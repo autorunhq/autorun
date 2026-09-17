@@ -179,15 +179,19 @@ void compositor_gl_release( struct compositor_gl *comp, struct compositor_gl_tex
 }
 
 static void draw_quad( struct compositor_gl *comp, const struct compositor_gl_texture *texture,
-                       int x, int y, int width, int height, int src_x, int src_y )
+                       int x, int y, int width, int height, int src_x, int src_y,
+                       int src_width, int src_height )
 {
     const struct compositor_gl_funcs *gl = comp->gl;
     float sw = (float)comp->screen_width, sh = (float)comp->screen_height;
     float tw = (float)texture->width, th = (float)texture->height;
 
+    if (src_width <= 0) src_width = width;
+    if (src_height <= 0) src_height = height;
     gl->Uniform4f( comp->rect_uniform, 2.0f * x / sw - 1.0f, 1.0f - 2.0f * y / sh,
                    2.0f * (x + width) / sw - 1.0f, 1.0f - 2.0f * (y + height) / sh );
-    gl->Uniform4f( comp->src_uniform, src_x / tw, src_y / th, (src_x + width) / tw, (src_y + height) / th );
+    gl->Uniform4f( comp->src_uniform, src_x / tw, src_y / th,
+                   (src_x + src_width) / tw, (src_y + src_height) / th );
     gl->BindTexture( GL_TEXTURE_2D, texture->name );
     gl->DrawArrays( GL_TRIANGLE_STRIP, 0, 4 );
 }
@@ -213,7 +217,8 @@ void compositor_gl_draw( struct compositor_gl *comp, const struct compositor_gl_
         const struct compositor_gl_quad *quad = &quads[i];
 
         if (!quad->texture->name || quad->width <= 0 || quad->height <= 0) continue;
-        draw_quad( comp, quad->texture, quad->x, quad->y, quad->width, quad->height, quad->src_x, quad->src_y );
+        draw_quad( comp, quad->texture, quad->x, quad->y, quad->width, quad->height,
+                   quad->src_x, quad->src_y, quad->src_width, quad->src_height );
     }
 
     if (cursor_visible && comp->cursor.name)
@@ -221,7 +226,7 @@ void compositor_gl_draw( struct compositor_gl *comp, const struct compositor_gl_
         gl->Enable( GL_BLEND );
         gl->BlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
         gl->Uniform1i( comp->window_uniform, 0 );
-        draw_quad( comp, &comp->cursor, cursor_x, cursor_y, POINTER_CURSOR_W, POINTER_CURSOR_H, 0, 0 );
+        draw_quad( comp, &comp->cursor, cursor_x, cursor_y, POINTER_CURSOR_W, POINTER_CURSOR_H, 0, 0, 0, 0 );
         gl->Disable( GL_BLEND );
     }
 }

@@ -75,6 +75,36 @@ static void clear_dirty( struct wine_nx_layer *layer )
     layer->dirty_left = layer->dirty_top = layer->dirty_right = layer->dirty_bottom = 0;
 }
 
+/* A 640x480 / 800x600 game window fills the 1280x720 screen. Tiny host-test
+ * layers stay 1:1 so compositor_test pixel checks do not move. */
+static void stretch_quads_to_screen( struct compositor_gl_quad *quads, int count,
+                                     int *cursor_x, int *cursor_y, int screen_w, int screen_h )
+{
+    int i, max_w = 0, max_h = 0;
+
+    for (i = 0; i < count; i++)
+    {
+        int right = quads[i].x + quads[i].width;
+        int bottom = quads[i].y + quads[i].height;
+
+        if (right > max_w) max_w = right;
+        if (bottom > max_h) max_h = bottom;
+    }
+    if (max_w < 320 || max_h < 240) return;
+    if (max_w >= screen_w && max_h >= screen_h) return;
+    for (i = 0; i < count; i++)
+    {
+        if (quads[i].src_width <= 0) quads[i].src_width = quads[i].width;
+        if (quads[i].src_height <= 0) quads[i].src_height = quads[i].height;
+        quads[i].x = quads[i].x * screen_w / max_w;
+        quads[i].y = quads[i].y * screen_h / max_h;
+        quads[i].width = quads[i].width * screen_w / max_w;
+        quads[i].height = quads[i].height * screen_h / max_h;
+    }
+    *cursor_x = *cursor_x * screen_w / max_w;
+    *cursor_y = *cursor_y * screen_h / max_h;
+}
+
 struct wine_nx_layer *wine_nx_layer_create( int width, int height )
 {
     struct wine_nx_layer *layer;
@@ -378,10 +408,13 @@ static void *presenter_thread( void *arg )
             quads[i].width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
             quads[i].height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
             quads[i].src_x = quads[i].src_y = 0;
+            quads[i].src_width = quads[i].width;
+            quads[i].src_height = quads[i].height;
         }
         cursor_x = comp.cursor_x;
         cursor_y = comp.cursor_y;
         cursor_visible = comp.cursor_visible;
+        stretch_quads_to_screen( quads, count, &cursor_x, &cursor_y, comp.width, comp.height );
         pthread_mutex_unlock( &comp.lock );
 
         /* Only this thread frees layers, so drawn stays valid; a layer destroyed

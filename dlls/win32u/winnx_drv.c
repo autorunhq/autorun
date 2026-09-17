@@ -511,36 +511,50 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
 /**********************************************************************
  *           wine_nx_drv_UpdateDisplayDevices
  *
- * Report a single 1280x720 primary monitor so win32u has a real virtual
- * screen; without it the desktop is 0x0 and every window clips to nothing.
+ * Offer 640x480 as the current mode so games render a small backbuffer
+ * (minimal graphics). 800x600 is there if they ask. Present stretches
+ * whichever they pick onto the 1280x720 NWindow. Do not advertise 720p:
+ * that is the physical screen, not a mode the game should fill.
  */
 #define WINE_NX_SCREEN_W 1280
 #define WINE_NX_SCREEN_H 720
+#define WINE_NX_MODE_W 640
+#define WINE_NX_MODE_H 480
 
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
     static const DWORD source_flags = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP |
                                       DISPLAY_DEVICE_PRIMARY_DEVICE | DISPLAY_DEVICE_VGA_COMPATIBLE;
-    RECT rc = { 0, 0, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H };
+    RECT rc = { 0, 0, WINE_NX_MODE_W, WINE_NX_MODE_H };
     struct pci_id pci_id = { 0 };
     struct gdi_monitor monitor = { .rc_monitor = rc, .rc_work = rc };
-    DEVMODEW mode =
-    {
-        .dmSize   = sizeof(mode),
-        .dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL |
-                    DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY,
-        .dmBitsPerPel = 32, .dmPelsWidth = WINE_NX_SCREEN_W, .dmPelsHeight = WINE_NX_SCREEN_H,
-        .dmDisplayFrequency = 60,
-    };
+    DEVMODEW modes[2];
+    DEVMODEW current;
     UINT dpi = NtUserGetSystemDpiForProcess( NULL );
-    DEVMODEW current = mode;
+    unsigned int i;
+
+    memset( modes, 0, sizeof(modes) );
+    for (i = 0; i < ARRAY_SIZE(modes); i++)
+    {
+        modes[i].dmSize = sizeof(modes[i]);
+        modes[i].dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL |
+                            DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY;
+        modes[i].dmBitsPerPel = 32;
+        modes[i].dmDisplayFrequency = 60;
+    }
+    modes[0].dmPelsWidth = WINE_NX_MODE_W;
+    modes[0].dmPelsHeight = WINE_NX_MODE_H;
+    modes[1].dmPelsWidth = 800;
+    modes[1].dmPelsHeight = 600;
+    current = modes[0];
+    current.dmFields |= DM_POSITION;
 
     dm->add_gpu( "Wine NX GPU", &pci_id, NULL, param );
     dm->add_source( "Default", source_flags, dpi, param );
     dm->add_monitor( &monitor, param );
-    current.dmFields |= DM_POSITION;
-    dm->add_modes( &current, 1, &mode, param );
-    nxdrv_trace( "[NXDRV] UpdateDisplayDevices -> %dx%d", WINE_NX_SCREEN_W, WINE_NX_SCREEN_H, 0, 0 );
+    dm->add_modes( &current, ARRAY_SIZE(modes), modes, param );
+    nxdrv_trace( "[NXDRV] UpdateDisplayDevices -> %dx%d (present %dx%d)",
+                 WINE_NX_MODE_W, WINE_NX_MODE_H, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
     return STATUS_SUCCESS;
 }
 
@@ -626,6 +640,24 @@ static BOOL wine_nx_send_keys(void)
 static void wine_nx_send_mouse( int x, int y, DWORD flags )
 {
     INPUT input = {0};
+    HWND hwnd;
+    RECT client;
+    int width, height;
+
+    /* Stick/touch live in 1280x720; the stretched present maps that onto the
+     * foreground client (typically 640x480). */
+    hwnd = NtUserGetForegroundWindow();
+    if (!hwnd) hwnd = get_active_window();
+    if (hwnd && get_client_rect_rel( hwnd, COORDS_CLIENT, &client, get_thread_dpi() ))
+    {
+        width = client.right - client.left;
+        height = client.bottom - client.top;
+        if (width > 0 && height > 0 && (width != WINE_NX_SCREEN_W || height != WINE_NX_SCREEN_H))
+        {
+            x = x * width / WINE_NX_SCREEN_W;
+            y = y * height / WINE_NX_SCREEN_H;
+        }
+    }
 
     input.type = INPUT_MOUSE;
     input.mi.dx = x;

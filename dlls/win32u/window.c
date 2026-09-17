@@ -4812,11 +4812,10 @@ static BOOL show_window( HWND hwnd, INT cmd )
 
 #ifdef __SWITCH__
     /* Horizon currently presents one desktop application without a window
-     * manager. Maximize its ownerless top-level application window. Borderless
-     * games commonly use an uncaptioned WS_POPUP, while dialogs have a caption
-     * and must remain under application control. */
-    nx_fullscreen = !(style & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ) &&
-                    (!(style & WS_POPUP) || !(style & WS_CAPTION));
+     * manager. Maximize ownerless overlapped windows to the virtual mode
+     * (640x480 / 800x600). Leave WS_POPUP games at the size they asked for so
+     * they keep a small backbuffer; present stretches that to 1280x720. */
+    nx_fullscreen = !(style & (WS_CHILD | WS_POPUP)) && !get_window_relative( hwnd, GW_OWNER );
     if (!(style & WS_CHILD))
         nx_window_trace( "[NXWIN] thread %04x shows hwnd %p with %d (style %#x, visible %d%s)",
                          (int)GetCurrentThreadId(), hwnd, cmd, (int)style, was_visible,
@@ -4903,7 +4902,7 @@ static BOOL show_window( HWND hwnd, INT cmd )
 #ifdef __SWITCH__
     if (nx_fullscreen && show_flag)
     {
-        SetRect( &newPos, 0, 0, 1280, 720 );
+        SetRect( &newPos, 0, 0, get_system_metrics( SM_CXSCREEN ), get_system_metrics( SM_CYSCREEN ) );
         swp &= ~(SWP_NOSIZE | SWP_NOMOVE | SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE);
         swp |= SWP_FRAMECHANGED;
         if (!was_visible) swp |= SWP_SHOWWINDOW;

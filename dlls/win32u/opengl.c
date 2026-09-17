@@ -738,6 +738,12 @@ static void blit_framebuffer_surface( struct framebuffer_surface *surface )
     const struct opengl_funcs *funcs = &display_funcs;
     struct client_surface *client;
     RECT src, dst;
+#ifdef __SWITCH__
+    /* Horizon's EGL NWindow is 1280x720. The game keeps a small backbuffer
+     * (640x480 / 800x600); stretch that onto the whole screen instead of
+     * leaving a 4:3 square. */
+    static const int dest_x0 = 0, dest_y0 = 0, dest_x1 = 1280, dest_y1 = 720;
+#endif
 
     typedef void (*state_handler_t)(int mode, struct wgl_context *ctx, struct fs_hack_gl_state *state);
     static const state_handler_t general_state_handlers[] =
@@ -765,6 +771,17 @@ static void blit_framebuffer_surface( struct framebuffer_surface *surface )
     if (!(client = surface->base.client)) return;
     if (!NtUserGetClientRect( client->hwnd, &src, NtUserGetDpiForWindow( client->hwnd ) )) return;
     if (!NtUserGetClientRect( client->hwnd, &dst, NtUserGetWinMonitorDpi( client->hwnd, MDT_WINE_RAW_DPI ) )) return;
+#ifdef __SWITCH__
+    {
+        static BOOL logged;
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        if (!logged && &wine_nx_runtime_trace)
+        {
+            wine_nx_runtime_trace( "[NXGFX] stretch OpenGL client -> 1280x720" );
+            logged = TRUE;
+        }
+    }
+#endif
 
     TRACE( "hwnd %p src %s dst %s fbo %u\n", client->hwnd, wine_dbgstr_rect(&src), wine_dbgstr_rect(&dst), surface->base.read_fbo );
 
@@ -793,8 +810,13 @@ static void blit_framebuffer_surface( struct framebuffer_surface *surface )
     {
         funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, surface->base.read_fbo );
         funcs->p_glReadBuffer( GL_COLOR_ATTACHMENT0 );
+#ifdef __SWITCH__
+        funcs->p_glBlitFramebuffer( 0, 0, src.right, src.bottom, dest_x0, dest_y0, dest_x1, dest_y1,
+                                    GL_COLOR_BUFFER_BIT, ctx->integer_scaling ? GL_NEAREST : GL_LINEAR );
+#else
         funcs->p_glBlitFramebuffer( 0, 0, src.right, src.bottom, 0, 0, dst.right, dst.bottom, GL_COLOR_BUFFER_BIT,
                                     ctx->integer_scaling ? GL_NEAREST : GL_LINEAR );
+#endif
     }
     else
     {
@@ -807,8 +829,14 @@ static void blit_framebuffer_surface( struct framebuffer_surface *surface )
                                                              GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &front_texture );
         funcs->p_glBindTexture( GL_TEXTURE_2D, front_texture );
 
+#ifdef __SWITCH__
+        if (ctx->has_GL_ARB_viewport_array)
+            funcs->p_glViewportIndexedf( 0, dest_x0, dest_y0, dest_x1 - dest_x0, dest_y1 - dest_y0 );
+        else funcs->p_glViewport( dest_x0, dest_y0, dest_x1 - dest_x0, dest_y1 - dest_y0 );
+#else
         if (ctx->has_GL_ARB_viewport_array) funcs->p_glViewportIndexedf( 0, 0, 0, dst.right, dst.bottom );
         else funcs->p_glViewport( 0, 0, dst.right, dst.bottom );
+#endif
 
         if (gamma_serial != surface->last_gamma_serial)
         {
@@ -930,6 +958,14 @@ static struct opengl_drawable *framebuffer_surface_create( int format, struct cl
 
 static BOOL needs_framebuffer_surface( HWND hwnd )
 {
+#ifdef __SWITCH__
+    /* The NWindow is 1280x720. Games keep a 640x480 (or 800x600) client.
+     * Without this FBO+blit, they draw a viewport in the bottom-left of the
+     * screen and SwapBuffers leaves it there. blit_framebuffer_surface
+     * stretches that client onto the whole NWindow. */
+    (void)hwnd;
+    return TRUE;
+#else
     float gamma_ramp[GAMMA_RAMP_SIZE * 4];
     LONG gamma_serial;
 
@@ -953,6 +989,7 @@ static BOOL needs_framebuffer_surface( HWND hwnd )
 
     if (NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )) return TRUE;
     return get_float_gamma_ramp( gamma_ramp, &gamma_serial );
+#endif
 }
 
 static const struct opengl_drawable_funcs egldrv_pbuffer_funcs;

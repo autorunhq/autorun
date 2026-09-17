@@ -1,0 +1,32 @@
+---
+description: Golden Wine-NX Switch runtime (dynarec-131) — pad and present stretch. Do not regress.
+alwaysApply: true
+---
+
+# Golden runtime: `nx-wow64-dynarec-131`
+
+Worktree `mrkvka-refactored-funicular`, branch `mrkvka-improve-game-runtime`. Tag `golden/nx-wow64-dynarec-131`. User confirmed pad and this screen path. Treat this as the baseline; do not "improve" it without an explicit new request.
+
+## Pad — frozen, do not edit
+
+Do not change DirectInput joystick mapping, XInput, `wine_nx_pointer_poll` stick/touch math, keys.txt overlay, or dinput/xinput headers.
+
+- DirectInput enumerating a joystick must **not** zero pad keys. Only XInput (`gamepad`) zeros keys and takes the whole pad.
+- DirectInput must not steal the keyboard overlay.
+- No 256-key `WineNxAsyncInput` poll.
+- Do not zero pad keys on `wine_nx_dinput_last_poll`.
+
+## Screen — frozen, do not edit unless asked
+
+- Advertise **640×480** current mode and **800×600** optional. Do **not** advertise 720p as a Win32 mode.
+- Physical NWindow stays **1280×720**. GL origin is bottom-left.
+- `SW_SHOWNORMAL`. Do not maximize `WS_POPUP` to 1280×720. Overlapped maximize uses `SM_CXSCREEN`/`SM_CYSCREEN` (the virtual 640×480 mode), not hardcoded 1280×720.
+- `needs_framebuffer_surface()` is always **TRUE** on `__SWITCH__`. Keep `needs_framebuffer_surface` true so fshack FBO+`blit_framebuffer_surface` runs.
+- Blit dest is **0,0,1280,720** (anamorphic stretch is OK). Do not blit only to the client rect.
+- Do **not** also stretch inside `nx_drawable_swap` (double-stretch).
+- GDI compositor: stretch quads when the bounding box is ≥320×240 and smaller than the screen (`src_width`/`src_height` on quads).
+- Mouse: scale stick/touch from 1280×720 onto the foreground client.
+
+## Build / deploy
+
+Dynarec NRO ~18 MB (`wine-nx-probe/build-switch/wine-nx-runtime.nro`), never interpreter ~11 MB. Docker mount this tree as `/project`. FTP `192.168.1.34:5000` admin/admin, atomic replace `/switch/wine/wine-nx-runtime.nro`. Golden binary copy: `wine-nx-runtime.nro.golden-dynarec-131`. Log: `[BUILD] nx-wow64-dynarec-131` and `[NXGFX] stretch OpenGL client -> 1280x720`.

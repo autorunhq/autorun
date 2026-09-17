@@ -50,7 +50,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define RUNTIME_DIR WINE_ROOT
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_BOX64_DYNAREC
-#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-129"
+#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-131"
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
@@ -545,10 +545,9 @@ unsigned short wine_nx_pad_keys[WINE_NX_KEY_COUNT] =
  * (dlls/win32u/winnx_drv.c), which turns the changes into key events. */
 unsigned int wine_nx_pad_key_state;
 
-/* When a program last read the controller through XInput (xinput_unix.c) or
- * the virtual DirectInput joystick (dinput_unix.c). */
+/* When a program last read the controller through XInput (xinput_unix.c). DirectInput's
+ * virtual joystick is polled from dinput_unix.c without taking the keys. */
 extern u64 wine_nx_xinput_last_poll;
-extern u64 wine_nx_dinput_last_poll;
 
 /* One mouse for win32u, in native 1280x720 display coordinates: the right
  * analog stick moves the cursor, A holds the left button and B the right,
@@ -559,8 +558,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     HidTouchScreenState touch = {0};
     HidAnalogStickState stick;
     unsigned int pressed = 0;
-    u64 now, held, xinput_poll, dinput_poll;
-    int moved, gamepad, joystick;
+    u64 now, held, xinput_poll;
+    int moved, gamepad;
 
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     if (!wine_nx_pointer_ready)
@@ -579,13 +578,11 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     stick = padGetStickPos( &wine_nx_pad, 1 );
     /* A program reading the controller through XInput gets it whole: no keys,
      * clicks or cursor come from it meanwhile. DirectInput's virtual joystick
-     * only takes the keys (stick, d-pad, face buttons); A still clicks for
-     * menus that have no pad, and the right stick still moves the cursor.
+     * does not steal the keyboard overlay: titles that EnumDevices a pad and
+     * still read keys.txt otherwise see no buttons at all. A still clicks.
      * The touchscreen still points in both cases. */
     xinput_poll = wine_nx_xinput_last_poll;
-    dinput_poll = wine_nx_dinput_last_poll;
     gamepad = xinput_poll && (xinput_poll >= now || armTicksToNs( now - xinput_poll ) < 1000000000ull);
-    joystick = dinput_poll && (dinput_poll >= now || armTicksToNs( now - dinput_poll ) < 1000000000ull);
     if (hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = (int)wine_nx_pointer.x, old_y = (int)wine_nx_pointer.y;
@@ -598,7 +595,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
                                                     armTicksToNs( now - wine_nx_pointer_tick ) );
     wine_nx_pointer_tick = now;
     if (!gamepad && (held & HidNpadButton_A) && !wine_nx_pad_keys[WINE_NX_KEY_A]) pressed |= WINE_NX_POINTER_LEFT;
-    if (!gamepad && !joystick && (held & HidNpadButton_B) && !wine_nx_pad_keys[WINE_NX_KEY_B]) pressed |= WINE_NX_POINTER_RIGHT;
+    if (!gamepad && (held & HidNpadButton_B) && !wine_nx_pad_keys[WINE_NX_KEY_B]) pressed |= WINE_NX_POINTER_RIGHT;
     {
         /* The left stick steers as well as the d-pad, past a dead zone. */
         HidAnalogStickState steer = padGetStickPos( &wine_nx_pad, 0 );
@@ -621,7 +618,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         if (steer.y < -12000) keys |= 1u << WINE_NX_KEY_DOWN;
         if (steer.x < -12000) keys |= 1u << WINE_NX_KEY_LEFT;
         if (steer.x >  12000) keys |= 1u << WINE_NX_KEY_RIGHT;
-        if (gamepad || joystick) keys = 0;
+        if (gamepad) keys = 0;
         __atomic_store_n( &wine_nx_pad_key_state, keys, __ATOMIC_RELAXED );
     }
     *x = (int)wine_nx_pointer.x;
@@ -1308,11 +1305,10 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     params->AllocationSize = size;
     params->Size = size;
     params->Flags = PROCESS_PARAMS_FLAG_NORMALIZED;
-    /* The Switch runtime presents one foreground desktop application.  Use
-     * the standard Win32 startup hint so applications maximize their own
-     * top-level window while dialogs and child windows keep normal sizing. */
+    /* Let the program keep the window size it asked for. The driver offers
+     * 640x480 (and 800x600); present stretches that onto the 1280x720 screen. */
     params->dwFlags = STARTF_USESHOWWINDOW;
-    params->wShowWindow = SW_SHOWMAXIMIZED;
+    params->wShowWindow = SW_SHOWNORMAL;
     params->ProcessGroupId = GetCurrentProcessId();
 
     cursor = (WCHAR *)(params + 1);
@@ -2056,6 +2052,7 @@ int main( int argc, char **argv )
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );
     log_line( "[INIT] profiler %s (profile.txt)", runtime_profile ? "on" : "off" );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
+    log_line( "[NXGFX] desktop 640x480 (800x600 optional), present stretched to 1280x720" );
     /* After the launcher, where X may have turned it on or off. */
     if (runtime_profile)
     {
