@@ -26,6 +26,7 @@
 #include "winbase.h"
 #include "winuser.h"
 #include "winerror.h"
+#include "winreg.h"
 #include "dinput.h"
 
 #include "dinput_private.h"
@@ -39,6 +40,7 @@ static const struct dinput_device_vtbl keyboard_vtbl;
 struct keyboard
 {
     struct dinput_device base;
+    BOOL sync_async_state;
 };
 
 static inline struct keyboard *impl_from_IDirectInputDevice8W( IDirectInputDevice8W *iface )
@@ -189,6 +191,8 @@ HRESULT keyboard_create_device( struct dinput *dinput, const GUID *guid, IDirect
 {
     DIDEVICEOBJECTINSTANCEW instance;
     struct keyboard *impl;
+    HKEY hkey, appkey;
+    WCHAR buffer[20];
     DWORD i, index, dik;
     BYTE subtype;
     HRESULT hr;
@@ -207,6 +211,12 @@ HRESULT keyboard_create_device( struct dinput *dinput, const GUID *guid, IDirect
     impl->base.caps.dwFirmwareRevision = 100;
     impl->base.caps.dwHardwareRevision = 100;
     if (dinput->dwVersion >= 0x0800) impl->base.use_raw_input = TRUE;
+    get_app_key( &hkey, &appkey );
+    if (!get_config_key( hkey, appkey, L"WineNxAsyncInput", buffer, sizeof(buffer) ) &&
+        !wcsicmp( buffer, L"enabled" ))
+        impl->sync_async_state = TRUE;
+    if (appkey) RegCloseKey( appkey );
+    if (hkey) RegCloseKey( hkey );
     subtype = GET_DIDEVICE_SUBTYPE( impl->base.instance.dwDevType );
 
     if (FAILED(hr = dinput_device_init_device_format( &impl->base.IDirectInputDevice8W_iface ))) goto failed;
@@ -232,7 +242,25 @@ failed:
 
 static HRESULT keyboard_poll( IDirectInputDevice8W *iface )
 {
+    struct keyboard *impl = impl_from_IDirectInputDevice8W( iface );
+    DWORD scan;
+    UINT vkey;
+
     check_dinput_events();
+    /*
+     * Horizon has no physical keyboard device. Controller keys are injected
+     * through NtUserSendHardwareInput and are always reflected in the async
+     * key state, while a DirectInput 8 raw-input registration may not have
+     * been serviced yet. Synchronize the polled DirectInput keyboard from the
+     * authoritative state so games cannot lose those controller transitions.
+     */
+    if (!impl->sync_async_state) return DI_OK;
+    for (vkey = 1; vkey < 256; vkey++)
+    {
+        if (!(scan = MapVirtualKeyW( vkey, MAPVK_VK_TO_VSC_EX ))) continue;
+        if ((scan & 0xff00) == 0xe000) scan = (scan & 0xff) | 0x100;
+        keyboard_handle_event( impl, vkey, scan, !(GetAsyncKeyState( vkey ) & 0x8000) );
+    }
     return DI_OK;
 }
 

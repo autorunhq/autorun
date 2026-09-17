@@ -32,13 +32,10 @@ static int pad_ready;
 static XINPUT_GAMEPAD last_gamepad;
 static DWORD packet;
 
-static NTSTATUS nx_xinput_get_state_unix( void *args )
+/* Shared with dinput_unix.c: one libnx read of player 1. */
+void wine_nx_horizon_pad_snapshot( unsigned int *connected, unsigned int *buttons,
+                                   int *lx, int *ly, int *rx, int *ry )
 {
-    struct nx_xinput_state_params *params = args;
-    XINPUT_GAMEPAD gamepad;
-
-    params->connected = 0;
-    if (params->index) return STATUS_SUCCESS;  /* player 1 only */
     pthread_mutex_lock( &pad_mutex );
     if (!pad_ready)
     {
@@ -51,18 +48,44 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
     {
         HidAnalogStickState left = padGetStickPos( &pad, 0 ), right = padGetStickPos( &pad, 1 );
 
-        nx_xinput_map( padGetButtons( &pad ), left.x, left.y, right.x, right.y, &gamepad );
-        if (memcmp( &gamepad, &last_gamepad, sizeof(gamepad) ))
-        {
-            last_gamepad = gamepad;
-            packet++;
-        }
-        params->connected = 1;
-        params->state.dwPacketNumber = packet;
-        params->state.Gamepad = gamepad;
-        wine_nx_xinput_last_poll = armGetSystemTick();
+        *connected = 1;
+        *buttons = (unsigned int)padGetButtons( &pad );
+        *lx = left.x;
+        *ly = left.y;
+        *rx = right.x;
+        *ry = right.y;
+    }
+    else
+    {
+        *connected = 0;
+        *buttons = 0;
+        *lx = *ly = *rx = *ry = 0;
     }
     pthread_mutex_unlock( &pad_mutex );
+}
+
+static NTSTATUS nx_xinput_get_state_unix( void *args )
+{
+    struct nx_xinput_state_params *params = args;
+    XINPUT_GAMEPAD gamepad;
+    unsigned int connected, buttons;
+    int lx, ly, rx, ry;
+
+    params->connected = 0;
+    if (params->index) return STATUS_SUCCESS;  /* player 1 only */
+    wine_nx_horizon_pad_snapshot( &connected, &buttons, &lx, &ly, &rx, &ry );
+    if (!connected) return STATUS_SUCCESS;
+
+    nx_xinput_map( buttons, lx, ly, rx, ry, &gamepad );
+    if (memcmp( &gamepad, &last_gamepad, sizeof(gamepad) ))
+    {
+        last_gamepad = gamepad;
+        packet++;
+    }
+    params->connected = 1;
+    params->state.dwPacketNumber = packet;
+    params->state.Gamepad = gamepad;
+    wine_nx_xinput_last_poll = armGetSystemTick();
     return STATUS_SUCCESS;
 }
 

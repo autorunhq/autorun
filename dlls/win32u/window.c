@@ -4812,9 +4812,11 @@ static BOOL show_window( HWND hwnd, INT cmd )
 
 #ifdef __SWITCH__
     /* Horizon currently presents one desktop application without a window
-     * manager.  Maximize its ownerless overlapped top-level window while
-     * leaving popups, dialogs and child controls under application control. */
-    nx_fullscreen = !(style & (WS_CHILD | WS_POPUP)) && !get_window_relative( hwnd, GW_OWNER );
+     * manager. Maximize its ownerless top-level application window. Borderless
+     * games commonly use an uncaptioned WS_POPUP, while dialogs have a caption
+     * and must remain under application control. */
+    nx_fullscreen = !(style & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ) &&
+                    (!(style & WS_POPUP) || !(style & WS_CAPTION));
     if (!(style & WS_CHILD))
         nx_window_trace( "[NXWIN] thread %04x shows hwnd %p with %d (style %#x, visible %d%s)",
                          (int)GetCurrentThreadId(), hwnd, cmd, (int)style, was_visible,

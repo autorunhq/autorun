@@ -15,6 +15,7 @@ SOURCES = \
 	dinput8.idl \
 	dinput_main.c \
 	joystick_hid.c \
+	joystick_nx.c \
 	keyboard.c \
 	mouse.c \
 	version.rc

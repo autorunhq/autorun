@@ -600,6 +600,7 @@ add_executable(wine-nx-runtime
     source/ws2_32_unix_stub.c
     source/audio_unix.c
     source/xinput_unix.c
+    source/dinput_unix.c
     source/thread_profile.c
     source/compositor.c
     source/compositor_gl.c
@@ -629,7 +630,7 @@ add_executable(wine-nx-runtime
 )
 
 set_target_properties(wine-nx-runtime PROPERTIES SUFFIX ".elf")
-set_source_files_properties(source/audio_unix.c source/xinput_unix.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
+set_source_files_properties(source/audio_unix.c source/xinput_unix.c source/dinput_unix.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
 target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_PE_BUILD_DIR}/include")
 
 option(WINE_NX_BOX64_INTERPRETER "Build the experimental WoW64 Box64 interpreter adapter" OFF)

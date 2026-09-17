@@ -59,6 +59,7 @@ struct mouse
     DWORD                           last_warped;
 
     WARP_MOUSE                      warp_override;
+    BOOL                            sync_async_state;
 };
 
 static inline struct mouse *impl_from_IDirectInputDevice8W( IDirectInputDevice8W *iface )
@@ -337,6 +338,35 @@ static HRESULT mouse_poll( IDirectInputDevice8W *iface )
 {
     struct mouse *impl = impl_from_IDirectInputDevice8W( iface );
     check_dinput_events();
+    if (impl->sync_async_state)
+    {
+        DIMOUSESTATE2 *state = (DIMOUSESTATE2 *)impl->base.device_state;
+        POINT point;
+
+        /*
+         * The Horizon server supplies legacy mouse messages and async button
+         * state for controller input, but it has no physical raw mouse. Keep
+         * the polling DirectInput device in sync with that authoritative
+         * state, which is what DirectInput-only games read.
+         */
+        GetCursorPos( &point );
+        EnterCriticalSection( &impl->base.crit );
+        if (impl->base.user_format.dwFlags & DIDF_ABSAXIS)
+        {
+            state->lX = point.x;
+            state->lY = point.y;
+        }
+        else
+        {
+            state->lX += point.x - impl->org_coords.x;
+            state->lY += point.y - impl->org_coords.y;
+            impl->org_coords = point;
+        }
+        state->rgbButtons[0] = GetAsyncKeyState( VK_LBUTTON ) & 0x80;
+        state->rgbButtons[1] = GetAsyncKeyState( VK_RBUTTON ) & 0x80;
+        state->rgbButtons[2] = GetAsyncKeyState( VK_MBUTTON ) & 0x80;
+        LeaveCriticalSection( &impl->base.crit );
+    }
     warp_check( impl, FALSE );
     return DI_OK;
 }
@@ -541,6 +571,9 @@ HRESULT mouse_create_device( struct dinput *dinput, const GUID *guid, IDirectInp
         if (!wcsnicmp( buffer, L"disable", -1 )) impl->warp_override = WARP_DISABLE;
         else if (!wcsnicmp( buffer, L"force", -1 )) impl->warp_override = WARP_FORCE_ON;
     }
+    if (!get_config_key( hkey, appkey, L"WineNxAsyncInput", buffer, sizeof(buffer) ) &&
+        !wcsicmp( buffer, L"enabled" ))
+        impl->sync_async_state = TRUE;
     if (appkey) RegCloseKey(appkey);
     if (hkey) RegCloseKey(hkey);
 
