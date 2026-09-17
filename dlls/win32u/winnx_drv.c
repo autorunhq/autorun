@@ -511,15 +511,14 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
 /**********************************************************************
  *           wine_nx_drv_UpdateDisplayDevices
  *
- * Offer 640x480 as the current mode so games render a small backbuffer
- * (minimal graphics). 800x600 is there if they ask. Present stretches
- * whichever they pick onto the 1280x720 NWindow. Do not advertise 720p:
- * that is the physical screen, not a mode the game should fill.
+ * Current mode is the NWindow (1280x720) so a 16:9 game can create that
+ * swapchain. 640x480 and 800x600 stay in the list for titles that pick them.
+ * Present still blits the client onto the whole NWindow.
  */
 #define WINE_NX_SCREEN_W 1280
 #define WINE_NX_SCREEN_H 720
-#define WINE_NX_MODE_W 640
-#define WINE_NX_MODE_H 480
+#define WINE_NX_MODE_W 1280
+#define WINE_NX_MODE_H 720
 
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
@@ -528,7 +527,7 @@ UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void
     RECT rc = { 0, 0, WINE_NX_MODE_W, WINE_NX_MODE_H };
     struct pci_id pci_id = { 0 };
     struct gdi_monitor monitor = { .rc_monitor = rc, .rc_work = rc };
-    DEVMODEW modes[2];
+    DEVMODEW modes[3];
     DEVMODEW current;
     UINT dpi = NtUserGetSystemDpiForProcess( NULL );
     unsigned int i;
@@ -544,8 +543,10 @@ UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void
     }
     modes[0].dmPelsWidth = WINE_NX_MODE_W;
     modes[0].dmPelsHeight = WINE_NX_MODE_H;
-    modes[1].dmPelsWidth = 800;
-    modes[1].dmPelsHeight = 600;
+    modes[1].dmPelsWidth = 640;
+    modes[1].dmPelsHeight = 480;
+    modes[2].dmPelsWidth = 800;
+    modes[2].dmPelsHeight = 600;
     current = modes[0];
     current.dmFields |= DM_POSITION;
 

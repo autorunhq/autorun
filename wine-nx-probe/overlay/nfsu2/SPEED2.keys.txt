@@ -1,0 +1,22 @@
+# SPEED2.EXE. Every control is listed so Barnyard's WASD map is not inherited.
+# GitHub xan1242/NFSU-XtendedInput Config-UG2 EventsKB:
+#   JOY_EVENT_THROTTLE=VK_UP  BRAKE=VK_DOWN  steer=Left/Right
+# Overlay: ZR/R=Up, ZL/L=Down, stick X=Left/Right.
+# DirectInput: X=steer, Y=gas (0 idle / max pressed). Z is not used (Xbox Z
+# at max is brake, which made ZR brake when gas was copied onto Z).
+B=0x0D       # Enter: select
+A=0x1B       # Esc: back
+PLUS=0x1B    # Esc: pause
+MINUS=0x52   # R: reset car
+X=0x10       # Shift: e-brake
+Y=0x20       # Space: nitrous
+STICKL=0x42  # B: look back
+STICKR=0x43  # C: change camera
+UP=0x26      # gas (ZR/R overlay = EventsKB throttle)
+DOWN=0x28    # brake (ZL/L overlay = EventsKB brake)
+LEFT=0x25
+RIGHT=0x27
+L=0x0
+R=0x0
+ZL=0x0
+ZR=0x0

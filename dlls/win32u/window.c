@@ -4813,8 +4813,8 @@ static BOOL show_window( HWND hwnd, INT cmd )
 #ifdef __SWITCH__
     /* Horizon currently presents one desktop application without a window
      * manager. Maximize ownerless overlapped windows to the virtual mode
-     * (640x480 / 800x600). Leave WS_POPUP games at the size they asked for so
-     * they keep a small backbuffer; present stretches that to 1280x720. */
+     * (1280x720, or 640x480 / 800x600 if the game picked those). Leave
+     * WS_POPUP games at the size they asked for; present blits to the NWindow. */
     nx_fullscreen = !(style & (WS_CHILD | WS_POPUP)) && !get_window_relative( hwnd, GW_OWNER );
     if (!(style & WS_CHILD))
         nx_window_trace( "[NXWIN] thread %04x shows hwnd %p with %d (style %#x, visible %d%s)",

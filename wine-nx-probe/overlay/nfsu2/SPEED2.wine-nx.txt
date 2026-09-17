@@ -1,0 +1,3 @@
+# Wine-NX launcher sidecar for SPEED2.EXE. Not a hidden file.
+# Leave hidden unset so Underground 2 stays in the library.
+title=Need for Speed Underground 2

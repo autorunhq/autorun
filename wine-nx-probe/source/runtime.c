@@ -50,7 +50,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define RUNTIME_DIR WINE_ROOT
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_BOX64_DYNAREC
-#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-131"
+#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-132"
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
@@ -1306,7 +1306,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     params->Size = size;
     params->Flags = PROCESS_PARAMS_FLAG_NORMALIZED;
     /* Let the program keep the window size it asked for. The driver offers
-     * 640x480 (and 800x600); present stretches that onto the 1280x720 screen. */
+     * 1280x720 (plus 640x480 and 800x600); present blits onto the NWindow. */
     params->dwFlags = STARTF_USESHOWWINDOW;
     params->wShowWindow = SW_SHOWNORMAL;
     params->ProcessGroupId = GetCurrentProcessId();
@@ -2052,7 +2052,7 @@ int main( int argc, char **argv )
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );
     log_line( "[INIT] profiler %s (profile.txt)", runtime_profile ? "on" : "off" );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
-    log_line( "[NXGFX] desktop 640x480 (800x600 optional), present stretched to 1280x720" );
+    log_line( "[NXGFX] desktop 1280x720 (640x480 and 800x600 optional), present to NWindow" );
     /* After the launcher, where X may have turned it on or off. */
     if (runtime_profile)
     {
