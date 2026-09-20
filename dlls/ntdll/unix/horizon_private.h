@@ -44,6 +44,9 @@ extern unsigned int horizon_server_protocol_version(void);
 extern int horizon_server_connect(void);
 extern void horizon_server_send_fd( int fd );
 extern int horizon_server_receive_fd( unsigned int *handle );
+extern int horizon_fast_sync_enabled;
+extern int horizon_server_sync_call( unsigned int tid, const void *request, const void *data,
+                                     unsigned int data_size, void *reply, void *reply_data );
 
 /* Horizon address arbitration used as a futex; timeout_ns < 0 waits forever. */
 extern int horizon_futex_wait( const int *addr, int value, long long timeout_ns );

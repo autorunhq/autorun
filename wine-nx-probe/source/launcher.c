@@ -1675,7 +1675,7 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
-    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64,
+    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_SYNC,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2353,6 +2353,11 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             snprintf( row->value, sizeof(row->value), "args.txt: %s", global_line );
         else snprintf( row->value, sizeof(row->value), "None" );
 
+        ADD_ROW( ROW_SYNC, SECTION_GENERAL, "Synchronization",
+                 "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
+        row->kind = UI_ROW_VALUE;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
+
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
                  "Writes Wine's traces to wine-nx-runtime.log, which slows the program down. "
                  "Global follows the setting in Settings (X on the library)." );
@@ -2627,6 +2632,25 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             p->settings.dxvk = action == UI_ACTION_RESET ? 0 : !p->settings.dxvk;
             save_program_settings( l, p );
             break;
+
+        case ROW_SYNC:
+        {
+            struct ui_row items[2] = {0};
+            int selected;
+
+            if (action == UI_ACTION_RESET) p->settings.fast_sync = 0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                snprintf( items[0].label, sizeof(items[0].label), "Standard" );
+                snprintf( items[1].label, sizeof(items[1].label), "Horizon" );
+                selected = ui_settings_dropdown( ui, &list, items, 2, p->settings.fast_sync );
+                if (selected < 0) break;
+                p->settings.fast_sync = selected;
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+        }
 
         case ROW_VKD3D_VERSION:
         case ROW_DXVK_VERSION:

@@ -2809,6 +2809,9 @@ struct horizon_server_connection
      * keeps both in the thread. */
     struct horizon_server_object *completion_wait;
     unsigned int completion_wait_handle;
+    void *direct_reply;
+    void *direct_data;
+    size_t direct_size;
 };
 
 /* An apc_call is a few dozen bytes; anything larger is not one. */
@@ -2961,6 +2964,7 @@ static struct horizon_server_object *horizon_server_threads;
 static unsigned int horizon_server_running_threads;
 /* Each client connection is served by its own pthread. */
 static __thread struct horizon_server_connection *horizon_server_current;
+int horizon_fast_sync_enabled;
 static struct horizon_zombie_list horizon_server_zombies = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0 };
 struct horizon_lifecycle_counters horizon_lifecycle;
 static unsigned int horizon_process_winstation;
@@ -4004,6 +4008,19 @@ static int horizon_server_write_status( int fd, unsigned int status )
     struct horizon_server_reply_header reply = { status, 0 };
 
     return horizon_server_write_reply( fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_sync_reply( struct horizon_server_connection *connection,
+                                      const void *reply, size_t reply_size,
+                                      const void *data, size_t data_size )
+{
+    if (!connection->direct_reply)
+        return horizon_server_write_reply( connection->reply_fd, reply, reply_size, data, data_size );
+    if (reply_size > HORIZON_SERVER_FIXED_MESSAGE_SIZE || data_size > connection->direct_size) return -1;
+    memset( connection->direct_reply, 0, HORIZON_SERVER_FIXED_MESSAGE_SIZE );
+    memcpy( connection->direct_reply, reply, reply_size );
+    if (data_size) memcpy( connection->direct_data, data, data_size );
+    return 0;
 }
 
 static unsigned int horizon_server_alloc_handle(void)
@@ -5380,7 +5397,7 @@ static unsigned int horizon_server_find_typed_object_locked( unsigned int handle
     return HORIZON_STATUS_SUCCESS;
 }
 
-/* Identity of the client served by the calling server thread (mutex owner). */
+/* Identity of the Wine thread whose request is being handled. */
 static unsigned int horizon_server_current_tid(void)
 {
     return horizon_server_current ? horizon_server_current->tid : 0;
@@ -10967,7 +10984,7 @@ static unsigned int horizon_sock_ioctl_connect( unsigned int handle, const unsig
     {
         const unsigned char *ip = (const unsigned char *)&sa.sin_addr;
         horizon_trace( "[server] connect target: fd=%d len=%u family=%u ip=%u.%u.%u.%u port=%u\n",
-                       fd, sa.sin_len, sa.sin_family, ip[0], ip[1], ip[2], ip[3],
+                       fd, (unsigned int)sizeof(sa), sa.sin_family, ip[0], ip[1], ip[2], ip[3],
                        (unsigned)((((const unsigned char *)&sa.sin_port)[0] << 8) |
                                   ((const unsigned char *)&sa.sin_port)[1]) );
     }
@@ -12441,7 +12458,7 @@ static int horizon_server_handle_event_op( struct horizon_server_connection *con
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static int horizon_server_handle_query_event( struct horizon_server_connection *connection,
@@ -12463,7 +12480,7 @@ static int horizon_server_handle_query_event( struct horizon_server_connection *
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 /* I/O completion ports (horizon_completion.h, after server/completion.c). A
@@ -12751,7 +12768,7 @@ static int horizon_server_handle_release_mutex( struct horizon_server_connection
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static int horizon_server_handle_query_mutex( struct horizon_server_connection *connection,
@@ -12774,7 +12791,7 @@ static int horizon_server_handle_query_mutex( struct horizon_server_connection *
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static int horizon_server_handle_create_semaphore( struct horizon_server_connection *connection,
@@ -12837,7 +12854,7 @@ static int horizon_server_handle_release_semaphore( struct horizon_server_connec
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static int horizon_server_handle_query_semaphore( struct horizon_server_connection *connection,
@@ -12859,7 +12876,7 @@ static int horizon_server_handle_query_semaphore( struct horizon_server_connecti
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static int horizon_server_handle_create_timer( struct horizon_server_connection *connection,
@@ -13036,9 +13053,9 @@ static unsigned int horizon_server_select_signal_and_wait( const struct horizon_
 {
     unsigned int status;
 
-    if (size < sizeof(*op)) return HORIZON_STATUS_INVALID_PARAMETER;
+    if (size < offsetof( struct horizon_select_signal_and_wait_op, signal )) return HORIZON_STATUS_INVALID_PARAMETER;
 
-    status = initial ? horizon_server_signal_object_locked( op->signal ) : HORIZON_STATUS_SUCCESS;
+    status = initial && size >= sizeof(*op) ? horizon_server_signal_object_locked( op->signal ) : HORIZON_STATUS_SUCCESS;
     if (status == HORIZON_STATUS_SUCCESS)
         status = horizon_server_wait_object_locked( op->wait, TRUE );
     return status;
@@ -13122,7 +13139,7 @@ static int horizon_server_select_polls_locked( const struct horizon_select_reque
         return 0;
     }
     case HORIZON_SELECT_SIGNAL_AND_WAIT:
-        if (request->size < sizeof(struct horizon_select_signal_and_wait_op)) return 0;
+        if (request->size < offsetof( struct horizon_select_signal_and_wait_op, signal )) return 0;
         return horizon_server_handle_polls_locked(
             ((const struct horizon_select_signal_and_wait_op *)select_data)->wait );
     default:
@@ -13207,7 +13224,7 @@ static int horizon_server_select_signals( const struct horizon_select_request *r
     if (data_size >= HORIZON_APC_RESULT_SIZE + request->size) data += HORIZON_APC_RESULT_SIZE;
     else if (data_size < request->size) return 0;
     memcpy( &op, data, sizeof(op) );
-    return op == HORIZON_SELECT_SIGNAL_AND_WAIT;
+    return op == HORIZON_SELECT_SIGNAL_AND_WAIT && request->size >= sizeof(struct horizon_select_signal_and_wait_op);
 }
 
 /* server/async.c's async_set_result: how an operation on a socket that has
@@ -13381,18 +13398,71 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
         unsigned int size = min( (unsigned int)sizeof(system_call), request->header.reply_size );
 
         reply.header.reply_size = size;
-        return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), system_call, size );
+        return horizon_server_sync_reply( connection, &reply, sizeof(reply), system_call, size );
     }
     if (apc)
     {
         unsigned int size = min( apc->size, request->header.reply_size );
 
         reply.header.reply_size = size;
-        ret = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), apc->call, size );
+        ret = horizon_server_sync_reply( connection, &reply, sizeof(reply), apc->call, size );
         free( apc );
         return ret;
     }
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
+}
+
+int horizon_server_sync_call( unsigned int tid, const void *message, const void *data,
+                              unsigned int data_size, void *reply, void *reply_data )
+{
+    const struct horizon_server_request_header *request = message;
+    struct horizon_server_connection connection = {0}, *previous;
+    struct horizon_server_object *thread;
+    int (*handler)( struct horizon_server_connection *, const unsigned char * ) = NULL;
+    int status;
+
+    if (!horizon_fast_sync_enabled || !tid) return 0;
+    if (request->request_size != data_size || (request->reply_size && !reply_data)) return 0;
+    switch (request->req)
+    {
+    case HORIZON_REQ_SELECT: break;
+    case HORIZON_REQ_EVENT_OP: handler = horizon_server_handle_event_op; break;
+    case HORIZON_REQ_QUERY_EVENT: handler = horizon_server_handle_query_event; break;
+    case HORIZON_REQ_RELEASE_MUTEX: handler = horizon_server_handle_release_mutex; break;
+    case HORIZON_REQ_QUERY_MUTEX: handler = horizon_server_handle_query_mutex; break;
+    case HORIZON_REQ_RELEASE_SEMAPHORE: handler = horizon_server_handle_release_semaphore; break;
+    case HORIZON_REQ_QUERY_SEMAPHORE: handler = horizon_server_handle_query_semaphore; break;
+    default: return 0;
+    }
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    for (thread = horizon_server_threads; thread; thread = thread->thread_next)
+        if (thread->thread.tid == tid && !thread->thread.terminated) break;
+    if (thread) thread->refs++;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (!thread) return 0;
+
+    connection.tid = tid;
+    connection.pid = thread->thread.pid;
+    connection.thread = thread;
+    connection.direct_reply = reply;
+    connection.direct_data = reply_data;
+    connection.direct_size = request->reply_size;
+    previous = horizon_server_current;
+    horizon_server_current = &connection;
+    if (handler) status = handler( &connection, message );
+    else status = horizon_server_handle_select( &connection, message, data, data_size );
+    horizon_server_current = previous;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!--thread->refs) horizon_server_free_object( thread );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (status)
+    {
+        struct horizon_server_reply_header *header = reply;
+        memset( reply, 0, HORIZON_SERVER_FIXED_MESSAGE_SIZE );
+        header->error = HORIZON_STATUS_UNSUCCESSFUL;
+    }
+    return 1;
 }
 
 static void *horizon_server_thread( void *param )

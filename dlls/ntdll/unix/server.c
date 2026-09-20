@@ -364,12 +364,48 @@ static inline unsigned int wait_reply( struct __server_request_info *req )
  *           server_call_unlocked
  */
 #ifdef __SWITCH__
-/* Round trips to the in-process server by request, for the runtime's [SERVER]
- * report: each goes over a pipe to a server thread and back. */
+/* Request counts and latency for the runtime's [SERVER] report. */
 unsigned int wine_nx_server_request_count = REQ_NB_REQUESTS;
 unsigned int wine_nx_server_calls[REQ_NB_REQUESTS];
 unsigned long long wine_nx_server_ticks[REQ_NB_REQUESTS];
 const char *wine_nx_server_names[REQ_NB_REQUESTS];
+
+static int horizon_sync_call( struct __server_request_info *req )
+{
+    extern volatile int wine_nx_quit_requested __attribute__((weak));
+    extern void wine_nx_quit_point(void) __attribute__((weak));
+    union { unsigned long long align; unsigned char bytes[1024]; } data;
+    unsigned int size = 0;
+
+    if (!horizon_fast_sync_enabled) return 0;
+    if (&wine_nx_quit_requested && wine_nx_quit_requested && &wine_nx_quit_point) wine_nx_quit_point();
+    switch (req->u.req.request_header.req)
+    {
+    case REQ_select:
+        if (req->u.req.request_header.request_size != sizeof(union apc_result) + req->u.req.select_request.size)
+            return 0;
+        break;
+    case REQ_event_op:
+    case REQ_query_event:
+    case REQ_release_mutex:
+    case REQ_query_mutex:
+    case REQ_release_semaphore:
+    case REQ_query_semaphore:
+        break;
+    default:
+        return 0;
+    }
+    if (req->u.req.request_header.request_size > sizeof(data.bytes)) return 0;
+    for (unsigned int i = 0; i < req->data_count; i++)
+    {
+        if (req->data[i].size > sizeof(data.bytes) - size) return 0;
+        if (req->data[i].size) memcpy( data.bytes + size, req->data[i].ptr, req->data[i].size );
+        size += req->data[i].size;
+    }
+    if (size != req->u.req.request_header.request_size) return 0;
+    return horizon_server_sync_call( HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ),
+                                     &req->u.req, data.bytes, size, &req->u.reply, req->reply_data );
+}
 #endif
 
 unsigned int server_call_unlocked( void *req_ptr )
@@ -382,7 +418,11 @@ unsigned int server_call_unlocked( void *req_ptr )
 #endif
 
     FTRACE_BLOCK_START("req %s", req->name)
-    TRACE_(client)("%s start\n", req->name); \
+    TRACE_(client)("%s start\n", req->name);
+#ifdef __SWITCH__
+    if (horizon_sync_call( req )) ret = req->u.reply.reply_header.error;
+    else
+#endif
     if (!(ret = send_request( req )))
         ret = wait_reply( req );
     TRACE_(client)("%s end\n", req->name);

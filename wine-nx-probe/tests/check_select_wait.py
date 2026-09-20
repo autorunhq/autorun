@@ -90,8 +90,8 @@ static unsigned horizon_server_async_apc_locked(struct horizon_server_connection
     if (!async_ready_on || calls + 1 < async_ready_on) return 0;
     async_ready_on = 0; memset(call, 0, HORIZON_APC_CALL_SIZE); call[0] = 2; return ++async_given;
 }
-static int horizon_server_write_reply(int fd, const void *data, unsigned size, const void *extra, unsigned n) {
-    (void)fd; (void)size; (void)extra; (void)n;
+static int horizon_server_sync_reply(struct horizon_server_connection *connection, const void *data, unsigned size, const void *extra, unsigned n) {
+    (void)connection; (void)size; (void)extra; (void)n;
     assert(pthread_mutex_trylock(&horizon_server_objects_mutex) == 0); /* Replies go out unlocked. */
     pthread_mutex_unlock(&horizon_server_objects_mutex);
     reply_status = ((const struct horizon_select_reply *)data)->header.error; return 0;
@@ -157,6 +157,6 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='wine-nx-wait-test-') as tmp:
     c = Path(tmp) / 'test.c'; exe = Path(tmp) / 'test'
-    c.write_text(fixture + extract('static unsigned int horizon_server_select_wait(', 'static unsigned int horizon_server_select_signal_and_wait(') + extract('static int horizon_server_handle_select(', 'static void *horizon_server_thread(') + tests)
+    c.write_text(fixture + extract('static unsigned int horizon_server_select_wait(', 'static unsigned int horizon_server_select_signal_and_wait(') + extract('static int horizon_server_handle_select(', 'int horizon_server_sync_call(') + tests)
     subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

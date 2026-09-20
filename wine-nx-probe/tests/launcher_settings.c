@@ -68,6 +68,21 @@ static void test_settings( const char *dir )
     struct launcher_kv kv;
     char path[768], other[768], config[512];
 
+    load_text( &kv, "" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fast_sync );
+    load_text( &kv, "sync=horizon\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fast_sync );
+    assert( launcher_settings_write( &kv, &settings ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.fast_sync );
+    settings.fast_sync = 0;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "sync=" ) );
+    load_text( &kv, "sync=fsync\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fast_sync );
+
     assert( launcher_settings_path( "sdmc:/switch/wine/drive_c/nfsu2/SPEED2.EXE", path, sizeof(path) ) );
     assert( !strcmp( path, "sdmc:/switch/wine/drive_c/nfsu2/SPEED2.wine-nx.txt" ) );
     assert( !launcher_settings_path( "sdmc:/readme.txt", path, sizeof(path) ) );

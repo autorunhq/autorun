@@ -562,7 +562,7 @@ int main( void )
 fixture = (fixture.replace('@DEFINES@', defines)
                   .replace('@HEADER@', header)
                   .replace('@SOCKADDR@', sockaddr_header)
-                  .replace('@SELECT@', struct('horizon_select_request'))
+                  .replace('@SELECT@', struct('horizon_select_request') + '\n' + struct('horizon_select_signal_and_wait_op'))
                   .replace('@FUNCTIONS@', functions))
 
 with tempfile.TemporaryDirectory(prefix='wine-nx-async-sockets-') as tmp:
