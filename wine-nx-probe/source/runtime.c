@@ -3534,6 +3534,7 @@ int main( int argc, char **argv )
         runtime_dxvk_hud = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
+        wine_nx_upscaling_configure( 0, 0.4f );
 #endif
 #ifdef WINE_NX_LSFG
         wine_nx_lsfg_configure( 0, 1, 1 );
@@ -3552,6 +3553,7 @@ int main( int argc, char **argv )
             runtime_dxvk = settings.dxvk;
             runtime_dxvk_hud = settings.dxvk_hud;
             wine_nx_graphics_configure( launcher_frame_limits[settings.frame_limit], settings.vsync );
+            wine_nx_upscaling_configure( settings.upscaling, launcher_sharpness_values[settings.upscaling_sharpness] );
 #ifdef WINE_NX_LSFG
             wine_nx_lsfg_configure( settings.lsfg_enabled, settings.lsfg_performance, settings.lsfg_flow );
 #endif

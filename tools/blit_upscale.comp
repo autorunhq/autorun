@@ -1,0 +1,167 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D texSampler;
+layout(binding = 1) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform pushConstants {
+    vec2 offset;         /* letterbox offset in dst coords */
+    vec2 extents;        /* dst scaled viewport size */
+    vec2 src_extents;    /* src texture resolution */
+    float sharpness;     /* 0.0 (smooth) to 1.0 (sharp) */
+    int upscaling_mode;  /* 0 = Bilinear, 1 = FSR 1.0 (EASU+CAS), 2 = Nearest/Integer */
+} constants;
+
+// Helper: convert linear to sRGB
+vec3 linear_to_srgb(vec3 c)
+{
+    bvec3 isLo = lessThanEqual(c, vec3(0.0031308));
+    vec3 loPart = c * 12.92;
+    vec3 hiPart = pow(c, vec3(5.0 / 12.0)) * 1.055 - 0.055;
+    return mix(hiPart, loPart, isLo);
+}
+
+// Luminance approximation for edge detection
+float luma(vec3 c)
+{
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// FSR 1.0 EASU filtering kernel approximation
+float fsr_lanczos(float x)
+{
+    // Polynomial approximation of windowed Lanczos2
+    x = clamp(abs(x), 0.0, 2.0);
+    float x2 = x * x;
+    return (0.4 * x2 - 1.0) * (x2 - 1.0) * (x2 - 1.0);
+}
+
+// FSR 1.0 Edge-Adaptive Spatial Upsampling with integrated Contrast-Adaptive Sharpening
+vec4 sample_fsr(vec2 texcoord)
+{
+    vec2 pp = texcoord * constants.src_extents - vec2(0.5);
+    vec2 fp = floor(pp);
+    vec2 f = pp - fp;
+
+    vec2 inv_src = 1.0 / constants.src_extents;
+
+    // 12-tap cross neighborhood
+    // Top row: B
+    // Middle rows: D, E, F, G (center quad E, F, I, J in 4x4)
+    // Center 4 samples:
+    vec2 c00 = (fp + vec2(0.5, 0.5)) * inv_src;
+    vec3 s00 = textureLod(texSampler, c00, 0.0).rgb;
+    vec3 s10 = textureLod(texSampler, c00 + vec2(inv_src.x, 0.0), 0.0).rgb;
+    vec3 s01 = textureLod(texSampler, c00 + vec2(0.0, inv_src.y), 0.0).rgb;
+    vec3 s11 = textureLod(texSampler, c00 + inv_src, 0.0).rgb;
+
+    // Surrounding cross taps for edge analysis and contrast detection
+    vec3 s_top = textureLod(texSampler, c00 + vec2(0.0, -inv_src.y), 0.0).rgb;
+    vec3 s_left = textureLod(texSampler, c00 + vec2(-inv_src.x, 0.0), 0.0).rgb;
+    vec3 s_right = textureLod(texSampler, c00 + vec2(2.0 * inv_src.x, 0.0), 0.0).rgb;
+    vec3 s_bottom = textureLod(texSampler, c00 + vec2(0.0, 2.0 * inv_src.y), 0.0).rgb;
+
+    // Luminance of surrounding samples
+    float l00 = luma(s00);
+    float l10 = luma(s10);
+    float l01 = luma(s01);
+    float l11 = luma(s11);
+    float l_top = luma(s_top);
+    float l_left = luma(s_left);
+    float l_right = luma(s_right);
+    float l_bottom = luma(s_bottom);
+
+    // Directional gradient detection (horizontal, vertical, diagonal)
+    float dir_h = (l10 - l00) + (l11 - l01);
+    float dir_v = (l01 - l00) + (l11 - l10);
+    vec2 dir = vec2(dir_h, dir_v);
+    float len = length(dir);
+
+    // Directional weighting
+    vec2 edge_dir = len > 0.001 ? dir / len : vec2(0.0);
+
+    // Compute edge-aligned Lanczos tap weights
+    float wx0 = fsr_lanczos(f.x);
+    float wx1 = fsr_lanczos(1.0 - f.x);
+    float wy0 = fsr_lanczos(f.y);
+    float wy1 = fsr_lanczos(1.0 - f.y);
+
+    // Weight center 4 samples
+    float w00 = wx0 * wy0;
+    float w10 = wx1 * wy0;
+    float w01 = wx0 * wy1;
+    float w11 = wx1 * wy1;
+
+    // Modulate weights along edge gradient
+    float stretch = clamp(len * 2.0, 0.0, 0.5);
+    w00 += stretch * dot(edge_dir, vec2(-1.0, -1.0));
+    w10 += stretch * dot(edge_dir, vec2( 1.0, -1.0));
+    w01 += stretch * dot(edge_dir, vec2(-1.0,  1.0));
+    w11 += stretch * dot(edge_dir, vec2( 1.0,  1.0));
+
+    // Clamp weights to positive
+    w00 = max(w00, 0.0001);
+    w10 = max(w10, 0.0001);
+    w01 = max(w01, 0.0001);
+    w11 = max(w11, 0.0001);
+
+    float sum_w = w00 + w10 + w01 + w11;
+    vec3 color = (s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11) / sum_w;
+
+    // Contrast-Adaptive Sharpening pass (integrated RCAS)
+    if (constants.sharpness > 0.01)
+    {
+        vec3 min_c = min(min(s00, s10), min(s01, s11));
+        vec3 max_c = max(max(s00, s10), max(s01, s11));
+
+        // Incorporate cross taps into local bounding box to prevent ringing
+        min_c = min(min_c, min(min(s_top, s_bottom), min(s_left, s_right)));
+        max_c = max(max_c, max(max(s_top, s_bottom), max(s_left, s_right)));
+
+        // Unsharp mask cross average
+        vec3 cross_avg = (s00 + s10 + s01 + s11) * 0.25;
+        vec3 sharp_color = color + (color - cross_avg) * (constants.sharpness * 1.5);
+
+        // Strict clamp to local neighborhood range (anti-ringing / overshoot protection)
+        color = clamp(sharp_color, min_c, max_c);
+    }
+
+    return vec4(color, 1.0);
+}
+
+void main()
+{
+    ivec2 out_coord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 texcoord = (vec2(out_coord) - constants.offset) / constants.extents;
+
+    // Check bounds: border is kept black for aspect ratio letterboxing
+    if (texcoord.x < 0.0 || texcoord.x > 1.0 || texcoord.y < 0.0 || texcoord.y > 1.0)
+    {
+        imageStore(outImage, out_coord, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    vec4 c;
+    if (constants.upscaling_mode == 1)
+    {
+        // Mode 1: FSR 1.0 (EASU + Adaptive Sharpness)
+        c = sample_fsr(texcoord);
+    }
+    else if (constants.upscaling_mode == 2)
+    {
+        // Mode 2: Integer / Nearest Neighbor
+        vec2 nearest_coord = (floor(texcoord * constants.src_extents) + vec2(0.5)) / constants.src_extents;
+        c = textureLod(texSampler, nearest_coord, 0.0);
+    }
+    else
+    {
+        // Mode 0: Bilinear
+        c = texture(texSampler, texcoord);
+    }
+
+    // Convert linear -> sRGB
+    c.rgb = linear_to_srgb(c.rgb);
+
+    imageStore(outImage, out_coord, c);
+}

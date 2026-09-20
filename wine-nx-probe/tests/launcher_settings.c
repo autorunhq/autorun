@@ -124,6 +124,23 @@ static void test_settings( const char *dir )
     assert( launcher_dxvk_version_directory( 0x014c, "", path, sizeof(path) ) && !strcmp( path, "dxvk" ) );
     assert( !launcher_dxvk_version_directory( 0x8664, "../bad", path, sizeof(path) ) );
 
+    load_text( &kv, "upscaling=fsr\nupscaling-sharpness=80%\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.upscaling == 1 && settings.upscaling_sharpness == 4 );
+
+    load_text( &kv, "upscaling=integer\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.upscaling == 2 && settings.upscaling_sharpness == 2 );
+
+    settings.upscaling = 1;
+    settings.upscaling_sharpness = 3;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "upscaling=fsr" ) && strstr( kv.text, "upscaling-sharpness=60%" ) );
+
+    settings.upscaling = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "upscaling=" ) && !strstr( kv.text, "upscaling-sharpness=" ) );
+
     snprintf( path, sizeof(path), "%s/game.wine-nx.txt", dir );
     load_text( &kv, "# written by hand\n" );
     memset( &settings, 0, sizeof(settings) );
