@@ -24,19 +24,24 @@ assert (server.index('horizon_registry_load_hive( machine, "config/classes.reg" 
 # quartz serves the filter graph, which is the class Fallout asks for.
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('quartz'))
 assert classes.get('e436ebb3-524f-11ce-9f53-0020af0ba770') == 'FilterGraph'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('wbemprox'))
+assert classes.get('4590f811-1d3a-11d0-891f-00aa004b2e24') == 'WbemLocator'
 # and a DLL that cannot serve a class is not asked to.
 assert mk.classes_of('kernel32') == []
 assert mk.classes_of('not-a-dll') == []
 
 with tempfile.TemporaryDirectory() as tmp:
     stage = Path(tmp)
-    count = mk.write(stage, ['quartz', 'devenum', 'combase', 'kernel32'])
+    count = mk.write(stage, ['quartz', 'devenum', 'combase', 'kernel32', 'wbemprox'])
     text = (stage / 'config/classes.reg').read_text()
     assert text.startswith('WINE REGISTRY Version 2\n')
     assert count > 20
     # The shape the registry parser reads: a key line, then its values.
     entry = ('[Software\\\\Classes\\\\CLSID\\\\{e436ebb3-524f-11ce-9f53-0020af0ba770}\\\\InprocServer32]\n'
              '@="quartz.dll"\n"ThreadingModel"="Both"')
+    assert entry in text, text[:400]
+    entry = ('[Software\\\\Classes\\\\CLSID\\\\{4590f811-1d3a-11d0-891f-00aa004b2e24}\\\\InprocServer32]\n'
+             '@="wbemprox.dll"\n"ThreadingModel"="Both"')
     assert entry in text, text[:400]
     # Every line is one the parser knows: a key, a value, or a comment.
     for line in text.splitlines():

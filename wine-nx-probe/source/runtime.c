@@ -1609,6 +1609,7 @@ static void put_process_string( WCHAR **cursor, UNICODE_STRING *string, const ch
  * profile is where programs keep saves and settings, and where DXVK keeps
  * its shader cache (LOCALAPPDATA); its directories are made at start-up. */
 static const char runtime_environment[] =
+    "ALLUSERSPROFILE=C:\\ProgramData\0"
     "APPDATA=C:\\users\\steamuser\\AppData\\Roaming\0"
     "DXVK_CONFIG_FILE=C:\\users\\steamuser\\AppData\\Local\\Autorun\\dxvk.conf\0"
     "DXVK_HUD=0\0"
@@ -1616,12 +1617,15 @@ static const char runtime_environment[] =
     "HOMEPATH=\\users\\steamuser\0"
     "LOCALAPPDATA=C:\\users\\steamuser\\AppData\\Local\0"
     "PATH=C:\\windows\\system32;C:\\windows\0"
+    "ProgramData=C:\\ProgramData\0"
+    "PUBLIC=C:\\users\\Public\0"
     "SystemDrive=C:\0"
     "SystemRoot=C:\\windows\0"
     "TEMP=C:\\windows\\temp\0"
     "TMP=C:\\windows\\temp\0"
     "USERNAME=steamuser\0"
     "USERPROFILE=C:\\users\\steamuser\0"
+    "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
     "windir=C:\\windows\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0";
 
@@ -3322,11 +3326,16 @@ int main( int argc, char **argv )
     mkdir( WINE_DRIVE_C "/windows", 0777 );
     mkdir( WINE_DRIVE_C "/windows/temp", 0777 );
     mkdir( WINE_SYSTEM_DIR, 0777 );
+    mkdir( WINE_DRIVE_C "/ProgramData", 0777 );
     mkdir( WINE_DRIVE_C "/users", 0777 );
+    mkdir( WINE_DRIVE_C "/users/Public", 0777 );
+    mkdir( WINE_DRIVE_C "/users/Public/Documents", 0777 );
+    mkdir( WINE_DRIVE_C "/users/Public/Documents/Steam", 0777 );
     mkdir( WINE_USER_DIR, 0777 );
     mkdir( WINE_USER_DIR "/AppData", 0777 );
     mkdir( WINE_USER_DIR "/AppData/Local", 0777 );
     mkdir( WINE_USER_DIR "/AppData/LocalLow", 0777 );
+    mkdir( WINE_USER_DIR "/AppData/Local/Autorun", 0777 );
     mkdir( WINE_USER_DIR "/AppData/Roaming", 0777 );
     /* SHGetFolderPath refuses a folder that is not there unless the caller
      * asked for it to be created, and a game that ignores that failure reads
@@ -3602,7 +3611,6 @@ int main( int argc, char **argv )
             {
                 struct launcher_kv graphics;
 
-                mkdir( WINE_USER_DIR "/AppData/Local/Autorun", 0777 );
                 if (!launcher_dxvk_config( &settings, graphics.text, sizeof(graphics.text) ))
                     return return_to_launcher();
                 graphics.size = strlen( graphics.text );

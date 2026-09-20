@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -244,8 +245,9 @@ def validate_external_imports(paths, modules):
 
 
 game_runtime = (
-    'cfgmgr32', 'dwmapi', 'msvcp140', 'normaliz', 'powrprof', 'vcruntime140', 'wldap32',
-    'uiautomationcore', 'x3daudio1_7', 'xapofx1_5',
+    'cfgmgr32', 'concrt140', 'dwmapi', 'mfplat', 'mfreadwrite', 'msvcp140', 'normaliz',
+    'powrprof', 'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'x3daudio1_7',
+    'xapofx1_5',
 )
 common = 'ntdll kernel32 kernelbase msvcrt ucrtbase advapi32 sechost'.split()
 dxvk_paths = [args.dxvk / name for name in DXVK_DLLS] if args.dxvk else []
@@ -440,6 +442,7 @@ required = set(re.findall(r'^@ (?:stdcall|extern) (\w+)',
                           (probe.parent / 'dlls/winebox64ec/winebox64ec.spec').read_text(), re.M))
 if not required <= exports:
     raise ValueError(f'CPU64 exports missing: {required - exports}')
+run([sys.executable, str(probe / 'tools/make-classes-reg.py'), str(stage)])
 files = sorted(path for path in stage.rglob('*') if path.is_file() and
                path.suffix != '.log' and path.name != 'build-manifest.json')
 manifest = {

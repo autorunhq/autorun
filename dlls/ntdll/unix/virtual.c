@@ -5458,6 +5458,9 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     NTSTATUS status;
     sigset_t sigset;
     SIZE_T size;
+#ifdef __SWITCH__
+    SIZE_T initial_commit = 0;
+#endif
 
     if (!reserve_size) reserve_size = main_image_info.MaximumStackSize;
     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
@@ -5467,6 +5470,12 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     size = ROUND_SIZE( 0, size, granularity_mask );
 
 #ifdef __SWITCH__
+    if (guard_page)
+    {
+        initial_commit = ROUND_SIZE( 0, max( commit_size, (SIZE_T)(1024 * 1024) ), host_page_mask );
+        initial_commit = min( initial_commit, size - 2 * host_page_size );
+    }
+
     /* A WoW64 process keeps its native stacks above 4 GB so the guest has the
      * low 4 GB to itself. A Horizon process launched with a 32-bit address
      * space, which a fixed low image base needs, has nothing above 4 GB, and
@@ -5481,8 +5490,13 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
+#ifdef __SWITCH__
+    status = map_view( &view, NULL, size, alloc_type, VPROT_READ | VPROT_WRITE |
+                       (guard_page ? 0 : VPROT_COMMITTED), limit_low, limit_high, 0 );
+#else
     status = map_view( &view, NULL, size, alloc_type, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED,
                        limit_low, limit_high, 0 );
+#endif
     if (status != STATUS_SUCCESS) goto done;
 
 #ifdef VALGRIND_STACK_REGISTER
@@ -5492,10 +5506,23 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     /* setup no access guard page */
     if (guard_page)
     {
+#ifdef __SWITCH__
+        char *commit = (char *)view->base + view->size - initial_commit;
+
+        if (!set_vprot( view, commit, initial_commit, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED ) ||
+            !set_vprot( view, commit - host_page_size, host_page_size,
+                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD ))
+        {
+            delete_view( view );
+            status = STATUS_NO_MEMORY;
+            goto done;
+        }
+#else
         set_page_vprot( view->base, host_page_size, 0 );
         set_page_vprot( (char *)view->base + host_page_size, host_page_size,
                         VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD );
         mprotect_range( view->base, 2 * host_page_size , 0, 0 );
+#endif
     }
     else
     {
@@ -5510,7 +5537,12 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     stack->OldStackLimit = 0;
     stack->DeallocationStack = view->base;
     stack->StackBase = (char *)view->base + view->size;
+#ifdef __SWITCH__
+    stack->StackLimit = guard_page ? (char *)stack->StackBase - initial_commit
+                                   : (char *)view->base;
+#else
     stack->StackLimit = (char *)view->base + (guard_page ? 2 * host_page_size : 0);
+#endif
 done:
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     return status;
