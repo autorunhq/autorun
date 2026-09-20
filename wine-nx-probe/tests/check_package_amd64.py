@@ -22,7 +22,7 @@ game_runtime = next(ast.literal_eval(node.value) for node in tree.body
                     any(isinstance(target, ast.Name) and target.id == 'game_runtime' for target in node.targets))
 assert set(game_runtime) == {
     'cfgmgr32', 'dwmapi', 'msvcp140', 'normaliz', 'powrprof', 'vcruntime140', 'wldap32',
-    'x3daudio1_7', 'xapofx1_5',
+    'uiautomationcore', 'x3daudio1_7', 'xapofx1_5',
 }
 helpers = ast.Module(body=[node for node in tree.body
                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in selected],

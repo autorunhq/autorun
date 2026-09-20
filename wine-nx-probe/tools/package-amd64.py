@@ -238,7 +238,7 @@ def validate_external_imports(paths, modules):
 
 game_runtime = (
     'cfgmgr32', 'dwmapi', 'msvcp140', 'normaliz', 'powrprof', 'vcruntime140', 'wldap32',
-    'x3daudio1_7', 'xapofx1_5',
+    'uiautomationcore', 'x3daudio1_7', 'xapofx1_5',
 )
 common = 'ntdll kernel32 kernelbase msvcrt ucrtbase advapi32 sechost'.split()
 dxvk_paths = [args.dxvk / name for name in DXVK_DLLS] if args.dxvk else []
