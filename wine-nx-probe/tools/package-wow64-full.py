@@ -76,16 +76,11 @@ SOURCE_DLLS = ['avifil32']
 # imports WINSPOOL.DRV. Without it keystone does not load, the check cannot
 # run, and Halo stops with "one of the Halo PC files is missing or corrupted".
 HALO_DLLS = ['winspool.drv']
-# The Sims 2 loads Activation.dll, which draws with GDI+; everything else it and
-# the game import is staged already. Its own VP6 codec is the release's to
-# supply, being nobody else's to give away.
 SIMS2_DLLS = ['gdiplus']
-# The runtime staged here is the one linked with Mesa, so the card can run
-# Vulkan; the DXVK overlay adds DXVK's d3d9 in C:\\dxvk, which needs Wine's
-# 32-bit loader in syswow64. vulkan-1 loads winevulkan by hand and imports
-# nothing else of it, so no import walk reaches either: name both.
 VULKAN_DLLS = 'vulkan-1 winevulkan'.split()
-GAME_DLLS = NFS_DLLS + FALLOUT_DLLS + SOURCE_DLLS + HALO_DLLS + SIMS2_DLLS + VULKAN_DLLS
+# Stronghold Crusader, Age of Empires and older DirectPlay titles require dplayx.
+DIRECTPLAY_DLLS = 'dplayx dpnet'.split()
+GAME_DLLS = NFS_DLLS + FALLOUT_DLLS + SOURCE_DLLS + HALO_DLLS + SIMS2_DLLS + VULKAN_DLLS + DIRECTPLAY_DLLS
 pe = probe / 'build-wine-wow64-pe'
 toolchain = probe / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
 env = dict(os.environ, PATH=f'{toolchain}:/opt/homebrew/opt/bison/bin:' + os.environ['PATH'])

@@ -1,4 +1,6 @@
 wine-nx-probe/build-switch/
+wine-nx-probe/build-wine-arm64-pe/
+wine-nx-probe/build-switch-test/
 wine-nx-probe/build-wine-arm64-pe-clean/
 wine-nx-probe/build-wine-arm64-pe-local/
 wine-nx-probe/toolchains/

@@ -35,6 +35,7 @@ Tested on a real Switch:
 | Fallout: New Vegas | Reaches in game, heavy, maybe can be improved. |
 | OpenTTD | Up to 60 fps, with sound. |
 | Quake III Arena (Quake3e) | About 37 fps at 720p. |
+| Stronghold Crusader HD | Plays smoothly with mouse and touch controls. Needs the [32-bit forwarder](#games-that-need-the-32-bit-forwarder), dplayx.dll, and `-skipvid` launch argument. |
 
 In progress: **The Sims 2 Legacy Collection** doesn't work yet - it starts and
 then closes while loading its title screen. The **Ultimate Collection** hasn't

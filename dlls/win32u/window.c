@@ -6390,6 +6390,9 @@ ULONG_PTR WINAPI NtUserCallHwndParam( HWND hwnd, DWORD_PTR param, DWORD code )
         return set_raw_window_pos( hwnd, params->rect, params->flags, params->internal );
     }
 
+    case NtUserCallHwndParam_ShowSoftwareKeyboard:
+        return user_driver->pShowSoftwareKeyboard( hwnd );
+
     default:
         FIXME( "invalid code %u\n", code );
         return 0;

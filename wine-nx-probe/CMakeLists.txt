@@ -602,6 +602,7 @@ target_link_libraries(wine-nx-hbl PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
+    source/dplayx_embed.c
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
     source/launcher.c
     source/launcher_catalog.c

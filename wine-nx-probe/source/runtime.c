@@ -763,6 +763,32 @@ extern u64 wine_nx_xinput_last_poll;
 void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
 
+int wine_nx_swkbd_auto_enabled = 1;
+int wine_nx_swkbd_active;
+unsigned int wine_nx_swkbd_hotkey_state;
+const unsigned int wine_nx_pad_key_l_bit = 1u << WINE_NX_KEY_L;
+const unsigned int wine_nx_pad_key_zl_bit = 1u << WINE_NX_KEY_ZL;
+const unsigned int wine_nx_pad_key_stickr_bit = 1u << WINE_NX_KEY_STICKR;
+
+int wine_nx_show_keyboard( const char *header, const char *initial, char *out, size_t out_size )
+{
+    SwkbdConfig keyboard;
+    Result rc;
+
+    if (!out_size) return 0;
+    if (R_FAILED( swkbdCreate( &keyboard, 0 ) )) return 0;
+    swkbdConfigMakePresetDefault( &keyboard );
+    swkbdConfigSetHeaderText( &keyboard, header );
+    swkbdConfigSetGuideText( &keyboard, header );
+    swkbdConfigSetInitialText( &keyboard, initial );
+    swkbdConfigSetStringLenMax( &keyboard, out_size - 1 < 500 ? out_size - 1 : 500 );
+    __atomic_store_n( &wine_nx_swkbd_active, 1, __ATOMIC_RELEASE );
+    rc = swkbdShow( &keyboard, out, out_size );
+    __atomic_store_n( &wine_nx_swkbd_active, 0, __ATOMIC_RELEASE );
+    swkbdClose( &keyboard );
+    return R_SUCCEEDED( rc );
+}
+
 /* One mouse for win32u, in native 1280x720 display coordinates: the right
  * analog stick moves the cursor, A holds the left button and B the right,
  * and a touchscreen contact puts the cursor under the finger with the left
@@ -774,6 +800,16 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     unsigned int pressed = 0;
     u64 now, held, xinput_poll;
     int moved, gamepad, leave = 0;
+
+    if (__atomic_load_n( &wine_nx_swkbd_active, __ATOMIC_ACQUIRE ))
+    {
+        pthread_mutex_lock( &wine_nx_pointer_mutex );
+        *x = (int)wine_nx_pointer.x;
+        *y = (int)wine_nx_pointer.y;
+        *buttons = 0;
+        pthread_mutex_unlock( &wine_nx_pointer_mutex );
+        return 0;
+    }
 
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     if (!wine_nx_pointer_ready)
@@ -902,6 +938,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             if (wine_nx_touch_dx < -WINE_NX_TOUCH_STEP) keys |= 1u << WINE_NX_KEY_TLEFT;
             if (wine_nx_touch_dx >  WINE_NX_TOUCH_STEP) keys |= 1u << WINE_NX_KEY_TRIGHT;
         }
+        __atomic_store_n( &wine_nx_swkbd_hotkey_state,
+                          keys & (wine_nx_pad_key_l_bit | wine_nx_pad_key_zl_bit | wine_nx_pad_key_stickr_bit), __ATOMIC_RELAXED );
         if (gamepad) keys = 0;
         __atomic_store_n( &wine_nx_pad_key_state, keys, __ATOMIC_RELAXED );
     }
@@ -1590,6 +1628,52 @@ static void put_process_string( WCHAR **cursor, UNICODE_STRING *string, const ch
     *cursor += len + 1;
 }
 
+extern const unsigned char wine_nx_dplayx_dll[];
+extern const size_t wine_nx_dplayx_dll_size;
+
+static void wine_nx_ensure_syswow64_dlls(void)
+{
+    static const char *dest_dirs[] = {
+        WINE_ROOT "/drive_c/windows/syswow64",
+        WINE_ROOT "/drive_c/windows/system32"
+    };
+    for (size_t i = 0; i < sizeof(dest_dirs)/sizeof(dest_dirs[0]); i++)
+    {
+        char dll_path[512];
+        struct stat st;
+
+        snprintf( dll_path, sizeof(dll_path), "%s/dplayx.dll", dest_dirs[i] );
+        if (stat( dll_path, &st ) != 0 || st.st_size == 0)
+        {
+            mkdir( WINE_ROOT "/drive_c", 0777 );
+            mkdir( WINE_ROOT "/drive_c/windows", 0777 );
+            mkdir( dest_dirs[i], 0777 );
+
+            FILE *f = fopen( dll_path, "wb" );
+            if (f)
+            {
+                fwrite( wine_nx_dplayx_dll, 1, wine_nx_dplayx_dll_size, f );
+                fclose( f );
+                log_line( "[AUTODEPLOY] deployed missing %s (%zu bytes)", dll_path, wine_nx_dplayx_dll_size );
+            }
+        }
+    }
+}
+
+static int string_contains_ignore_case( const char *haystack, const char *needle )
+{
+    if (!haystack || !needle) return 0;
+    size_t needle_len = strlen( needle );
+    size_t haystack_len = strlen( haystack );
+    if (needle_len > haystack_len) return 0;
+    for (size_t i = 0; i <= haystack_len - needle_len; i++)
+    {
+        if (!strncasecmp( haystack + i, needle, needle_len ))
+            return 1;
+    }
+    return 0;
+}
+
 /* Minimal environment (sorted, NUL-separated; the literal's own terminator
  * ends the block). Console programs and Wine's DLLs look these up. The user
  * profile is where programs keep saves and settings, and where DXVK keeps
@@ -1609,6 +1693,7 @@ static const char runtime_environment[] =
     "USERNAME=wine\0"
     "USERPROFILE=C:\\users\\wine\0"
     "windir=C:\\windows\0"
+    "WINEDLLOVERRIDES=unicows=d\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0";
 
 /* Horizon has no console device: the standard handles are files next to the
@@ -1707,6 +1792,32 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
             launcher_sibling_path( target, ".box64.txt", wine_nx_box64_options_path, 512 );
     }
 
+    /* If game directory contains unicows.dll, rename it so it won't crash MSLU on Wine */
+    if (target[1] != ':')
+    {
+        char unicows_src[512], unicows_bak[512], dir_buf[512];
+        const char *last_slash = strrchr( target, '/' );
+        if (last_slash)
+        {
+            size_t dlen = last_slash - target;
+            if (dlen < sizeof(dir_buf))
+            {
+                memcpy( dir_buf, target, dlen );
+                dir_buf[dlen] = 0;
+                snprintf( unicows_src, sizeof(unicows_src), "%s/unicows.dll", dir_buf );
+                snprintf( unicows_bak, sizeof(unicows_bak), "%s/unicows.dll.bak", dir_buf );
+                struct stat ust;
+                if (stat( unicows_src, &ust ) == 0)
+                {
+                    if (rename( unicows_src, unicows_bak ) == 0)
+                        log_line( "[FIX] renamed %s -> .bak to prevent Win9x MSLU crash", unicows_src );
+                    else
+                        log_line( "[FIX] unicows.dll found, overridden via WINEDLLOVERRIDES" );
+                }
+            }
+        }
+    }
+
     cmdline_str = dos_path;
     if (target[1] != ':' && launcher_args_path( target, args_path, sizeof(args_path) ) &&
         read_first_line( args_path, args_buf, sizeof(args_buf) ) &&
@@ -1716,9 +1827,34 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         log_line( "[ARGS] from %s; CommandLine='%s'", args_path, cmdline_str );
     }
     else if (!read_first_line( RUNTIME_DIR "/args.txt", args_buf, sizeof(args_buf) ) || !args_buf[0])
-        log_line( "[ARGS] no args.txt; CommandLine='%s'", cmdline_str );
+    {
+        /* Game-specific quirk / default args if none provided */
+        if (string_contains_ignore_case( dos_path, "Stronghold Crusader" ) ||
+            string_contains_ignore_case( dos_path, "Stronghold_Crusader" ))
+        {
+            snprintf( cmdline, sizeof(cmdline), "\"%s\" -skipvid", dos_path );
+            cmdline_str = cmdline;
+            log_line( "[ARGS] auto-applied Stronghold Crusader fix: CommandLine='%s'", cmdline_str );
+        }
+        else
+        {
+            log_line( "[ARGS] no args.txt; CommandLine='%s'", cmdline_str );
+        }
+    }
     else if (!launcher_args_match( args_buf, dos_path ))
-        log_line( "[ARGS] args.txt is for another program; CommandLine='%s'", cmdline_str );
+    {
+        if (string_contains_ignore_case( dos_path, "Stronghold Crusader" ) ||
+            string_contains_ignore_case( dos_path, "Stronghold_Crusader" ))
+        {
+            snprintf( cmdline, sizeof(cmdline), "\"%s\" -skipvid", dos_path );
+            cmdline_str = cmdline;
+            log_line( "[ARGS] args.txt for other program; auto-applied Stronghold Crusader fix: CommandLine='%s'", cmdline_str );
+        }
+        else
+        {
+            log_line( "[ARGS] args.txt is for another program; CommandLine='%s'", cmdline_str );
+        }
+    }
     else
     {
         snprintf( cmdline, sizeof(cmdline), "%s", args_buf );
@@ -3314,6 +3450,7 @@ int main( int argc, char **argv )
             threadClose( &stall_watch_thread );
         else stall_watch_running = 1;
     }
+    wine_nx_ensure_syswow64_dlls();
     /* First, before anything else: which build this is and which file it was
      * started from. Without it a log from an older NRO on the card reads just
      * like one from the new one. */
@@ -3389,6 +3526,8 @@ int main( int argc, char **argv )
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
+    wine_nx_swkbd_auto_enabled = config_bool( "on-screen-keyboard", 1, "no-swkbd-auto.txt", 1 );
+    log_line( "[INIT] on-screen keyboard opens on focus %s", wine_nx_swkbd_auto_enabled ? "automatically" : "off" );
     /* Both are wanted on the way out, when the card is a poor thing to ask. */
     runtime_loader_anyway = config_bool( "hand-the-process-back-anyway", 0, "loader-anyway.txt", 0 );
     runtime_reopen_launcher = config_bool( "reopen-the-launcher-on-exit", 1, "reload-launcher.txt", 0 );

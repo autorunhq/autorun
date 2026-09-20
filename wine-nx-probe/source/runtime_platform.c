@@ -101,6 +101,7 @@ void wine_nx_runtime_environment_init(void)
     static int environment_initialized;
 
     if (environment_initialized) return;
+    setenv( "WINEDLLOVERRIDES", "unicows=d", 0 );
     init_environment();
     environment_initialized = 1;
 }
