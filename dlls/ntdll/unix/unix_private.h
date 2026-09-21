@@ -287,6 +287,11 @@ extern void wait_suspend( CONTEXT *context );
 extern NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance, BOOL exception );
 extern NTSTATUS set_thread_context( HANDLE handle, const void *context, BOOL *self, USHORT machine );
 extern NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT machine );
+#if defined(__SWITCH__) && defined(__aarch64__)
+extern BOOL horizon_capture_arm64ec_server_context( TEB *teb, struct context_data *context );
+extern BOOL horizon_apply_arm64ec_server_context( TEB *teb, const struct context_data *context );
+extern void horizon_wait_suspend_arm64ec(void);
+#endif
 extern unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
                                              data_size_t *ret_len );
 extern NTSTATUS system_time_precise( void *args );

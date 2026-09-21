@@ -2472,6 +2472,11 @@ extern void svcSleepThread( int64_t nano );
 NTSTATUS WINAPI NtYieldExecution(void)
 {
 #ifdef __SWITCH__
+    CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;
+
+    if (area && area->SuspendDoorbell &&
+        __atomic_load_n( area->SuspendDoorbell, __ATOMIC_ACQUIRE ))
+        horizon_wait_suspend_arm64ec();
     /* Sleep(0) and SwitchToThread must give up the core: wined3d waits for its
      * command-stream thread by pausing and sleeping 0, and without a yield that
      * wait spun a whole core while the thread it waited for got less of one.

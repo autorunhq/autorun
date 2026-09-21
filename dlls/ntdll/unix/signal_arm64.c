@@ -99,21 +99,26 @@ void *get_wow_context( CONTEXT *context )
     return NULL;
 }
 
+extern int horizon_capture_context( CONTEXT *context );
+
 NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
 {
-    (void)handle;
-    (void)context;
-    return STATUS_NOT_IMPLEMENTED;
+    BOOL self;
+    NTSTATUS status = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
+
+    if (status || !self) return status;
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
 {
-    (void)handle;
-    (void)context;
-    return STATUS_NOT_IMPLEMENTED;
-}
+    BOOL self;
+    NTSTATUS status;
 
-extern int horizon_capture_context( CONTEXT *context );
+    status = get_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
+    if (status || !self) return status;
+    return horizon_capture_context( context ) ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+}
 
 static NTSTATUS check_current_thread_context_access( HANDLE handle, ACCESS_MASK access )
 {

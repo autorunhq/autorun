@@ -534,6 +534,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_SET_TIMER 103
 #define HORIZON_REQ_CANCEL_TIMER 104
 #define HORIZON_REQ_GET_TIMER_INFO 105
+#define HORIZON_REQ_GET_THREAD_CONTEXT 106
+#define HORIZON_REQ_SET_THREAD_CONTEXT 107
 #define HORIZON_REQ_ADD_ATOM 108
 #define HORIZON_REQ_FIND_ATOM 110
 #define HORIZON_REQ_ADD_USER_ATOM 112
@@ -1018,6 +1020,48 @@ struct horizon_suspend_thread_reply
     int count;
     unsigned int wait_handle;
 };
+
+struct horizon_get_thread_context_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned int context;
+    unsigned int flags;
+    unsigned int native_flags;
+    unsigned short machine;
+    char pad[2];
+};
+
+struct horizon_get_thread_context_reply
+{
+    struct horizon_server_reply_header header;
+    int self;
+    unsigned int handle;
+};
+
+struct horizon_set_thread_context_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned int native_flags;
+    char pad[4];
+};
+
+struct horizon_set_thread_context_reply
+{
+    struct horizon_server_reply_header header;
+    int self;
+    char pad[4];
+};
+
+C_ASSERT( offsetof(struct horizon_get_thread_context_request, handle) == 12 );
+C_ASSERT( offsetof(struct horizon_get_thread_context_request, context) == 16 );
+C_ASSERT( offsetof(struct horizon_get_thread_context_request, machine) == 28 );
+C_ASSERT( sizeof(struct horizon_get_thread_context_request) == 32 );
+C_ASSERT( sizeof(struct horizon_get_thread_context_reply) == 16 );
+C_ASSERT( offsetof(struct horizon_set_thread_context_request, handle) == 12 );
+C_ASSERT( sizeof(struct horizon_set_thread_context_request) == 24 );
+C_ASSERT( sizeof(struct horizon_set_thread_context_reply) == 16 );
 
 struct horizon_close_handle_request
 {
@@ -2967,6 +3011,12 @@ struct horizon_server_object
     struct horizon_mutex_state mutex;
     struct horizon_thread_state thread;
     struct horizon_server_object *thread_next;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    struct context_data thread_contexts[2];
+#endif
+    unsigned int thread_context_count;
+    int thread_context_valid;
+    int thread_context_dirty;
     struct horizon_user_apc *apc_first, *apc_last;
     unsigned int rootdir;
     unsigned int name_len;
@@ -10196,11 +10246,22 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
  * request pipe close, which exit_thread does after the thread has finished
  * all Windows code (LdrShutdownThread, TLS callbacks, stack frames).
  * CREATE_SUSPENDED holds init_thread at a start gate until resume_thread.
- * Suspending a thread that already runs and terminating another thread need
- * an interpreter-safe stop point; both report STATUS_NOT_SUPPORTED.
+ * Running ARM64EC threads stop at a Box64 or server-wait safe point.
+ * Terminating another thread remains unsupported.
  */
 
 static void *horizon_server_thread( void *param );
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+static void horizon_server_set_suspend_doorbell_locked( struct horizon_server_object *object, int value )
+{
+    TEB *teb = (TEB *)(ULONG_PTR)object->thread.teb;
+    CHPE_V2_CPU_AREA_INFO *area;
+
+    if (!teb || !(area = teb->ChpeV2CpuAreaInfo) || !area->SuspendDoorbell) return;
+    __atomic_store_n( area->SuspendDoorbell, value, __ATOMIC_RELEASE );
+}
+#endif
 
 /* A client thread and its connection thread take turns, so they share a core:
  * requests and replies hand over without waking another core, and connection
@@ -10306,7 +10367,13 @@ static int horizon_server_handle_resume_thread( struct horizon_server_connection
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((object = horizon_server_get_thread_locked( request->handle, &status )))
+    {
         status = horizon_thread_resume( &object->thread, &reply.count );
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (!status && reply.count == 1)
+            horizon_server_set_suspend_doorbell_locked( object, 0 );
+#endif
+    }
     horizon_server_signal_changed_locked();  /* the start gate */
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     reply.header.error = status;
@@ -10319,21 +10386,170 @@ static int horizon_server_handle_suspend_thread( struct horizon_server_connectio
     const struct horizon_suspend_thread_request *request = (const void *)message;
     struct horizon_suspend_thread_reply reply;
     struct horizon_server_object *object;
-    unsigned int status, tid = 0;
+    unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((object = horizon_server_get_thread_locked( request->handle, &status )))
     {
         status = horizon_thread_suspend( &object->thread, &reply.count );
-        tid = object->thread.tid;
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (!status && object->thread.started && !reply.count)
+            horizon_server_set_suspend_doorbell_locked( object, 1 );
+#endif
     }
+    if (!status) horizon_server_signal_changed_locked();
     pthread_mutex_unlock( &horizon_server_objects_mutex );
-    if (status == HORIZON_THREADS_STATUS_NOT_SUPPORTED)
-        horizon_trace( "[server] suspend_thread tid=%u refused: thread already running", tid );
     reply.header.error = status;
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+static void horizon_server_merge_context( struct context_data *dst, const struct context_data *src )
+{
+    unsigned int flags;
+
+    if (dst->machine != src->machine) return;
+    flags = src->flags;
+    if (flags & SERVER_CTX_CONTROL)
+    {
+        memcpy( &dst->ctl, &src->ctl, sizeof(dst->ctl) );
+        if (src->machine == HORIZON_IMAGE_FILE_MACHINE_ARM64)
+        {
+            dst->integer.arm64_regs.x[29] = src->integer.arm64_regs.x[29];
+            dst->integer.arm64_regs.x[30] = src->integer.arm64_regs.x[30];
+        }
+        else if (src->machine == HORIZON_IMAGE_FILE_MACHINE_AMD64)
+            dst->integer.x86_64_regs.rbp = src->integer.x86_64_regs.rbp;
+        else if (src->machine == HORIZON_IMAGE_FILE_MACHINE_I386)
+            dst->ctl.i386_regs.ebp = src->ctl.i386_regs.ebp;
+    }
+    if (flags & SERVER_CTX_INTEGER)
+    {
+        if (src->machine == HORIZON_IMAGE_FILE_MACHINE_ARM64)
+            memcpy( dst->integer.arm64_regs.x, src->integer.arm64_regs.x,
+                    29 * sizeof(src->integer.arm64_regs.x[0]) );
+        else memcpy( &dst->integer, &src->integer, sizeof(dst->integer) );
+    }
+    if (flags & SERVER_CTX_SEGMENTS) memcpy( &dst->seg, &src->seg, sizeof(dst->seg) );
+    if (flags & SERVER_CTX_FLOATING_POINT) memcpy( &dst->fp, &src->fp, sizeof(dst->fp) );
+    if (flags & SERVER_CTX_DEBUG_REGISTERS) memcpy( &dst->debug, &src->debug, sizeof(dst->debug) );
+    if (flags & SERVER_CTX_EXTENDED_REGISTERS) memcpy( &dst->ext, &src->ext, sizeof(dst->ext) );
+    if (flags & SERVER_CTX_EXEC_SPACE) memcpy( &dst->exec_space, &src->exec_space, sizeof(dst->exec_space) );
+    if (flags & SERVER_CTX_YMM_REGISTERS) memcpy( &dst->ymm, &src->ymm, sizeof(dst->ymm) );
+    dst->flags |= flags;
+}
+
+static int horizon_server_handle_get_thread_context( struct horizon_server_connection *connection,
+                                                     const unsigned char *message )
+{
+    const struct horizon_get_thread_context_request *request = (const void *)message;
+    struct horizon_get_thread_context_reply reply;
+    struct horizon_server_object *object;
+    struct context_data context;
+    unsigned int status, i;
+    int found = 0;
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if ((object = horizon_server_get_thread_locked( request->handle, &status )))
+    {
+        if (object == connection->thread) reply.self = 1;
+        else if (!object->thread.suspend) status = HORIZON_STATUS_INVALID_PARAMETER;
+        else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
+        else
+        {
+            while (!object->thread_context_valid && object->thread.suspend &&
+                   !object->thread.terminated)
+            {
+                horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                horizon_server_quit_check_locked();
+            }
+            if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
+            else if (!object->thread.suspend) status = HORIZON_STATUS_UNSUCCESSFUL;
+            else for (i = 0; i < object->thread_context_count; i++)
+            {
+                if (object->thread_contexts[i].machine != request->machine) continue;
+                context = object->thread_contexts[i];
+                context.flags &= request->flags | request->native_flags | SERVER_CTX_EXEC_SPACE;
+                found = 1;
+                break;
+            }
+            if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    reply.header.error = status;
+    if (!status && found) reply.header.reply_size = sizeof(context);
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply),
+                                       found ? &context : NULL, found ? sizeof(context) : 0 );
+}
+
+static int horizon_server_handle_set_thread_context( struct horizon_server_connection *connection,
+                                                     const unsigned char *message,
+                                                     const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_set_thread_context_request *request = (const void *)message;
+    const struct context_data *contexts = (const void *)data;
+    struct horizon_set_thread_context_reply reply;
+    struct horizon_server_object *object;
+    unsigned int status, count, i, j;
+    int found = 0;
+
+    memset( &reply, 0, sizeof(reply) );
+    count = data_size / sizeof(*contexts);
+    if (!count || count > 2 || data_size != count * sizeof(*contexts)) status = HORIZON_STATUS_INVALID_PARAMETER;
+    else
+    {
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        if ((object = horizon_server_get_thread_locked( request->handle, &status )))
+        {
+            if (object == connection->thread) reply.self = 1;
+            else if (!object->thread.suspend) status = HORIZON_STATUS_INVALID_PARAMETER;
+            else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
+            else
+            {
+                while (!object->thread_context_valid && object->thread.suspend &&
+                       !object->thread.terminated)
+                {
+                    horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                    horizon_server_quit_check_locked();
+                }
+                if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
+                else if (!object->thread.suspend) status = HORIZON_STATUS_UNSUCCESSFUL;
+                else for (i = 0; i < count; i++)
+                    for (j = 0; j < object->thread_context_count; j++)
+                        if (contexts[i].machine == object->thread_contexts[j].machine)
+                        {
+                            horizon_server_merge_context( &object->thread_contexts[j], &contexts[i] );
+                            found = object->thread_context_dirty = 1;
+                        }
+                if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+            }
+        }
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    reply.header.error = status;
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+#else
+static int horizon_server_handle_get_thread_context( struct horizon_server_connection *connection,
+                                                     const unsigned char *message )
+{
+    (void)message;
+    return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+}
+
+static int horizon_server_handle_set_thread_context( struct horizon_server_connection *connection,
+                                                     const unsigned char *message,
+                                                     const unsigned char *data, unsigned int data_size )
+{
+    (void)message;
+    (void)data;
+    (void)data_size;
+    return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+}
+#endif
 
 static int horizon_server_handle_terminate_thread( struct horizon_server_connection *connection,
                                                    const unsigned char *message )
@@ -13866,6 +14082,15 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
     struct horizon_user_apc *apc = NULL;
     struct horizon_select_reply reply;
     int polls, signals, ret;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    struct
+    {
+        unsigned char call[HORIZON_APC_CALL_SIZE];
+        struct context_data contexts[2];
+    } suspend_reply;
+    const struct context_data *suspend_contexts = NULL;
+    unsigned int suspend_context_count = 0, suspend_reply_size = 0;
+#endif
 
     memset( &reply, 0, sizeof(reply) );
     /* Each client has its own server connection/thread. A pending wait sleeps on
@@ -13880,10 +14105,83 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
     horizon_server_async_result_locked( request, data, data_size );
     polls = horizon_server_select_polls_locked( request, data, data_size );
     signals = horizon_server_select_signals( request, data, data_size );
+#ifndef HORIZON_STANDALONE_SYNTAX
+    if (data_size >= HORIZON_APC_RESULT_SIZE + request->size + sizeof(struct context_data))
+    {
+        unsigned int offset = HORIZON_APC_RESULT_SIZE + request->size;
+        unsigned int size = data_size - offset;
+
+        if (!(size % sizeof(struct context_data)) && size / sizeof(struct context_data) <= 2)
+        {
+            suspend_contexts = (const struct context_data *)(data + offset);
+            suspend_context_count = size / sizeof(struct context_data);
+        }
+    }
+#endif
     for (int initial = 1;; initial = 0)
     {
         LARGE_INTEGER now;
         long long timeout = HORIZON_SERVER_WAIT_SLICE;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (connection->thread && connection->thread->thread.started &&
+            connection->thread->thread.suspend)
+        {
+            struct horizon_server_object *thread = connection->thread;
+
+            if (!thread->thread_context_valid)
+            {
+                if (suspend_context_count)
+                {
+                    memcpy( thread->thread_contexts, suspend_contexts,
+                            suspend_context_count * sizeof(*suspend_contexts) );
+                    thread->thread_context_count = suspend_context_count;
+                    thread->thread_context_valid = 1;
+                }
+                else if (horizon_capture_arm64ec_server_context(
+                             (TEB *)(ULONG_PTR)thread->thread.teb, &thread->thread_contexts[0] ))
+                {
+                    thread->thread_context_count = 1;
+                    thread->thread_context_valid = 1;
+                }
+                else thread->thread_context_valid = 1;
+                horizon_server_signal_changed_locked();
+            }
+            while (thread->thread.suspend && !thread->thread.terminated)
+            {
+                horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                horizon_server_quit_check_locked();
+            }
+            if (suspend_context_count && thread->thread_context_valid)
+            {
+                memset( &suspend_reply, 0, sizeof(suspend_reply) );
+                memcpy( suspend_reply.contexts, thread->thread_contexts,
+                        thread->thread_context_count * sizeof(thread->thread_contexts[0]) );
+                suspend_reply_size = HORIZON_APC_CALL_SIZE +
+                                     thread->thread_context_count * sizeof(thread->thread_contexts[0]);
+                reply.header.error = thread->thread.terminated ? HORIZON_STATUS_ACCESS_DENIED :
+                                                                 HORIZON_STATUS_SUCCESS;
+                thread->thread_context_valid = 0;
+                thread->thread_context_dirty = 0;
+                thread->thread_context_count = 0;
+                break;
+            }
+            if (thread->thread_context_valid)
+            {
+                if (thread->thread_context_dirty)
+                    horizon_apply_arm64ec_server_context( (TEB *)(ULONG_PTR)thread->thread.teb,
+                                                          &thread->thread_contexts[0] );
+                thread->thread_context_valid = 0;
+                thread->thread_context_dirty = 0;
+                thread->thread_context_count = 0;
+            }
+            if (thread->thread.terminated)
+            {
+                reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
+                break;
+            }
+        }
+#endif
 
         /* A system APC comes first, in any wait: the socket operation the
          * thread started is ready to be done. Not before a signal-and-wait
@@ -13931,6 +14229,15 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
 
     TRACE( "Horizon server select size %u timeout %lld status %08x.\n",
            request->size, request->timeout, reply.header.error );
+#ifndef HORIZON_STANDALONE_SYNTAX
+    if (suspend_reply_size)
+    {
+        unsigned int size = min( suspend_reply_size, request->header.reply_size );
+
+        reply.header.reply_size = size;
+        return horizon_server_sync_reply( connection, &reply, sizeof(reply), &suspend_reply, size );
+    }
+#endif
     if (reply.apc_handle)
     {
         unsigned int size = min( (unsigned int)sizeof(system_call), request->header.reply_size );
@@ -14085,6 +14392,13 @@ static void *horizon_server_thread( void *param )
             break;
         case HORIZON_REQ_RESUME_THREAD:
             status = horizon_server_handle_resume_thread( connection, message );
+            break;
+        case HORIZON_REQ_GET_THREAD_CONTEXT:
+            status = horizon_server_handle_get_thread_context( connection, message );
+            break;
+        case HORIZON_REQ_SET_THREAD_CONTEXT:
+            status = horizon_server_handle_set_thread_context( connection, message, request_data,
+                                                               header->request_size );
             break;
         case HORIZON_REQ_TERMINATE_THREAD:
             status = horizon_server_handle_terminate_thread( connection, message );

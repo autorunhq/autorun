@@ -84,7 +84,7 @@ static void test_thread_state(void)
     assert( horizon_thread_exit_status( &t ) == 0x1234 );
     assert( horizon_thread_info_flags( &t, 1 ) == (HORIZON_THREAD_INFO_TERMINATED | HORIZON_THREAD_INFO_LAST) );
 
-    /* Start gate: CREATE_SUSPENDED before start, nested counts, no running suspend. */
+    /* Start gate and nested suspend counts. */
     horizon_thread_init( &t, 12, 1, 0x7, 0 );
     t.suspend = 1;
     assert( !horizon_thread_may_start( &t ) );
@@ -93,7 +93,10 @@ static void test_thread_state(void)
     assert( horizon_thread_resume( &t, &previous ) == 0 && previous == 1 && horizon_thread_may_start( &t ) );
     assert( horizon_thread_resume( &t, &previous ) == 0 && previous == 0 && t.suspend == 0 );
     t.started = 1;
-    assert( horizon_thread_suspend( &t, &previous ) == HORIZON_THREADS_STATUS_NOT_SUPPORTED && t.suspend == 0 );
+    assert( horizon_thread_suspend( &t, &previous ) == 0 && previous == 0 && t.suspend == 1 );
+    assert( horizon_thread_suspend( &t, &previous ) == 0 && previous == 1 && t.suspend == 2 );
+    assert( horizon_thread_resume( &t, &previous ) == 0 && previous == 2 && t.suspend == 1 );
+    assert( horizon_thread_resume( &t, &previous ) == 0 && previous == 1 && t.suspend == 0 );
     horizon_thread_mark_terminated( &t, 1 );
     assert( horizon_thread_suspend( &t, &previous ) == HORIZON_THREADS_STATUS_ACCESS_DENIED );
     horizon_thread_init( &t, 16, 1, 0x7, 0 );
