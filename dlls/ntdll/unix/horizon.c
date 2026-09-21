@@ -503,6 +503,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_CANCEL_ASYNC 135
 #define HORIZON_REQ_GET_ASYNC_RESULT 136
 #define HORIZON_REQ_IOCTL 140
+#define HORIZON_REQ_CREATE_NAMED_PIPE 142
+#define HORIZON_REQ_SET_NAMED_PIPE_INFO 143
 #define HORIZON_REQ_CREATE_MAPPING 63
 #define HORIZON_REQ_OPEN_MAPPING 64
 #define HORIZON_REQ_GET_MAPPING_INFO 65
@@ -636,6 +638,8 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_ADDRESS_ALREADY_ASSOCIATED 0xc0000238u
 #define HORIZON_STATUS_INVALID_ADDRESS_COMPONENT 0xc0000207u
 #define HORIZON_STATUS_SHARING_VIOLATION 0xc0000043u
+#define HORIZON_STATUS_INSTANCE_NOT_AVAILABLE 0xc00000abu
+#define HORIZON_STATUS_PIPE_NOT_AVAILABLE 0xc00000acu
 #define HORIZON_STATUS_PIPE_DISCONNECTED 0xc00000b0u
 #define HORIZON_STATUS_NOT_IMPLEMENTED 0xc0000002u
 #define HORIZON_STATUS_INVALID_HANDLE 0xc0000008u
@@ -699,6 +703,7 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_FD_TYPE_FILE 1
 #define HORIZON_FD_TYPE_DIR 2
 #define HORIZON_FD_TYPE_SOCKET 3
+#define HORIZON_FD_TYPE_CHAR 5
 #define HORIZON_FIRST_USER_HANDLE 0x0020
 #define HORIZON_LAST_USER_HANDLE 0xffef
 #define HORIZON_MAX_USER_HANDLES ((HORIZON_LAST_USER_HANDLE - HORIZON_FIRST_USER_HANDLE + 1) >> 1)
@@ -844,7 +849,8 @@ enum horizon_server_object_type
     HORIZON_SERVER_OBJECT_MSG_QUEUE,
     HORIZON_SERVER_OBJECT_DIRECTORY,
     HORIZON_SERVER_OBJECT_COMPLETION,
-    HORIZON_SERVER_OBJECT_COMPLETION_WAIT
+    HORIZON_SERVER_OBJECT_COMPLETION_WAIT,
+    HORIZON_SERVER_OBJECT_NAMED_PIPE
 };
 
 struct horizon_server_request_header
@@ -1339,6 +1345,49 @@ struct horizon_open_file_object_reply
     unsigned int handle;
     char pad[4];
 };
+
+struct horizon_create_named_pipe_request
+{
+    struct horizon_server_request_header header;
+    unsigned int access;
+    unsigned int options;
+    unsigned int sharing;
+    unsigned int disposition;
+    unsigned int maxinstances;
+    unsigned int outsize;
+    unsigned int insize;
+    unsigned long long timeout;
+    unsigned int flags;
+    char pad[4];
+};
+
+struct horizon_create_named_pipe_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int handle;
+    int created;
+};
+
+struct horizon_set_named_pipe_info_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned int flags;
+    char pad[4];
+};
+
+C_ASSERT( offsetof(struct horizon_create_named_pipe_request, access) == 12 );
+C_ASSERT( offsetof(struct horizon_create_named_pipe_request, timeout) == 40 );
+C_ASSERT( offsetof(struct horizon_create_named_pipe_request, flags) == 48 );
+C_ASSERT( sizeof(struct horizon_create_named_pipe_request) == 56 );
+C_ASSERT( sizeof(struct horizon_create_named_pipe_reply) == 16 );
+C_ASSERT( offsetof(struct horizon_set_named_pipe_info_request, handle) == 12 );
+C_ASSERT( sizeof(struct horizon_set_named_pipe_info_request) == 24 );
+
+#define HORIZON_NAMED_PIPE_MESSAGE_STREAM_WRITE 0x0001
+#define HORIZON_NAMED_PIPE_MESSAGE_STREAM_READ  0x0002
+#define HORIZON_NAMED_PIPE_NONBLOCKING_MODE     0x0004
+#define HORIZON_NAMED_PIPE_SERVER_END           0x8000
 
 struct horizon_async_data
 {
@@ -2921,6 +2970,7 @@ struct horizon_server_object
     long long timer_when;
     unsigned int timer_period;
     int file_fd;
+    int file_peer_fd;
     char *file_name;
     unsigned int file_access;
     unsigned int file_options;
@@ -2928,6 +2978,7 @@ struct horizon_server_object
     unsigned int file_sharing;      /* FILE_SHARE_* it was opened with, when file_shared */
     int file_shared;                /* opened by create_file, whose sharing mode is known */
     int file_is_dir;
+    unsigned int pipe_flags;
     unsigned int dir_enum_index;
     int dir_queried;                /* a directory query has run on this handle */
     char *dir_mask;
@@ -4160,6 +4211,7 @@ static struct horizon_server_handle_entry *horizon_server_create_handle_locked( 
     object->type = type;
     object->refs = 1;
     object->file_fd = -1;
+    object->file_peer_fd = -1;
     return entry;
 }
 
@@ -4207,6 +4259,7 @@ static void horizon_server_free_object( struct horizon_server_object *object )
         horizon_server_free_object( object->file_completion );
     if (object->reg_key) horizon_reg_release( &horizon_registry, object->reg_key );
     if (object->file_fd != -1) close( object->file_fd );
+    if (object->file_peer_fd != -1) close( object->file_peer_fd );
     free( object->file_name );
     free( object->dir_mask );
     free( object->name );
@@ -9754,7 +9807,8 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
     if (!entry) reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
     else if ((entry->object->type != HORIZON_SERVER_OBJECT_FILE &&
               entry->object->type != HORIZON_SERVER_OBJECT_MAPPING &&
-              entry->object->type != HORIZON_SERVER_OBJECT_SOCK) ||
+              entry->object->type != HORIZON_SERVER_OBJECT_SOCK &&
+              entry->object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE) ||
              entry->object->file_fd == -1)
     {
         if (entry->object->type == HORIZON_SERVER_OBJECT_FILE && entry->object->file_is_dir)
@@ -9767,6 +9821,14 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
         reply.type = HORIZON_FD_TYPE_SOCKET;
         reply.cacheable = 1;
         reply.access = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA;
+        reply.options = entry->object->file_options;
+        horizon_server_queue_fd( entry->object->file_fd, request->handle );
+    }
+    else if (entry->object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE)
+    {
+        reply.type = HORIZON_FD_TYPE_CHAR;
+        reply.cacheable = 1;
+        reply.access = entry->object->file_access;
         reply.options = entry->object->file_options;
         horizon_server_queue_fd( entry->object->file_fd, request->handle );
     }
@@ -10960,6 +11022,182 @@ static unsigned int horizon_server_get_sock_fd( unsigned int handle, int *fd, in
     return status;
 }
 
+static int horizon_named_pipe_has_prefix( const unsigned char *name, unsigned int size,
+                                          const char *prefix )
+{
+    unsigned int i, count = strlen( prefix );
+
+    if (size < count * sizeof(unsigned short)) return 0;
+    for (i = 0; i < count; i++)
+    {
+        unsigned int a = name[i * 2] | (name[i * 2 + 1] << 8);
+        unsigned int b = (unsigned char)prefix[i];
+
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static void horizon_named_pipe_name_tail( const unsigned char **name, unsigned int *size )
+{
+    static const char dos_prefix[] = "\\??\\pipe\\";
+    static const char device_prefix[] = "\\Device\\NamedPipe\\";
+    unsigned int count = 0;
+
+    if (horizon_named_pipe_has_prefix( *name, *size, dos_prefix ))
+        count = sizeof(dos_prefix) - 1;
+    else if (horizon_named_pipe_has_prefix( *name, *size, device_prefix ))
+        count = sizeof(device_prefix) - 1;
+    if (count)
+    {
+        *name += count * sizeof(unsigned short);
+        *size -= count * sizeof(unsigned short);
+    }
+}
+
+static int horizon_named_pipe_name_equal( const struct horizon_server_object *object,
+                                          const unsigned char *name, unsigned int size )
+{
+    const unsigned char *stored = object->name;
+    unsigned int stored_size = object->name_len, i;
+
+    horizon_named_pipe_name_tail( &stored, &stored_size );
+    horizon_named_pipe_name_tail( &name, &size );
+    if (!size || size != stored_size) return 0;
+    for (i = 0; i < size; i += 2)
+    {
+        unsigned int a = stored[i] | (stored[i + 1] << 8);
+        unsigned int b = name[i] | (name[i + 1] << 8);
+
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static struct horizon_server_object *horizon_server_find_named_pipe_locked(
+    const unsigned char *name, unsigned int size )
+{
+    struct horizon_server_handle_entry *entry;
+    struct horizon_server_object *connected = NULL;
+
+    if (!size || (size & 1)) return NULL;
+    for (entry = horizon_server_handles; entry; entry = entry->next)
+    {
+        struct horizon_server_object *object = entry->object;
+
+        if (object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE ||
+            !horizon_named_pipe_name_equal( object, name, size ))
+            continue;
+        if (object->file_peer_fd != -1) return object;
+        connected = object;
+    }
+    return connected;
+}
+
+static int horizon_server_handle_create_named_pipe( struct horizon_server_connection *connection,
+                                                    const unsigned char *message,
+                                                    const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_create_named_pipe_request *request = (const void *)message;
+    struct horizon_create_named_pipe_reply reply;
+    struct horizon_server_handle_entry *entry = NULL;
+    struct horizon_object_name name;
+    unsigned int access;
+    int fd[2] = {-1, -1};
+
+    memset( &reply, 0, sizeof(reply) );
+    reply.header.error = horizon_server_parse_object_attributes( data, data_size, &name );
+    access = horizon_file_map_access( request->access );
+    if (!reply.header.error && (!name.name_len || (name.name_len & 1) || !request->access ||
+        !request->maxinstances || !request->sharing || (request->sharing & ~3u) ||
+        request->sharing == 3 ||
+        (request->disposition != FILE_OPEN && request->disposition != FILE_CREATE &&
+         request->disposition != FILE_OPEN_IF)))
+        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+    if (!reply.header.error &&
+        (request->maxinstances != 1 ||
+         request->flags & (HORIZON_NAMED_PIPE_MESSAGE_STREAM_WRITE |
+                           HORIZON_NAMED_PIPE_MESSAGE_STREAM_READ |
+                           HORIZON_NAMED_PIPE_NONBLOCKING_MODE)))
+        reply.header.error = HORIZON_STATUS_NOT_SUPPORTED;
+    if (!reply.header.error && !(request->options & (0x10u | 0x20u)))
+        reply.header.error = HORIZON_STATUS_NOT_SUPPORTED;
+    if (!reply.header.error && request->sharing == FILE_SHARE_WRITE && !(access & FILE_READ_DATA))
+        reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
+    if (!reply.header.error && request->sharing == FILE_SHARE_READ && !(access & FILE_WRITE_DATA))
+        reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
+    if (!reply.header.error && horizon_pipe( fd ) == -1)
+        reply.header.error = horizon_server_errno_status( errno );
+
+    if (!reply.header.error)
+    {
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        if (horizon_server_find_named_pipe_locked( name.name, name.name_len ))
+            reply.header.error = request->disposition == FILE_CREATE ? HORIZON_STATUS_ACCESS_DENIED :
+                                 HORIZON_STATUS_INSTANCE_NOT_AVAILABLE;
+        else if (request->disposition == FILE_OPEN)
+            reply.header.error = HORIZON_STATUS_OBJECT_NAME_NOT_FOUND;
+        else if (!(entry = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_NAMED_PIPE )))
+            reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        else if ((reply.header.error = horizon_server_set_object_name( entry->object, &name )))
+        {
+            horizon_server_unlink_handle_locked( entry );
+            horizon_server_free_object( entry->object );
+            free( entry );
+            entry = NULL;
+        }
+        else
+        {
+            if (request->sharing == FILE_SHARE_WRITE)
+            {
+                entry->object->file_fd = fd[0];
+                entry->object->file_peer_fd = fd[1];
+            }
+            else
+            {
+                entry->object->file_fd = fd[1];
+                entry->object->file_peer_fd = fd[0];
+            }
+            fd[0] = fd[1] = -1;
+            entry->object->file_access = access;
+            entry->object->file_options = request->options;
+            entry->object->file_sharing = request->sharing;
+            entry->object->pipe_flags = request->flags | HORIZON_NAMED_PIPE_SERVER_END;
+            reply.handle = entry->handle;
+            reply.created = 1;
+        }
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    if (fd[0] != -1) close( fd[0] );
+    if (fd[1] != -1) close( fd[1] );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_set_named_pipe_info( struct horizon_server_connection *connection,
+                                                      const unsigned char *message )
+{
+    const struct horizon_set_named_pipe_info_request *request = (const void *)message;
+    struct horizon_server_reply_header reply = {0};
+    struct horizon_server_handle_entry *entry;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    entry = horizon_server_find_handle_locked( request->handle );
+    if (!entry) reply.error = HORIZON_STATUS_INVALID_HANDLE;
+    else if (entry->object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE)
+        reply.error = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (request->flags & ~(HORIZON_NAMED_PIPE_MESSAGE_STREAM_READ |
+                                HORIZON_NAMED_PIPE_NONBLOCKING_MODE))
+        reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else if (request->flags) reply.error = HORIZON_STATUS_NOT_SUPPORTED;
+    else entry->object->pipe_flags &= HORIZON_NAMED_PIPE_SERVER_END;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
 static int horizon_server_handle_open_file_object( struct horizon_server_connection *connection,
                                                    const unsigned char *message,
                                                    const unsigned char *data, unsigned int data_size )
@@ -10991,6 +11229,40 @@ static int horizon_server_handle_open_file_object( struct horizon_server_connect
             memcpy( &c, data + 22, sizeof(c) );
             if (c != '\\') is_afd = 0;
         }
+    }
+
+    if (!is_afd && !(data_size & 1))
+    {
+        struct horizon_server_object *pipe;
+
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        pipe = horizon_server_find_named_pipe_locked( data, data_size );
+        if (pipe)
+        {
+            unsigned int access = horizon_file_map_access( request->access );
+            struct horizon_server_handle_entry *entry = NULL;
+
+            if (pipe->file_peer_fd == -1) reply.header.error = HORIZON_STATUS_PIPE_NOT_AVAILABLE;
+            else if (((access & FILE_READ_DATA) && !(pipe->file_sharing & FILE_SHARE_READ)) ||
+                     ((access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) &&
+                      !(pipe->file_sharing & FILE_SHARE_WRITE)))
+                reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
+            else if (!(entry = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_NAMED_PIPE )))
+                reply.header.error = HORIZON_STATUS_NO_MEMORY;
+            else
+            {
+                entry->object->file_fd = pipe->file_peer_fd;
+                pipe->file_peer_fd = -1;
+                entry->object->file_access = access;
+                entry->object->file_options = request->options;
+                entry->object->file_sharing = pipe->file_sharing;
+                entry->object->pipe_flags = pipe->pipe_flags & ~HORIZON_NAMED_PIPE_SERVER_END;
+                reply.handle = entry->handle;
+            }
+        }
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+        if (pipe)
+            return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
     }
 
     if (is_afd)
@@ -13690,6 +13962,13 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_IOCTL:
             status = horizon_server_handle_ioctl( connection, message, request_data,
                                                   header->request_size );
+            break;
+        case HORIZON_REQ_CREATE_NAMED_PIPE:
+            status = horizon_server_handle_create_named_pipe( connection, message, request_data,
+                                                              header->request_size );
+            break;
+        case HORIZON_REQ_SET_NAMED_PIPE_INFO:
+            status = horizon_server_handle_set_named_pipe_info( connection, message );
             break;
         case HORIZON_REQ_RECV_SOCKET:
         case HORIZON_REQ_SEND_SOCKET:
