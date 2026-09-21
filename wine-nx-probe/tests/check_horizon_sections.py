@@ -193,6 +193,8 @@ static int split_backing_mapping( struct horizon_mapping *m, char *start, size_t
 static struct horizon_mapping *split_backing_mapping_metadata( struct horizon_mapping *m, char *start, size_t size )
 { (void)m; (void)start; (void)size; abort(); }
 static int protect_code_mapping( struct horizon_mapping *m, int prot ) { (void)m; (void)prot; abort(); }
+static int protect_reservation_mapping( struct horizon_mapping *m, char *start, size_t size, int prot )
+{ (void)m; (void)start; (void)size; (void)prot; abort(); }
 static int map_backing_at( void *addr, size_t size, int prot, int fd, off_t offset, int flags, int map_errno )
 { (void)addr; (void)size; (void)prot; (void)fd; (void)offset; (void)flags; (void)map_errno; abort(); }
 '''

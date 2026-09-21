@@ -129,6 +129,8 @@ static int protect_code_mapping( struct horizon_mapping *m, int prot )
 
 static int protect_section_range( struct horizon_mapping *m, char *start, size_t size, int prot )
 { (void)m; (void)start; (void)size; (void)prot; abort(); }
+static int protect_reservation_mapping( struct horizon_mapping *m, char *start, size_t size, int prot )
+{ (void)m; (void)start; (void)size; (void)prot; abort(); }
 '''
 
 fixture += function('static int protect_range_locked(')

@@ -36,6 +36,9 @@ typedef struct { u64 addr, size; u32 type, perm, attr; } MemoryInfo;
 #define PROT_NONE 0
 #define PROT_READ 1
 #define PROT_WRITE 2
+#define PROT_EXEC 4
+#define TRUE 1
+#define FALSE 0
 #define MAP_FAILED ((void *)-1)
 #define MAP_PRIVATE 2
 #define MAP_ANON 0x20
@@ -43,7 +46,7 @@ typedef struct { u64 addr, size; u32 type, perm, attr; } MemoryInfo;
 #define MemType_Unmapped 0
 #define R_SUCCEEDED(result) ((result) == 0)
 typedef struct { uintptr_t start, end; int used; } VirtmemReservation;
-struct horizon_mapping { void *addr; size_t size; VirtmemReservation *reservation; };
+struct horizon_mapping { void *addr; size_t size; int prot; void *backing; VirtmemReservation *reservation; };
 static VirtmemReservation reservations[32];
 static struct horizon_mapping *maps[8];
 static int map_count, mapping_pool, allocations, fail_allocation, fail_reservation;
@@ -89,11 +92,11 @@ static void remove_reservation(VirtmemReservation *r)
 static struct horizon_mapping *alloc_mapping(void *p, size_t size, void *backing,
                                              size_t off, VirtmemReservation *r, int prot)
 {
-    (void)backing; (void)off; (void)prot;
+    (void)backing; (void)off;
     if (fail_allocation && !--fail_allocation) return NULL;
     struct horizon_mapping *m = malloc(sizeof(*m));
     assert(m); allocations++;
-    *m = (struct horizon_mapping){p,size,r};
+    *m = (struct horizon_mapping){p,size,prot,backing,r};
     return m;
 }
 static void horizon_object_free(void *pool, struct horizon_mapping *m)
@@ -109,6 +112,8 @@ fixture += 'static int map_backing_at(void *, size_t, int, int, off_t, int, int)
 fixture += function('static int replace_reservation_mapping(')
 fixture += function('static int change_reservation_mapping(')
 fixture += function('static int split_reservation_mapping(')
+fixture += function('static struct horizon_mapping *reservation_mapping_piece(')
+fixture += function('static int protect_reservation_mapping(')
 fixture += r'''
 static int unmap_range_locked(void *p, size_t size)
 {
@@ -138,8 +143,12 @@ static int map_backing_at(void *p, size_t size, int prot, int fd, off_t offset, 
 }
 static int map_anonymous_backings(void *p, size_t size, int prot, int flags, int error)
 { return map_backing_at(p, size, prot, -1, 0, flags, error); }
+#define HORIZON_LAZY_MAPPING_MIN ((size_t)256 * 1024 * 1024)
+#define HORIZON_LAZY_MAPPING_CHUNK HORIZON_POOL_ARENA
 static void wine_nx_runtime_trace(const char *msg) { puts(msg); }
 '''
+fixture += function('static int add_lazy_mapping_locked(')
+fixture += function('static BOOL horizon_commit_lazy_fault(')
 fixture += function('static void *horizon_mmap_fixed(')
 fixture += r'''
 static void setup(void)
@@ -217,6 +226,17 @@ int main(void)
         assert(errno == EEXIST && !violation && map_count == 2);
         cleanup();
     }
+    assert(!add_lazy_mapping_locked((void *)0x200000, HORIZON_LAZY_MAPPING_MIN, 3));
+    assert(map_count == 1 && maps[0]->reservation && maps[0]->prot == 3 && !kernel_target);
+    assert(!protect_reservation_mapping(maps[0], (char *)0x201000, 0x1000, PROT_NONE));
+    assert(map_count == 3 && find_overlap_mapping((void *)0x200000, 1)->prot == 3);
+    assert(find_overlap_mapping((void *)0x201000, 1)->prot == PROT_NONE);
+    assert(find_overlap_mapping((void *)0x202000, 1)->prot == 3);
+    cleanup();
+    assert(!add_lazy_mapping_locked((void *)0x200000, HORIZON_LAZY_MAPPING_MIN, 3));
+    assert(horizon_commit_lazy_fault(0x201000, (0x24u << 26) | 0x04));
+    assert(kernel_target && map_count == 2);
+    cleanup();
     puts("Horizon reservation transitions: no exposed neighbours/target, transactional failures and remap errors passed");
 }
 '''

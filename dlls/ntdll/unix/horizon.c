@@ -14677,6 +14677,8 @@ extern BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_P
 extern int wine_nx_box64_describe_native_pc( ULONG_PTR pc, const unsigned long long *x,
                                              char *buf, size_t size ) __attribute__((weak));
 extern int wine_nx_box64_callret_trap( ULONG_PTR *pc ) __attribute__((weak));
+static BOOL
+horizon_commit_lazy_fault( unsigned long long address, unsigned int esr );
 
 #if defined(__aarch64__)
 /* KUSER_SHARED_DATA is not always at 0x7ffe0000 on Horizon (virtual_alloc_first_teb).
@@ -14794,6 +14796,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
             horizon_restore_exception_context_x9( ctx );
         }
     }
+    if (horizon_commit_lazy_fault( ctx->far.x, ctx->esr )) horizon_resume_exception( ctx );
     if (horizon_transient_page_fault( ctx ))
     {
         static unsigned int resumed;
@@ -15618,7 +15621,8 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
     {
         VirtmemReservation *reservation = reserve_fixed_range( mapping_start, start - mapping_start );
         if (!reservation) goto failed;
-        if (!(left = alloc_mapping( mapping_start, start - mapping_start, NULL, 0, reservation, PROT_NONE )))
+        if (!(left = alloc_mapping( mapping_start, start - mapping_start, NULL, 0,
+                                    reservation, mapping->prot )))
         {
             remove_reservation( reservation );
             errno = ENOMEM;
@@ -15630,7 +15634,8 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
     {
         VirtmemReservation *reservation = reserve_fixed_range( end, mapping_end - end );
         if (!reservation) goto failed;
-        if (!(right = alloc_mapping( end, mapping_end - end, NULL, 0, reservation, PROT_NONE )))
+        if (!(right = alloc_mapping( end, mapping_end - end, NULL, 0,
+                                     reservation, mapping->prot )))
         {
             remove_reservation( reservation );
             errno = ENOMEM;
@@ -15676,6 +15681,70 @@ static int change_reservation_mapping( struct horizon_mapping *mapping, char *st
 static int split_reservation_mapping( struct horizon_mapping *mapping, char *start, size_t size )
 {
     return change_reservation_mapping( mapping, start, size, PROT_NONE );
+}
+
+static struct horizon_mapping *reservation_mapping_piece( char *addr, size_t size, int prot )
+{
+    VirtmemReservation *reservation = reserve_fixed_range( addr, size );
+    struct horizon_mapping *mapping;
+
+    if (!reservation) return NULL;
+    if (!(mapping = alloc_mapping( addr, size, NULL, 0, reservation, prot )))
+    {
+        remove_reservation( reservation );
+        errno = ENOMEM;
+    }
+    return mapping;
+}
+
+static int protect_reservation_mapping( struct horizon_mapping *mapping, char *start, size_t size, int prot )
+{
+    char *mapping_start = mapping->addr;
+    char *mapping_end = mapping_start + mapping->size;
+    char *end = start + size;
+    struct horizon_mapping *left = NULL, *middle = NULL, *right = NULL;
+    int saved_errno;
+
+    if (mapping_start == start && mapping_end == end)
+    {
+        mapping->prot = prot;
+        return 0;
+    }
+    if (mapping_start < start &&
+        !(left = reservation_mapping_piece( mapping_start, start - mapping_start, mapping->prot )))
+        goto failed;
+    if (!(middle = reservation_mapping_piece( start, size, prot ))) goto failed;
+    if (end < mapping_end &&
+        !(right = reservation_mapping_piece( end, mapping_end - end, mapping->prot )))
+        goto failed;
+
+    list_remove_mapping( mapping );
+    if (left) list_add_mapping( left );
+    list_add_mapping( middle );
+    if (right) list_add_mapping( right );
+    remove_reservation( mapping->reservation );
+    horizon_object_free( &mapping_pool, mapping );
+    return 0;
+
+failed:
+    saved_errno = errno;
+    if (right)
+    {
+        remove_reservation( right->reservation );
+        horizon_object_free( &mapping_pool, right );
+    }
+    if (middle)
+    {
+        remove_reservation( middle->reservation );
+        horizon_object_free( &mapping_pool, middle );
+    }
+    if (left)
+    {
+        remove_reservation( left->reservation );
+        horizon_object_free( &mapping_pool, left );
+    }
+    errno = saved_errno;
+    return -1;
 }
 
 static int split_backing_mapping( struct horizon_mapping *mapping, char *start, size_t size )
@@ -16417,7 +16486,13 @@ static int protect_range_locked( void *addr, size_t size, int prot )
         }
         else if (mapping->reservation)
         {
-            if (prot != PROT_NONE)
+            if (mapping->prot != PROT_NONE)
+            {
+                if (mapping->prot != prot &&
+                    protect_reservation_mapping( mapping, start, protect_size, prot ))
+                    return -1;
+            }
+            else if (prot != PROT_NONE)
             {
                 /* Commit a whole chunk of the reservation at once. Each
                  * mapped range costs kernel memory blocks, and Horizon has
@@ -16519,6 +16594,87 @@ static int add_reservation_mapping_locked( void *start, size_t size )
     }
     list_add_mapping( mapping );
     return 0;
+}
+
+#define HORIZON_LAZY_MAPPING_MIN   ((size_t)256 * 1024 * 1024)
+#define HORIZON_LAZY_MAPPING_CHUNK HORIZON_POOL_ARENA
+
+static int add_lazy_mapping_locked( void *start, size_t size, int prot )
+{
+    struct horizon_mapping *mapping;
+
+    if (add_reservation_mapping_locked( start, size )) return -1;
+    mapping = find_overlap_mapping( start, size );
+    mapping->prot = prot;
+    return 0;
+}
+
+static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int esr )
+{
+    static unsigned int commits, failures;
+    unsigned int exception_class = esr >> 26;
+    int needed;
+    struct horizon_mapping *mapping;
+    char *chunk_start, *chunk_end, *mapping_start, *mapping_end;
+    BOOL handled = FALSE;
+
+    if ((exception_class != 0x20 && exception_class != 0x21 &&
+         exception_class != 0x24 && exception_class != 0x25) ||
+        ((esr & 0x3f) & ~3u) != 0x04 || (esr & (1u << 10)))
+        return FALSE;
+    needed = (exception_class == 0x20 || exception_class == 0x21) ? PROT_EXEC :
+             (esr & 0x40) ? PROT_WRITE : PROT_READ;
+
+    pthread_mutex_lock( &mapping_mutex );
+    mapping = find_overlap_mapping( (void *)(uintptr_t)address, 1 );
+    if (!mapping || !(mapping->prot & needed)) goto done;
+    if (!mapping->reservation)
+    {
+        handled = mapping->backing != NULL;
+        goto done;
+    }
+    if (mapping->prot == PROT_NONE) goto done;
+
+    mapping_start = mapping->addr;
+    mapping_end = mapping_start + mapping->size;
+    chunk_start = (char *)((uintptr_t)address & ~(uintptr_t)(HORIZON_LAZY_MAPPING_CHUNK - 1));
+    chunk_end = chunk_start + HORIZON_LAZY_MAPPING_CHUNK;
+    if (chunk_start < mapping_start) chunk_start = mapping_start;
+    if (chunk_end > mapping_end || chunk_end < chunk_start) chunk_end = mapping_end;
+    if (!replace_reservation_mapping( mapping, chunk_start, chunk_end - chunk_start,
+                                      mapping->prot, TRUE ))
+    {
+        unsigned int count = __atomic_add_fetch( &commits, 1, __ATOMIC_RELAXED );
+
+        handled = TRUE;
+        if (count <= 8 || !(count & (count - 1)))
+        {
+            char message[160];
+
+            snprintf( message, sizeof(message),
+                      "[HMAP] demand commit addr=%p size=0x%lx count=%u",
+                      chunk_start, (unsigned long)(chunk_end - chunk_start), count );
+            wine_nx_runtime_trace( message );
+        }
+    }
+    else
+    {
+        unsigned int count = __atomic_add_fetch( &failures, 1, __ATOMIC_RELAXED );
+
+        if (count <= 8 || !(count & (count - 1)))
+        {
+            char message[176];
+
+            snprintf( message, sizeof(message),
+                      "[HMAP] demand commit failed addr=%p size=0x%lx errno=%d count=%u",
+                      chunk_start, (unsigned long)(chunk_end - chunk_start), errno, count );
+            wine_nx_runtime_trace( message );
+        }
+    }
+
+done:
+    pthread_mutex_unlock( &mapping_mutex );
+    return handled;
 }
 
 static Result check_thread_local_range( u64 cursor, u64 end, u64 *conflict )
@@ -16646,6 +16802,16 @@ static void *horizon_mmap_fixed( void *start, size_t size, int prot, int flags, 
         virtmemUnlock();
         if (ret) start = MAP_FAILED;
     }
+    else if (anonymous && size >= HORIZON_LAZY_MAPPING_MIN)
+    {
+        int ret;
+
+        stage = "reserve demand-backed range";
+        virtmemLock();
+        ret = add_lazy_mapping_locked( start, size, prot );
+        virtmemUnlock();
+        if (ret) start = MAP_FAILED;
+    }
     else
     {
         stage = "map backing";
@@ -16742,6 +16908,12 @@ static void *horizon_mmap_tryfixed( void *start, size_t size, int prot, int flag
         if (add_reservation_mapping_locked( start, size )) ret = MAP_FAILED;
         virtmemUnlock();
     }
+    else if (anonymous && size >= HORIZON_LAZY_MAPPING_MIN)
+    {
+        virtmemLock();
+        if (add_lazy_mapping_locked( start, size, prot )) ret = MAP_FAILED;
+        virtmemUnlock();
+    }
     else if (anonymous && size > HORIZON_POOL_ARENA)
     {
         if (!(transition = reserve_fixed_range( start, size )) ||
@@ -16782,6 +16954,10 @@ static void *horizon_mmap_alloc( size_t size, int prot, int flags, int fd, off_t
     else if (anonymous && prot == PROT_NONE)
     {
         ret = add_reservation_mapping_locked( addr, size );
+    }
+    else if (anonymous && size >= HORIZON_LAZY_MAPPING_MIN)
+    {
+        ret = add_lazy_mapping_locked( addr, size, prot );
     }
     else if (anonymous && size > HORIZON_POOL_ARENA)
     {
