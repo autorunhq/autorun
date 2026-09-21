@@ -39,6 +39,7 @@ typedef struct { u64 addr, size; u32 type, perm, attr; } MemoryInfo;
 #define MAP_FAILED ((void *)-1)
 #define MAP_PRIVATE 2
 #define MAP_ANON 0x20
+#define HORIZON_POOL_ARENA (2 * 1024 * 1024ul)
 #define MemType_Unmapped 0
 #define R_SUCCEEDED(result) ((result) == 0)
 typedef struct { uintptr_t start, end; int used; } VirtmemReservation;
@@ -135,6 +136,8 @@ static int map_backing_at(void *p, size_t size, int prot, int fd, off_t offset, 
     if (!ret) kernel_target = 1;
     return ret;
 }
+static int map_anonymous_backings(void *p, size_t size, int prot, int flags, int error)
+{ return map_backing_at(p, size, prot, -1, 0, flags, error); }
 static void wine_nx_runtime_trace(const char *msg) { puts(msg); }
 '''
 fixture += function('static void *horizon_mmap_fixed(')

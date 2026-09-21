@@ -16197,6 +16197,47 @@ static int unmap_range_locked( void *addr, size_t size )
     return 0;
 }
 
+static int map_anonymous_backings( void *addr, size_t size, int prot, int flags, int map_errno )
+{
+    char *cursor = addr;
+    char *end = cursor + size;
+    unsigned int count = 0;
+
+    while (cursor < end)
+    {
+        size_t chunk = min( (size_t)(end - cursor), HORIZON_POOL_ARENA * 8 );
+
+        while (map_backing_at( cursor, chunk, prot, -1, 0, flags, map_errno ))
+        {
+            int saved_errno = errno;
+
+            if (saved_errno == ENOMEM && chunk > HORIZON_POOL_ARENA)
+            {
+                chunk = max( HORIZON_POOL_ARENA,
+                             (chunk / 2) & ~(HORIZON_POOL_PAGE - 1) );
+                continue;
+            }
+            if (cursor != addr && unmap_range_locked( addr, cursor - (char *)addr ))
+                horizon_trace( "[HMAP] could not roll back chunked mapping addr=%p size=0x%lx errno=%d",
+                               addr, (unsigned long)(cursor - (char *)addr), errno );
+            errno = saved_errno;
+            return -1;
+        }
+        cursor += chunk;
+        count++;
+    }
+    if (size >= 256 * 1024 * 1024)
+    {
+        char message[128];
+
+        snprintf( message, sizeof(message),
+                  "[HMAP] mapped anonymous range addr=%p size=0x%lx backings=%u",
+                  addr, (unsigned long)size, count );
+        wine_nx_runtime_trace( message );
+    }
+    return 0;
+}
+
 static int protect_range_locked( void *addr, size_t size, int prot )
 {
     char *start = addr;
@@ -16465,7 +16506,12 @@ static void *horizon_mmap_fixed( void *start, size_t size, int prot, int flags, 
     else
     {
         stage = "map backing";
-        if (map_backing_at( start, size, prot, fd, offset, flags, EINVAL )) start = MAP_FAILED;
+        if (anonymous && size > HORIZON_POOL_ARENA)
+        {
+            stage = "map backing chunks";
+            if (map_anonymous_backings( start, size, prot, flags, EINVAL )) start = MAP_FAILED;
+        }
+        else if (map_backing_at( start, size, prot, fd, offset, flags, EINVAL )) start = MAP_FAILED;
     }
 
     if (start == MAP_FAILED) goto failed;
@@ -16531,6 +16577,7 @@ void *horizon_anon_mmap_fixed( void *start, size_t size, int prot, int flags )
 static void *horizon_mmap_tryfixed( void *start, size_t size, int prot, int flags, int fd, off_t offset )
 {
     BOOL anonymous = fd == -1;
+    VirtmemReservation *transition = NULL;
     void *ret = start;
 
     size = page_align_size( size );
@@ -16552,6 +16599,13 @@ static void *horizon_mmap_tryfixed( void *start, size_t size, int prot, int flag
         if (add_reservation_mapping_locked( start, size )) ret = MAP_FAILED;
         virtmemUnlock();
     }
+    else if (anonymous && size > HORIZON_POOL_ARENA)
+    {
+        if (!(transition = reserve_fixed_range( start, size )) ||
+            map_anonymous_backings( start, size, prot, flags, EEXIST ))
+            ret = MAP_FAILED;
+        if (transition) remove_reservation( transition );
+    }
     else if (map_backing_at( start, size, prot, fd, offset, flags, EEXIST ))
     {
         ret = MAP_FAILED;
@@ -16563,6 +16617,7 @@ static void *horizon_mmap_tryfixed( void *start, size_t size, int prot, int flag
 static void *horizon_mmap_alloc( size_t size, int prot, int flags, int fd, off_t offset )
 {
     BOOL anonymous = fd == -1;
+    VirtmemReservation *transition = NULL;
     void *addr;
     int ret;
 
@@ -16585,11 +16640,21 @@ static void *horizon_mmap_alloc( size_t size, int prot, int flags, int fd, off_t
     {
         ret = add_reservation_mapping_locked( addr, size );
     }
+    else if (anonymous && size > HORIZON_POOL_ARENA)
+    {
+        transition = reserve_fixed_range_locked( addr, size );
+        ret = transition ? 0 : -1;
+    }
     else
     {
         ret = map_backing_at_locked( addr, size, prot, fd, offset, flags, ENOMEM );
     }
     virtmemUnlock();
+    if (transition)
+    {
+        ret = map_anonymous_backings( addr, size, prot, flags, ENOMEM );
+        remove_reservation( transition );
+    }
     pthread_mutex_unlock( &mapping_mutex );
 
     return ret ? MAP_FAILED : addr;
