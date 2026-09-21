@@ -105,16 +105,16 @@ function(wine_nx_add_box64_core target)
     target_compile_options(${target} PRIVATE ${private_options})
     if(os_generated)
         target_compile_options(${target} PRIVATE
-            "$<$<COMPILE_LANGUAGE:C>:-include${os_generated}>"
-            "$<$<COMPILE_LANGUAGE:C>:-include${emu_generated}>")
+            "$<$<COMPILE_LANGUAGE:C>:SHELL:-include ${os_generated}>"
+            "$<$<COMPILE_LANGUAGE:C>:SHELL:-include ${emu_generated}>")
     else()
         target_compile_options(${target} PRIVATE
-            "$<$<COMPILE_LANGUAGE:C>:-include${emu_generated}>")
+            "$<$<COMPILE_LANGUAGE:C>:SHELL:-include ${emu_generated}>")
     endif()
     set_source_files_properties(
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../source/wow64_box64_engine.c"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../source/wow64_box64_dynarec.c"
-        PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:-include${emu_generated}>")
+        PROPERTIES COMPILE_OPTIONS "-include;${emu_generated}")
 
     if(NOT core_DYNAREC)
         return()
@@ -328,10 +328,10 @@ function(wine_nx_add_box64_core target)
         target_compile_options(${target}-pass${step} PRIVATE ${private_options})
         if(CMAKE_SYSTEM_NAME STREQUAL "Generic")
             target_compile_options(${target}-pass${step} PRIVATE
-                "-include${os_generated}" "-include${emu_generated}")
+                "SHELL:-include ${os_generated}" "SHELL:-include ${emu_generated}")
         else()
             target_compile_options(${target}-pass${step} PRIVATE
-                "$<$<COMPILE_LANGUAGE:C>:-include${emu_generated}>")
+                "$<$<COMPILE_LANGUAGE:C>:SHELL:-include ${emu_generated}>")
         endif()
         target_include_directories(${target}-pass${step} PRIVATE "${root}/src/dynarec" "${root}/src/dynarec/arm64")
         target_sources(${target} PRIVATE $<TARGET_OBJECTS:${target}-pass${step}>)
