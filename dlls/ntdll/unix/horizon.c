@@ -689,7 +689,9 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_IMAGE_NT_OPTIONAL_HDR64_MAGIC 0x20b
 #define HORIZON_IMAGE_FILE_RELOCS_STRIPPED 0x0001
 #define HORIZON_IMAGE_FILE_DLL 0x2000
+#define HORIZON_IMAGE_SCN_MEM_SHARED 0x10000000
 #define HORIZON_IMAGE_SCN_MEM_EXECUTE 0x20000000
+#define HORIZON_IMAGE_SCN_MEM_WRITE 0x80000000
 #define HORIZON_IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE 0x0040
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_BASERELOC 5
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
@@ -697,6 +699,8 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_IMAGE_FLAGS_IMAGE_DYNAMICALLY_RELOCATED 0x04
 #define HORIZON_IMAGE_FLAGS_IMAGE_MAPPED_FLAT 0x08
 #define HORIZON_SEC_IMAGE 0x01000000u
+#define HORIZON_SECTION_MAP_WRITE 0x0002u
+#define HORIZON_SECTION_MAP_READ 0x0004u
 #define HORIZON_FILE_DIRECTORY_FILE 0x00000001u
 #define HORIZON_FILE_NON_DIRECTORY_FILE 0x00000040u
 #define HORIZON_APC_RESULT_SIZE 40
@@ -3017,6 +3021,7 @@ struct horizon_server_object
     unsigned long long file_completion_key;
     unsigned int file_completion_flags;  /* FILE_SKIP_* */
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
+    struct horizon_server_object *mapping_shared_file;
 };
 
 struct horizon_server_handle_entry
@@ -4257,6 +4262,8 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (object->wait_port && !--object->wait_port->refs) horizon_server_free_object( object->wait_port );
     if (object->file_completion && !--object->file_completion->refs)
         horizon_server_free_object( object->file_completion );
+    if (object->mapping_shared_file && !--object->mapping_shared_file->refs)
+        horizon_server_free_object( object->mapping_shared_file );
     if (object->reg_key) horizon_reg_release( &horizon_registry, object->reg_key );
     if (object->file_fd != -1) close( object->file_fd );
     if (object->file_peer_fd != -1) close( object->file_peer_fd );
@@ -4569,7 +4576,118 @@ static size_t horizon_server_read_pe_dir( int fd, void *buffer, size_t buffer_si
     return 0;
 }
 
-static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe_image_info *info )
+static unsigned int horizon_server_build_shared_image( int fd, const unsigned char *sections,
+                                                       unsigned int section_count, unsigned int align_mask,
+                                                       unsigned long long file_size,
+                                                       struct horizon_server_object **shared_file )
+{
+    struct horizon_server_object *object;
+    struct horizon_memfile *memfile;
+    unsigned long long total_size = 0, shared_pos = 0;
+    char *buffer = NULL;
+    unsigned int i, status = HORIZON_STATUS_SUCCESS;
+    int shared_fd = -1;
+
+    *shared_file = NULL;
+    for (i = 0; i < section_count; i++)
+    {
+        const unsigned char *section = sections + i * 40;
+        unsigned int characteristics = horizon_get_le32( section + 36 );
+        unsigned long long map_size;
+
+        if ((characteristics & (HORIZON_IMAGE_SCN_MEM_SHARED | HORIZON_IMAGE_SCN_MEM_WRITE)) !=
+            (HORIZON_IMAGE_SCN_MEM_SHARED | HORIZON_IMAGE_SCN_MEM_WRITE))
+            continue;
+        map_size = horizon_get_le32( section + 8 );
+        if (!map_size) map_size = horizon_get_le32( section + 16 );
+        map_size = (map_size + align_mask) & ~(unsigned long long)align_mask;
+        if (!map_size || total_size + map_size < total_size) return HORIZON_STATUS_INVALID_IMAGE_FORMAT;
+        total_size += map_size;
+    }
+    if (!total_size) return HORIZON_STATUS_SUCCESS;
+
+    if ((shared_fd = horizon_memfile_create( total_size, 0 )) == -1)
+        return horizon_server_errno_status( errno );
+    if (!(memfile = horizon_memfile_from_fd( shared_fd )) || !(buffer = malloc( 0x10000 )))
+    {
+        status = HORIZON_STATUS_NO_MEMORY;
+        goto done;
+    }
+
+    for (i = 0; i < section_count; i++)
+    {
+        const unsigned char *section = sections + i * 40;
+        unsigned int characteristics = horizon_get_le32( section + 36 );
+        unsigned int raw_offset = horizon_get_le32( section + 20 );
+        unsigned long long map_size, read_pos, read_size, copied = 0;
+
+        if ((characteristics & (HORIZON_IMAGE_SCN_MEM_SHARED | HORIZON_IMAGE_SCN_MEM_WRITE)) !=
+            (HORIZON_IMAGE_SCN_MEM_SHARED | HORIZON_IMAGE_SCN_MEM_WRITE))
+            continue;
+        map_size = horizon_get_le32( section + 8 );
+        if (!map_size) map_size = horizon_get_le32( section + 16 );
+        map_size = (map_size + align_mask) & ~(unsigned long long)align_mask;
+        if (!raw_offset)
+        {
+            shared_pos += map_size;
+            continue;
+        }
+        read_pos = raw_offset & ~0x1ffu;
+        read_size = (unsigned long long)horizon_get_le32( section + 16 ) +
+                    (raw_offset & 0x1ffu);
+        read_size = (read_size + 0x1ff) & ~(unsigned long long)0x1ff;
+        if (read_size > map_size) read_size = map_size;
+        if (!read_size)
+        {
+            shared_pos += map_size;
+            continue;
+        }
+        if (read_pos >= file_size ||
+            (read_size > file_size - read_pos && read_size - (file_size - read_pos) >= 0x200))
+        {
+            status = HORIZON_STATUS_INVALID_IMAGE_FORMAT;
+            goto done;
+        }
+        if (read_size > file_size - read_pos) read_size = file_size - read_pos;
+
+        while (copied < read_size)
+        {
+            size_t chunk = min( read_size - copied, 0x10000 );
+            ssize_t written;
+
+            if ((status = horizon_server_read_exact_at( fd, read_pos + copied, buffer, chunk ))) goto done;
+            written = horizon_memfile_pwrite( memfile, buffer, chunk, shared_pos + copied );
+            if (written < 0 || (size_t)written != chunk)
+            {
+                status = HORIZON_STATUS_NO_MEMORY;
+                goto done;
+            }
+            copied += chunk;
+        }
+        shared_pos += map_size;
+    }
+
+    if (!(object = calloc( 1, sizeof(*object) )))
+    {
+        status = HORIZON_STATUS_NO_MEMORY;
+        goto done;
+    }
+    object->type = HORIZON_SERVER_OBJECT_FILE;
+    object->refs = 1;
+    object->file_fd = shared_fd;
+    object->file_peer_fd = -1;
+    object->file_access = FILE_READ_DATA | FILE_WRITE_DATA;
+    *shared_file = object;
+    shared_fd = -1;
+
+done:
+    free( buffer );
+    if (shared_fd != -1) close( shared_fd );
+    return status;
+}
+
+static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe_image_info *info,
+                                                       struct horizon_server_object **shared_file )
 {
     static const char builtin_signature[] = "Wine builtin DLL";
     static const char fakedll_signature[] = "Wine placeholder DLL";
@@ -4586,6 +4704,7 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
     struct stat st;
 
     memset( info, 0, sizeof(*info) );
+    *shared_file = NULL;
 
     if (fstat( fd, &st ) == -1) return horizon_server_errno_status( errno );
     if (st.st_size < (off_t)(sizeof(dos) + sizeof(nt))) return HORIZON_STATUS_INVALID_IMAGE_FORMAT;
@@ -4727,6 +4846,9 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
             info->is_hybrid = pe32 ? !!horizon_get_le32( cfg + chpe_offset ) :
                                      !!horizon_get_le64( cfg + chpe_offset );
     }
+
+    status = horizon_server_build_shared_image( fd, headers + opt_size, section_count, align_mask,
+                                                st.st_size, shared_file );
 
 done:
     free( headers );
@@ -12422,6 +12544,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
     struct horizon_server_handle_entry *file_entry;
     struct horizon_server_handle_entry *mapping_entry = NULL;
     struct horizon_pe_image_info image_info;
+    struct horizon_server_object *shared_file = NULL;
     struct horizon_object_name name;
     unsigned long long mapping_size = request->size;
     unsigned int mapping_flags = request->flags;
@@ -12474,7 +12597,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
 
     if (!reply.header.error && (request->flags & HORIZON_SEC_IMAGE))
     {
-        reply.header.error = horizon_server_read_pe_image_info( fd, &image_info );
+        reply.header.error = horizon_server_read_pe_image_info( fd, &image_info, &shared_file );
         mapping_size = image_info.map_size;
 #ifdef __SWITCH__
         horizon_trace( "[HZ] create_mapping flags=0x%x SEC_IMAGE=1 read_pe=0x%x machine=0x%x map_size=0x%x name=%s",
@@ -12514,11 +12637,13 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
             mapping_entry->object->mapping_has_image = !!(request->flags & HORIZON_SEC_IMAGE);
             mapping_entry->object->mapping_image = image_info;
             mapping_entry->object->mapping_memfile = horizon_memfile_from_fd( fd );
+            mapping_entry->object->mapping_shared_file = shared_file;
             reply.handle = mapping_entry->handle;
 #ifdef __SWITCH__
             dbg_has_image = mapping_entry->object->mapping_has_image;
 #endif
             mapping_name = NULL;
+            shared_file = NULL;
             fd = -1;
         }
         /* As in wineserver, a section that already has the name is returned as it is. */
@@ -12533,6 +12658,12 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
 #endif
 
     if (fd != -1) close( fd );
+    if (shared_file)
+    {
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        horizon_server_free_object( shared_file );
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
     free( mapping_name );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -12562,6 +12693,8 @@ static int horizon_server_handle_get_mapping_info( struct horizon_server_connect
         reply.header.error = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
     else
     {
+        struct horizon_server_handle_entry *shared_entry;
+
         reply.size = entry->object->mapping_size;
         reply.flags = entry->object->mapping_flags;
         reply.shared_file = 0;
@@ -12595,6 +12728,16 @@ static int horizon_server_handle_get_mapping_info( struct horizon_server_connect
                 reply.name_len = 0;
                 reply.header.error = HORIZON_STATUS_NO_MEMORY;
             }
+        }
+        if (!reply.header.error &&
+            (request->access & (HORIZON_SECTION_MAP_READ | HORIZON_SECTION_MAP_WRITE)) &&
+            entry->object->mapping_shared_file)
+        {
+            if ((shared_entry = horizon_server_create_handle_for_object_locked(
+                     entry->object->mapping_shared_file )))
+                reply.shared_file = shared_entry->handle;
+            else
+                reply.header.error = HORIZON_STATUS_NO_MEMORY;
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );

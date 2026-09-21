@@ -45,6 +45,7 @@ fixture = f'''
 typedef int BOOL;
 {defines}
 {struct_text}
+struct horizon_server_object {{ int unused; }};
 static unsigned short horizon_process_machine = HORIZON_IMAGE_FILE_MACHINE_I386;
 static unsigned int horizon_server_errno_status( int error ) {{ return 0xc0000000u | (unsigned int)error; }}
 {block('static unsigned int horizon_server_read_exact_at(')}
@@ -53,6 +54,14 @@ static unsigned int horizon_server_errno_status( int error ) {{ return 0xc000000
 {block('static unsigned long long horizon_get_le64(')}
 {block('static int horizon_pe_data_dir(')}
 {block('static size_t horizon_server_read_pe_dir(')}
+static unsigned int horizon_server_build_shared_image( int fd, const unsigned char *sections,
+                                                       unsigned int section_count, unsigned int align_mask,
+                                                       unsigned long long file_size,
+                                                       struct horizon_server_object **shared_file )
+{{
+    *shared_file = NULL;
+    return HORIZON_STATUS_SUCCESS;
+}}
 {block('static unsigned int horizon_server_read_pe_image_info(')}
 int main( int argc, char **argv )
 {{
@@ -63,8 +72,9 @@ int main( int argc, char **argv )
     for (i = 2; i < argc; i++)
     {{
         struct horizon_pe_image_info info;
+        struct horizon_server_object *shared_file;
         int fd = open( argv[i], O_RDONLY );
-        unsigned int status = horizon_server_read_pe_image_info( fd, &info );
+        unsigned int status = horizon_server_read_pe_image_info( fd, &info, &shared_file );
 
         printf( "%d %08x %x %x %x %x %x %x %x %x %x %x %x\\n", i - 2, status,
                 info.map_size, info.header_map_size, info.image_flags, info.alignment, info.machine,
