@@ -7,6 +7,7 @@ source = (Path(__file__).resolve().parents[2] / 'dlls/ntdll/unix/horizon.c').rea
 def extract(start, end):
     return source[source.index(start):source.index(end, source.index(start))]
 fixture = r'''
+#define HORIZON_STANDALONE_SYNTAX
 #include <assert.h>
 #include <errno.h>
 #include <stddef.h>

@@ -38,7 +38,8 @@ static inline void horizon_object_free( struct horizon_object_pool *pool, void *
 
 #define HORIZON_POOL_PAGE 4096
 #define HORIZON_POOL_PAGES 512
-#define HORIZON_POOL_ARENAS 512  /* at most 1 GiB retained, allocated on demand */
+#define HORIZON_POOL_ARENAS 512
+#define HORIZON_POOL_RETAIN_EMPTY 8
 /* One arena is one kernel memory block, and is aligned like one: the pages an
  * alias takes as its source lose their mapping until the alias goes away, and
  * the kernel splits the block they sit in to do it, so a block must hold
@@ -54,7 +55,8 @@ struct horizon_page_arena
 struct horizon_page_pool
 {
     struct horizon_page_arena arenas[HORIZON_POOL_ARENAS];
-    unsigned long long hits, misses, blocks, shared;
+    unsigned int active_arenas, peak_arenas;
+    unsigned long long hits, misses, reclaims, blocks, shared;
 };
 
 /* Arena pages, or NULL for a request larger than an arena or a full pool,
@@ -68,13 +70,7 @@ static inline void *horizon_pages_alloc( struct horizon_page_pool *pool, size_t 
     for (i = 0; i < HORIZON_POOL_ARENAS; i++)
     {
         struct horizon_page_arena *arena = &pool->arenas[i];
-        if (!arena->memory)
-        {
-            arena->memory = aligned_alloc( HORIZON_POOL_ARENA, HORIZON_POOL_ARENA );
-            if (!arena->memory) return NULL;
-            arena->free_pages = HORIZON_POOL_PAGES;
-            pool->misses++;
-        }
+        if (!arena->memory) continue;
         if (arena->free_pages < pages) continue;
         for (j = run = 0; j < HORIZON_POOL_PAGES; j++)
         {
@@ -88,6 +84,21 @@ static inline void *horizon_pages_alloc( struct horizon_page_pool *pool, size_t 
                 return arena->memory + first * HORIZON_POOL_PAGE;
             }
         }
+    }
+    for (i = 0; i < HORIZON_POOL_ARENAS; i++)
+    {
+        struct horizon_page_arena *arena = &pool->arenas[i];
+
+        if (arena->memory) continue;
+        arena->memory = aligned_alloc( HORIZON_POOL_ARENA, HORIZON_POOL_ARENA );
+        if (!arena->memory) return NULL;
+        arena->free_pages = HORIZON_POOL_PAGES - pages;
+        memset( arena->used, 1, pages );
+        pool->active_arenas++;
+        if (pool->active_arenas > pool->peak_arenas) pool->peak_arenas = pool->active_arenas;
+        pool->misses++;
+        pool->hits++;
+        return arena->memory;
     }
     return NULL;
 }
@@ -114,15 +125,29 @@ static inline void *horizon_pages_alloc_any( struct horizon_page_pool *pool, siz
 static inline int horizon_pages_free( struct horizon_page_pool *pool, void *ptr, size_t size )
 {
     unsigned int i;
+
+    if (!ptr || !size || size % HORIZON_POOL_PAGE) return 0;
     for (i = 0; i < HORIZON_POOL_ARENAS; i++)
     {
         struct horizon_page_arena *arena = &pool->arenas[i];
-        uintptr_t offset = (uintptr_t)ptr - (uintptr_t)arena->memory;
-        if (arena->memory && offset < HORIZON_POOL_ARENA)
+        uintptr_t offset;
+
+        if (!arena->memory) continue;
+        offset = (uintptr_t)ptr - (uintptr_t)arena->memory;
+        if (offset < HORIZON_POOL_ARENA && !(offset % HORIZON_POOL_PAGE) &&
+            size <= HORIZON_POOL_ARENA - offset)
         {
             size_t pages = size / HORIZON_POOL_PAGE;
             memset( arena->used + offset / HORIZON_POOL_PAGE, 0, pages );
             arena->free_pages += pages;
+            if (arena->free_pages == HORIZON_POOL_PAGES &&
+                pool->active_arenas > HORIZON_POOL_RETAIN_EMPTY)
+            {
+                free( arena->memory );
+                memset( arena, 0, sizeof(*arena) );
+                pool->active_arenas--;
+                pool->reclaims++;
+            }
             return 1;
         }
     }

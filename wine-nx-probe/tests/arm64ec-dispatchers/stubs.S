@@ -97,6 +97,35 @@ syscall_return_target:
     str w17, [x16, :lo12:syscall_x9_returned]
     b capture_return
 
+.global invoke_callback
+.type invoke_callback, %function
+invoke_callback:
+    save_host
+    load_nonvolatile
+    adrp x18, stale_teb
+    add x18, x18, :lo12:stale_teb
+    adrp x0, callback_target
+    add x0, x0, :lo12:callback_target
+    adrp x1, input_args
+    add x1, x1, :lo12:input_args
+    mov w2, #64
+    adrp x3, authoritative_teb
+    add x3, x3, :lo12:authoritative_teb
+    bl wine_nx_call_pe_callback
+    b capture_return
+
+.type callback_target, %function
+callback_target:
+    adrp x16, callback_args
+    add x16, x16, :lo12:callback_args
+    stp x0, x1, [x16]
+    str x18, [x16, #16]
+    mov x23, #0x23
+    mov x24, #0x24
+    mov x28, #0x28
+    mov x0, #42
+    ret
+
 .global syscall_dispatch_ret
 syscall_dispatch_ret:
     adrp x16, dispatch_ret_called

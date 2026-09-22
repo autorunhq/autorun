@@ -218,12 +218,20 @@ static uint32_t read_word32( uint64_t address )
     return *(const uint32_t *)(uintptr_t)address;
 }
 
-static int readable( uint64_t address, MemoryInfo *info )
+static int readable_size( uint64_t address, uint64_t size, MemoryInfo *info )
 {
+    uint64_t offset;
     u32 page;
 
-    return R_SUCCEEDED( svcQueryMemory( info, &page, address ) ) && (info->perm & Perm_R) &&
-           info->type != MemType_Unmapped;
+    if (!size || R_FAILED( svcQueryMemory( info, &page, address ) ) || !(info->perm & Perm_R) ||
+        info->type == MemType_Unmapped || address < info->addr) return 0;
+    offset = address - info->addr;
+    return offset <= info->size && size <= info->size - offset;
+}
+
+static int readable( uint64_t address, MemoryInfo *info )
+{
+    return readable_size( address, 1, info );
 }
 
 /* Both walks run while the thread is paused: memory reads and system calls. */
@@ -343,7 +351,8 @@ static void sampler( void *arg )
             {
                 count = walk_callers( &ctx, callers );
                 if (&wine_nx_box64_pc_to_x86) translated = wine_nx_box64_pc_to_x86( ctx.pc.x, &x86 );
-                x86_count = translated ? walk_x86_frames( &ctx, x86_callers ) : walk_x86( target->teb, x86_callers );
+                x86_count = translated ? walk_x86_frames( &ctx, x86_callers ) :
+                                          walk_x86( target->teb, x86_callers );
             }
             svcSetThreadActivity( target->handle, ThreadActivity_Runnable );
             if (R_SUCCEEDED( rc )) record( target, &ctx, translated, x86, callers, count, x86_callers, x86_count );
@@ -366,6 +375,7 @@ void wine_nx_profile_start( void )
     u32 page;
     Result rc;
 
+    if (__atomic_load_n( &profiling, __ATOMIC_RELAXED )) return;
     /* A system call the process is not granted ends it. */
     if (!envIsSyscallHinted( 0x32 ) || !envIsSyscallHinted( 0x33 ))
     {
@@ -462,24 +472,31 @@ void wine_nx_threads_report_stalled( void )
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
         uint64_t callers[NX_PROF_DEPTH];
-        char line[NX_PROF_LINE], where[96];
+        char line[NX_PROF_LINE], where[96], kind;
         Handle handle = registry[i].handle;
-        unsigned int frames, f;
+        unsigned int frames, f, tid;
         ThreadContext ctx;
         Result rc;
         int tries, len;
 
         if (!handle || handle == self) continue;
-        if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) )) continue;
+        pthread_mutex_lock( &profile_mutex );
+        if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) ))
+        {
+            pthread_mutex_unlock( &profile_mutex );
+            continue;
+        }
         for (tries = 0; R_FAILED( rc = svcGetThreadContext3( &ctx, handle ) ) && tries < 4; tries++)
             svcSleepThread( 0 );
         frames = R_SUCCEEDED( rc ) ? walk_callers( &ctx, callers ) : 0;
+        tid = registry[i].tid;
+        kind = registry[i].kind;
         svcSetThreadActivity( handle, ThreadActivity_Runnable );
+        pthread_mutex_unlock( &profile_mutex );
         if (R_FAILED( rc )) continue;
-
         name_address( ctx.pc.x, where, sizeof(where) );
         len = snprintf( line, sizeof(line), "[STALL] thread %u%c at %s sp=%#lx lr=%#lx",
-                        registry[i].tid, registry[i].kind, where,
+                        tid, kind, where,
                         (unsigned long)ctx.sp, (unsigned long)ctx.lr );
         for (f = 0; f < frames; f++)
         {

@@ -39,6 +39,7 @@ int main(void)
         assert(whole[i] && !((uintptr_t)whole[i] % HORIZON_POOL_ARENA));
         ((unsigned char *)whole[i])[bytes - 1] = (unsigned char)(i + 1);
     }
+    assert(pool.active_arenas == HORIZON_POOL_ARENAS && pool.peak_arenas == HORIZON_POOL_ARENAS);
     assert(!horizon_pages_alloc(&pool, HORIZON_POOL_PAGE));
     /* A full pool, and anything too large for an arena, take blocks of their
      * own rather than pages the general heap shares with other allocations. */
@@ -54,7 +55,10 @@ int main(void)
     }
     /* Release and reuse a middle arena while every other arena remains live. */
     assert(horizon_pages_free(&pool, whole[7], bytes));
-    assert(horizon_pages_alloc(&pool, bytes) == whole[7]);
+    assert(pool.active_arenas == HORIZON_POOL_ARENAS - 1);
+    whole[7] = horizon_pages_alloc(&pool, bytes);
+    assert(whole[7] && pool.active_arenas == HORIZON_POOL_ARENAS);
+    ((unsigned char *)whole[7])[bytes - 1] = 8;
     for (i = 0; i < HORIZON_POOL_ARENAS; i++)
     {
         assert(((unsigned char *)whole[i])[bytes - 1] == (unsigned char)(i + 1));
@@ -85,12 +89,17 @@ int main(void)
     }
     for (i = 0; i < 128; i++) if (live[i].ptr)
         assert(horizon_pages_free(&pool, live[i].ptr, live[i].size));
+    assert(pool.active_arenas == HORIZON_POOL_RETAIN_EMPTY && pool.reclaims >= HORIZON_POOL_ARENAS - HORIZON_POOL_RETAIN_EMPTY);
+    j = 0;
     for (i = 0; i < HORIZON_POOL_ARENAS; i++)
     {
+        if (!pool.arenas[i].memory) continue;
+        j++;
         assert(pool.arenas[i].free_pages == HORIZON_POOL_PAGES);
-        for (j = 0; j < HORIZON_POOL_PAGES; j++) assert(!pool.arenas[i].used[j]);
+        for (unsigned int page = 0; page < HORIZON_POOL_PAGES; page++) assert(!pool.arenas[i].used[page]);
         free(pool.arenas[i].memory);
     }
-    puts("Mapping pools: descriptor fallback, reset, capacity, alignment and 20000 fragmented allocation cycles passed");
+    assert(j == HORIZON_POOL_RETAIN_EMPTY);
+    puts("Mapping pools: descriptor fallback, bounded idle arenas, reclamation, alignment and 20000 fragmented allocation cycles passed");
     return 0;
 }

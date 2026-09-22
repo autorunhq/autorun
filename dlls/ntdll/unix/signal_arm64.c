@@ -295,16 +295,19 @@ __asm__(
     ".type wine_nx_call_pe_callback, %function\n"
     "wine_nx_call_pe_callback:\n"
     "    hint 34\n"                  /* bti c */
-    "    stp x29, x30, [sp, #-32]!\n"
+    "    stp x29, x30, [sp, #-64]!\n"
     "    mov x29, sp\n"
-    "    str x18, [sp, #16]\n"       /* save unix x18 */
+    /* ARM64EC cannot preserve the native caller's x23, x24 and x28. */
+    "    stp x18, x23, [sp, #16]\n"
+    "    stp x24, x28, [sp, #32]\n"
     "    mov x18, x3\n"              /* x18 = PE TEB for the callback */
     "    mov x16, x0\n"              /* func */
     "    mov x0, x1\n"               /* args */
     "    mov w1, w2\n"               /* len */
     "    blr x16\n"
-    "    ldr x18, [x29, #16]\n"      /* restore unix x18 */
-    "    ldp x29, x30, [sp], #32\n"
+    "    ldp x18, x23, [sp, #16]\n"
+    "    ldp x24, x28, [sp, #32]\n"
+    "    ldp x29, x30, [sp], #64\n"
     "    ret\n"
     ".size wine_nx_call_pe_callback, . - wine_nx_call_pe_callback\n"
 );
@@ -498,7 +501,7 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
  *   3. If the syscall has >64 bytes of arguments, copies the extra stack
  *      arguments from the caller's frame
  *   4. Calls the handler (x0-x7 are unchanged)
- *   5. Returns the NTSTATUS result in x0
+ *   5. Returns the full pointer-sized result in x0
  *
  * We don't do a full context save because the Switch build doesn't use
  * signal-based exception delivery.  Callee-saved registers are preserved
@@ -524,14 +527,15 @@ void *wine_nx_current_teb(void)
 unsigned int wine_nx_syscalls;
 /* Calls per system call id (table << 12 | function), for the runtime's [PROGRESS] line. */
 unsigned int wine_nx_syscall_counts[0x2000];
+static __thread unsigned int wine_nx_syscall_sample;
 void *wine_nx_arm64ec_dispatch_ret;
 
-NTSTATUS wine_nx_do_syscall( ULONG_PTR *stack_args,
-                                    ULONG_PTR x0, ULONG_PTR x1,
-                                    ULONG_PTR x2, ULONG_PTR x3,
-                                    ULONG_PTR x4, ULONG_PTR x5,
-                                    ULONG_PTR x6, ULONG_PTR x7,
-                                    unsigned int syscall_id )
+ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
+                              ULONG_PTR x0, ULONG_PTR x1,
+                              ULONG_PTR x2, ULONG_PTR x3,
+                              ULONG_PTR x4, ULONG_PTR x5,
+                              ULONG_PTR x6, ULONG_PTR x7,
+                              unsigned int syscall_id )
 {
     unsigned int table_idx = (syscall_id >> 12) & 3;
     unsigned int func_idx  = syscall_id & 0xfff;
@@ -548,7 +552,7 @@ NTSTATUS wine_nx_do_syscall( ULONG_PTR *stack_args,
     SYSTEM_SERVICE_TABLE *table = &KeServiceDescriptorTable[table_idx];
     ULONG_PTR *handler;
     unsigned int arg_bytes;
-    NTSTATUS result;
+    ULONG_PTR result;
     BOOL trace_syscall = &wine_nx_runtime_verbose && wine_nx_runtime_verbose &&
                          !(table_idx == 1 && func_idx == 1051); /* NtUserGetMessage idle polling */
 
@@ -560,10 +564,10 @@ NTSTATUS wine_nx_do_syscall( ULONG_PTR *stack_args,
         return STATUS_INVALID_SYSTEM_SERVICE;
     /* winebox64 reads each x86 syscall's stack arguments through this. */
     if ((void *)handler == (void *)NtReadVirtualMemory) trace_syscall = FALSE;
-    else
+    else if (!(++wine_nx_syscall_sample & 63))
     {
-        __atomic_add_fetch( &wine_nx_syscalls, 1, __ATOMIC_RELAXED );
-        __atomic_add_fetch( &wine_nx_syscall_counts[syscall_id & 0x1fff], 1, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &wine_nx_syscalls, 64, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &wine_nx_syscall_counts[syscall_id & 0x1fff], 64, __ATOMIC_RELAXED );
     }
 
     arg_bytes = table->ArgumentTable ? table->ArgumentTable[func_idx] : 0;
@@ -585,12 +589,12 @@ NTSTATUS wine_nx_do_syscall( ULONG_PTR *stack_args,
      * We use a function pointer cast to call with up to 16 arguments (128 bytes).
      * This covers all NT syscalls in practice (max observed is ~112 bytes).
      */
-    typedef NTSTATUS (*syscall_func_8)(ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
-                                       ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR);
-    typedef NTSTATUS (*syscall_func_16)(ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
-                                        ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
-                                        ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
+    typedef ULONG_PTR (*syscall_func_8)(ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
                                         ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR);
+    typedef ULONG_PTR (*syscall_func_16)(ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
+                                         ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
+                                         ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
+                                         ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR);
 
     if (arg_bytes <= 64)
     {

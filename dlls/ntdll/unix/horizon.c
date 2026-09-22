@@ -514,6 +514,7 @@ struct horizon_fd_queue
 #define HORIZON_REQ_UNMAP_VIEW 71
 #define HORIZON_REQ_GET_MAPPING_COMMITTED_RANGE 72
 #define HORIZON_REQ_ADD_MAPPING_COMMITTED_RANGE 73
+#define HORIZON_REQ_IS_SAME_MAPPING 74
 #define HORIZON_REQ_GET_TOKEN_SID 230
 #define HORIZON_REQ_ALLOCATE_LOCALLY_UNIQUE_ID 252
 #define HORIZON_REQ_OPEN_DIRECTORY 242
@@ -565,7 +566,12 @@ struct horizon_fd_queue
 #define HORIZON_REQ_GET_WINDOW_TREE 156
 #define HORIZON_REQ_SET_WINDOW_POS 157
 #define HORIZON_REQ_GET_WINDOW_RECTANGLES 158
+#define HORIZON_REQ_GET_WINDOW_TEXT 159
+#define HORIZON_REQ_SET_WINDOW_TEXT 160
+#define HORIZON_REQ_GET_WINDOWS_OFFSET 161
 #define HORIZON_REQ_GET_VISIBLE_REGION 162
+#define HORIZON_REQ_GET_WINDOW_REGION 163
+#define HORIZON_REQ_SET_WINDOW_REGION 164
 #define HORIZON_REQ_GET_UPDATE_REGION 165
 #define HORIZON_REQ_UPDATE_WINDOW_ZORDER 166
 #define HORIZON_REQ_REDRAW_WINDOW 167
@@ -612,6 +618,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_REMOVE_CLIPBOARD_LISTENER 220
 #define HORIZON_REQ_DESTROY_CLASS 206
 #define HORIZON_REQ_GET_OBJECT_INFO 248
+#define HORIZON_REQ_GET_WINDOW_LAYERED_INFO 278
+#define HORIZON_REQ_SET_WINDOW_LAYERED_INFO 279
 #define HORIZON_REQ_ALLOC_USER_HANDLE 280
 #define HORIZON_REQ_FREE_USER_HANDLE 281
 #define HORIZON_REQ_SET_CURSOR 282
@@ -646,6 +654,7 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_NOT_IMPLEMENTED 0xc0000002u
 #define HORIZON_STATUS_INVALID_HANDLE 0xc0000008u
 #define HORIZON_STATUS_NOT_MAPPED_VIEW 0xc0000019u
+#define HORIZON_STATUS_NOT_SAME_DEVICE 0xc00000d4u
 #define HORIZON_STATUS_INVALID_PARAMETER 0xc000000du
 #define HORIZON_STATUS_INVALID_IMAGE_FORMAT 0xc000007bu
 #define HORIZON_STATUS_NO_SUCH_FILE 0xc000000fu
@@ -656,6 +665,7 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_OBJECT_NAME_COLLISION 0xc0000035u
 #define HORIZON_STATUS_FILE_IS_A_DIRECTORY 0xc00000bau
 #define HORIZON_STATUS_DIRECTORY_NOT_EMPTY 0xc0000101u
+#define HORIZON_ERROR_INVALID_WINDOW_HANDLE 0xc0010578u
 #define HORIZON_STATUS_OBJECT_PATH_SYNTAX_BAD 0xc000003bu
 #define HORIZON_STATUS_OBJECT_PATH_NOT_FOUND 0xc000003au
 #define HORIZON_STATUS_MUTANT_NOT_OWNED 0xc0000046u
@@ -736,6 +746,8 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_WS_EX_TOPMOST 0x00000008u
 #define HORIZON_WS_EX_TRANSPARENT 0x00000020u
 #define HORIZON_WS_EX_LAYERED 0x00080000u
+#define HORIZON_WS_EX_LAYOUTRTL 0x00400000u
+#define HORIZON_LWA_ALPHA 0x00000002u
 #define HORIZON_SET_WINPOS_PAINT_SURFACE 0x01
 #define HORIZON_COORDS_CLIENT 0
 #define HORIZON_COORDS_WINDOW 1
@@ -1682,6 +1694,14 @@ struct horizon_add_mapping_committed_range_request
     unsigned long long size;
 };
 
+struct horizon_is_same_mapping_request
+{
+    struct horizon_server_request_header header;
+    char pad[4];
+    unsigned long long base1;
+    unsigned long long base2;
+};
+
 /* Wine's server_protocol.h layouts. */
 _Static_assert( offsetof(struct horizon_get_mapping_committed_range_request, offset) == 24,
                 "get_mapping_committed_range_request layout" );
@@ -1689,6 +1709,10 @@ _Static_assert( offsetof(struct horizon_get_mapping_committed_range_reply, commi
                 "get_mapping_committed_range_reply layout" );
 _Static_assert( offsetof(struct horizon_add_mapping_committed_range_request, size) == 32,
                 "add_mapping_committed_range_request layout" );
+_Static_assert( offsetof(struct horizon_is_same_mapping_request, base1) == 16,
+                "is_same_mapping_request layout" );
+_Static_assert( sizeof(struct horizon_is_same_mapping_request) == 32,
+                "is_same_mapping_request size" );
 
 struct horizon_pe_image_info
 {
@@ -2081,6 +2105,42 @@ struct horizon_get_window_rectangles_reply
     struct horizon_rectangle client;
 };
 
+struct horizon_get_window_text_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+};
+
+struct horizon_get_window_text_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int length;
+    char pad[4];
+};
+
+struct horizon_set_window_text_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+};
+
+struct horizon_get_windows_offset_request
+{
+    struct horizon_server_request_header header;
+    unsigned int from;
+    unsigned int to;
+    int dpi;
+};
+
+struct horizon_get_windows_offset_reply
+{
+    struct horizon_server_reply_header header;
+    int x;
+    int y;
+    int mirror;
+    char pad[4];
+};
+
 struct horizon_get_visible_region_request
 {
     struct horizon_server_request_header header;
@@ -2099,6 +2159,67 @@ struct horizon_get_visible_region_reply
     unsigned int total_size;
     char pad[4];
 };
+
+struct horizon_get_window_region_request
+{
+    struct horizon_server_request_header header;
+    unsigned int window;
+    int surface;
+    char pad[4];
+};
+
+struct horizon_get_window_region_reply
+{
+    struct horizon_server_reply_header header;
+    struct horizon_rectangle visible_rect;
+    unsigned int total_size;
+    char pad[4];
+};
+
+struct horizon_set_window_region_request
+{
+    struct horizon_server_request_header header;
+    unsigned int window;
+    int redraw;
+    char pad[4];
+};
+
+struct horizon_get_window_layered_info_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+};
+
+struct horizon_get_window_layered_info_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int color_key;
+    unsigned int alpha;
+    unsigned int flags;
+    char pad[4];
+};
+
+struct horizon_set_window_layered_info_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned int color_key;
+    unsigned int alpha;
+    unsigned int flags;
+    char pad[4];
+};
+
+C_ASSERT( sizeof(struct horizon_get_window_text_request) == 16 );
+C_ASSERT( sizeof(struct horizon_get_window_text_reply) == 16 );
+C_ASSERT( sizeof(struct horizon_set_window_text_request) == 16 );
+C_ASSERT( sizeof(struct horizon_get_windows_offset_request) == 24 );
+C_ASSERT( sizeof(struct horizon_get_windows_offset_reply) == 24 );
+C_ASSERT( sizeof(struct horizon_get_window_region_request) == 24 );
+C_ASSERT( sizeof(struct horizon_get_window_region_reply) == 32 );
+C_ASSERT( sizeof(struct horizon_set_window_region_request) == 24 );
+C_ASSERT( sizeof(struct horizon_get_window_layered_info_request) == 16 );
+C_ASSERT( sizeof(struct horizon_get_window_layered_info_reply) == 24 );
+C_ASSERT( sizeof(struct horizon_set_window_layered_info_request) == 32 );
 
 struct horizon_get_update_region_request
 {
@@ -2946,6 +3067,14 @@ struct horizon_user_window
     unsigned int has_internal_paint;
     unsigned int needs_erase;
     unsigned int needs_nonclient;
+    unsigned int color_key;
+    unsigned int alpha;
+    unsigned int layered_flags;
+    unsigned int is_layered;
+    unsigned short *text;
+    unsigned int text_len;
+    struct horizon_rectangle *win_region;
+    unsigned int win_region_count;
     struct horizon_user_class *class;
     struct horizon_window_property *properties;
     struct horizon_obj_locator locator;
@@ -3012,11 +3141,10 @@ struct horizon_server_object
     struct horizon_thread_state thread;
     struct horizon_server_object *thread_next;
 #ifndef HORIZON_STANDALONE_SYNTAX
-    struct context_data thread_contexts[2];
+    struct context_data *thread_contexts;
 #endif
     unsigned int thread_context_count;
     int thread_context_valid;
-    int thread_context_dirty;
     struct horizon_user_apc *apc_first, *apc_last;
     unsigned int rootdir;
     unsigned int name_len;
@@ -3441,14 +3569,19 @@ static void alias_source_report( const void *addr, char *buffer, size_t size )
 void horizon_memory_pool_stats( char *buffer, size_t size )
 {
     pthread_mutex_lock( &mapping_mutex );
-    snprintf( buffer, size, "[MEMPOOL] arena_mb=%llu pooled_allocs=%llu block_allocs=%llu shared_allocs=%llu"
-              " backing_slots=%zu mapping_slots=%zu section_views=%llu anchors=%u anchor_mb=%llu section_failures=%u",
-              (backing_pages.misses + section_pages.misses) * 2,
+    pthread_mutex_lock( &section_pages_mutex );
+    snprintf( buffer, size, "[MEMPOOL] arena_mb=%u arena_peak_mb=%u arena_reclaims=%llu pooled_allocs=%llu"
+              " block_allocs=%llu shared_allocs=%llu backing_slots=%zu mapping_slots=%zu section_views=%llu"
+              " anchors=%u anchor_mb=%llu section_failures=%u",
+              (backing_pages.active_arenas + section_pages.active_arenas) * 2,
+              (backing_pages.peak_arenas + section_pages.peak_arenas) * 2,
+              backing_pages.reclaims + section_pages.reclaims,
               backing_pages.hits + section_pages.hits,
               backing_pages.blocks + section_pages.blocks,
               backing_pages.shared + section_pages.shared,
               backing_pool.used, mapping_pool.used, section_view_maps, section_anchors,
               section_anchor_bytes >> 20, section_failures );
+    pthread_mutex_unlock( &section_pages_mutex );
     pthread_mutex_unlock( &mapping_mutex );
 }
 
@@ -5848,6 +5981,7 @@ static struct horizon_server_object *horizon_server_alloc_thread_locked( unsigne
     object->type = HORIZON_SERVER_OBJECT_THREAD;
     object->id = tid;
     object->file_fd = -1;
+    object->file_peer_fd = -1;
     horizon_thread_init( &object->thread, tid, pid, horizon_get_system_affinity_mask(),
                          horizon_server_now() );
     object->thread_next = horizon_server_threads;
@@ -6909,6 +7043,8 @@ static int horizon_server_handle_destroy_window( struct horizon_server_connectio
             window->properties = property->next;
             free( property );
         }
+        free( window->text );
+        free( window->win_region );
         free( window );
         status = HORIZON_STATUS_SUCCESS;
         if (request->handle) break;
@@ -8448,6 +8584,276 @@ static int horizon_server_handle_get_window_rectangles( struct horizon_server_co
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_get_window_text( struct horizon_server_connection *connection,
+                                                  const unsigned char *message )
+{
+    const struct horizon_get_window_text_request *request = (const void *)message;
+    struct horizon_get_window_text_reply reply;
+    struct horizon_user_window *window;
+    unsigned char *text = NULL;
+    unsigned int size = 0;
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->handle )))
+        reply.header.error = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else
+    {
+        reply.length = window->text_len / sizeof(*window->text);
+        size = window->text_len;
+        if (size > request->header.reply_size) size = request->header.reply_size & ~1u;
+        if (size && !(text = malloc( size ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        else if (size) memcpy( text, window->text, size );
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (reply.header.error) size = 0;
+    reply.header.reply_size = size;
+    size = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), text, size );
+    free( text );
+    return size;
+}
+
+static int horizon_server_handle_set_window_text( struct horizon_server_connection *connection,
+                                                  const unsigned char *message,
+                                                  const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_set_window_text_request *request = (const void *)message;
+    struct horizon_user_window *window;
+    unsigned short *text = NULL;
+    unsigned int status = HORIZON_STATUS_SUCCESS;
+
+    if (data_size & 1) status = HORIZON_STATUS_INVALID_PARAMETER;
+    else if (data_size && !(text = malloc( data_size ))) status = HORIZON_STATUS_NO_MEMORY;
+    else if (data_size) memcpy( text, data, data_size );
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!status && !(window = horizon_server_find_window_locked( request->handle )))
+        status = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else if (!status)
+    {
+        free( window->text );
+        window->text = text;
+        window->text_len = data_size;
+        text = NULL;
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    free( text );
+    return horizon_server_write_status( connection->reply_fd, status );
+}
+
+static int horizon_server_scale_dpi_coordinate( int value, unsigned int from, unsigned int to )
+{
+    long long scaled;
+
+    if (!from) from = 96;
+    if (!to) to = from;
+    if (from == to) return value;
+    scaled = (long long)value * to;
+    scaled += scaled < 0 ? -(long long)from / 2 : (long long)from / 2;
+    return scaled / from;
+}
+
+static void horizon_server_window_client_origin_locked( const struct horizon_user_window *window,
+                                                        int *x, int *y )
+{
+    while (window && window->parent)
+    {
+        *x += window->client_rect.left;
+        *y += window->client_rect.top;
+        window = horizon_server_find_window_locked( window->parent );
+    }
+}
+
+static int horizon_server_handle_get_windows_offset( struct horizon_server_connection *connection,
+                                                     const unsigned char *message )
+{
+    const struct horizon_get_windows_offset_request *request = (const void *)message;
+    struct horizon_get_windows_offset_reply reply;
+    struct horizon_user_window *window;
+    unsigned int dpi;
+    int mirror_from = 0, x, y;
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (request->from)
+    {
+        if (!(window = horizon_server_find_window_locked( request->from )))
+            reply.header.error = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+        else
+        {
+            x = y = 0;
+            if (window->ex_style & HORIZON_WS_EX_LAYOUTRTL)
+            {
+                mirror_from = 1;
+                reply.mirror = 1;
+                x = window->client_rect.right - window->client_rect.left;
+            }
+            horizon_server_window_client_origin_locked( window, &x, &y );
+            dpi = request->dpi > 0 ? (unsigned int)request->dpi : window->monitor_dpi;
+            reply.x += horizon_server_scale_dpi_coordinate( x, window->monitor_dpi, dpi );
+            reply.y += horizon_server_scale_dpi_coordinate( y, window->monitor_dpi, dpi );
+        }
+    }
+    if (!reply.header.error && request->to)
+    {
+        if (!(window = horizon_server_find_window_locked( request->to )))
+            reply.header.error = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+        else
+        {
+            x = y = 0;
+            if (window->ex_style & HORIZON_WS_EX_LAYOUTRTL)
+            {
+                reply.mirror ^= 1;
+                x = window->client_rect.right - window->client_rect.left;
+            }
+            horizon_server_window_client_origin_locked( window, &x, &y );
+            dpi = request->dpi > 0 ? (unsigned int)request->dpi : window->monitor_dpi;
+            reply.x -= horizon_server_scale_dpi_coordinate( x, window->monitor_dpi, dpi );
+            reply.y -= horizon_server_scale_dpi_coordinate( y, window->monitor_dpi, dpi );
+        }
+    }
+    if (mirror_from) reply.x = -reply.x;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_get_window_region( struct horizon_server_connection *connection,
+                                                    const unsigned char *message )
+{
+    const struct horizon_get_window_region_request *request = (const void *)message;
+    struct horizon_get_window_region_reply reply;
+    struct horizon_user_window *window;
+    struct horizon_rectangle *region = NULL;
+    unsigned int size = 0;
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->window )))
+        reply.header.error = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else
+    {
+        reply.visible_rect = window->visible_rect;
+        if (request->surface)
+        {
+            if ((window->style & HORIZON_WS_VISIBLE) &&
+                !horizon_server_rect_empty( &window->visible_rect ))
+            {
+                size = sizeof(*region);
+                if ((region = malloc( size ))) *region = window->visible_rect;
+                else reply.header.error = HORIZON_STATUS_NO_MEMORY;
+            }
+        }
+        else if (window->win_region_count)
+        {
+            size = window->win_region_count * sizeof(*region);
+            if ((region = malloc( size ))) memcpy( region, window->win_region, size );
+            else reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        }
+        reply.total_size = size;
+        if (!reply.header.error && size > request->header.reply_size)
+        {
+            reply.header.error = HORIZON_STATUS_BUFFER_OVERFLOW;
+            free( region );
+            region = NULL;
+            size = 0;
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (reply.header.error != HORIZON_STATUS_BUFFER_OVERFLOW && reply.header.error) size = 0;
+    reply.header.reply_size = size;
+    size = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), region, size );
+    free( region );
+    return size;
+}
+
+static int horizon_server_handle_set_window_region( struct horizon_server_connection *connection,
+                                                    const unsigned char *message,
+                                                    const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_set_window_region_request *request = (const void *)message;
+    struct horizon_rectangle *region = NULL;
+    struct horizon_user_window *window;
+    unsigned int status = HORIZON_STATUS_SUCCESS;
+
+    if (data_size % sizeof(*region)) status = HORIZON_STATUS_INVALID_PARAMETER;
+    else if (data_size && !(region = malloc( data_size ))) status = HORIZON_STATUS_NO_MEMORY;
+    else if (data_size) memcpy( region, data, data_size );
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!status && !(window = horizon_server_find_window_locked( request->window )))
+        status = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else if (!status)
+    {
+        struct horizon_rectangle window_rect, client_rect;
+
+        free( window->win_region );
+        window->win_region = region;
+        window->win_region_count = data_size / sizeof(*region);
+        region = NULL;
+        if (request->redraw && !horizon_server_rect_empty( &window->visible_rect ))
+        {
+            horizon_server_window_screen_rects_locked( window, &window_rect, &client_rect );
+            horizon_server_mark_window_update_locked( window, window_rect, 1 );
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    free( region );
+    return horizon_server_write_status( connection->reply_fd, status );
+}
+
+static int horizon_server_handle_get_window_layered_info( struct horizon_server_connection *connection,
+                                                          const unsigned char *message )
+{
+    const struct horizon_get_window_layered_info_request *request = (const void *)message;
+    struct horizon_get_window_layered_info_reply reply;
+    struct horizon_user_window *window;
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->handle )) || !window->is_layered)
+        reply.header.error = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else
+    {
+        reply.color_key = window->color_key;
+        reply.alpha = window->alpha;
+        reply.flags = window->layered_flags;
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_set_window_layered_info( struct horizon_server_connection *connection,
+                                                          const unsigned char *message )
+{
+    const struct horizon_set_window_layered_info_request *request = (const void *)message;
+    struct horizon_user_window *window;
+    unsigned int status = HORIZON_STATUS_SUCCESS;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->handle )) ||
+        !(window->ex_style & HORIZON_WS_EX_LAYERED))
+        status = HORIZON_ERROR_INVALID_WINDOW_HANDLE;
+    else
+    {
+        int was_layered = window->is_layered;
+
+        if (request->flags & HORIZON_LWA_ALPHA) window->alpha = request->alpha;
+        else if (!window->is_layered) window->alpha = 0;
+        window->color_key = request->color_key;
+        window->layered_flags = request->flags;
+        window->is_layered = 1;
+        if (!was_layered && !horizon_server_rect_empty( &window->visible_rect ))
+        {
+            struct horizon_rectangle window_rect, client_rect;
+
+            horizon_server_window_screen_rects_locked( window, &window_rect, &client_rect );
+            horizon_server_mark_window_update_locked( window, window_rect, 1 );
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_status( connection->reply_fd, status );
 }
 
 static struct horizon_user_window *horizon_server_get_surface_window_locked( struct horizon_user_window *window )
@@ -10336,8 +10742,6 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
 
     if ((errno = pthread_create( &thread, NULL, horizon_server_thread, thread_connection )))
     {
-        horizon_trace( "[server] new_thread tid=%u: connection thread failed errno=%d",
-                       thread_connection->tid, errno );
         pthread_mutex_lock( &horizon_server_objects_mutex );
         horizon_server_end_thread_locked( thread_connection );
         __atomic_sub_fetch( &horizon_lifecycle.connections, 1, __ATOMIC_RELAXED );
@@ -10522,7 +10926,7 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
                         if (contexts[i].machine == object->thread_contexts[j].machine)
                         {
                             horizon_server_merge_context( &object->thread_contexts[j], &contexts[i] );
-                            found = object->thread_context_dirty = 1;
+                            found = 1;
                         }
                 if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
             }
@@ -11697,7 +12101,7 @@ static unsigned int horizon_sock_ioctl_connect( unsigned int handle, const unsig
 {
     struct sockaddr_in sa;
     unsigned int status;
-    int addr_len, fd, nonblocking, ret;
+    int addr_len, fd, nonblocking, ret, err;
 
     if (data_size < 8 + 16) return HORIZON_STATUS_INVALID_PARAMETER;
     memcpy( &addr_len, data, sizeof(addr_len) );
@@ -11714,27 +12118,14 @@ static unsigned int horizon_sock_ioctl_connect( unsigned int handle, const unsig
         if ((status = horizon_ws_sockaddr_to_unix_for( data + 8, addr_len, &sa, v6only, 1 ))) return status;
     }
 
-    {
-        const unsigned char *ip = (const unsigned char *)&sa.sin_addr;
-        horizon_trace( "[server] connect target: fd=%d len=%u family=%u ip=%u.%u.%u.%u port=%u\n",
-                       fd, (unsigned int)sizeof(sa), sa.sin_family, ip[0], ip[1], ip[2], ip[3],
-                       (unsigned)((((const unsigned char *)&sa.sin_port)[0] << 8) |
-                                  ((const unsigned char *)&sa.sin_port)[1]) );
-    }
-
-    /* Horizon's bsd service never completes nonblocking connects in a way
-     * poll/getpeername can observe; blocking connect (the only style Switch
-     * homebrew uses) works.  Do the wait here — the client is blocked on
-     * this request anyway and each Wine thread has its own server thread —
-     * and hand back the final result; ws2_32 treats an immediate success
-     * from a nonblocking connect as connected. */
-    fcntl( fd, F_SETFL, 0 );
+    if (!nonblocking) fcntl( fd, F_SETFL, 0 );
     ret = connect( fd, (struct sockaddr *)&sa, sizeof(sa) );
-    status = ret ? horizon_sock_errno_status( errno ) : HORIZON_STATUS_SUCCESS;
-    fcntl( fd, F_SETFL, O_NONBLOCK );
+    err = ret ? errno : 0;
+    status = ret ? horizon_sock_errno_status( err ) : HORIZON_STATUS_SUCCESS;
+    if (!nonblocking) fcntl( fd, F_SETFL, O_NONBLOCK );
 
-    horizon_trace( "[server] WINE_CONNECT handle=%08x fd=%d port=%u nonblocking=%d blocking-connect ret=%d errno=%d -> status=%08x\n",
-                   handle, fd, (unsigned)((data[10] << 8) | data[11]), nonblocking, ret, ret ? errno : 0, status );
+    horizon_trace( "[server] WINE_CONNECT handle=%08x fd=%d port=%u nonblocking=%d ret=%d errno=%d -> status=%08x\n",
+                   handle, fd, (unsigned)((data[10] << 8) | data[11]), nonblocking, ret, err, status );
     return status;
 }
 
@@ -12992,11 +13383,61 @@ static int horizon_server_handle_get_image_map_address( struct horizon_server_co
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
+struct horizon_image_view
+{
+    struct horizon_image_view *next;
+    unsigned int pid;
+    unsigned long long base;
+    struct horizon_server_object *mapping;
+};
+
+static struct horizon_image_view *horizon_image_views;
+
+static struct horizon_image_view *horizon_server_find_image_view_locked( unsigned int pid,
+                                                                         unsigned long long base )
+{
+    struct horizon_image_view *view;
+
+    for (view = horizon_image_views; view; view = view->next)
+        if (view->pid == pid && view->base == base) return view;
+    return NULL;
+}
+
+static void horizon_server_remove_image_view_locked( unsigned int pid, unsigned long long base )
+{
+    struct horizon_image_view **ptr, *view;
+
+    for (ptr = &horizon_image_views; (view = *ptr); ptr = &view->next)
+    {
+        if (view->pid != pid || view->base != base) continue;
+        *ptr = view->next;
+        if (!--view->mapping->refs) horizon_server_free_object( view->mapping );
+        free( view );
+        return;
+    }
+}
+
+static int horizon_server_same_image_file_locked( const struct horizon_server_object *first,
+                                                  const struct horizon_server_object *second )
+{
+    struct stat first_stat, second_stat;
+
+    if (first == second) return 1;
+    if (first->file_fd == -1 || second->file_fd == -1) return 0;
+    if (!fstat( first->file_fd, &first_stat ) && !fstat( second->file_fd, &second_stat ) &&
+        first_stat.st_ino && first_stat.st_dev == second_stat.st_dev &&
+        first_stat.st_ino == second_stat.st_ino)
+        return 1;
+    return first->file_name && second->file_name &&
+           horizon_unix_path_equal( first->file_name, second->file_name );
+}
+
 static int horizon_server_handle_map_image_view( struct horizon_server_connection *connection,
                                                  const unsigned char *message )
 {
     const struct horizon_map_image_view_request *request = (const void *)message;
     struct horizon_server_handle_entry *entry;
+    struct horizon_image_view *view = NULL;
     unsigned int status = HORIZON_STATUS_SUCCESS;
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
@@ -13004,8 +13445,16 @@ static int horizon_server_handle_map_image_view( struct horizon_server_connectio
     if (!entry) status = HORIZON_STATUS_INVALID_HANDLE;
     else if (entry->object->type != HORIZON_SERVER_OBJECT_MAPPING || !entry->object->mapping_has_image)
         status = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (!(view = calloc( 1, sizeof(*view) ))) status = HORIZON_STATUS_NO_MEMORY;
     else
     {
+        horizon_server_remove_image_view_locked( connection->pid, request->base );
+        view->pid = connection->pid;
+        view->base = request->base;
+        view->mapping = entry->object;
+        view->mapping->refs++;
+        view->next = horizon_image_views;
+        horizon_image_views = view;
         entry->object->mapping_image.map_addr = request->base;
         entry->object->mapping_image.base = request->base;
         entry->object->mapping_image.map_size = request->size;
@@ -13014,6 +13463,24 @@ static int horizon_server_handle_map_image_view( struct horizon_server_connectio
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
+    return horizon_server_write_status( connection->reply_fd, status );
+}
+
+static int horizon_server_handle_is_same_mapping( struct horizon_server_connection *connection,
+                                                  const unsigned char *message )
+{
+    const struct horizon_is_same_mapping_request *request = (const void *)message;
+    struct horizon_image_view *first, *second;
+    unsigned int status = HORIZON_STATUS_NOT_SAME_DEVICE;
+    int same = 0;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    first = horizon_server_find_image_view_locked( connection->pid, request->base1 );
+    second = horizon_server_find_image_view_locked( connection->pid, request->base2 );
+    if (first && second) same = horizon_server_same_image_file_locked( first->mapping, second->mapping );
+    if (same)
+        status = HORIZON_STATUS_SUCCESS;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_status( connection->reply_fd, status );
 }
 
@@ -13088,6 +13555,7 @@ static int horizon_server_handle_unmap_view( struct horizon_server_connection *c
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
     horizon_server_remove_session_view_locked( request->base );
+    horizon_server_remove_image_view_locked( connection->pid, request->base );
     for (ptr = &horizon_section_views; (view = *ptr); ptr = &view->next)
     {
         if (view->base != request->base) continue;
@@ -14087,7 +14555,7 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
     {
         unsigned char call[HORIZON_APC_CALL_SIZE];
         struct context_data contexts[2];
-    } suspend_reply;
+    } suspend_reply = {0};
     const struct context_data *suspend_contexts = NULL;
     unsigned int suspend_context_count = 0, suspend_reply_size = 0;
 #endif
@@ -14131,20 +14599,12 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
 
             if (!thread->thread_context_valid)
             {
+                thread->thread_contexts = suspend_reply.contexts;
+                thread->thread_context_count = suspend_context_count;
                 if (suspend_context_count)
-                {
                     memcpy( thread->thread_contexts, suspend_contexts,
                             suspend_context_count * sizeof(*suspend_contexts) );
-                    thread->thread_context_count = suspend_context_count;
-                    thread->thread_context_valid = 1;
-                }
-                else if (horizon_capture_arm64ec_server_context(
-                             (TEB *)(ULONG_PTR)thread->thread.teb, &thread->thread_contexts[0] ))
-                {
-                    thread->thread_context_count = 1;
-                    thread->thread_context_valid = 1;
-                }
-                else thread->thread_context_valid = 1;
+                thread->thread_context_valid = 1;
                 horizon_server_signal_changed_locked();
             }
             while (thread->thread.suspend && !thread->thread.terminated)
@@ -14152,28 +14612,16 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
                 horizon_server_quit_check_locked();
             }
-            if (suspend_context_count && thread->thread_context_valid)
+            thread->thread_contexts = NULL;
+            thread->thread_context_valid = 0;
+            thread->thread_context_count = 0;
+            if (suspend_context_count)
             {
-                memset( &suspend_reply, 0, sizeof(suspend_reply) );
-                memcpy( suspend_reply.contexts, thread->thread_contexts,
-                        thread->thread_context_count * sizeof(thread->thread_contexts[0]) );
                 suspend_reply_size = HORIZON_APC_CALL_SIZE +
-                                     thread->thread_context_count * sizeof(thread->thread_contexts[0]);
+                                     suspend_context_count * sizeof(*suspend_contexts);
                 reply.header.error = thread->thread.terminated ? HORIZON_STATUS_ACCESS_DENIED :
                                                                  HORIZON_STATUS_SUCCESS;
-                thread->thread_context_valid = 0;
-                thread->thread_context_dirty = 0;
-                thread->thread_context_count = 0;
                 break;
-            }
-            if (thread->thread_context_valid)
-            {
-                if (thread->thread_context_dirty)
-                    horizon_apply_arm64ec_server_context( (TEB *)(ULONG_PTR)thread->thread.teb,
-                                                          &thread->thread_contexts[0] );
-                thread->thread_context_valid = 0;
-                thread->thread_context_dirty = 0;
-                thread->thread_context_count = 0;
             }
             if (thread->thread.terminated)
             {
@@ -14687,6 +15135,9 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_ADD_MAPPING_COMMITTED_RANGE:
             status = horizon_server_handle_add_mapping_committed_range( connection, message );
             break;
+        case HORIZON_REQ_IS_SAME_MAPPING:
+            status = horizon_server_handle_is_same_mapping( connection, message );
+            break;
         case HORIZON_REQ_CREATE_TIMER:
             status = horizon_server_handle_create_timer( connection, message, request_data, header->request_size );
             break;
@@ -14747,8 +15198,25 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_GET_WINDOW_RECTANGLES:
             status = horizon_server_handle_get_window_rectangles( connection, message );
             break;
+        case HORIZON_REQ_GET_WINDOW_TEXT:
+            status = horizon_server_handle_get_window_text( connection, message );
+            break;
+        case HORIZON_REQ_SET_WINDOW_TEXT:
+            status = horizon_server_handle_set_window_text( connection, message, request_data,
+                                                            header->request_size );
+            break;
+        case HORIZON_REQ_GET_WINDOWS_OFFSET:
+            status = horizon_server_handle_get_windows_offset( connection, message );
+            break;
         case HORIZON_REQ_GET_VISIBLE_REGION:
             status = horizon_server_handle_get_visible_region( connection, message );
+            break;
+        case HORIZON_REQ_GET_WINDOW_REGION:
+            status = horizon_server_handle_get_window_region( connection, message );
+            break;
+        case HORIZON_REQ_SET_WINDOW_REGION:
+            status = horizon_server_handle_set_window_region( connection, message, request_data,
+                                                              header->request_size );
             break;
         case HORIZON_REQ_GET_UPDATE_REGION:
             status = horizon_server_handle_get_update_region( connection, message );
@@ -14854,12 +15322,20 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_SET_CURSOR:
             status = horizon_server_handle_set_cursor( connection, message );
             break;
+        case HORIZON_REQ_GET_WINDOW_LAYERED_INFO:
+            status = horizon_server_handle_get_window_layered_info( connection, message );
+            break;
+        case HORIZON_REQ_SET_WINDOW_LAYERED_INFO:
+            status = horizon_server_handle_set_window_layered_info( connection, message );
+            break;
         default:
+        {
             WARN( "unimplemented Horizon server request %d size %u reply_size %u.\n",
                   header->req, header->request_size, header->reply_size );
             if (connection->reply_fd != -1)
                 status = horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_IMPLEMENTED );
             break;
+        }
         }
 
         free( request_data );
@@ -15087,6 +15563,8 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
 }
 #endif
 
+__thread int horizon_suspend_pending;
+
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -15158,6 +15636,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
             break;
         case 0x3c:
             rec.ExceptionCode = (esr & 0xffff) == 0xcafe ? STATUS_ILLEGAL_INSTRUCTION : STATUS_BREAKPOINT;
+            if ((esr & 0xffff) == 0xcafe && is_arm64ec()) horizon_suspend_pending = 1;
             break;
         default:
             rec.ExceptionCode = STATUS_ILLEGAL_INSTRUCTION;
@@ -16397,8 +16876,15 @@ static void *find_anchor_address_locked( size_t size )
     return find_anchor_run_locked( size );
 }
 
+struct horizon_native_code
+{
+    struct horizon_mapping *mapping;
+    void *view;
+};
+
 void *horizon_reserve_native_code( size_t size, void **token )
 {
+    struct horizon_native_code *code;
     struct horizon_mapping *mapping;
     VirtmemReservation *reservation;
     void *start, *limit, *addr = NULL;
@@ -16407,6 +16893,7 @@ void *horizon_reserve_native_code( size_t size, void **token )
     unsigned int i;
 
     *token = NULL;
+    if (!(code = calloc( 1, sizeof(*code) ))) return NULL;
     pthread_mutex_lock( &mapping_mutex );
     virtmemLock();
     horizon_get_address_space_limits( &start, &limit );
@@ -16435,26 +16922,55 @@ void *horizon_reserve_native_code( size_t size, void **token )
             {
                 mapping->section_state = SECTION_NATIVE;
                 list_add_mapping( mapping );
-                *token = mapping;
+                code->mapping = mapping;
             }
             else remove_reservation_locked( reservation );
         }
-        if (!*token) addr = NULL;
+        if (!code->mapping) addr = NULL;
     }
     virtmemUnlock();
     pthread_mutex_unlock( &mapping_mutex );
+
+    /* Claim space through Wine before taking mapping_mutex (virtual -> mapping). */
+    if (!addr && (uintptr_t)limit <= 0x100000000ULL &&
+        (addr = virtual_alloc_horizon_native( size, &code->view )))
+    {
+        pthread_mutex_lock( &mapping_mutex );
+        mapping = find_overlap_mapping( addr, size );
+        if (mapping && mapping->addr == addr && mapping->size == size &&
+            mapping->reservation && !mapping->backing && mapping->section_state == SECTION_NONE)
+        {
+            mapping->section_state = SECTION_NATIVE;
+            code->mapping = mapping;
+        }
+        pthread_mutex_unlock( &mapping_mutex );
+        if (!code->mapping)
+        {
+            virtual_free_horizon_native( code->view );
+            addr = NULL;
+        }
+    }
+    if (addr) *token = code;
+    else free( code );
     return addr;
 }
 
 void horizon_release_native_code( void *token )
 {
-    struct horizon_mapping *mapping = token;
+    struct horizon_native_code *code = token;
+    struct horizon_mapping *mapping = code->mapping;
 
     pthread_mutex_lock( &mapping_mutex );
-    list_remove_mapping( mapping );
-    remove_reservation( mapping->reservation );
-    horizon_object_free( &mapping_pool, mapping );
+    if (code->view) mapping->section_state = SECTION_NONE;
+    else
+    {
+        list_remove_mapping( mapping );
+        remove_reservation( mapping->reservation );
+        horizon_object_free( &mapping_pool, mapping );
+    }
     pthread_mutex_unlock( &mapping_mutex );
+    if (code->view) virtual_free_horizon_native( code->view );
+    free( code );
 }
 
 static void *horizon_section_anchor( void *source, size_t size, void **token )
@@ -16727,7 +17243,6 @@ static int map_anonymous_backings( void *addr, size_t size, int prot, int flags,
 {
     char *cursor = addr;
     char *end = cursor + size;
-    unsigned int count = 0;
 
     while (cursor < end)
     {
@@ -16750,16 +17265,6 @@ static int map_anonymous_backings( void *addr, size_t size, int prot, int flags,
             return -1;
         }
         cursor += chunk;
-        count++;
-    }
-    if (size >= 256 * 1024 * 1024)
-    {
-        char message[128];
-
-        snprintf( message, sizeof(message),
-                  "[HMAP] mapped anonymous range addr=%p size=0x%lx backings=%u",
-                  addr, (unsigned long)size, count );
-        wine_nx_runtime_trace( message );
     }
     return 0;
 }
@@ -16925,7 +17430,7 @@ static int add_lazy_mapping_locked( void *start, size_t size, int prot )
 
 static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int esr )
 {
-    static unsigned int commits, failures;
+    static unsigned int failures;
     unsigned int exception_class = esr >> 26;
     int needed;
     struct horizon_mapping *mapping;
@@ -16956,21 +17461,8 @@ static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int 
     if (chunk_start < mapping_start) chunk_start = mapping_start;
     if (chunk_end > mapping_end || chunk_end < chunk_start) chunk_end = mapping_end;
     if (!replace_reservation_mapping( mapping, chunk_start, chunk_end - chunk_start,
-                                      mapping->prot, TRUE ))
-    {
-        unsigned int count = __atomic_add_fetch( &commits, 1, __ATOMIC_RELAXED );
-
+                                       mapping->prot, TRUE ))
         handled = TRUE;
-        if (count <= 8 || !(count & (count - 1)))
-        {
-            char message[160];
-
-            snprintf( message, sizeof(message),
-                      "[HMAP] demand commit addr=%p size=0x%lx count=%u",
-                      chunk_start, (unsigned long)(chunk_end - chunk_start), count );
-            wine_nx_runtime_trace( message );
-        }
-    }
     else
     {
         unsigned int count = __atomic_add_fetch( &failures, 1, __ATOMIC_RELAXED );
@@ -17071,12 +17563,6 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         }
     }
     pthread_mutex_unlock( &mapping_mutex );
-    if (retries)
-    {
-        char message[128];
-        snprintf( message, sizeof(message), "[TLS] thread placement retries=%u result=%#x", retries, rc );
-        wine_nx_runtime_trace( message );
-    }
     return rc;
 }
 

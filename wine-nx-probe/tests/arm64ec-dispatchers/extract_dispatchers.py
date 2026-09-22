@@ -7,7 +7,11 @@ from pathlib import Path
 source = Path(sys.argv[1]).read_text(encoding="utf-8").split("#else /* __SWITCH__ */", 1)[0]
 output = []
 
-for marker in ('.global __wine_syscall_dispatcher', '.global __wine_unix_call_dispatcher'):
+if not re.search(r"\bULONG_PTR\s+wine_nx_do_syscall\s*\(", source):
+    raise SystemExit("wine_nx_do_syscall must preserve pointer-sized return values")
+
+for marker in ('.global __wine_syscall_dispatcher', '.global __wine_unix_call_dispatcher',
+               '.global wine_nx_call_pe_callback'):
     pos = source.index(marker)
     start = source.rfind("__asm__(", 0, pos)
     end = source.index("\n);", pos) + 3

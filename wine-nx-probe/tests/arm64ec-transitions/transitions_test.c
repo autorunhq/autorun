@@ -12,11 +12,11 @@ _Alignas(16) static unsigned char emulator_stack[0x10000];
 _Alignas(16) static unsigned char guest_stack[0x100];
 static uint64_t ec_bitmap[1u << 21];
 
-uint64_t input_gpr[15], output_gpr[15], observed_gpr[16];
+uint64_t input_gpr[15], output_gpr[15], observed_gpr[17];
 _Alignas(16) unsigned char input_vec[16][16], output_vec[16][16], observed_vec[16][16];
 uint64_t saved_host[14];
 _Alignas(16) unsigned char saved_host_vec[8][16];
-uint64_t initial_target, observed_entry[3];
+uint64_t initial_target, observed_entry[4];
 unsigned int observed_kind;
 void *x64_return_instr;
 
@@ -133,7 +133,8 @@ static void test_capture_restore(void)
     report( "mapped-gpr-xmm-capture", run_calls == 1 && capture_ok );
     report( "mapped-gpr-restore", observed_kind == 1 &&
             !memcmp( observed_gpr, output_gpr, sizeof(output_gpr) ) &&
-            observed_gpr[15] == (uint64_t)(guest_stack + 0x80) );
+            observed_gpr[15] == (uint64_t)(guest_stack + 0x80) &&
+            observed_gpr[16] == saved_host[6] );
     report( "mapped-xmm-restore", !memcmp( observed_vec, output_vec, sizeof(output_vec) ) );
     report( "direct-continuation-r10", observed_gpr[9] == output_gpr[9] );
 }
@@ -146,7 +147,8 @@ static void test_bitmap_fast_path(void)
     reset_observed();
     invoke_dispatch();
     report( "native-bitmap-fast-path", run_calls == 0 && observed_kind == 1 &&
-            observed_gpr[9] == input_gpr[9] && observed_gpr[15] == saved_host[0] - 8 );
+            observed_gpr[9] == input_gpr[9] && observed_gpr[15] == saved_host[0] - 8 &&
+            observed_gpr[16] == saved_host[6] );
     reset_observed();
     invoke_ret();
     report( "ret-bitmap-no-push", run_calls == 0 && observed_kind == 1 &&
@@ -178,7 +180,7 @@ static void test_entry_stack( int aligned_after_pop )
     {
         int passed = run_calls == 1 && capture_ok && observed_kind == 2 &&
                      observed_entry[0] == requested_sp + 8 && observed_entry[1] == return_address &&
-                     observed_entry[2] == requested_sp + 8;
+                     observed_entry[2] == requested_sp + 8 && observed_entry[3] == saved_host[6];
         if (!passed) printf( "INFO entry=%#llx sp=%#llx lr=%#llx x4=%#llx\n",
                              (unsigned long long)requested_sp,
                              (unsigned long long)observed_entry[0],
@@ -189,7 +191,7 @@ static void test_entry_stack( int aligned_after_pop )
     else
         report( "entry-stack-synthetic-ret", run_calls == 1 && capture_ok && observed_kind == 2 &&
                 observed_entry[0] == requested_sp && observed_entry[1] == (uint64_t)&ret_sentinel &&
-                observed_entry[2] == requested_sp );
+                observed_entry[2] == requested_sp && observed_entry[3] == saved_host[6] );
 }
 
 int main(void)

@@ -36,6 +36,7 @@ static KERNEL_CALLBACK_PROC table[4];
 static PEB peb = { table };
 static TEB teb = { &peb };
 static TEB *NtCurrentTeb(void) { return &teb; }
+static int is_arm64ec(void) { return 0; }
 /* Stack binding is exercised separately by check_native_stack.py. */
 void horizon_bind_native_stack(TEB *t) { assert(t == &teb); }
 static ULONG_PTR wine_nx_call_pe_callback(void *func, const void *args, ULONG len, void *t) {

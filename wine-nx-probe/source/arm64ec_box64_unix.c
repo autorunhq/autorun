@@ -170,12 +170,20 @@ static NTSTATUS run_guest( void *args )
     }
     status = wine_nx_box64_run_amd64( context, (ULONG_PTR)thread->teb, &thread->state,
                                      &host, thread, 0, 1000000, &p->executed );
+#ifdef __SWITCH__
+    if (status == STATUS_TIMEOUT && thread->area->SuspendDoorbell &&
+        __atomic_load_n( thread->area->SuspendDoorbell, __ATOMIC_ACQUIRE ))
+    {
+        horizon_wait_suspend_arm64ec();
+        thread->have_state = FALSE;
+    }
+#endif
     thread->context = *context;
     thread->have_context = TRUE;
     p->entry_kind = WINEBOX64EC_ENTRY_CONTINUE;
     if (status == STATUS_TIMEOUT)
     {
-        thread->resume_timeout = TRUE;
+        thread->resume_timeout = thread->have_state;
         return status;
     }
     if (status == STATUS_EMULATION_SYSCALL)

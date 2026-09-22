@@ -2038,9 +2038,9 @@ static struct file_view *find_view( const void *addr, size_t size )
  * executables). */
 BOOL wine_nx_image_at( const void *addr, void **base, char *name, size_t size )
 {
+    sigset_t sigset;
     struct file_view *view;
     const char *export;
-    sigset_t sigset;
     BOOL ret = FALSE;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -5642,6 +5642,7 @@ void wine_nx_start_user_shared_data_clock(void)
     data->ActiveProcessorCount  = horizon_get_processor_count(); /* before the PEB is filled */
     data->ActiveGroupCount      = 1;
     data->NativeProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64;
+    init_shared_data_cpuinfo( data );
     usd_update_time();
     if (pthread_create( &thread, NULL, usd_clock_thread, NULL ))
         ERR( "failed to start the shared user data clock\n" );

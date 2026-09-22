@@ -179,6 +179,12 @@ fixture += block(r'^static struct \{ char \*start, \*end, \*cursor; \} anchor_re
 fixture += block(r'^static unsigned int anchor_region_count;')
 fixture += block(r'^static char \*anchor_region, \*anchor_region_end;')
 fixture += block(r'^enum horizon_section_state\n\{.*?^\};')
+fixture += block(r'^struct horizon_native_code\n\{.*?^\};')
+fixture += '''
+static int allow_native_view, native_views;
+static void *virtual_alloc_horizon_native(size_t size, void **token);
+static void virtual_free_horizon_native(void *token);
+'''
 for name in ['horizon_backing', 'horizon_mapping']:
     fixture += block(r'^struct ' + name + r'\n\{.*?^\};')
 a = s.index('static struct horizon_backing backing_slots[')
@@ -277,6 +283,30 @@ static void reserve_view( void *addr, size_t size )
     list_add_mapping( mapping );
 }
 
+static void *virtual_alloc_horizon_native(size_t size, void **token)
+{
+    void *addr = (void *)0x90000000;
+    assert(!pthread_mutex_trylock(&mapping_mutex));
+    pthread_mutex_unlock(&mapping_mutex);
+    *token = NULL;
+    if (!allow_native_view) return NULL;
+    assert(!native_views && !find_overlap_mapping(addr, size));
+    reserve_view(addr, size);
+    *token = entry_at(addr);
+    ++native_views;
+    return addr;
+}
+
+static void virtual_free_horizon_native(void *token)
+{
+    struct horizon_mapping *mapping = token;
+    assert(!pthread_mutex_trylock(&mapping_mutex));
+    assert(native_views == 1 && mapping->section_state == SECTION_NONE);
+    assert(!unmap_range_locked(mapping->addr, mapping->size));
+    --native_views;
+    pthread_mutex_unlock(&mapping_mutex);
+}
+
 int main(void)
 {
     struct horizon_memfile *file, *reserved;
@@ -297,6 +327,15 @@ int main(void)
         assert( unmap_range_locked(region, P) == -1 && errno == EBUSY );
         assert( protect_range_locked(region, P, RW) == -1 );
         assert( !horizon_reserve_native_code(0x10000000, &other) && !other );
+        allow_native_view = 1;
+        assert( horizon_reserve_native_code(0x10000000, &other) == (void *)0x90000000 );
+        assert( native_views == 1 && entry_at((void *)0x90000000)->section_state == SECTION_NATIVE );
+        assert( unmap_range_locked((void *)0x90000000, P) == -1 && errno == EBUSY );
+        assert( protect_range_locked((void *)0x90000000, P, RW) == -1 );
+        check_tree();
+        horizon_release_native_code(other);
+        assert(!native_views && !entry_at((void *)0x90000000));
+        allow_native_view = 0;
         check_tree();
         horizon_release_native_code(token);
         assert( !mappings.root && !reservation_count );

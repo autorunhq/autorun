@@ -48,7 +48,7 @@ fixture = r'''
 ''' + definitions + '\n' + block(source, 'enum horizon_server_object_type\n') + ';\n' + r'''
 struct horizon_server_object {
     unsigned refs, id;
-    int type, file_fd, completion_closed;
+    int type, file_fd, file_peer_fd, completion_closed;
     struct horizon_server_object *thread_next;
     struct horizon_thread_state thread;
 };

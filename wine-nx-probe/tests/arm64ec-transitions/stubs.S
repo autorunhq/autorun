@@ -110,6 +110,7 @@ direct_target:
     str x22, [x16, #112]
     mov x17, sp
     str x17, [x16, #120]
+    str x23, [x16, #128]
     adrp x16, observed_vec
     add x16, x16, :lo12:observed_vec
     stp q0, q1, [x16]
@@ -138,6 +139,7 @@ entry_target:
     mov x17, sp
     stp x17, x30, [x16]
     str x4, [x16, #16]
+    str x23, [x16, #24]
     mov w17, #2
     adrp x16, observed_kind
     str w17, [x16, :lo12:observed_kind]

@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { SYSCALL_STATUS = 0x12345678, UNIX_STATUS = 0x23456789 };
+enum { UNIX_STATUS = 0x23456789 };
+
+#define SYSCALL_RESULT UINT64_C(0x7ffd12345678)
 
 uint64_t saved_host[14];
 _Alignas(16) unsigned char saved_host_vec[8][16];
@@ -12,6 +14,7 @@ uint64_t input_args[8], input_stack_args[8];
 unsigned int input_syscall_id;
 uint64_t unix_inputs[3];
 uint64_t observed_state[4];
+uint64_t callback_args[3];
 unsigned int syscall_x9_returned, unix_lr_returned;
 unsigned int dispatch_ret_called;
 unsigned char stale_teb[16], authoritative_teb[0x68], fake_peb[0x370];
@@ -25,14 +28,15 @@ static unsigned int failures;
 
 extern void invoke_syscall_dispatcher(void);
 extern void invoke_unix_dispatcher(void);
+extern void invoke_callback(void);
 extern void syscall_return_target(void);
 extern void syscall_dispatch_ret(void);
 extern void clobber_vectors(void);
 
-int32_t wine_nx_do_syscall( uint64_t *stack_args,
-                            uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                            uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7,
-                            unsigned int syscall_id )
+uint64_t wine_nx_do_syscall( uint64_t *stack_args,
+                             uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
+                             uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7,
+                             unsigned int syscall_id )
 {
     uint64_t args[8] = { x0, x1, x2, x3, x4, x5, x6, x7 };
 
@@ -41,7 +45,7 @@ int32_t wine_nx_do_syscall( uint64_t *stack_args,
     memcpy( recorded_stack_args, stack_args, sizeof(recorded_stack_args) );
     recorded_syscall_id = syscall_id;
     clobber_vectors();
-    return SYSCALL_STATUS;
+    return SYSCALL_RESULT;
 }
 
 int32_t __wine_unix_call_dispatcher_impl( uint64_t handle, unsigned int index, void *args )
@@ -122,12 +126,12 @@ static void test_syscall(void)
     uint64_t target = (uint64_t)&syscall_return_target;
 
     run_syscall();
-    report( "syscall-guest-return", observed_state[0] == SYSCALL_STATUS && syscall_x9_returned &&
+    report( "syscall-guest-return", observed_state[0] == SYSCALL_RESULT && syscall_x9_returned &&
             dispatch_ret_called && observed_state[3] == target );
 
     native_bitmap[target >> 18] |= 1ull << ((target >> 12) & 63);
     run_syscall();
-    report( "syscall-native-return", observed_state[0] == SYSCALL_STATUS && syscall_x9_returned &&
+    report( "syscall-native-return", observed_state[0] == SYSCALL_RESULT && syscall_x9_returned &&
             !dispatch_ret_called && observed_state[3] == target );
 }
 
@@ -145,11 +149,24 @@ static void test_unix(void)
             observed_state[2] == saved_host[0] );
 }
 
+static void test_callback(void)
+{
+    clear_results();
+    invoke_callback();
+    report( "callback-args-teb", callback_args[0] == (uintptr_t)input_args && callback_args[1] == 64 &&
+            callback_args[2] == (uintptr_t)authoritative_teb );
+    report( "callback-result-stack", observed_state[0] == 42 && observed_state[2] == saved_host[0] );
+    report( "callback-native-x18", observed_state[1] == (uintptr_t)stale_teb );
+    report( "callback-native-nonvolatile", !memcmp( observed_nonvolatile, input_nonvolatile,
+                                                    sizeof(input_nonvolatile) ) );
+}
+
 int main(void)
 {
     initialize();
     test_syscall();
     test_unix();
+    test_callback();
     printf( "RESULT %s\n", failures ? "FAIL" : "PASS" );
     return failures != 0;
 }

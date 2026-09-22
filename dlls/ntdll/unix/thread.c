@@ -1120,39 +1120,6 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 }
 
 #if defined(__SWITCH__) && defined(__aarch64__)
-BOOL horizon_capture_arm64ec_server_context( TEB *teb, struct context_data *context )
-{
-    ARM64EC_NT_CONTEXT ec;
-    ARM64_NT_CONTEXT arm;
-    CHPE_V2_CPU_AREA_INFO *area;
-
-    if (!teb || !(area = teb->ChpeV2CpuAreaInfo) || !area->ContextAmd64) return FALSE;
-    ec = *area->ContextAmd64;
-    ec.ContextFlags = CONTEXT_AMD64_FULL;
-    context_x64_to_arm_base( &arm, &ec );
-    arm.ContextFlags = CONTEXT_ARM64_FULL;
-    if (context_to_server( context, IMAGE_FILE_MACHINE_ARM64, &arm, IMAGE_FILE_MACHINE_ARM64 ))
-        return FALSE;
-    if (area->SuspendDoorbell) __atomic_store_n( area->SuspendDoorbell, 0, __ATOMIC_RELEASE );
-    return TRUE;
-}
-
-BOOL horizon_apply_arm64ec_server_context( TEB *teb, const struct context_data *context )
-{
-    ARM64EC_NT_CONTEXT ec;
-    ARM64_NT_CONTEXT arm;
-    CHPE_V2_CPU_AREA_INFO *area;
-
-    if (!teb || !(area = teb->ChpeV2CpuAreaInfo) || !area->ContextAmd64) return FALSE;
-    ec = *area->ContextAmd64;
-    ec.ContextFlags = CONTEXT_AMD64_FULL;
-    context_x64_to_arm_base( &arm, &ec );
-    arm.ContextFlags = CONTEXT_ARM64_FULL;
-    if (context_from_server( &arm, context, IMAGE_FILE_MACHINE_ARM64 )) return FALSE;
-    context_arm_to_x64_base( area->ContextAmd64, &arm );
-    return TRUE;
-}
-
 void horizon_wait_suspend_arm64ec(void)
 {
     CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;

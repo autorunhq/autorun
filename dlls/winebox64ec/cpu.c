@@ -170,13 +170,7 @@ static void __attribute__((used)) winebox64ec_run_context_returning( CHPE_V2_CPU
         params.exit_kind = WINEBOX64EC_EXIT_NONE;
         params.target = params.exception_record = 0;
         status = WINE_UNIX_CALL( winebox64ec_run, &params );
-        if (status == STATUS_TIMEOUT)
-        {
-            if (area->SuspendDoorbell &&
-                __atomic_load_n( area->SuspendDoorbell, __ATOMIC_ACQUIRE ))
-                NtYieldExecution();
-            continue;
-        }
+        if (status == STATUS_TIMEOUT) continue;
         if (status) fail( status );
         if (params.exit_kind == WINEBOX64EC_EXIT_EC_TARGET)
         {
@@ -201,9 +195,6 @@ static void __attribute__((used)) winebox64ec_run_context_returning( CHPE_V2_CPU
     fpcr = fpcsr;
     fpsr = fpcsr >> 32;
     __asm__ volatile( "msr fpcr, %0; msr fpsr, %1" :: "r" (fpcr), "r" (fpsr) );
-    if (area->SuspendDoorbell &&
-        __atomic_load_n( area->SuspendDoorbell, __ATOMIC_ACQUIRE ))
-        NtYieldExecution();
 }
 
 NTSTATUS WINAPI ProcessInit(void)
@@ -569,11 +560,11 @@ __ASM_GLOBAL_FUNC( winebox64ec_bridge_ec,
                    "mov x17, x9\n\t"
                    "mov w16, #0x0200\n\t"
                    "movk w16, #0xd63f, lsl #16\n\t"
-                   "ldursw x23, [x17, #-4]\n\t"
-                   "cmp w23, w16\n\t"
+                   "ldursw x15, [x17, #-4]\n\t"
+                   "cmp w15, w16\n\t"
                    "b.eq 2f\n\t"
-                   "and x23, x23, #-4\n\t"
-                   "add x17, x17, x23\n\t"
+                   "and x15, x15, #-4\n\t"
+                   "add x17, x17, x15\n\t"
                    "mov x4, sp\n\t"
                    "tbz x4, #3, 1f\n\t"
                    "ldr lr, [x4], #8\n\t"

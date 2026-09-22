@@ -28,11 +28,13 @@ fixture = rf'''
 typedef NTSTATUS (*unixlib_entry_t)( void *args );
 #define __NTDLL_UNIX_HORIZON_PRIVATE_H
 void horizon_get_address_space_limits( void **start, void **limit );
+void horizon_wait_suspend_arm64ec(void);
 void *wine_nx_arm64ec_dispatch_ret;
 
 static _Thread_local TEB *active_teb;
 static TEB *mock_current_teb(void) {{ return active_teb; }}
 #define NtCurrentTeb mock_current_teb
+#define __SWITCH__
 #include "{source.as_posix()}"
 #undef NtCurrentTeb
 
@@ -62,6 +64,21 @@ static unsigned int engine_calls;
 static ULONG_PTR engine_probe_read, engine_probe_native;
 static NTSTATUS engine_probe_status;
 static BOOL engine_probe_native_result;
+static unsigned int suspend_calls;
+
+void horizon_wait_suspend_arm64ec(void)
+{{
+    CHPE_V2_CPU_AREA_INFO *area = active_teb->ChpeV2CpuAreaInfo;
+    AMD64_CONTEXT *context = (AMD64_CONTEXT *)area->ContextAmd64;
+    unsigned int i;
+
+    assert( *area->SuspendDoorbell );
+    *area->SuspendDoorbell = 0;
+    suspend_calls++;
+    context->Rip = 0x100009000ull;
+    context->FltSave.StatusWord = 0;
+    for (i = 0; i < 8; i++) context->FltSave.FloatRegisters[i].Low = 0xa000 + i;
+}}
 
 void horizon_get_address_space_limits( void **start, void **limit )
 {{
@@ -356,6 +373,17 @@ static void test_engine_exits_and_callbacks(void)
     assert( run_guest( &run ) == STATUS_SUCCESS );
     for (i = 0; i < 8; i++) assert( engine_state_seen.mmx[i] == 0xd000 + i );
     engine_probe_read = engine_probe_native = 0;
+
+    assert( !suspend_calls );
+    main_doorbell = 1;
+    engine_status = STATUS_TIMEOUT;
+    assert( run_guest( &run ) == STATUS_TIMEOUT );
+    assert( suspend_calls == 1 && !main_doorbell );
+    engine_status = STATUS_EMULATION_SYSCALL;
+    assert( run_guest( &run ) == STATUS_SUCCESS );
+    assert( engine_seen.Rip == 0x100009000ull );
+    for (i = 0; i < 8; i++) assert( engine_state_seen.mmx[i] == 0xa000 + i );
+    assert( suspend_calls == 1 );
 }}
 
 static void test_notifications(void)
@@ -481,7 +509,7 @@ static void test_thread_ownership(void)
     engine_status = STATUS_EMULATION_SYSCALL;
     engine_replace_state = FALSE;
     assert( run_guest( &run ) == STATUS_SUCCESS );
-    assert( engine_state_seen.mmx[0] == 0xd000 );
+    assert( engine_state_seen.mmx[0] == 0xa000 );
 
     term.object = remote.token;
     term.handle = (ULONG_PTR)NtCurrentThread();
@@ -521,7 +549,7 @@ int main(void)
     test_notifications();
     test_thread_ownership();
     free( native_bitmap );
-    puts( "ARM64EC Box64 Unix bridge: ABI, ownership, contexts, exits and invalidation passed" );
+    puts( "ARM64EC Box64 Unix bridge: ABI, ownership, contexts, suspension, exits and invalidation passed" );
     return 0;
 }}
 '''
@@ -533,7 +561,7 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-arm64ec-unix-') as tmp:
     c.write_text(fixture)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-g', '-O1', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter',
-                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-pthread',
+                    '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer', '-pthread',
                     '-I' + str(root / 'include'), '-I' + str(root / 'dlls/ntdll/unix'),
                     '-I' + str(root), str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

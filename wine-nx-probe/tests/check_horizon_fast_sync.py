@@ -29,6 +29,7 @@ types = "".join(definition("horizon_" + name, True) for name in (
     "query_mutex_request", "query_mutex_reply", "release_semaphore_request", "release_semaphore_reply",
     "query_semaphore_request", "query_semaphore_reply"))
 fixture = r'''
+#define HORIZON_STANDALONE_SYNTAX
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>

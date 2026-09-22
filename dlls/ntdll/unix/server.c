@@ -1012,6 +1012,16 @@ NTSTATUS WINAPI NtContinueEx( CONTEXT *context, KCONTINUE_ARGUMENT *args )
     NTSTATUS status;
     BOOL alertable;
 
+#ifdef __SWITCH__
+    if (horizon_suspend_pending && context &&
+        (context->ContextFlags & CONTEXT_ARM64_FULL) == CONTEXT_ARM64_FULL && is_arm64ec() &&
+        !NtCurrentTeb()->ChpeV2CpuAreaInfo->InSimulation &&
+        !NtCurrentTeb()->ChpeV2CpuAreaInfo->InSyscallCallback)
+    {
+        horizon_suspend_pending = 0;
+        wait_suspend( context );
+    }
+#endif
     if ((UINT_PTR)args > 0xff)
         alertable = args->ContinueFlags & KCONTINUE_FLAG_TEST_ALERT;
     else

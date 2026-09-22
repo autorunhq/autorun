@@ -81,7 +81,6 @@ static Result svcQueryMemory(MemoryInfo *info, u32 *page_info, u64 cursor) {
   if (query_error == 5) *info = (MemoryInfo){0, cursor, 0};
   return 0;
 }
-static void wine_nx_runtime_trace(const char *message) { assert(strstr(message, "[TLS]")); }
 '''
 tests = r'''
 static Result create(Handle *handle) {
