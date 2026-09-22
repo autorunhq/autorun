@@ -150,10 +150,6 @@ struct file_id
 
 #define HASH_MAP_SIZE 32
 static LIST_ENTRY hash_table[HASH_MAP_SIZE];
-#ifdef __WINE_PE_BUILD
-/* Switch bootstrap resolves this export; never depend on PE link offsets. */
-LIST_ENTRY *wine_nx_pe_hash_table = hash_table;
-#endif
 
 /* internal representation of loaded modules */
 typedef struct _wine_modref
@@ -4239,6 +4235,25 @@ failed:
     return NULL;  /* unreached */
 }
 
+#ifdef __WINE_PE_BUILD
+void CDECL wine_nx_init_loader_indexes(void)
+{
+    LIST_ENTRY *head = &NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList;
+    LIST_ENTRY *entry;
+    unsigned int i;
+
+    for (i = 0; i < HASH_MAP_SIZE; i++) InitializeListHead( &hash_table[i] );
+    for (entry = head->Flink; entry != head; entry = entry->Flink)
+    {
+        LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
+
+        InsertTailList( &hash_table[hash_basename( &mod->BaseDllName )], &mod->HashLinks );
+        rtl_rb_tree_put( &base_address_index_tree, mod->DllBase, &mod->BaseAddressIndexNode, base_address_compare );
+        register_module_exception_directory( mod->DllBase );
+    }
+}
+#endif
+
 #ifdef __SWITCH__
 static WINE_MODREF *wine_nx_main_module;
 static BOOL wine_nx_loader_ready;
@@ -4271,7 +4286,7 @@ static void wine_nx_patch_ntdll_dispatchers(void)
     void **syscall_dispatcher;
     void **unix_call_dispatcher;
     void **pe_teb, **pe_user_shared_data;
-    LIST_ENTRY **pe_hash_table_export;
+    void *init_loader_indexes;
     unixlib_handle_t *unixlib_handle;
 
     if (patched) return;
@@ -4291,10 +4306,10 @@ static void wine_nx_patch_ntdll_dispatchers(void)
     unixlib_handle = RtlFindExportedRoutineByName( ntdll->ldr.DllBase, "__wine_unixlib_handle" );
     pe_teb = RtlFindExportedRoutineByName( ntdll->ldr.DllBase, "wine_nx_pe_teb" );
     pe_user_shared_data = RtlFindExportedRoutineByName( ntdll->ldr.DllBase, "wine_nx_user_shared_data" );
-    pe_hash_table_export = RtlFindExportedRoutineByName( ntdll->ldr.DllBase, "wine_nx_pe_hash_table" );
-    if (!pe_hash_table_export || !*pe_hash_table_export)
+    init_loader_indexes = RtlFindExportedRoutineByName( ntdll->ldr.DllBase, "wine_nx_init_loader_indexes" );
+    if (!init_loader_indexes)
     {
-        wine_nx_trace( "[LDR] missing wine_nx_pe_hash_table; use the matching rebuilt ntdll.dll" );
+        wine_nx_trace( "[LDR] missing wine_nx_init_loader_indexes; use the matching rebuilt ntdll.dll" );
         NtTerminateProcess( NtCurrentProcess(), STATUS_INVALID_IMAGE_FORMAT );
         return;
     }
@@ -4450,64 +4465,23 @@ static void wine_nx_patch_ntdll_dispatchers(void)
         }
     }
 
-    /* Initialize PE ntdll's `hash_table` (32 LIST_ENTRY buckets used by
-     * find_basename_module / LdrGetDllHandle to look up loaded modules by
-     * basename). LdrInitializeThunk normally InitializeListHead's each
-     * bucket and alloc_module InsertTailList's each loaded module into it.
-     * We bypass that path entirely. Without this both win32u DllMain (and
-     * anything else calling LdrGetDllHandle) faults.
-     *
-     * We also must use the SAME hash function PE ntdll uses (X65599 with
-     * case-insensitive folding) — the shim RtlHashUnicodeString in
-     * ntdll_pe_compat.c uses DJB2, which would index different buckets and
-     * leave lookups missing.
-     *
-     * The table pointer is exported by the matching PE ntdll. */
+    /* Adopt the bootstrap modules before running their PE entry points. */
     {
-        LIST_ENTRY *pe_hash_table = *pe_hash_table_export;
-        PEB *peb_local = NtCurrentTeb()->Peb;
-        LIST_ENTRY *head, *cursor;
-        unsigned int i, inserted = 0;
+        uintptr_t teb_val = (uintptr_t)NtCurrentTeb();
 
-        for (i = 0; i < 32; i++)
-        {
-            pe_hash_table[i].Flink = &pe_hash_table[i];
-            pe_hash_table[i].Blink = &pe_hash_table[i];
-        }
-
-        if (peb_local && peb_local->LdrData)
-        {
-            head = &peb_local->LdrData->InLoadOrderModuleList;
-            for (cursor = head->Flink; cursor && cursor != head; cursor = cursor->Flink)
-            {
-                LDR_DATA_TABLE_ENTRY *mod = CONTAINING_RECORD( cursor, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks );
-                ULONG hash = 0;
-                USHORT j, char_count = mod->BaseDllName.Length / sizeof(WCHAR);
-                LIST_ENTRY *bucket;
-
-                /* X65599 hash with simple ASCII upper-case folding (all our
-                 * loaded DLL basenames are ASCII). Matches real RtlHashUnicodeString
-                 * with HASH_STRING_ALGORITHM_DEFAULT + case_insensitive=TRUE. */
-                for (j = 0; j < char_count; j++)
-                {
-                    WCHAR c = mod->BaseDllName.Buffer[j];
-                    if (c >= 'a' && c <= 'z') c -= 0x20;
-                    hash = hash * 65599 + c;
-                }
-                bucket = &pe_hash_table[hash % 32];
-
-                /* Re-link mod->HashLinks into PE bucket. This corrupts our
-                 * unix-side hash_table (where this entry was previously linked),
-                 * but nothing walks unix-side hash_table after dispatcher patch. */
-                mod->HashLinks.Flink = bucket->Flink;
-                mod->HashLinks.Blink = bucket;
-                bucket->Flink->Blink = &mod->HashLinks;
-                bucket->Flink = &mod->HashLinks;
-                inserted++;
-            }
-        }
-        wine_nx_trace( "[LDR] PE ntdll hash_table initialized (32 buckets at %p, %u modules inserted)",
-                       pe_hash_table, inserted );
+        __asm__ volatile(
+            "mov x16, %[func]\n\t"
+            "mov x17, %[teb]\n\t"
+            "str x18, [sp, #-16]!\n\t"
+            "mov x18, x17\n\t"
+            "blr x16\n\t"
+            "ldr x18, [sp], #16\n\t"
+            :
+            : [func] "r"(init_loader_indexes), [teb] "r"(teb_val)
+            : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
+              "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
+              "x30", "memory", "cc" );
+        wine_nx_trace( "[LDR] PE ntdll loader indexes initialized" );
     }
 }
 
@@ -4575,12 +4549,13 @@ NTSTATUS wine_nx_loader_bootstrap( const UNICODE_STRING *main_nt_name )
 }
 
 /* Load only native modules here. The x86 ntdll loader owns guest imports/TLS. */
-NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize )
+NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize, BOOL fex )
 {
-    static const WCHAR *names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll", L"winebox64.dll" };
+    const WCHAR *names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll",
+                            fex ? L"libwow64fex.dll" : L"winebox64.dll" };
     WINE_MODREF *loaded[ARRAY_SIZE(names)];
     NTSTATUS status = STATUS_SUCCESS;
-    ULONG *cpu_backend;
+    const WCHAR **cpu_dll;
     unsigned int i;
     if (!wine_nx_loader_ready || !NtCurrentTeb()->WowTebOffset) return STATUS_INVALID_PARAMETER;
     RtlEnterCriticalSection( &loader_section );
@@ -4621,12 +4596,12 @@ NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize 
                 *prepare = prepare_fn;
             }
         }
-        cpu_backend = RtlFindExportedRoutineByName( loaded[1]->ldr.DllBase, "__wine_switch_cpu_backend" );
-        if (!cpu_backend) status = STATUS_PROCEDURE_NOT_FOUND;
+        cpu_dll = RtlFindExportedRoutineByName( loaded[1]->ldr.DllBase, "__wine_switch_cpu_dll" );
+        if (!cpu_dll) status = STATUS_PROCEDURE_NOT_FOUND;
         if (!status)
         {
-            *cpu_backend = IMAGE_FILE_MACHINE_I386;
-            wine_nx_trace( "[WOW64] selected winebox64.dll through native bootstrap" );
+            *cpu_dll = names[3];
+            wine_nx_trace( "[WOW64] selected %s", fex ? "libwow64fex.dll" : "winebox64.dll" );
         }
     }
     RtlLeaveCriticalSection( &loader_section );

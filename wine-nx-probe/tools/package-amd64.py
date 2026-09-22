@@ -14,6 +14,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 from dxvk_payload import DLLS as DXVK_DLLS, validate_payload
 from vkd3d_payload import DLLS as VKD3D_DLLS, validate_payload as validate_vkd3d_payload
+from fex_payload import DLLS as FEX_DLLS, validate_payload as validate_fex_payload
 
 probe = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -25,6 +26,7 @@ parser.add_argument('--minimal', action='store_true', help='Only console smoke-t
 parser.add_argument('--vulkan', action='store_true', help='Include Vulkan DLLs for a mesa-switch runtime')
 parser.add_argument('--dxvk', type=Path, help='AMD64 payload produced by tools/build-dxvk.py (requires --vulkan)')
 parser.add_argument('--vkd3d', type=Path, help='AMD64 payload produced by tools/build-vkd3d.py (requires --dxvk)')
+parser.add_argument('--fex', type=Path, help='ARM64EC and WoW64 payload produced by build-fex.sh')
 parser.add_argument('--interpreter-nro', type=Path, help='Include an interpreter-only diagnostic NRO')
 args = parser.parse_args()
 if args.vulkan and args.minimal:
@@ -35,6 +37,7 @@ if args.vkd3d and not args.dxvk:
     parser.error('--vkd3d requires --dxvk for DXGI')
 dxvk_manifest = validate_payload(args.dxvk) if args.dxvk else None
 vkd3d_manifest = validate_vkd3d_payload(args.vkd3d) if args.vkd3d else None
+fex_manifest = validate_fex_payload(args.fex) if args.fex else None
 pe, build = args.pe.resolve(), args.build.resolve()
 env = os.environ.copy()
 if env.get('WINE_NX_LLVM_MINGW'):
@@ -51,11 +54,15 @@ cache = dict(re.findall(r'^([^#/:\n][^:\n]*):[^=\n]+=(.*)$', cache_path.read_tex
 enabled = lambda name: cache.get(name, '').upper() in ('ON', 'TRUE', 'YES', '1')
 if not enabled('WINE_NX_AMD64'):
     parser.error('The NRO must be built with WINE_NX_AMD64=ON')
+if bool(args.fex) != enabled('WINE_NX_FEX'):
+    parser.error('--fex must match the NRO FEX build configuration')
 if args.vulkan != bool(cache.get('WINE_NX_MESA_SWITCH_DIR')):
     parser.error('--vulkan must match the NRO mesa-switch build configuration')
 nro = build / 'wine-nx-runtime.nro'
 if not nro.is_file() or nro.read_bytes()[16:20] != b'NRO0':
     parser.error('Missing or invalid wine-nx-runtime.nro')
+if args.fex and b'FEX-2609' not in nro.read_bytes():
+    parser.error('The NRO has no FEX launch support; rebuild it first')
 if args.vkd3d and b'[VKD3D] payload' not in nro.read_bytes():
     parser.error('The NRO has no VKD3D launch support; rebuild it first')
 lsfg_revision = None
@@ -262,6 +269,13 @@ if args.vkd3d:
                             if module_name(name) not in DXVK_DLLS + VKD3D_DLLS})
 prebuild(native_seeds, 'aarch64')
 native = stage_closure(native_seeds, 'aarch64', 'system32')
+if args.fex:
+    destination = stage / 'drive_c/windows/system32'
+    for name in FEX_DLLS:
+        shutil.copy2(args.fex / name, destination / name)
+    validate_external_imports([destination / name for name in FEX_DLLS],
+                              {name: destination / name for name in native})
+    native.update(FEX_DLLS)
 prebuild(common, 'i386')
 guest = stage_closure(common, 'i386', 'syswow64')
 if not args.minimal:
@@ -368,6 +382,10 @@ if args.vulkan:
 shutil.copy2(probe / 'AMD64.md', stage / 'AMD64-README.md')
 licenses = stage / 'licenses'
 licenses.mkdir()
+if args.fex:
+    shutil.copy2(args.fex / 'fex-manifest.json', stage / 'fex-manifest.json')
+    for name in fex_manifest['licenses']:
+        shutil.copy2(args.fex / 'licenses' / name, licenses / name)
 if lsfg_revision:
     shutil.copy2(probe / 'vendor/lsfg-vk/LICENSE.md', licenses / 'LSFG-VK-GPL-3.0.txt')
     shutil.copy2(probe / 'lsfg/README.md', stage / 'LSFG-README.md')
@@ -430,11 +448,12 @@ manifest = {
     'hardware_verified': False,
     'features': {'amd64': True, 'dynarec': enabled('WINE_NX_BOX64_DYNAREC'),
                  'vulkan': args.vulkan, 'dxvk': bool(args.dxvk), 'vkd3d': bool(args.vkd3d),
-                 'lsfg': bool(lsfg_revision),
+                 'lsfg': bool(lsfg_revision), 'fex': bool(args.fex),
                  'interpreter_fallback': bool(args.interpreter_nro)},
     'mesa_switch': mesa_revision,
     'dxvk': dxvk_manifest,
     'vkd3d': vkd3d_manifest,
+    'fex': fex_manifest,
     'lsfg': {'repository': 'https://git.lsfg-vk.dev/lsfg-vk-archive.git',
              'revision': lsfg_revision,
              'patch_sha256': hashlib.sha256((probe / 'lsfg/horizon.patch').read_bytes()).hexdigest()}
@@ -447,6 +466,8 @@ manifest = {
 archive = build / ('wine-nx-amd64-box64-mesa-dxvk-vkd3d.zip' if args.vkd3d else
                    'wine-nx-amd64-box64-mesa-dxvk.zip' if args.dxvk else
                    'wine-nx-amd64-box64-mesa-vulkan.zip' if args.vulkan else 'wine-nx-amd64-box64.zip')
+if args.fex:
+    archive = archive.with_name(archive.name.replace('-box64', '-box64-fex'))
 with ZipFile(archive, 'w', ZIP_DEFLATED) as output:
     for path in sorted(stage.rglob('*')):
         if path.is_file() and path.suffix != '.log':

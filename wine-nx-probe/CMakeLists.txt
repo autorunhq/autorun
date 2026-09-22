@@ -759,6 +759,10 @@ endif()
 option(WINE_NX_BOX64_INTERPRETER "Build the Box64 interpreter adapter" OFF)
 option(WINE_NX_BOX64_DYNAREC "Use the ARM64 dynarec in the Box64 adapter" OFF)
 option(WINE_NX_AMD64 "Enable AMD64 applications through Wine ARM64EC and Box64" OFF)
+option(WINE_NX_FEX "Enable the Horizon FEX WoW64 and ARM64EC backends" OFF)
+if(WINE_NX_FEX AND NOT WINE_NX_AMD64)
+    message(FATAL_ERROR "WINE_NX_FEX requires WINE_NX_AMD64")
+endif()
 if(WINE_NX_AMD64 AND NOT (WINE_NX_BOX64_INTERPRETER OR WINE_NX_BOX64_DYNAREC))
     message(FATAL_ERROR "WINE_NX_AMD64 requires WINE_NX_BOX64_INTERPRETER or WINE_NX_BOX64_DYNAREC")
 endif()
@@ -782,6 +786,13 @@ if(WINE_NX_AMD64)
     target_compile_definitions(wine-virtual-real PRIVATE WINE_NX_AMD64)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_AMD64)
 endif()
+if(WINE_NX_FEX)
+    target_sources(wine-nx-runtime PRIVATE source/fex_jit.c source/fex_unix.c source/fex_context.S source/fex_exceptions.c)
+    set_source_files_properties(source/fex_unix.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
+    target_compile_definitions(wine-virtual-real PRIVATE WINE_NX_FEX)
+    target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_FEX)
+    target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=__libnx_exception_entry")
+endif()
 
 target_compile_definitions(wine-nx-runtime PRIVATE ${WINE_SWITCH_NTDLL_DEFS})
 
@@ -796,7 +807,9 @@ target_compile_options(wine-nx-runtime PRIVATE
 
 target_include_directories(wine-nx-runtime PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES})
 
-target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections)
+target_sources(wine-nx-runtime PRIVATE source/horizon_virtmem.c)
+target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
+    -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation)
 
 # freetype (+ its deps) for win32u font rendering; nx last for the libnx syscalls
 find_library(SWITCH_FREETYPE freetype HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")

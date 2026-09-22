@@ -30,6 +30,7 @@ extern int horizon_get_kernel_regions( void **starts, size_t *sizes, int max );
 /* Logs the kernel's view of the low 4 GB once: megabytes per memory type and the largest free ranges. */
 extern void horizon_log_low_address_space( void );
 extern BOOL horizon_get_stack_region( void **start, void **limit );
+extern BOOL horizon_is_native_stack_range( const void *address, size_t size );
 /* Around re-protecting every view: the server's session views stay writable. */
 extern void horizon_lock_session_views( void );
 extern void horizon_unlock_session_views( void );

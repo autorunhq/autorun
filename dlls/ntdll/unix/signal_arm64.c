@@ -115,12 +115,27 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
 
 extern int horizon_capture_context( CONTEXT *context );
 
+static NTSTATUS check_current_thread_context_access( HANDLE handle, ACCESS_MASK access )
+{
+    OBJECT_BASIC_INFORMATION info;
+    NTSTATUS status;
+
+    if (handle == GetCurrentThread()) return STATUS_SUCCESS;
+    status = NtCompareObjects( handle, GetCurrentThread() );
+    if (status == STATUS_NOT_SAME_OBJECT) return STATUS_NOT_IMPLEMENTED;
+    if (status) return status;
+    status = NtQueryObject( handle, ObjectBasicInformation, &info, sizeof(info), NULL );
+    if (status) return status;
+    return (info.GrantedAccess & access) == access ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+}
+
 NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
 {
     WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    NTSTATUS status;
+
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
-    /* Remote threads require suspension and a synchronized emulator snapshot. */
-    if (handle != GetCurrentThread()) return STATUS_NOT_IMPLEMENTED;
+    if ((status = check_current_thread_context_access( handle, THREAD_SET_CONTEXT ))) return status;
     if (!cpu) return STATUS_INVALID_PARAMETER;
     return horizon_transfer_i386_context( cpu,
                                           get_cpu_area( IMAGE_FILE_MACHINE_I386 ),
@@ -130,8 +145,10 @@ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
 NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
 {
     WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    NTSTATUS status;
+
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
-    if (handle != GetCurrentThread()) return STATUS_NOT_IMPLEMENTED;
+    if ((status = check_current_thread_context_access( handle, THREAD_GET_CONTEXT ))) return status;
     if (!cpu) return STATUS_INVALID_PARAMETER;
     return horizon_transfer_i386_context( cpu,
                                           get_cpu_area( IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
@@ -203,6 +220,7 @@ NTSTATUS call_user_exception_dispatcher( EXCEPTION_RECORD *rec, CONTEXT *context
     resume = *context;
     resume.Sp = stack;
     resume.Pc = (ULONG_PTR)pKiUserExceptionDispatcher;
+    resume.X18 = (ULONG_PTR)NtCurrentTeb();
     return signal_set_full_context( &resume );
 }
 

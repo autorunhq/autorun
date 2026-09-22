@@ -45,6 +45,10 @@ python3 "$root/wine-nx-probe/tests/check_horizon_va_search.py"
 python3 "$root/wine-nx-probe/tests/check_horizon_guest_reserve.py"
 python3 "$root/wine-nx-probe/tests/check_horizon_reservation_transition.py"
 python3 "$root/wine-nx-probe/tests/check_horizon_reservation_bounds.py"
+python3 "$root/wine-nx-probe/tests/check_horizon_thread_tls.py"
+"${CC:-clang}" $flags -pthread -I"$root/wine-nx-probe/tests/horizon_virtmem" \
+    "$root/wine-nx-probe/tests/horizon_virtmem.c" -o "$build/virtmem"
+"$build/virtmem"
 python3 "$root/wine-nx-probe/tests/check_commit_chunks.py"
 python3 "$root/wine-nx-probe/tests/check_waitable_timer.py"
 "${CC:-clang}" $flags -D__WINESRC__ -DWINE_UNIX_LIB -D_WIN64 \

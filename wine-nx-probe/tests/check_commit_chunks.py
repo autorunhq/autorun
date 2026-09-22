@@ -39,7 +39,7 @@ typedef int BOOL;
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define horizon_trace(...) ((void)0)
 
-enum horizon_section_state { SECTION_NONE, SECTION_ALIASED, SECTION_HOLE, SECTION_ANCHOR };
+enum horizon_section_state { SECTION_NONE, SECTION_ALIASED, SECTION_HOLE, SECTION_ANCHOR, SECTION_NATIVE };
 struct horizon_mapping
 {
     void *addr;

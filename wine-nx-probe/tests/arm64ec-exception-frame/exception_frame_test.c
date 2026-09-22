@@ -18,6 +18,7 @@ typedef void *HANDLE;
 #define STATUS_PARTIAL_COPY      ((NTSTATUS)0x8000000d)
 #define CONTEXT_ARM64_FULL       0x00400007
 #define NtCurrentProcess()       ((HANDLE)(uintptr_t)-1)
+#define NtCurrentTeb()           ((void *)(uintptr_t)0x77770000)
 #define C_ASSERT(e)              _Static_assert((e), #e)
 #define X18 X[18]
 
@@ -278,7 +279,7 @@ static void test_exception_frame(void)
     report( "exception-frame-dispatch", call_user_exception_dispatcher( &record, &context ) == STATUS_UNSUCCESSFUL &&
             write_count == 1 && writes[0].address == (void *)frame && writes[0].size == 0x470 &&
             continue_count == 1 && continued.Pc == (uintptr_t)pKiUserExceptionDispatcher &&
-            continued.Sp == frame );
+            continued.Sp == frame && continued.X18 == (uintptr_t)NtCurrentTeb() );
     memcpy( &context_ex, writes[0].data + 0x390, sizeof(context_ex) );
     report( "exception-frame-offsets", !memcmp( writes[0].data, &context, sizeof(context) ) &&
             !memcmp( writes[0].data + 0x3b0, &record, sizeof(record) ) &&

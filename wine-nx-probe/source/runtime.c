@@ -33,6 +33,12 @@
 #include "std_stream_lines.h"
 #include "thread_profile.h"
 #include "dxvk_releases.h"
+#ifdef WINE_NX_FEX
+#include "fex_jit.h"
+int wine_nx_fex_active;
+extern int wine_nx_fex_exception_attach(void);
+extern void wine_nx_fex_exception_detach(void);
+#endif
 #ifdef WINE_NX_MESA_SWITCH
 #include "graphics_config.h"
 #endif
@@ -69,7 +75,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_DIR  RUNTIME_DIR "/config"
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
-#ifdef WINE_NX_AMD64
+#ifdef WINE_NX_FEX
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
+#elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-223"
@@ -419,6 +427,7 @@ int wine_nx_runtime_verbose;
  * containing 1, which the launcher's X toggles like Y does verbose.txt. */
 static int runtime_profile;
 static int runtime_dxvk;
+static int runtime_fex;
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
 static char runtime_dxvk_version[32];
@@ -2199,7 +2208,7 @@ static int launcher_machine( const char *path, unsigned short *machine )
 #ifdef WINE_NX_BOX64_INTERPRETER
 extern NTSTATUS wine_nx_init_wow64_peb( RTL_USER_PROCESS_PARAMETERS *, void * );
 extern NTSTATUS wine_nx_prepare_wow64_ntdll( HMODULE, HMODULE );
-extern NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *, void ** );
+extern NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *, void **, BOOL );
 
 static void *runtime_wow64_initialize;
 extern void (*wine_nx_wow64_thread_start)( PRTL_THREAD_START_ROUTINE, void *, BOOL, TEB * );
@@ -2254,7 +2263,7 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
     status = wine_nx_loader_bootstrap( main_nt_name );
     log_line( "[WOW64] native loader bootstrap status=%08x", status );
     if (status) return status;
-    status = wine_nx_loader_prepare_wow64( &native, &initialize );
+    status = wine_nx_loader_prepare_wow64( &native, &initialize, runtime_fex );
     log_line( "[WOW64] native DLLs status=%08x", status );
     if (status) return status;
     status = map_pe_image( WINE_DRIVE_C "/windows/syswow64/ntdll.dll", (void **)&guest, &size );
@@ -2344,7 +2353,9 @@ static NTSTATUS runtime_create_registry_path( const char *path, HANDLE *key )
 static NTSTATUS runtime_prepare_arm64ec(void)
 {
     static const char key_path[] = "\\Registry\\Machine\\Software\\Microsoft\\Wow64\\amd64";
-    static const WCHAR cpu_name[] = {'w','i','n','e','b','o','x','6','4','e','c','.','d','l','l',0};
+    WCHAR cpu_name[32];
+    const char *cpu_module = runtime_fex ? "libarm64ecfex.dll" : "winebox64ec.dll";
+    unsigned int i;
     UNICODE_STRING value = {0};
     HMODULE ntdll = NULL;
     HANDLE key;
@@ -2356,7 +2367,9 @@ static NTSTATUS runtime_prepare_arm64ec(void)
     status = runtime_create_registry_path( key_path, &key );
     log_line( "[AMD64] CPU registry status=%08x", status );
     if (status) return status;
-    status = NtSetValueKey( key, &value, 0, REG_SZ, cpu_name, sizeof(cpu_name) );
+    for (i = 0; cpu_module[i]; i++) cpu_name[i] = cpu_module[i];
+    cpu_name[i] = 0;
+    status = NtSetValueKey( key, &value, 0, REG_SZ, cpu_name, (i + 1) * sizeof(WCHAR) );
     NtClose( key );
     if (status) return status;
 
@@ -3056,6 +3069,14 @@ static int return_to_launcher( void )
                       joined, memory_left_behind( 0 ) );
         }
     }
+#ifdef WINE_NX_FEX
+    if (wine_nx_fex_active)
+    {
+        size_t retained = wine_nx_fex_jit_release();
+        wine_nx_fex_exception_detach();
+        log_line( "[FEX] code memory retained at exit: %zu bytes", retained );
+    }
+#endif
     socketExit();
     stop_log_flusher();
     {
@@ -3548,6 +3569,7 @@ int main( int argc, char **argv )
 
         runtime_dxvk = 0;
         runtime_dxvk_hud = 0;
+        runtime_fex = 0;
         horizon_fast_sync_enabled = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
@@ -3563,6 +3585,7 @@ int main( int argc, char **argv )
         {
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
+            runtime_fex = settings.fex;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
@@ -3629,6 +3652,32 @@ int main( int argc, char **argv )
         park_forever();
     }
     main_image_info.Machine = target_machine;
+    if (runtime_fex)
+    {
+#ifdef WINE_NX_FEX
+        const char *cpu_module = target_machine == IMAGE_FILE_MACHINE_AMD64 ?
+                                 WINE_SYSTEM_DIR "/libarm64ecfex.dll" :
+                                 WINE_SYSTEM_DIR "/libwow64fex.dll";
+
+        if ((target_machine != IMAGE_FILE_MACHINE_AMD64 && target_machine != IMAGE_FILE_MACHINE_I386) ||
+            access( cpu_module, R_OK ))
+        {
+            log_line( "[FAIL] FEX CPU module missing or unsupported target: %04x (%s)", target_machine, cpu_module );
+            return return_to_launcher();
+        }
+        if (wine_nx_fex_exception_attach())
+        {
+            log_line( "[FAIL] FEX exception setup failed" );
+            return return_to_launcher();
+        }
+        wine_nx_fex_active = 1;
+#else
+        log_line( "[FAIL] this runtime was built without FEX" );
+        return return_to_launcher();
+#endif
+    }
+    log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
+                         runtime_fex ? "FEX-2609" : "Box64" );
 #ifdef WINE_NX_AMD64
     if (target_machine == IMAGE_FILE_MACHINE_AMD64)
     {

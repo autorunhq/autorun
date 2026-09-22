@@ -1067,13 +1067,20 @@ extern const unixlib_entry_t wine_nx_winebox64_unix_funcs[];
 #ifdef WINE_NX_AMD64
 extern const unixlib_entry_t wine_nx_winebox64ec_unix_funcs[];
 #endif
+#ifdef WINE_NX_FEX
+extern const unixlib_entry_t wine_nx_fex_unix_funcs[];
+#endif
 
 static const struct
 {
-    const WCHAR  name[16];   /* lowercase PE basename incl. .dll, NUL-terminated */
+    const WCHAR  name[24];   /* lowercase PE basename incl. .dll, NUL-terminated */
     const void  *funcs;
 } wine_nx_static_unix_libs[] =
 {
+#ifdef WINE_NX_FEX
+    { {'l','i','b','a','r','m','6','4','e','c','f','e','x','.','d','l','l',0}, wine_nx_fex_unix_funcs },
+    { {'l','i','b','w','o','w','6','4','f','e','x','.','d','l','l',0}, wine_nx_fex_unix_funcs },
+#endif
 #ifdef WINE_NX_BOX64_INTERPRETER
     { {'w','i','n','e','b','o','x','6','4','.','d','l','l',0}, wine_nx_winebox64_unix_funcs },
 #endif
@@ -2514,6 +2521,35 @@ static void commit_arm64ec_map( struct file_view *view )
     view->protect |= VPROT_ARM64EC;
     set_vprot( arm64ec_view, base, size, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED );
 }
+
+#if defined(__SWITCH__) && defined(WINE_NX_FEX)
+NTSTATUS wine_nx_set_fex_code_range( void *base, SIZE_T size, BOOL enable )
+{
+    sigset_t sigset;
+    NTSTATUS status = STATUS_SUCCESS;
+    SIZE_T start, end, map_size;
+    void *map_base;
+
+    if (!size || ((ULONG_PTR)base & page_mask) || (size & page_mask) ||
+        (ULONG_PTR)base > ~(ULONG_PTR)0 - size) return STATUS_INVALID_PARAMETER;
+    if (!is_arm64ec()) return STATUS_SUCCESS;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    start = ((ULONG_PTR)base >> page_shift) / 8;
+    end = (((ULONG_PTR)base + size - 1) >> page_shift) / 8;
+    if (!arm64ec_view || end >= arm64ec_view->size) status = STATUS_INVALID_ADDRESS;
+    else
+    {
+        map_base = ROUND_ADDR( (char *)arm64ec_view->base + start, page_mask );
+        map_size = ROUND_SIZE( start, end + 1 - start, page_mask );
+        if (!set_vprot( arm64ec_view, map_base, map_size, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED ))
+            status = STATUS_NO_MEMORY;
+        else if (enable) set_arm64ec_range( base, size );
+        else clear_arm64ec_range( base, size );
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return status;
+}
+#endif
 
 
 /***********************************************************************
@@ -4438,21 +4474,16 @@ static void horizon_reserve_guest_address_space(void)
         wine_nx_runtime_trace( "[VA] early guest reservations disabled: native stack region unavailable" );
         return;
     }
-    /* Native thread stacks can only be placed in this region, since
-     * virtmemFindStack searches it alone, so leave a window at its top for
-     * them and for the code memory the dynarec maps. Build 103 reserved the
-     * whole region and no native worker thread could start. Both are placed
-     * at random with 0x200 attempts, so the window does not have to be empty:
-     * 96 threads, all Horizon allows, take a megabyte of kernel stack each,
-     * and the code arenas are bounded. A region too small keeps half. */
+    /* Keep room for native stacks and code aliases outside guest reservations. */
     stack_room = min( HORIZON_NATIVE_STACKS, ((ULONG_PTR)stack_end - (ULONG_PTR)stack_start) / 2 );
     window_start = (char *)ROUND_ADDR( (ULONG_PTR)stack_end - stack_room, granularity_mask );
     /* horizon.c places section anchors in here itself rather than asking
      * libnx, whose search picks addresses at random. */
     horizon_native_window_start = window_start;
     horizon_native_window_end = stack_end;
-    snprintf( msg, sizeof(msg), "[VA] native stack region %p-%p; window for native mappings %p-%p",
-              stack_start, stack_end, window_start, stack_end );
+    snprintf( msg, sizeof(msg), "[VA] native stack region %p-%p; window for native mappings %p-%p; stacks %s",
+              stack_start, stack_end, window_start, stack_end,
+              (uintptr_t)stack_end <= 0x100000000ULL ? "compact" : "ASLR" );
     wine_nx_runtime_trace( msg );
     for (range = free_ranges; range != free_ranges_end; range++)
     {
@@ -5872,6 +5903,10 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
     size_t i;
     char *addr = ROUND_ADDR( base, host_page_mask );
 
+#ifdef __SWITCH__
+    /* libnx owns the native stack; it has no Wine page-protection entries. */
+    if (horizon_is_native_stack_range( base, size )) return STATUS_SUCCESS;
+#endif
     size = ROUND_SIZE( base, size, host_page_mask );
     for (i = 0; i < size; i += host_page_size)
     {

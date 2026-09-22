@@ -317,17 +317,41 @@ with tempfile.TemporaryDirectory(prefix='autorun-amd64-merge-') as temp:
     for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
         (runtime / name).write_text('keep\n')
     archive = temp / 'amd64.zip'
-    manifest = {'features': {name: True for name in
-                ('amd64', 'dynarec', 'vulkan', 'dxvk', 'vkd3d', 'lsfg')}}
-    with ZipFile(archive, 'w') as z:
-        z.writestr('switch/wine/build-manifest.json', json.dumps(manifest))
-        z.writestr('switch/wine/wine-nx-runtime.nro', b'NRO0 nx-amd64-box64-3\0')
-        z.writestr('switch/wine/drive_c/windows/system32/winebox64ec.dll', b'cpu')
-        z.writestr('switch/wine/drive_c/dxvk64/dxgi.dll', b'dxvk')
-        z.writestr('switch/wine/drive_c/vkd3d64/d3d12.dll', b'vkd3d')
-    assert autorun_namespace['merge_amd64'](archive, stage) == '3'
-    assert (runtime / 'drive_c/dxvk64/dxgi.dll').read_bytes() == b'dxvk'
-    for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
-        assert (runtime / name).read_text() == 'keep\n'
+    def make_archive(fex, missing=None):
+        manifest = {'features': {name: True for name in
+                    ('amd64', 'dynarec', 'vulkan', 'dxvk', 'vkd3d', 'lsfg')}}
+        manifest['features']['fex'] = fex
+        marker = 'fex-2609' if fex else 'box64-3'
+        with ZipFile(archive, 'w') as z:
+            z.writestr('switch/wine/build-manifest.json', json.dumps(manifest))
+            z.writestr('switch/wine/wine-nx-runtime.nro', f'NRO0 nx-amd64-{marker}\0'.encode())
+            z.writestr('switch/wine/drive_c/windows/system32/winebox64ec.dll', b'cpu')
+            if fex:
+                for dll in ('libarm64ecfex.dll', 'libwow64fex.dll'):
+                    if dll != missing:
+                        z.writestr(f'switch/wine/drive_c/windows/system32/{dll}', b'fex')
+            z.writestr('switch/wine/drive_c/dxvk64/dxgi.dll', b'dxvk')
+            z.writestr('switch/wine/drive_c/vkd3d64/d3d12.dll', b'vkd3d')
+            for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
+                z.writestr(f'switch/wine/{name}', 'replace\n')
+
+    for fex, expected in ((False, '3'), (True, 'fex-2609')):
+        make_archive(fex)
+        assert autorun_namespace['merge_amd64'](archive, stage) == expected
+        assert (runtime / 'drive_c/dxvk64/dxgi.dll').read_bytes() == b'dxvk'
+        if fex:
+            for dll in ('libarm64ecfex.dll', 'libwow64fex.dll'):
+                assert (runtime / 'drive_c/windows/system32' / dll).read_bytes() == b'fex'
+        for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
+            assert (runtime / name).read_text() == 'keep\n'
+
+    for dll in ('libarm64ecfex.dll', 'libwow64fex.dll'):
+        make_archive(True, missing=dll)
+        try:
+            autorun_namespace['merge_amd64'](archive, stage)
+        except AssertionError as error:
+            assert f'no FEX CPU module: {dll}' in str(error), error
+        else:
+            raise AssertionError(f'accepted a FEX package without {dll}')
 
 print('PASS: the Autorun package merges the complete AMD64 graphics runtime without replacing package settings')

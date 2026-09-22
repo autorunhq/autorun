@@ -755,9 +755,7 @@ static HMODULE load_64bit_module( const WCHAR *name )
  *           get_cpu_dll_name
  */
 #ifdef __aarch64__
-/* Explicit Switch bootstrap selection. Zero preserves Wine's normal registry
- * lookup/default; the native Switch loader sets this before process_init. */
-ULONG __wine_switch_cpu_backend;
+const WCHAR *__wine_switch_cpu_dll;
 #endif
 
 static const WCHAR *get_cpu_dll_name(void)
@@ -774,9 +772,8 @@ static const WCHAR *get_cpu_dll_name(void)
     {
     case IMAGE_FILE_MACHINE_I386:
 #ifdef __aarch64__
-        if (native_machine == IMAGE_FILE_MACHINE_ARM64 &&
-            __wine_switch_cpu_backend == IMAGE_FILE_MACHINE_I386)
-            return L"winebox64.dll";
+        if (native_machine == IMAGE_FILE_MACHINE_ARM64 && __wine_switch_cpu_dll)
+            return __wine_switch_cpu_dll;
 #endif
         RtlInitUnicodeString( &nameW, L"\\Registry\\Machine\\Software\\Microsoft\\Wow64\\x86" );
         ret = (native_machine == IMAGE_FILE_MACHINE_ARM64 ? L"libwow64fex.dll" : L"wow64cpu.dll");
@@ -930,8 +927,10 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
 /**********************************************************************
  *           thread_init
  */
-static void thread_init(void)
+static NTSTATUS thread_init(void)
 {
+    NTSTATUS status;
+
     NtCurrentTeb32()->WOW32Reserved = PtrToUlong( pBTCpuGetBopCode() );
     NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = wow64info;
     if (pBTCpuThreadInit) pBTCpuThreadInit();
@@ -944,7 +943,8 @@ static void thread_init(void)
             I386_CONTEXT *ctx_ptr, ctx = { CONTEXT_I386_FULL };
             ULONG *stack;
 
-            pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
+            if ((status = pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
+            if (ctx.Esp < sizeof(*ctx_ptr) + 5 * sizeof(*stack)) return STATUS_BAD_INITIAL_STACK;
             ctx_ptr = (I386_CONTEXT *)ULongToPtr( ctx.Esp ) - 1;
             *ctx_ptr = ctx;
             stack = (ULONG *)ctx_ptr;
@@ -955,7 +955,7 @@ static void thread_init(void)
             *(--stack) = 0xdeadbabe;
             ctx.Esp = PtrToUlong( stack );
             ctx.Eip = pLdrSystemDllInitBlock->pLdrInitializeThunk;
-            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
+            if ((status = pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
         }
         break;
 
@@ -963,21 +963,23 @@ static void thread_init(void)
         {
             ARM_CONTEXT *ctx_ptr, ctx = { CONTEXT_ARM_FULL };
 
-            pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
+            if ((status = pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
+            if ((ctx.Sp & ~15) < sizeof(*ctx_ptr)) return STATUS_BAD_INITIAL_STACK;
             ctx_ptr = (ARM_CONTEXT *)ULongToPtr( ctx.Sp & ~15 ) - 1;
             *ctx_ptr = ctx;
 
             ctx.R0 = PtrToUlong( ctx_ptr );
             ctx.Sp = PtrToUlong( ctx_ptr );
             ctx.Pc = pLdrSystemDllInitBlock->pLdrInitializeThunk;
-            pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
+            if ((status = pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
         }
         break;
 
     default:
         ERR( "not supported machine %x\n", current_machine );
-        NtTerminateProcess( GetCurrentProcess(), STATUS_INVALID_IMAGE_FORMAT );
+        return STATUS_INVALID_IMAGE_FORMAT;
     }
+    return STATUS_SUCCESS;
 }
 
 
@@ -1303,12 +1305,9 @@ NTSTATUS WINAPI Wow64KiUserCallbackDispatcher( ULONG id, void *args, ULONG len,
             ctx.Eip = pLdrSystemDllInitBlock->pKiUserCallbackDispatcher;
             pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
 
-            /* NtCallbackReturn is an internal non-local return to this frame. The
-             * Wine-NX backend crosses PE, Unix and generated-code frames, so an
-             * ARM64 unwind cannot reliably walk back to this callback frame. A
-             * NULL unwind frame makes ntdll restore the saved registers directly. */
+            /* Box64's native JIT frames require a register-only callback return. */
 #ifdef __aarch64__
-            if (__wine_switch_cpu_backend == IMAGE_FILE_MACHINE_I386)
+            if (__wine_switch_cpu_dll && !wcscmp( __wine_switch_cpu_dll, L"winebox64.dll" ))
             {
                 if (!wow64_setjmpex( frame.jmpbuf, NULL ))
                     cpu_simulate();
@@ -1366,9 +1365,14 @@ NTSTATUS WINAPI Wow64KiUserCallbackDispatcher( ULONG id, void *args, ULONG len,
 void WINAPI Wow64LdrpInitialize( CONTEXT *context )
 {
     static RTL_RUN_ONCE init_done;
+    NTSTATUS status;
 
     RtlRunOnceExecuteOnce( &init_done, process_init, NULL, NULL );
-    thread_init();
+    if ((status = thread_init()))
+    {
+        ERR( "CPU thread initialization failed, status %#lx\n", status );
+        RtlRaiseStatus( status );
+    }
     cpu_simulate();
 }
 

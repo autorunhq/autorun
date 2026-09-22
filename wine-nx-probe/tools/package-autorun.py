@@ -51,6 +51,14 @@ def merge_amd64(archive, root):
         features = manifest.get('features', {})
         for feature in ('amd64', 'dynarec', 'vulkan', 'dxvk', 'vkd3d', 'lsfg'):
             assert features.get(feature) is True, f'{archive} has no {feature} support'
+        if features.get('fex'):
+            for dll in ('libarm64ecfex.dll', 'libwow64fex.dll'):
+                assert f'switch/wine/drive_c/windows/system32/{dll}' in names, \
+                    f'{archive} has no FEX CPU module: {dll}'
+        nro = z.read('switch/wine/wine-nx-runtime.nro')
+        match = re.search(rb'nx-amd64-(?:box64-(\d+)|(fex-\d+))\0', nro)
+        assert match, f'{archive} does not contain the AMD64 runtime'
+        assert bool(match.group(2)) == bool(features.get('fex')), f'{archive} has inconsistent FEX support'
         for info in z.infolist():
             if info.filename.rstrip('/') in keep:
                 continue
@@ -61,16 +69,14 @@ def merge_amd64(archive, root):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(info) as source, destination.open('wb') as output:
                     shutil.copyfileobj(source, output)
-    nro = (root / 'switch/wine/wine-nx-runtime.nro').read_bytes()
-    match = re.search(rb'nx-amd64-box64-(\d+)\0', nro)
-    assert match, f'{archive} does not contain the AMD64 runtime'
-    return match.group(1).decode()
+    return (match.group(1) or match.group(2)).decode()
 
 subprocess.run([sys.executable, str(tools / 'package-wow64-full.py')], check=True)
 subprocess.run([sys.executable, str(tools / 'package-wow64-dxvk.py')], check=True)
 
-full = build / f'wine-nx-full-dynarec-{marker}.zip'
-overlay = build / f'wine-nx-dxvk-overlay-dynarec-{marker}.zip'
+wow64_marker = re.search(r'nx-wow64-dynarec-(\d+)', (probe / 'source/runtime.c').read_text()).group(1)
+full = build / f'wine-nx-full-dynarec-{wow64_marker}.zip'
+overlay = build / f'wine-nx-dxvk-overlay-dynarec-{wow64_marker}.zip'
 assert full.is_file() and overlay.is_file(), 'a half is missing'
 
 # The overlay's paths are the card's own, so it unpacks onto the staged payload

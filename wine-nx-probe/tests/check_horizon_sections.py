@@ -64,6 +64,8 @@ typedef u32 Handle;
 static pthread_mutex_t mapping_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int traces;
 static void wine_nx_runtime_trace( const char *msg ) { (void)msg; traces++; }
+static void describe_memory( void *addr, char *buffer, size_t size )
+{ snprintf( buffer, size, "%p", addr ); }
 static int check_code_memory_syscalls(void) { return 0; }
 static int envIsSyscallHinted( unsigned int number ) { (void)number; return 1; }
 static Handle envGetOwnProcessHandle(void) { return 1; }
@@ -79,7 +81,9 @@ static size_t code_pool_used;
  * it: with no window set, anchor regions come from libnx as they do on an
  * address space the runtime made no reservations in. */
 void *horizon_native_window_start, *horizon_native_window_end;
-static struct { unsigned long long addr, size; } native_blocks[4];
+static void horizon_get_address_space_limits(void **start, void **end)
+{ *start = (void *)0x200000; *end = (void *)0x100000000ULL; }
+static struct { unsigned long long addr, size; } native_blocks[64];
 static unsigned int native_block_count;
 static int horizon_query_region( void *context, unsigned long long addr, struct horizon_region *region )
 {
@@ -197,6 +201,7 @@ for name in ['static void list_add_mapping(', 'static void list_remove_mapping('
              'static VirtmemReservation *reserve_fixed_range_locked(', 'static VirtmemReservation *reserve_fixed_range(',
              'static void remove_reservation_locked(', 'static void remove_reservation(',
              'static void *find_anchor_run_locked(', 'static void *find_anchor_region_locked(', 'static void *find_anchor_address_locked(', 'static int replace_reservation_mapping(', 'static int change_reservation_mapping(', 'static int split_reservation_mapping(', 'static size_t page_align_size(',
+             'void *horizon_reserve_native_code(', 'void horizon_release_native_code(',
              'static void section_failure(', 'static void *horizon_section_anchor(', 'static int horizon_section_unanchor(',
              'static int horizon_section_alias(', 'static int horizon_section_unalias(']:
     fixture += function(name)
@@ -237,7 +242,7 @@ static void check_tree(void)
             assert( inside );
             count--;
         }
-        assert( !mapping->section == (mapping->section_state == SECTION_NONE || mapping->section_state == SECTION_ANCHOR) );
+        assert( !mapping->section == (mapping->section_state == SECTION_NONE || mapping->section_state == SECTION_ANCHOR || mapping->section_state == SECTION_NATIVE) );
         if (prev) assert( (char *)prev->addr + prev->size <= (char *)mapping->addr );
         prev = mapping;
         count++;
@@ -277,6 +282,77 @@ int main(void)
     struct horizon_mapping *anchor;
     int before_reservations, before_anchors;
 
+    {
+        void *token, *other, *region;
+        horizon_native_window_start = (void *)0x20000000;
+        horizon_native_window_end = (void *)0x40000000;
+        native_blocks[0].addr = 0x20000000;
+        native_blocks[0].size = 0x100000;
+        native_block_count = 1;
+        region = horizon_reserve_native_code( 0x10000000, &token );
+        assert( region == (void *)0x20100000 && token );
+        assert( entry_at(region)->section_state == SECTION_NATIVE );
+        assert( unmap_range_locked(region, P) == -1 && errno == EBUSY );
+        assert( protect_range_locked(region, P, RW) == -1 );
+        assert( !horizon_reserve_native_code(0x10000000, &other) && !other );
+        check_tree();
+        horizon_release_native_code(token);
+        assert( !mappings.root && !reservation_count );
+        {
+            void *tokens[8], *addresses[8];
+            const size_t sizes[] = { 16, 16, 32, 32, 16, 16, 16, 16 };
+            unsigned int i;
+            horizon_native_window_end = (void *)0x30000000;
+            native_block_count = 4;
+            for (i = 0; i < 4; ++i)
+            {
+                native_blocks[i].addr = 0x20000000 + i * 0x4000000;
+                native_blocks[i].size = P;
+            }
+            assert( !horizon_reserve_native_code(0x4000000, &other) && !other );
+            for (i = 0; i < 8; ++i)
+            {
+                addresses[i] = horizon_reserve_native_code(sizes[i] * 0x100000 + 2 * P, &tokens[i]);
+                assert( addresses[i] && tokens[i] );
+                check_tree();
+            }
+            horizon_release_native_code(tokens[2]);
+            assert( horizon_reserve_native_code(sizes[2] * 0x100000 + 2 * P, &tokens[2]) == addresses[2] );
+            for (i = 0; i < 8; ++i) horizon_release_native_code(tokens[i]);
+            assert( !mappings.root && !reservation_count );
+        }
+        {
+            void *tokens[9];
+            const size_t sizes[] = { 0x2000000, 0x6000, 0x6000,
+                0x1002000, 0x1002000, 0x2002000, 0x2002000, 0x4002000, 0x4002000 };
+            unsigned int i;
+            horizon_native_window_end = (void *)0x40000000;
+            native_blocks[0].addr = 0x26b20000;
+            native_blocks[0].size = P;
+            native_blocks[1].addr = 0x3381f000;
+            native_blocks[1].size = P;
+            native_blocks[2].addr = 0x344f1000;
+            native_blocks[2].size = 0x100000;
+            native_blocks[3].addr = 0x296c3000;
+            native_blocks[3].size = 0xc000;
+            native_block_count = 44;
+            for (i = 4; i < native_block_count; ++i)
+            {
+                native_blocks[i].addr = 0x3fefc000 - (i - 4) * 0x104000;
+                native_blocks[i].size = 0x100000;
+            }
+            for (i = 0; i < 9; ++i)
+            {
+                assert( horizon_reserve_native_code(sizes[i], &tokens[i]) && tokens[i] );
+                check_tree();
+            }
+            for (i = 0; i < 9; ++i) horizon_release_native_code(tokens[i]);
+            assert( !mappings.root && !reservation_count );
+        }
+        native_block_count = 0;
+        horizon_native_window_start = horizon_native_window_end = NULL;
+    }
+
     code_pool_size = 3 * HORIZON_ANCHOR_REGION + 256 * P;  /* room for the extra regions */
     code_pool = host_reserve( code_pool_size );
     views = host_reserve( 64 * P );
@@ -306,6 +382,17 @@ int main(void)
             anchors++;
         }
         assert( anchors && next <= anchor_region_end );
+    }
+    {
+        char *cursor = anchor_regions[0].cursor;
+        native_blocks[0].addr = (uintptr_t)(cursor + P);
+        native_blocks[0].size = P;
+        native_block_count = 1;
+        assert( find_anchor_run_locked(4 * P) == cursor + 2 * P );
+        native_blocks[0].addr = (uintptr_t)anchor_regions[0].start;
+        native_blocks[0].size = HORIZON_ANCHOR_REGION;
+        assert( !find_anchor_run_locked(P) );
+        native_block_count = 0;
     }
     /* A region with no room left takes another one: falling back to libnx for
      * each anchor walks every reservation the process holds. */
@@ -340,6 +427,17 @@ int main(void)
         /* Nothing that large left in the window. */
         assert( !find_anchor_region_locked( 3 * HORIZON_ANCHOR_REGION ) );
         list_remove_mapping( entry_at( window ) );
+        {
+            char *saved_start = anchor_regions[0].start, *saved_end = anchor_regions[0].end;
+            anchor_regions[0].start = window;
+            anchor_regions[0].end = window + HORIZON_ANCHOR_REGION;
+            assert( find_anchor_region_locked(HORIZON_ANCHOR_REGION) == window + 2 * HORIZON_ANCHOR_REGION );
+            anchor_regions[0].start = saved_start;
+            anchor_regions[0].end = saved_end;
+        }
+        list_add_mapping( alloc_mapping(window, 5 * HORIZON_ANCHOR_REGION, NULL, 0, NULL, RW) );
+        assert( !find_anchor_region_locked(P) );
+        list_remove_mapping( entry_at(window) );
         native_block_count = 0;
         horizon_native_window_start = horizon_native_window_end = NULL;
     }

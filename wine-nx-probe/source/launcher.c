@@ -1675,7 +1675,7 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
-    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_SYNC,
+    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_SYNC, ROW_CPU,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2353,6 +2353,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             snprintf( row->value, sizeof(row->value), "args.txt: %s", global_line );
         else snprintf( row->value, sizeof(row->value), "None" );
 
+#ifdef WINE_NX_FEX
+        if (x86 || x64)
+        {
+            ADD_ROW( ROW_CPU, SECTION_GENERAL, "CPU translator", "Translator used to run this program." );
+            row->kind = UI_ROW_DROPDOWN;
+            snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
+        }
+#endif
         ADD_ROW( ROW_SYNC, SECTION_GENERAL, "Synchronization",
                  "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
         row->kind = UI_ROW_VALUE;
@@ -2511,7 +2519,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             }
         }
 
-        if (x86 || x64)
+        if ((x86 || x64) && !p->settings.fex)
         {
             ADD_ROW( ROW_BOX64, SECTION_DIAGNOSTICS, "Box64 options",
                      "Per-game performance and compatibility flags for the Box64 translator." );
@@ -2633,6 +2641,33 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             save_program_settings( l, p );
             break;
 
+#ifdef WINE_NX_FEX
+        case ROW_CPU:
+        {
+            struct ui_row items[2] = {0};
+            int selected;
+
+            if (action == UI_ACTION_RESET) selected = 0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                snprintf( items[0].label, sizeof(items[0].label), "Box64" );
+                snprintf( items[1].label, sizeof(items[1].label), "FEX" );
+                selected = ui_settings_dropdown( ui, &list, items, 2, p->settings.fex );
+                if (selected < 0) break;
+            }
+            else break;
+            runtime_file( l, x64 ? "drive_c/windows/system32/libarm64ecfex.dll" :
+                                  "drive_c/windows/system32/libwow64fex.dll", path, sizeof(path) );
+            if (selected && !file_exists( path ))
+            {
+                ui_message( ui, "FEX", "Install the FEX runtime package first." );
+                break;
+            }
+            p->settings.fex = selected;
+            save_program_settings( l, p );
+            break;
+        }
+#endif
         case ROW_SYNC:
         {
             struct ui_row items[2] = {0};

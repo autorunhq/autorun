@@ -70,7 +70,18 @@ static void test_settings( const char *dir )
 
     load_text( &kv, "" );
     launcher_settings_read( &kv, &settings );
-    assert( !settings.fast_sync );
+    assert( !settings.fast_sync && !settings.fex );
+    load_text( &kv, "cpu=fex\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex );
+    assert( launcher_settings_write( &kv, &settings ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.fex );
+    settings.fex = 0;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "cpu=" ) );
+    load_text( &kv, "cpu=unknown\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fex );
     load_text( &kv, "sync=horizon\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.fast_sync );

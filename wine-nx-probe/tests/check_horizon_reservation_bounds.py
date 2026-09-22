@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
 start = source.index('static int add_reservation_mapping_locked(')
-end = source.index('\nstatic void *horizon_mmap_fixed(', start)
+end = source.index('\nstatic Result check_thread_local_range(', start)
 fixture = r'''
 #include <assert.h>
 #include <errno.h>
