@@ -144,6 +144,11 @@ static void test_settings( const char *dir )
     assert( LAUNCHER_FRAME_LIMIT_COUNT == 8 );
     assert( launcher_dxvk_config( &settings, config, sizeof(config) ) );
     assert( strstr( config, "dxgi.syncInterval = 1" ) );
+    assert( !strstr( config, "dxvk.enableDescriptorBuffer" ) );
+    settings.dxvk_hud = 1;
+    assert( launcher_dxvk_config( &settings, config, sizeof(config) ) );
+    assert( strstr( config, "dxvk.enableDescriptorBuffer = False" ) );
+    settings.dxvk_hud = 0;
     assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "frame-limit=" ) );
     assert( launcher_dxvk_version_directory( 0x8664, "2.7.1", path, sizeof(path) ) &&
             !strcmp( path, "dxvk64\\versions\\2.7.1" ) );

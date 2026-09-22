@@ -217,6 +217,12 @@ static inline int launcher_dxvk_config( const struct launcher_settings *settings
     length = snprintf( out, size, "dxgi.syncInterval = %d\nd3d9.presentInterval = %d\n",
                        !!settings->vsync, !!settings->vsync );
     if (length < 0 || (size_t)length >= size) return 0;
+    if (settings->dxvk_hud)
+    {
+        int extra = snprintf( out + length, size - length, "dxvk.enableDescriptorBuffer = False\n" );
+        if (extra < 0 || (size_t)extra >= size - length) return 0;
+        length += extra;
+    }
     if (settings->frame_limit)
     {
         int extra = snprintf( out + length, size - length,
