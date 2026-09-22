@@ -3,9 +3,8 @@
  * menu, whose only job is to start the homebrew loader with Autorun's NRO, in
  * the address space the forwarder's own NPDM asks for.
  *
- * A game linked for a fixed address in the low 4 GB only runs under a 32-bit
- * address space, and the space is fixed when the process is created, so the
- * only way to give a game one is to be started by a forwarder that asked for it.
+ * Stock Atmosphere needs the 32-bit forwarder for fixed low image addresses.
+ * The title-scoped low-window kernel also supports them in the 39-bit profile.
  *
  * The pieces are sphaira's (src/owo.cpp, ISC, TotalJustice), as is the loader
  * the program NCA carries (hbl/, nx-hbloader).

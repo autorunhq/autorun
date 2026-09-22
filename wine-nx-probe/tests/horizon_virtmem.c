@@ -11,6 +11,8 @@ static unsigned int original_calls, reserve_calls, reserve_fail, query_fail;
 static struct { uintptr_t start, end; } mapped[128];
 static unsigned int mapped_count;
 
+int wine_nx_low_window_reserve(void) { return 1; }
+
 static void check_locked(void) { assert(pthread_mutex_trylock(&lock) != 0); }
 VirtmemReservation *__real_virtmemAddReservation(void *address, size_t size)
 {

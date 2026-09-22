@@ -25,6 +25,7 @@
 #include "launcher.h"
 #include "autorun_install.h"
 #include "forwarder.h"
+#include "low_window.h"
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "config_json.h"
@@ -76,7 +77,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_FEX
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-suspend-1"
+#define WINE_NX_RUNTIME_BUILD "nx-low-window-2"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
@@ -3167,9 +3168,7 @@ static int return_to_launcher( void )
     return 0;
 }
 
-/* What the kernel left this process to map things in. A 32-bit address space is
- * the low 4 GB and nothing else, which is the only place a program linked for a
- * fixed low address can go. */
+/* The host address-space width is fixed when Horizon creates the process. */
 static int runtime_address_space_bits( void )
 {
     u64 base = 0, size = 0, limit;
@@ -3329,6 +3328,7 @@ int main( int argc, char **argv )
     unsigned int ldr_status = STATUS_INVALID_IMAGE_FORMAT;
     unsigned int attach_status = STATUS_INVALID_IMAGE_FORMAT;
     int autorun, handed_over = 0;
+    int low_window_available;
     USHORT target_machine;
     int sd_cache = wine_nx_sd_cache_install();  /* before any file on the card is opened */
 
@@ -3388,6 +3388,8 @@ int main( int argc, char **argv )
      * like one from the new one. */
     log_line( "[BUILD] %s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD, own_nro,
               runtime_address_space_bits() );
+    log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
+    low_window_available = wine_nx_low_window_probe( log_line_plain );
     {
         int recovered = autorun_install_recover( RUNTIME_DIR, strstr( own_nro, "/updates/previous.nro" ) != NULL );
         if (recovered < 0)
@@ -3527,6 +3529,7 @@ int main( int argc, char **argv )
             .list_usb = wine_nx_usb_list,
 #endif
             .address_space_bits = runtime_address_space_bits(),
+            .low_window = low_window_available,
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .title_id = runtime_title_id(),

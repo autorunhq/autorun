@@ -1,0 +1,132 @@
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_page_table.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_page_table.hpp
+index 2ab8527..084ca1a 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_page_table.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_page_table.hpp
+@@ -198,7 +198,7 @@ namespace ams::kern::arch::arm64 {
+             }
+ 
+             NOINLINE void InitializeForKernel(void *table, KVirtualAddress start, KVirtualAddress end);
+-            NOINLINE Result InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index);
++            NOINLINE Result InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index, bool low_window);
+             void Finalize();
+ 
+             static void NoteUpdatedCallback(const void *pt) {
+diff --git a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_process_page_table.hpp b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_process_page_table.hpp
+index e18a6fb..87a0523 100644
+--- a/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_process_page_table.hpp
++++ b/libraries/libmesosphere/include/mesosphere/arch/arm64/kern_k_process_page_table.hpp
+@@ -28,8 +28,8 @@ namespace ams::kern::arch::arm64 {
+                 m_page_table.ActivateProcess(process_index, id);
+             }
+ 
+-            Result Initialize(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index) {
+-                R_RETURN(m_page_table.InitializeForProcess(flags, from_back, pool, code_address, code_size, system_resource, resource_limit, process_index));
++            Result Initialize(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index, bool low_window = false) {
++                R_RETURN(m_page_table.InitializeForProcess(flags, from_back, pool, code_address, code_size, system_resource, resource_limit, process_index, low_window));
+             }
+ 
+             void Finalize() { m_page_table.Finalize(); }
+diff --git a/libraries/libmesosphere/include/mesosphere/kern_k_page_table_base.hpp b/libraries/libmesosphere/include/mesosphere/kern_k_page_table_base.hpp
+index 25c149b..736124e 100644
+--- a/libraries/libmesosphere/include/mesosphere/kern_k_page_table_base.hpp
++++ b/libraries/libmesosphere/include/mesosphere/kern_k_page_table_base.hpp
+@@ -228,7 +228,7 @@ namespace ams::kern {
+             explicit KPageTableBase() { /* ... */ }
+ 
+             NOINLINE void InitializeForKernel(bool is_64_bit, void *table, KVirtualAddress start, KVirtualAddress end);
+-            NOINLINE Result InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, void *table, KProcessAddress start, KProcessAddress end, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit);
++            NOINLINE Result InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, void *table, KProcessAddress start, KProcessAddress end, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, bool low_window);
+ 
+             void Finalize();
+ 
+diff --git a/libraries/libmesosphere/source/arch/arm64/kern_k_page_table.cpp b/libraries/libmesosphere/source/arch/arm64/kern_k_page_table.cpp
+index 6992281..39f0dac 100644
+--- a/libraries/libmesosphere/source/arch/arm64/kern_k_page_table.cpp
++++ b/libraries/libmesosphere/source/arch/arm64/kern_k_page_table.cpp
+@@ -128,7 +128,7 @@ namespace ams::kern::arch::arm64 {
+         KPageTableBase::InitializeForKernel(true, table, start, end);
+     }
+ 
+-    Result KPageTable::InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index) {
++    Result KPageTable::InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, size_t process_index, bool low_window) {
+         /* Determine our ASID */
+         m_asid = process_index + 1;
+         MESOSPHERE_ABORT_UNLESS(0 < m_asid && m_asid < util::size(s_ttbr0_entries));
+@@ -144,7 +144,7 @@ namespace ams::kern::arch::arm64 {
+         const size_t as_width = GetAddressSpaceWidth(flags);
+         const KProcessAddress as_start = 0;
+         const KProcessAddress as_end   = (1ul << as_width);
+-        R_TRY(KPageTableBase::InitializeForProcess(flags, from_back, pool, GetVoidPointer(ttbr0_virt), as_start, as_end, code_address, code_size, system_resource, resource_limit));
++        R_TRY(KPageTableBase::InitializeForProcess(flags, from_back, pool, GetVoidPointer(ttbr0_virt), as_start, as_end, code_address, code_size, system_resource, resource_limit, low_window));
+ 
+         /* Note that we've updated the table (since we created it). */
+         this->NoteUpdated();
+diff --git a/libraries/libmesosphere/source/kern_k_page_table_base.cpp b/libraries/libmesosphere/source/kern_k_page_table_base.cpp
+index 5d34dbe..0c00f86 100644
+--- a/libraries/libmesosphere/source/kern_k_page_table_base.cpp
++++ b/libraries/libmesosphere/source/kern_k_page_table_base.cpp
+@@ -133,7 +133,7 @@ namespace ams::kern {
+         MESOSPHERE_R_ABORT_UNLESS(m_memory_block_manager.Initialize(m_address_space_start, m_address_space_end, m_memory_block_slab_manager));
+     }
+ 
+-    Result KPageTableBase::InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, void *table, KProcessAddress start, KProcessAddress end, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit) {
++    Result KPageTableBase::InitializeForProcess(ams::svc::CreateProcessFlag flags, bool from_back, KMemoryManager::Pool pool, void *table, KProcessAddress start, KProcessAddress end, KProcessAddress code_address, size_t code_size, KSystemResource *system_resource, KResourceLimit *resource_limit, bool low_window) {
+         /* Validate the region. */
+         MESOSPHERE_ABORT_UNLESS(start <= code_address);
+         MESOSPHERE_ABORT_UNLESS(code_address < code_address + code_size);
+@@ -171,6 +171,12 @@ namespace ams::kern {
+             m_alias_code_region_start             = m_code_region_start;
+             m_alias_code_region_end               = m_code_region_end;
+ 
++            if (low_window) {
++                R_UNLESS(code_address >= ams::svc::AutorunNativeAddressStart, svc::ResultInvalidAddress());
++                m_code_region_start       = ams::svc::AutorunNativeAddressStart;
++                m_alias_code_region_start = ams::svc::AddressSmallMap32Start;
++            }
++
+             process_code_start                    = util::AlignDown(GetInteger(code_address), RegionAlignment);
+             process_code_end                      = util::AlignUp(GetInteger(code_address) + code_size, RegionAlignment);
+ 
+diff --git a/libraries/libmesosphere/source/kern_k_process.cpp b/libraries/libmesosphere/source/kern_k_process.cpp
+index 91048f4..8f79e30 100644
+--- a/libraries/libmesosphere/source/kern_k_process.cpp
++++ b/libraries/libmesosphere/source/kern_k_process.cpp
+@@ -373,7 +373,7 @@ namespace ams::kern {
+         /* Setup page table. */
+         {
+             const bool from_back = (params.flags & ams::svc::CreateProcessFlag_EnableAslr) == 0;
+-            R_TRY(m_page_table.Initialize(static_cast<ams::svc::CreateProcessFlag>(params.flags), from_back, pool, params.code_address, code_size, m_system_resource, res_limit, this->GetSlabIndex()));
++            R_TRY(m_page_table.Initialize(static_cast<ams::svc::CreateProcessFlag>(params.flags), from_back, pool, params.code_address, code_size, m_system_resource, res_limit, this->GetSlabIndex(), ams::svc::HasAutorunLowWindow(params.program_id)));
+         }
+         ON_RESULT_FAILURE_2 { m_page_table.Finalize(); };
+ 
+diff --git a/libraries/libvapours/include/vapours/svc/svc_memory_map.hpp b/libraries/libvapours/include/vapours/svc/svc_memory_map.hpp
+index 08bf177..bda56a3 100644
+--- a/libraries/libvapours/include/vapours/svc/svc_memory_map.hpp
++++ b/libraries/libvapours/include/vapours/svc/svc_memory_map.hpp
+@@ -97,4 +97,10 @@ namespace ams::svc {
+     constexpr inline uintptr_t AddressMap39End   = AddressMemoryRegion39Size;
+     constexpr inline size_t    AddressMap39Size  = AddressMap39End - AddressMap39Start;
+ 
++    constexpr inline bool HasAutorunLowWindow(u64 program_id) {
++        return program_id == UINT64_C(0x0548EABB35576000);
++    }
++
++    constexpr inline u64 AutorunNativeAddressStart = UINT64_C(0x100000000);
++
+ }
+diff --git a/stratosphere/loader/source/ldr_process_creation.cpp b/stratosphere/loader/source/ldr_process_creation.cpp
+index 2764848..92005e6 100644
+--- a/stratosphere/loader/source/ldr_process_creation.cpp
++++ b/stratosphere/loader/source/ldr_process_creation.cpp
+@@ -595,6 +595,10 @@ namespace ams::ldr {
+                     case svc::CreateProcessFlag_AddressSpace64Bit:
+                         aslr_start = svc::AddressMap39Start;
+                         aslr_size  = svc::AddressMap39Size;
++                        if (svc::HasAutorunLowWindow(out_param->program_id)) {
++                            aslr_start = svc::AutorunNativeAddressStart;
++                            aslr_size  = svc::AddressMap39End - aslr_start;
++                        }
+                         break;
+                     AMS_UNREACHABLE_DEFAULT_CASE();
+                 }

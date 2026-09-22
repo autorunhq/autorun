@@ -4439,6 +4439,36 @@ static void *alloc_virtual_heap( SIZE_T size )
 }
 
 #ifdef __SWITCH__
+void *virtual_alloc_horizon_native( size_t size, void **token )
+{
+    struct file_view *view;
+    sigset_t sigset;
+    void *addr = NULL;
+
+    *token = NULL;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if (!map_view( &view, NULL, size, MEM_TOP_DOWN, VPROT_SYSTEM | SEC_RESERVE,
+                   (ULONG_PTR)host_addr_space_limit > 0x100000000ULL ? 0x100000000ULL : 0,
+                   (ULONG_PTR)host_addr_space_limit - 1, 0 ))
+    {
+        addr = view->base;
+        *token = view;
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return addr;
+}
+
+void virtual_free_horizon_native( void *token )
+{
+    struct file_view *view = token;
+    sigset_t sigset;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    view->protect &= ~VPROT_SYSTEM;
+    delete_view( view );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+}
+
 /* Address space kept free at the top of Horizon's stack region for the native
  * mappings that cannot go anywhere else: thread stacks, which virtmemFindStack
  * only places there, the dynarec's code memory, and the region section anchors

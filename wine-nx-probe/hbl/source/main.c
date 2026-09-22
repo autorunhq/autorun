@@ -1,5 +1,6 @@
 #include <switch.h>
 #include <string.h>
+#include "../../source/low_window.h"
 
 #define EXIT_DETECTION_STR "if this isn't replaced i will exit :)"
 
@@ -455,6 +456,15 @@ void NX_NORETURN loadNro(void) {
     virtmemLock();
     const size_t total_size = (header->size + header->bss_size + 0xFFF) & ~0xFFF;
     void* map_addr = virtmemFindCodeMemory(total_size, 0);
+    u64 aslr_base = 0, aslr_size = 0;
+    svcGetInfo(&aslr_base, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&aslr_size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0);
+    if (wine_nx_is_low_window(aslr_base, aslr_size)) {
+        for (unsigned int attempt = 0; map_addr && (uintptr_t)map_addr < WINE_NX_NATIVE_BASE && attempt < 64; ++attempt)
+            map_addr = virtmemFindCodeMemory(total_size, 0);
+        if ((uintptr_t)map_addr < WINE_NX_NATIVE_BASE)
+            diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 18));
+    }
     rc = svcMapProcessCodeMemory(g_procHandle, (u64)map_addr, (u64)g_heapAddr, total_size);
     virtmemUnlock();
 

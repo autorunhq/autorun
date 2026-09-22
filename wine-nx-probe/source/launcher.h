@@ -36,11 +36,9 @@ struct wine_nx_launcher_options
     int (*machine_of)( const char *path, unsigned short *machine );
     int (*list_usb)( struct wine_nx_launcher_usb_volume *volumes, int max );
     int vulkan;                /* the runtime has Vulkan for DXVK */
-    /* How wide an address space Horizon gave this process: 32 when the low 4 GB
-     * is all of it, 36 or 39 when it reaches beyond, 0 when it could not be
-     * read. The title that started the process fixes it, so a program that needs
-     * the low 4 GB has to be opened from a forwarder that asks for 32 bits. */
+    /* The forwarder's host address-space width, or 0 if unavailable. */
     int address_space_bits;
+    int low_window;
     /* This forwarder, and the ones beside it. A game that needs an address space
      * this forwarder was not made with is started by asking the console for the
      * forwarder that was: list_titles writes how many it found, launch_title

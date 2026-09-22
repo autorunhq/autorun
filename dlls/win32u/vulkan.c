@@ -108,15 +108,15 @@ static void nx_vk_trace( const char *format, ... )
 
 extern void horizon_get_address_space_limits( void **start, void **limit );
 
-static BOOL driver_maps_fit_wow64(void)
+static BOOL nx_uses_32bit_address_space(void)
 {
-    static int fit = -1;
+    static int is_32bit = -1;
     void *start, *limit;
 
-    if (fit >= 0) return fit;
+    if (is_32bit >= 0) return is_32bit;
     horizon_get_address_space_limits( &start, &limit );
-    fit = (ULONG_PTR)limit <= 0x100000000;
-    return fit;
+    is_32bit = (ULONG_PTR)limit <= 0x100000000;
+    return is_32bit;
 }
 #endif
 
@@ -349,25 +349,21 @@ static BOOL nx_memory_log_failure(void)
     return __atomic_add_fetch( &nx_memory_failure_logs, 1, __ATOMIC_RELAXED ) <= 32;
 }
 
-/* On NVK every memory type is host visible, so importing each allocation from a
- * 32-bit mapping mirrors all of a program's GPU memory into its 2 GB address
- * space: NFSU2 ran out of it loading a race. In a 32-bit address space the
- * driver's memory lies in the kernel's heap region, below 4 GB and outside
- * Wine's views, so its own mappings reach the program at no address space cost. */
 static BOOL nx_driver_maps_preferred(void)
 {
     static LONG logged;
+    BOOL native = !zero_bits || nx_uses_32bit_address_space();
 
-    if (!driver_maps_fit_wow64()) return FALSE;
     if (__atomic_add_fetch( &logged, 1, __ATOMIC_RELAXED ) == 1)
-        nx_vk_trace( "[NXVK] 32-bit address space: Vulkan memory uses the driver's own mappings, "
-                     "not imports into the program's address space" );
-    return TRUE;
+        nx_vk_trace( "[NXVK] Vulkan memory uses %s",
+                     native ? "native driver mappings" : "low host imports for the Win32 guest" );
+    return native;
 }
 #endif
 
-static VkResult allocate_external_host_memory( struct vulkan_device *device, VkMemoryAllocateInfo *alloc_info, uint32_t mem_flags,
-                                               VkImportMemoryHostPointerInfoEXT *import_info )
+static VkResult import_external_host_memory( struct vulkan_device *device, VkMemoryAllocateInfo *alloc_info,
+                                             uint32_t mem_flags, void *mapping,
+                                             VkImportMemoryHostPointerInfoEXT *import_info )
 {
     struct vulkan_physical_device *physical_device = device->physical_device;
     VkMemoryHostPointerPropertiesEXT props =
@@ -375,33 +371,11 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
         .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
     };
     uint32_t i, align = physical_device->external_memory_align - 1;
-    SIZE_T alloc_size = alloc_info->allocationSize;
-    static int once;
-    void *mapping = NULL;
-    NTSTATUS status;
     VkResult res;
-
-    if (!once++) FIXME( "Using VK_EXT_external_memory_host\n" );
-
-    if ((status = NtAllocateVirtualMemory( GetCurrentProcess(), &mapping, zero_bits, &alloc_size, MEM_COMMIT, PAGE_READWRITE )))
-    {
-        ERR( "NtAllocateVirtualMemory failed\n" );
-#ifdef __SWITCH__
-        if (nx_memory_log_failure())
-            nx_vk_trace( "[NXVK] no 32-bit mapping for %llu bytes of memory type %u: status %#x",
-                         (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, (unsigned int)status );
-#endif
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    }
 
     if ((res = device->p_vkGetMemoryHostPointerPropertiesEXT( device->host.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                               mapping, &props )))
-    {
-        ERR( "vkGetMemoryHostPointerPropertiesEXT failed: %d\n", res );
-        alloc_size = 0;
-        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
         return res;
-    }
 
     if (!(props.memoryTypeBits & (1u << alloc_info->memoryTypeIndex)))
     {
@@ -418,15 +392,7 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
         }
         if (i == physical_device->memory_properties.memoryTypeCount)
         {
-            FIXME( "Not found compatible memory type\n" );
-#ifdef __SWITCH__
-            if (__atomic_add_fetch( &nx_host_import_logs, 1, __ATOMIC_RELAXED ) <= 8)
-                nx_vk_trace( "[NXVK] no memory type takes host pointers (types %#x) with type %u's flags %#x: "
-                             "allocated without a 32-bit mapping", props.memoryTypeBits,
-                             alloc_info->memoryTypeIndex, mem_flags );
-#endif
-            alloc_size = 0;
-            NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
+            return VK_ERROR_FEATURE_NOT_PRESENT;
         }
     }
 
@@ -440,12 +406,46 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
         alloc_info->allocationSize = (alloc_info->allocationSize + align) & ~align;
 #ifdef __SWITCH__
         if (__atomic_add_fetch( &nx_host_import_logs, 1, __ATOMIC_RELAXED ) <= 8)
-            nx_vk_trace( "[NXVK] %llu bytes of memory type %u imported from the 32-bit mapping %p",
+            nx_vk_trace( "[NXVK] %llu bytes of memory type %u imported from host mapping %p",
                          (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, mapping );
 #endif
     }
 
     return VK_SUCCESS;
+}
+
+static VkResult allocate_external_host_memory( struct vulkan_device *device, VkMemoryAllocateInfo *alloc_info, uint32_t mem_flags,
+                                               VkImportMemoryHostPointerInfoEXT *import_info )
+{
+    SIZE_T alloc_size = alloc_info->allocationSize;
+    static int once;
+    void *mapping = NULL;
+    NTSTATUS status;
+    VkResult res;
+
+    if (!once++) FIXME( "Using VK_EXT_external_memory_host\n" );
+    if ((status = NtAllocateVirtualMemory( GetCurrentProcess(), &mapping, zero_bits, &alloc_size, MEM_COMMIT, PAGE_READWRITE )))
+    {
+#ifdef __SWITCH__
+        if (nx_memory_log_failure())
+            nx_vk_trace( "[NXVK] no 32-bit mapping for %llu bytes of memory type %u: status %#x",
+                         (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, (unsigned int)status );
+#endif
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    res = import_external_host_memory( device, alloc_info, mem_flags, mapping, import_info );
+    if (res != VK_SUCCESS)
+    {
+#ifdef __SWITCH__
+        if (nx_memory_log_failure())
+            nx_vk_trace( "[NXVK] host import at %p for %llu bytes failed: %d", mapping,
+                         (unsigned long long)alloc_info->allocationSize, res );
+#endif
+        alloc_size = 0;
+        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
+        if (res == VK_ERROR_FEATURE_NOT_PRESENT) return VK_SUCCESS;
+    }
+    return res;
 }
 
 static VkExternalMemoryHandleTypeFlagBits get_host_external_memory_type(void)
@@ -1302,23 +1302,7 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         !nx_driver_maps_preferred() &&
 #endif
         (res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info )))
-    {
-#ifdef __SWITCH__
-        /* In a 32-bit address space every mapping the driver makes lies below
-         * 4 GB, so when no 32-bit range is left to import (DXVK's 64 MB chunks
-         * in NFSU2), the driver's own mapping can go to the program instead. */
-        static LONG fallback_logs;
-
-        if (res == VK_ERROR_OUT_OF_HOST_MEMORY && driver_maps_fit_wow64())
-        {
-            if (__atomic_add_fetch( &fallback_logs, 1, __ATOMIC_RELAXED ) <= 8)
-                nx_vk_trace( "[NXVK] 32-bit address space full: %llu bytes of memory type %u use the driver's own mapping",
-                             (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex );
-        }
-        else
-#endif
         return res;
-    }
     /* The 32-bit mapping the host imports, if any: vkMapMemory hands it out, and
      * it is released once the host memory is freed. */
     mapping = host_pointer_info.pHostPointer;
@@ -1558,7 +1542,8 @@ static VkResult win32u_vkMapMemory2KHR( VkDevice client_device, const VkMemoryMa
     {
         *data = (char *)memory->vm_map + info.offset;
         TRACE( "returning %p\n", *data );
-        return VK_SUCCESS;
+        res = VK_SUCCESS;
+        goto done;
     }
 
     if (physical_device->map_placed_align)
@@ -1609,16 +1594,20 @@ static VkResult win32u_vkMapMemory2KHR( VkDevice client_device, const VkMemoryMa
             nx_vk_trace( "[NXVK] driver mapping %p for %llu bytes", *data, (unsigned long long)memory->size );
     }
 #endif
+done:
 #ifdef _WIN64
-    if (NtCurrentTeb()->WowTebOffset && res == VK_SUCCESS && (UINT_PTR)*data >> 32)
+    if (NtCurrentTeb()->WowTebOffset && res == VK_SUCCESS &&
+        ((UINT_PTR)*data > UINT32_MAX ||
+         (map_info->size == VK_WHOLE_SIZE ? memory->size - map_info->offset : map_info->size) >
+         0x100000000ULL - (UINT_PTR)*data))
     {
 #ifdef __SWITCH__
-        nx_vk_trace( "[NXVK] Vulkan mapping %p does not fit a 32-bit pointer; no imported low mapping", *data );
+        nx_vk_trace( "[NXVK] rejected Vulkan mapping %p: range exceeds the Win32 address space", *data );
 #endif
         FIXME( "returned mapping %p does not fit 32-bit pointer\n", *data );
-        device->p_vkUnmapMemory( device->host.device, memory->obj.host.device_memory );
+        if (!memory->vm_map) device->p_vkUnmapMemory( device->host.device, memory->obj.host.device_memory );
         *data = NULL;
-        res = VK_ERROR_OUT_OF_HOST_MEMORY;
+        res = VK_ERROR_MEMORY_MAP_FAILED;
     }
 #endif
 

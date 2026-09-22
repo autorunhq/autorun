@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <switch.h>
+#include "low_window.h"
 
 extern void *horizon_native_window_start, *horizon_native_window_end;
 extern VirtmemReservation *__real_virtmemAddReservation( void *address, size_t size );
@@ -54,6 +55,7 @@ void *__wrap_virtmemFindStack( size_t size, size_t guard )
     uintptr_t end = (uintptr_t)horizon_native_window_end;
     size_t total;
 
+    if (!wine_nx_low_window_reserve()) return NULL;
     if (!start || end <= start || end > 0x100000000ULL) return __real_virtmemFindStack( size, guard );
     if (size > SIZE_MAX - 4095 || guard > SIZE_MAX - 4095) return NULL;
     size = (size + 4095) & ~(size_t)4095;

@@ -1860,6 +1860,7 @@ static enum launcher_address_space program_address_space( struct program *p )
 static int address_space_fits( struct launcher *l, struct program *p )
 {
     return !l->options->address_space_bits || l->options->address_space_bits == 32 ||
+           (l->options->low_window && p->settings.address_space != 1) ||
            program_address_space( p ) != LAUNCHER_ADDRESS_LOW;
 }
 
@@ -2486,9 +2487,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             enum launcher_address_space needs = launcher_program_address_space( p->path );
 
             ADD_ROW( ROW_ADDRESS, SECTION_GRAPHICS, "Address space",
-                     "What the game needs of the address space Horizon gives Autorun. A game linked for a "
-                     "fixed address in the low 4 GB runs only under a forwarder made with 32 bits; the "
-                     "forwarder decides this, and a game that needs one it was not given is not started." );
+                     "Fixed-address Win32 games need the low window or the 32-bit forwarder. "
+                     "Autorun checks the low window before starting them in a 39-bit process." );
             row->adjustable = 1;
             if (p->settings.address_space >= 0)
                 snprintf( row->value, sizeof(row->value), "%s",
