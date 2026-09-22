@@ -1,0 +1,176 @@
+diff --git a/source/fatfs/diskio.c b/source/fatfs/diskio.c
+index aeabae7..ea346e8 100644
+--- a/source/fatfs/diskio.c
++++ b/source/fatfs/diskio.c
+@@ -14,6 +14,117 @@
+ #include "../usbhsfs_manager.h"
+ #include "../usbhsfs_scsi.h"
+ 
++#define USBHSFS_FAT_CACHE_ENTRIES 4096
++#define USBHSFS_FAT_CACHE_WAYS 4
++#define USBHSFS_FAT_CACHE_SETS (USBHSFS_FAT_CACHE_ENTRIES / USBHSFS_FAT_CACHE_WAYS)
++#define USBHSFS_FAT_CACHE_BLOCK_SIZE 512
++#define USBHSFS_FAT_CACHE_MAX_READ 64
++
++typedef struct {
++    LBA_t sector;
++    u32 stamp;
++    BYTE pdrv;
++    bool valid;
++    BYTE data[USBHSFS_FAT_CACHE_BLOCK_SIZE];
++} UsbHsFsFatCacheEntry;
++
++static Mutex g_fatCacheMutex;
++static UsbHsFsFatCacheEntry g_fatCache[USBHSFS_FAT_CACHE_ENTRIES];
++static u32 g_fatCacheStamp;
++
++unsigned int wine_nx_usb_reads;
++unsigned int wine_nx_usb_sectors;
++unsigned int wine_nx_usb_cache_hits;
++unsigned int wine_nx_usb_failures;
++unsigned long long wine_nx_usb_read_ns;
++
++static unsigned int usbHsFsFatCacheSet(BYTE pdrv, LBA_t sector)
++{
++    u64 value = (u64)sector;
++    return (unsigned int)(value ^ (value >> 32) ^ ((u64)pdrv * 0x9e3779b1U)) &
++           (USBHSFS_FAT_CACHE_SETS - 1);
++}
++
++static UsbHsFsFatCacheEntry *usbHsFsFatCacheFind(BYTE pdrv, LBA_t sector)
++{
++    unsigned int first = usbHsFsFatCacheSet(pdrv, sector) * USBHSFS_FAT_CACHE_WAYS;
++    unsigned int i;
++
++    for (i = 0; i < USBHSFS_FAT_CACHE_WAYS; i++)
++    {
++        UsbHsFsFatCacheEntry *entry = &g_fatCache[first + i];
++        if (entry->valid && entry->pdrv == pdrv && entry->sector == sector) return entry;
++    }
++    return NULL;
++}
++
++static bool usbHsFsFatCacheRead(BYTE pdrv, LBA_t sector, UINT count, BYTE *data)
++{
++    UINT i;
++    bool found = count && count <= USBHSFS_FAT_CACHE_MAX_READ;
++
++    mutexLock(&g_fatCacheMutex);
++    for (i = 0; found && i < count; i++)
++    {
++        UsbHsFsFatCacheEntry *entry = usbHsFsFatCacheFind(pdrv, sector + i);
++        if (!entry) found = false;
++        else
++        {
++            entry->stamp = ++g_fatCacheStamp;
++            memcpy(data + i * USBHSFS_FAT_CACHE_BLOCK_SIZE, entry->data, sizeof(entry->data));
++        }
++    }
++    mutexUnlock(&g_fatCacheMutex);
++    return found;
++}
++
++static void usbHsFsFatCacheStore(BYTE pdrv, LBA_t sector, UINT count, const BYTE *data)
++{
++    UINT i;
++
++    if (!count || count > USBHSFS_FAT_CACHE_MAX_READ) return;
++
++    mutexLock(&g_fatCacheMutex);
++    for (i = 0; i < count; i++)
++    {
++        unsigned int first = usbHsFsFatCacheSet(pdrv, sector + i) * USBHSFS_FAT_CACHE_WAYS;
++        UsbHsFsFatCacheEntry *entry = usbHsFsFatCacheFind(pdrv, sector + i);
++        unsigned int way;
++
++        if (!entry)
++        {
++            u32 oldest = ~0u;
++            entry = &g_fatCache[first];
++            for (way = 0; way < USBHSFS_FAT_CACHE_WAYS; way++)
++            {
++                UsbHsFsFatCacheEntry *candidate = &g_fatCache[first + way];
++                if (!candidate->valid) { entry = candidate; break; }
++                if (candidate->stamp < oldest) { oldest = candidate->stamp; entry = candidate; }
++            }
++        }
++        entry->valid = false;
++        entry->pdrv = pdrv;
++        entry->sector = sector + i;
++        entry->stamp = ++g_fatCacheStamp;
++        memcpy(entry->data, data + i * USBHSFS_FAT_CACHE_BLOCK_SIZE, sizeof(entry->data));
++        entry->valid = true;
++    }
++    mutexUnlock(&g_fatCacheMutex);
++}
++
++static void usbHsFsFatCacheInvalidate(BYTE pdrv, LBA_t sector, UINT count)
++{
++    unsigned int i;
++    LBA_t end = sector + count;
++
++    mutexLock(&g_fatCacheMutex);
++    for (i = 0; i < USBHSFS_FAT_CACHE_ENTRIES; i++)
++        if (g_fatCache[i].valid && g_fatCache[i].pdrv == pdrv &&
++            (!count || (g_fatCache[i].sector >= sector && g_fatCache[i].sector < end)))
++            g_fatCache[i].valid = false;
++    mutexUnlock(&g_fatCacheMutex);
++}
++
+ /* Reference for needed FATFS impl functions: http://irtos.sourceforge.net/FAT32_ChaN/doc/en/appnote.html#port */
+ 
+ /*-----------------------------------------------------------------------*/
+@@ -40,9 +151,8 @@ DSTATUS ff_disk_initialize (
+ 	BYTE pdrv				/* Physical drive nmuber to identify the drive */
+ )
+ {
+-    NX_IGNORE_ARG(pdrv);
+-
+     /* We take care of this. */
++    usbHsFsFatCacheInvalidate(pdrv, 0, 0);
+     return RES_OK;
+ }
+ 
+@@ -59,10 +169,33 @@ DRESULT ff_disk_read (
+ {
+     UsbHsFsDriveLogicalUnitContext *lun_ctx = NULL;
+     DRESULT ret = RES_PARERR;
++    u64 start;
+ 
+     /* Get LUN context and read logical blocks. */
+     lun_ctx = usbHsFsManagerGetLogicalUnitContextForFatFsDriveNumber(pdrv);
+-    if (lun_ctx && usbHsFsScsiReadLogicalUnitBlocks(lun_ctx, buff, sector, count)) ret = RES_OK;
++    if (!lun_ctx) return ret;
++    if (lun_ctx->block_length == USBHSFS_FAT_CACHE_BLOCK_SIZE &&
++        usbHsFsFatCacheRead(pdrv, sector, count, buff))
++    {
++        __atomic_fetch_add(&wine_nx_usb_cache_hits, 1, __ATOMIC_RELAXED);
++        return RES_OK;
++    }
++
++    start = armGetSystemTick();
++    if (usbHsFsScsiReadLogicalUnitBlocks(lun_ctx, buff, sector, count))
++    {
++        ret = RES_OK;
++        if (lun_ctx->block_length == USBHSFS_FAT_CACHE_BLOCK_SIZE)
++            usbHsFsFatCacheStore(pdrv, sector, count, buff);
++    }
++    else
++    {
++        __atomic_fetch_add(&wine_nx_usb_failures, 1, __ATOMIC_RELAXED);
++    }
++    __atomic_fetch_add(&wine_nx_usb_reads, 1, __ATOMIC_RELAXED);
++    __atomic_fetch_add(&wine_nx_usb_sectors, count, __ATOMIC_RELAXED);
++    __atomic_fetch_add(&wine_nx_usb_read_ns,
++                       (unsigned long long)armTicksToNs(armGetSystemTick() - start), __ATOMIC_RELAXED);
+ 
+     return ret;
+ }
+@@ -84,6 +217,7 @@ DRESULT ff_disk_write (
+ 
+     /* Get LUN context and write logical blocks. */
+     lun_ctx = usbHsFsManagerGetLogicalUnitContextForFatFsDriveNumber(pdrv);
++    usbHsFsFatCacheInvalidate(pdrv, sector, count);
+     if (lun_ctx && usbHsFsScsiWriteLogicalUnitBlocks(lun_ctx, buff, sector, count)) ret = RES_OK;
+ 
+     return ret;

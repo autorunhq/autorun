@@ -1159,6 +1159,11 @@ static void runtime_report_interpreter(void)
         extern unsigned int wine_nx_audio_underruns __attribute__((weak));
         extern unsigned int wine_nx_sd_reads, wine_nx_sd_hits;
         extern unsigned long long wine_nx_sd_read_ns;
+        extern unsigned int wine_nx_usb_reads __attribute__((weak));
+        extern unsigned int wine_nx_usb_sectors __attribute__((weak));
+        extern unsigned int wine_nx_usb_cache_hits __attribute__((weak));
+        extern unsigned int wine_nx_usb_failures __attribute__((weak));
+        extern unsigned long long wine_nx_usb_read_ns __attribute__((weak));
         extern unsigned int wine_nx_gl_swaps __attribute__((weak)), wine_nx_gl_calls __attribute__((weak));
         extern unsigned int wine_nx_vk_presents __attribute__((weak));
         extern unsigned int wine_nx_gl_persistent_failures __attribute__((weak));
@@ -1180,8 +1185,13 @@ static void runtime_report_interpreter(void)
         extern int wine_nx_gl_pinned_memory __attribute__((weak));
         extern unsigned int wine_nx_syscall_counts[] __attribute__((weak));
         static unsigned int calls, last_reads = ~0u, last_frames = ~0u;
+        static unsigned int last_usb_reads = ~0u, last_usb_hits = ~0u;
         static u64 start;
         unsigned int reads = &wine_nx_file_reads ? __atomic_load_n( &wine_nx_file_reads, __ATOMIC_RELAXED ) : 0;
+        unsigned int usb_reads = &wine_nx_usb_reads ?
+                                 __atomic_load_n( &wine_nx_usb_reads, __ATOMIC_RELAXED ) : 0;
+        unsigned int usb_hits = &wine_nx_usb_cache_hits ?
+                                __atomic_load_n( &wine_nx_usb_cache_hits, __ATOMIC_RELAXED ) : 0;
         unsigned int gl_frames = &wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0;
         unsigned int frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) + gl_frames +
                               wine_nx_compositor_frames() +
@@ -1189,13 +1199,16 @@ static void runtime_report_interpreter(void)
         unsigned long long read_ms = &wine_nx_file_read_100ns
                                      ? __atomic_load_n( &wine_nx_file_read_100ns, __ATOMIC_RELAXED ) / 10000 : 0;
         unsigned int syscalls = &wine_nx_syscalls ? __atomic_load_n( &wine_nx_syscalls, __ATOMIC_RELAXED ) : 0;
-        char native[256] = "", gl[512] = "", audio[32] = "", systop[64] = "";
+        char native[256] = "", gl[512] = "", audio[32] = "", systop[64] = "", usb[128] = "";
 
         if (!start) start = now;
         if (++calls % 2) return;
-        if (reads == last_reads && frames == last_frames) return;
+        if (reads == last_reads && frames == last_frames && usb_reads == last_usb_reads &&
+            usb_hits == last_usb_hits) return;
         last_reads = reads;
         last_frames = frames;
+        last_usb_reads = usb_reads;
+        last_usb_hits = usb_hits;
         /* The three system calls made most since the last line, as id:calls: a
          * program's busy loop shows here without verbose traces. */
         if (wine_nx_syscall_counts)
@@ -1295,6 +1308,15 @@ static void runtime_report_interpreter(void)
         if (&wine_nx_audio_underruns && wine_nx_audio_underruns)
             snprintf( audio, sizeof(audio), " audio_under=%u",
                       __atomic_load_n( &wine_nx_audio_underruns, __ATOMIC_RELAXED ) );
+        if (usb_reads || usb_hits)
+            snprintf( usb, sizeof(usb), " usb_reads=%u usb_sectors=%u usb_ms=%llu usb_hits=%u usb_fail=%u",
+                      usb_reads,
+                      &wine_nx_usb_sectors ? __atomic_load_n( &wine_nx_usb_sectors, __ATOMIC_RELAXED ) : 0,
+                      &wine_nx_usb_read_ns ?
+                          __atomic_load_n( &wine_nx_usb_read_ns, __ATOMIC_RELAXED ) / 1000000 : 0,
+                      usb_hits,
+                      &wine_nx_usb_failures ?
+                          __atomic_load_n( &wine_nx_usb_failures, __ATOMIC_RELAXED ) : 0 );
         /* The libnx heap backs everything: Wine's guest memory, the GPU's
          * buffers and translated code. Under a 32-bit address space it is only
          * the heap region (1 GiB, or 2 GiB without the alias region). Free is
@@ -1305,12 +1327,13 @@ static void runtime_report_interpreter(void)
         unsigned long long heap_free = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
 
         log_line( "[PROGRESS] %llus reads=%u read_ms=%llu sd_reads=%u sd_ms=%llu cache_hits=%u syscalls=%u "
-                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s",
+                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s%s",
                   (unsigned long long)(armTicksToNs( now - start ) / 1000000000ull), reads, read_ms,
                   __atomic_load_n( &wine_nx_sd_reads, __ATOMIC_RELAXED ),
                   __atomic_load_n( &wine_nx_sd_read_ns, __ATOMIC_RELAXED ) / 1000000,
                   __atomic_load_n( &wine_nx_sd_hits, __ATOMIC_RELAXED ), syscalls, frames,
-                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, native, gl, audio );
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20,
+                  systop, native, gl, audio, usb );
         {
             extern void wine_nx_thread_report( void );
             extern void horizon_memory_pool_stats( char *buffer, size_t size );
