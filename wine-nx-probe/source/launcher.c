@@ -47,6 +47,7 @@
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
 #include "box64_options.h"
+#include "fex_options.h"
 
 #define ICON_SIDE      128    /* icons are decoded no larger than this */
 #define ICON_TEXTURES  48     /* a screenful, the row below it and the backdrop, at 1 MiB each */
@@ -1675,7 +1676,7 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
-    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_SYNC, ROW_CPU,
+    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2260,6 +2261,129 @@ static void box64_options_menu( struct launcher *l, struct program *p )
     }
 }
 
+static int fex_configured_count( const struct launcher_kv *kv, int advanced )
+{
+    char value[64];
+    int count = 0, i;
+
+    for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
+        if (nx_fex_options[i].advanced == advanced &&
+            launcher_kv_get( kv, nx_fex_options[i].name, value, sizeof(value) )) count++;
+    return count;
+}
+
+static void fex_options_status( const char *path, char *value, size_t size )
+{
+    struct launcher_kv kv;
+    int count;
+
+    if (!launcher_kv_load( &kv, path ))
+    {
+        snprintf( value, size, "File too large" );
+        return;
+    }
+    count = fex_configured_count( &kv, 0 ) + fex_configured_count( &kv, 1 );
+    if (count) snprintf( value, size, "%d flag%s set", count, count == 1 ? "" : "s" );
+    else snprintf( value, size, "Default" );
+}
+
+static int fex_option_value( const struct launcher_kv *kv, const struct nx_fex_option *option,
+                             char *text, size_t size )
+{
+    char value[64];
+    int choice;
+
+    if (!launcher_kv_get( kv, option->name, value, sizeof(value) ))
+        choice = option->default_choice;
+    else if ((choice = nx_fex_option_choice( option, value )) < 0)
+    {
+        snprintf( text, size, "Unsupported (%s)", value );
+        return -1;
+    }
+    snprintf( text, size, "%s", option->value_names[choice] );
+    return choice;
+}
+
+static int fex_option_rows( struct ui_row *rows, int *ids, int count,
+                            const struct launcher_kv *kv, int advanced )
+{
+    int i;
+
+    for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
+    {
+        if (nx_fex_options[i].advanced != advanced) continue;
+        ids[count] = i;
+        snprintf( rows[count].label, sizeof(rows[count].label), "%s", nx_fex_options[i].name );
+        fex_option_value( kv, nx_fex_options + i, rows[count].value, sizeof(rows[count].value) );
+        rows[count].help = nx_fex_options[i].help;
+        rows[count].kind = UI_ROW_VALUE;
+        rows[count].adjustable = 1;
+        count++;
+    }
+    return count;
+}
+
+static void fex_options_menu( struct launcher *l, struct program *p )
+{
+    struct ui_row rows[NX_FEX_OPTION_COUNT + 1];
+    int ids[NX_FEX_OPTION_COUNT + 1];
+    struct ui_list list = {0};
+    struct launcher_kv kv;
+    char path[768];
+    int count, expanded = 0, i;
+
+    if (!launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) ||
+        !launcher_kv_load( &kv, path ))
+    {
+        ui_message( &l->ui, "FEX options", "The program settings file is too large to edit." );
+        return;
+    }
+    for (;;)
+    {
+        const struct nx_fex_option *option;
+        enum ui_action action;
+        char current_text[64];
+        int current, next, set;
+
+        memset( rows, 0, sizeof(rows) );
+        count = fex_option_rows( rows, ids, 0, &kv, 0 );
+        set = fex_configured_count( &kv, 1 );
+        ids[count] = -1;
+        snprintf( rows[count].label, sizeof(rows[count].label), "Advanced flags" );
+        snprintf( rows[count].value, sizeof(rows[count].value), expanded ? "Hide (%d set)" : "Show (%d set)", set );
+        rows[count].help = "Lower-level performance and compatibility controls supported by Autorun's FEX backend.";
+        rows[count].kind = UI_ROW_DROPDOWN;
+        rows[count].on = expanded;
+        count++;
+        if (expanded) count = fex_option_rows( rows, ids, count, &kv, 1 );
+        action = ui_list_run( &l->ui, &list, "FEX options", p->title, rows, count, 1 );
+        if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return;
+        i = ids[list.selection];
+        if (i < 0)
+        {
+            if (action == UI_ACTION_CHOOSE) expanded = !expanded;
+            continue;
+        }
+        option = nx_fex_options + i;
+        current = fex_option_value( &kv, option, current_text, sizeof(current_text) );
+        if (action == UI_ACTION_RESET) next = option->default_choice;
+        else
+        {
+            if (current < 0) current = option->default_choice;
+            next = (current + (action == UI_ACTION_LEFT ? option->value_count - 1 : 1)) % option->value_count;
+        }
+        if (!launcher_kv_set( &kv, option->name,
+                              next == option->default_choice ? NULL : option->values[next] ) ||
+            !launcher_kv_save( &kv, path ))
+        {
+            ui_message( &l->ui, "FEX options", "The options could not be saved." );
+            if (!launcher_kv_load( &kv, path )) return;
+            continue;
+        }
+        load_program_settings( l, p );
+    }
+}
+
 /* Returns 1 when the program is to be started. */
 /* The sections of Game Settings, in the order they stand in the list. */
 enum program_section
@@ -2526,6 +2650,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             launcher_sibling_path( p->path, ".box64.txt", path, sizeof(path) );
             box64_options_status( path, row->value, sizeof(row->value) );
         }
+        else if ((x86 || x64) && p->settings.fex)
+        {
+            ADD_ROW( ROW_FEX, SECTION_DIAGNOSTICS, "FEX options",
+                     "Per-game performance and compatibility flags for the FEX translator." );
+            if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ))
+                fex_options_status( path, row->value, sizeof(row->value) );
+            else snprintf( row->value, sizeof(row->value), "Unavailable" );
+        }
 
         if (in_library)
         {
@@ -2791,6 +2923,11 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         case ROW_BOX64:
             if (action != UI_ACTION_CHOOSE) break;
             box64_options_menu( l, p );
+            break;
+
+        case ROW_FEX:
+            if (action != UI_ACTION_CHOOSE) break;
+            fex_options_menu( l, p );
             break;
 
         case ROW_HIDE:

@@ -164,6 +164,153 @@ index 001adcb..32b03f2 100644
        break;
      }
      case ForwardLabel::InstType::LONG_ADDRESS_GEN: {
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index d292e5c..00b4356 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -300,7 +300,9 @@ endif()
+ # Meta-library to link jemalloc libraries enabled in the build configuration.
+ # Only needed for targets that run emulation. For others, use JemallocDummy.
+ add_library(JemallocLibs STATIC Utils/AllocatorHooks.cpp)
+-if (ENABLE_FEX_ALLOCATOR)
++if (FEX_HORIZON)
++  target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${CMAKE_SOURCE_DIR}/Source/Windows/include/")
++elseif (ENABLE_FEX_ALLOCATOR)
+   target_compile_definitions(JemallocLibs PRIVATE ENABLE_FEX_ALLOCATOR=1)
+   target_link_libraries(JemallocLibs PUBLIC rpmalloc)
+   target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/")
+diff --git a/FEXCore/Source/Interface/Core/CPUBackend.cpp b/FEXCore/Source/Interface/Core/CPUBackend.cpp
+index ed77028..25d911c 100644
+--- a/FEXCore/Source/Interface/Core/CPUBackend.cpp
++++ b/FEXCore/Source/Interface/Core/CPUBackend.cpp
+@@ -339,9 +339,13 @@ namespace CPU {
+ 
+   bool CPUBackend::IsAddressInCodeBuffer(uintptr_t Address) const {
+     const auto CheckCodeBuffer = [](const CodeBuffer& Buffer, uintptr_t Address) {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++      return Buffer.Contains(Address);
++#else
+       const auto BufferPtr = reinterpret_cast<uintptr_t>(Buffer.GetBufferBase());
+       const uintptr_t LastPageAddr = BufferPtr + Buffer.UsableSize();
+       return (Address >= BufferPtr && Address < LastPageAddr);
++#endif
+     };
+ 
+     if (CheckCodeBuffer(*CurrentCodeBuffer, Address)) {
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 8286c14..2f1284d 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -76,6 +76,9 @@ $end_info$
+ #include <unordered_map>
+ #include <utility>
+ #include <xxhash.h>
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++#include "cache_policy.h"
++#endif
+ #if defined(ARCHITECTURE_arm64)
+ #include <arm_acle.h>
+ #endif
+@@ -85,10 +88,17 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
+   : HostFeatures {Features}
+   , CPUID {this}
+   , CodeCache {*this} {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  Config.VirtualMemSize = WineNX::FEX::LookupAddressSpace(Config.Is64BitMode());
++  if (!Config.GlobalJITNaming() && !CodeCache.IsGeneratingCache && !FEXCore::Config::Get_ENABLECODECACHINGWIP()) {
++    SetCodeCacheLimit(WineNX::FEX::CodeCacheLimit(Config.Is64BitMode()));
++  }
++#else
+   if (!Config.Is64BitMode()) {
+     // When operating in 32-bit mode, the virtual memory we care about is only the lower 32-bits.
+     Config.VirtualMemSize = 1ULL << 32;
+   }
++#endif
+ 
+   if (Config.BlockJITNaming() || Config.GlobalJITNaming() || Config.LibraryJITNaming()) {
+     // Only initialize symbols file if enabled. Ensures we don't pollute /tmp with empty files.
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index b174dab..38cf000 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -181,18 +181,26 @@ void Dispatcher::EmitDispatcher() {
+     // It matches what is going on it LookupCache.h::FindBlock
+     ldr(TMP1, STATE_PTR(CpuStateFrame, Pointers.L2Pointer));
+ 
+-    // Mask the address by the virtual address size so we can check for aliases
+     uint64_t VirtualMemorySize = CTX->Config.VirtualMemSize;
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    lsr(ARMEmitter::Size::i64Bit, TMP2, RipReg.R(), 12);
++    eor(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP2, ARMEmitter::ShiftType::LSR, 16);
++    and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, VirtualMemorySize / FEXCore::Utils::FEX_PAGE_SIZE - 1);
++#else
++    // Mask the address by the virtual address size so we can check for aliases
+     if (std::popcount(VirtualMemorySize) == 1) {
+       and_(ARMEmitter::Size::i64Bit, TMP4, RipReg.R(), VirtualMemorySize - 1);
+     } else {
+       LoadConstant(ARMEmitter::Size::i64Bit, TMP4, VirtualMemorySize);
+       and_(ARMEmitter::Size::i64Bit, TMP4, RipReg.R(), TMP4);
+     }
++#endif
+ 
+     {
+       // Offset the address and add to our page pointer
++#if !defined(FEX_HORIZON) && !defined(FEX_HORIZON_CACHE_TEST)
+       lsr(ARMEmitter::Size::i64Bit, TMP2, TMP4, 12);
++#endif
+ 
+       // Load the pointer from the offset
+       ldr(TMP1, TMP1, TMP2, ARMEmitter::ExtendedType::LSL_64, 3);
+@@ -201,7 +209,7 @@ void Dispatcher::EmitDispatcher() {
+       (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &NoBlock);
+ 
+       // Steal the page offset
+-      and_(ARMEmitter::Size::i64Bit, TMP2, TMP4, 0x0FFF);
++      and_(ARMEmitter::Size::i64Bit, TMP2, RipReg.R(), 0x0FFF);
+ 
+       // Shift the offset by the size of the block cache entry
+       add(TMP1, TMP1, TMP2, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index 6ae165c..d00fcf2 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -1334,6 +1334,9 @@ void Decoder::AddBranchTarget(uint64_t Target) {
+           .NumInstructions = BlockIt->NumInstructions - SplitIdx,
+           .DecodedInstructions = BlockIt->DecodedInstructions + SplitIdx,
+           .BlockStatus = BlockIt->BlockStatus,
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++          .ForceFullSMCDetection = BlockIt->ForceFullSMCDetection,
++#endif
+         };
+ 
+         if (BlockIt->DataMasks.size()) {
+@@ -1554,6 +1557,17 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+       }
+       uint64_t OpEndAddress = OpAddress + DecodeInst->InstSize;
+ 
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++      if (BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && CTX->Config.SMCChecks != FEXCore::Config::CONFIG_SMC_NONE) {
++        bool Writable = CheckRangeExecutable(OpAddress, 1) && ExecutableRangeWritable;
++        Writable |= CheckRangeExecutable(OpEndAddress - 1, 1) && ExecutableRangeWritable;
++        if (Writable) {
++          BlockIt->ForceFullSMCDetection = true;
++          BlockIt->DataMasks.clear();
++        }
++      }
++#endif
++
+       DecodedMinAddress = std::min(DecodedMinAddress, OpAddress);
+       DecodedMaxAddress = std::max(DecodedMaxAddress, OpEndAddress);
+ 
+@@ -1569,7 +1583,7 @@ void Decoder::DecodeLoop(const uint8_t* _InstStream, uint64_t GuestSizePause) {
+       BlockIt->Size += DecodeInst->InstSize;
+ 
+       // if we weren't provided relocations (guest JIT), try to detect what we can
+-      if (WantsDataMasks && BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && BlockInfo.Is64BitMode && !Relocations) {
++      if (WantsDataMasks && !BlockIt->ForceFullSMCDetection && BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && BlockInfo.Is64BitMode && !Relocations) {
+         DetectDataMasks(OpAddress, *BlockIt);
+       }
+ 
 diff --git a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp b/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
 index 3691bca..7538793 100644
 --- a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
@@ -181,7 +328,7 @@ index 3691bca..7538793 100644
  }
  
 diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-index c23f01a..076c28e 100644
+index c23f01a..4337320 100644
 --- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 @@ -511,7 +511,7 @@ static void DirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record,
@@ -230,8 +377,28 @@ index c23f01a..076c28e 100644
      ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
  
      Thread->LookupCache->AddBlockLink(GuestRip, Record, IndirectBlockDelinker, lk);
-@@ -1124,7 +1127,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
-     CodeData.HostCodeOffset = CodeData.BlockBegin - CurrentCodeBuffer->GetBufferBase();
+@@ -832,7 +835,15 @@ CodeBuffer::CodeBufferAllocation Arm64JITCore::AllocateCodeBufferInSharedCache(s
+     if (AllocatedInfo.BufferAllocationOffset == nullptr) {
+       // If it didn't fit then clear the buffer and try again.
+       // This has the possibility of migrating the SharedCodeBuffer. See above in `Arm64JITCore::ClearCache()`
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++      const auto PreviousSize = CurrentCodeBuffer->TotalAllocationSize();
++#endif
+       CTX->ClearCodeCache(ThreadState);
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++      if (CurrentCodeBuffer->TotalAllocationSize() <= PreviousSize && Size > CurrentCodeBuffer->UsableSize()) {
++        ERROR_AND_DIE_FMT("Compiled block of {} bytes exceeds available code buffer", Size);
++      }
++#endif
+       continue;
+     }
+   }
+@@ -1121,10 +1132,10 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+       EntryPoint.second += Delta;
+     }
+     CodeBegin += Delta;
+-    CodeData.HostCodeOffset = CodeData.BlockBegin - CurrentCodeBuffer->GetBufferBase();
++    CodeData.HostCodeOffset = CodeData.BlockBegin - AllocatedInfo.BufferBase;
  
      // Copy over CodeBuffer contents
 -    memcpy(AllocatedInfo.BufferAllocationOffset, TempCodeBuffer, CodeData.Size);
@@ -239,7 +406,7 @@ index c23f01a..076c28e 100644
    }
  
    TempCodeBufferAllocator.DelayedDisownBuffer();
-@@ -1169,7 +1172,7 @@ CPUBackend::CompiledCode Arm64JITCore::LoadCachedCode(std::span<const uint8_t> H
+@@ -1169,13 +1180,13 @@ CPUBackend::CompiledCode Arm64JITCore::LoadCachedCode(std::span<const uint8_t> H
    auto AllocatedInfo = AllocateCodeBufferInSharedCache(HostBytes.size());
  
    uint8_t* Dest = AllocatedInfo.BufferAllocationOffset;
@@ -248,8 +415,15 @@ index c23f01a..076c28e 100644
    ClearICache(Dest, HostBytes.size());
  
    CPUBackend::CompiledCode Result;
+   Result.BlockBegin = Dest;
+   Result.Size = HostBytes.size();
+-  Result.HostCodeOffset = Dest - CurrentCodeBuffer->GetBufferBase();
++  Result.HostCodeOffset = Dest - AllocatedInfo.BufferBase;
+   return Result;
+ }
+ 
 diff --git a/FEXCore/Source/Interface/Core/LookupCache.cpp b/FEXCore/Source/Interface/Core/LookupCache.cpp
-index 0b23030..f8b2da1 100644
+index 0b23030..46f51d7 100644
 --- a/FEXCore/Source/Interface/Core/LookupCache.cpp
 +++ b/FEXCore/Source/Interface/Core/LookupCache.cpp
 @@ -39,7 +39,7 @@ LookupCache::LookupCache(FEXCore::Context::ContextImpl* CTX)
@@ -261,8 +435,155 @@ index 0b23030..f8b2da1 100644
  
    // Disable THP on the Lookup cache.
    FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<const void*>(PagePointer), TotalCacheSize, FEXCore::Allocator::THPControl::Disable);
+@@ -90,6 +90,9 @@ void LookupCache::ClearThreadLocalCaches(const LookupCacheWriteLockToken&) {
+   // TODO: Preserve code cache entries?
+   // Clear L1 and L2 by clearing the full cache.
+   FEXCore::Allocator::VirtualDontNeed(reinterpret_cast<void*>(PagePointer), TotalCacheSize, false);
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  AllocateOffset = 0;
++#endif
+ 
+   // TODO: Rename this member to avoid confusion with code caching
+   CachedCodePages.clear();
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index 391d485..eed4d88 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -1,5 +1,8 @@
+ // SPDX-License-Identifier: MIT
+ #pragma once
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++#include "cache_policy.h"
++#endif
+ #include "Interface/Context/Context.h"
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/SHMStats.h>
+@@ -193,7 +196,7 @@ public:
+ 
+       if (!DisableL2Cache()) {
+         // Try L2
+-        const auto PageIndex = (Address & (VirtualMemSize - 1)) >> 12;
++        const auto PageIndex = GetL2PageIndex(Address);
+         const auto PageOffset = Address & (0x0FFF);
+ 
+         const auto Pointers = reinterpret_cast<uintptr_t*>(PagePointer);
+@@ -320,12 +323,11 @@ public:
+ 
+     if (!DisableL2Cache()) {
+       // Do full map
+-      Address = Address & (VirtualMemSize - 1);
+       uint64_t PageOffset = Address & (0x0FFF);
+-      Address >>= 12;
++      const auto PageIndex = GetL2PageIndex(Address);
+ 
+       uintptr_t* Pointers = reinterpret_cast<uintptr_t*>(PagePointer);
+-      uint64_t LocalPagePointer = Pointers[Address];
++      uint64_t LocalPagePointer = Pointers[PageIndex];
+       if (!LocalPagePointer) {
+         // Page for this code didn't even exist, nothing to do
+         return;
+@@ -389,6 +391,16 @@ public:
+   }
+ 
+ private:
++  uint64_t GetL2PageIndex(uint64_t Address) const {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    auto Page = Address >> 12;
++    Page ^= Page >> 16;
++    return Page & (VirtualMemSize / FEXCore::Utils::FEX_PAGE_SIZE - 1);
++#else
++    return (Address & (VirtualMemSize - 1)) >> 12;
++#endif
++  }
++
+   void AddL1Entry(uint64_t GuestAddress, uint64_t HostCode) {
+     auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[GuestAddress & L1PointerMask];
+     L1Entry.GuestCode = GuestAddress;
+@@ -406,13 +418,11 @@ private:
+     if (!DisableL2Cache() && !L1Only) {
+       // Do ful map
+       auto FullAddress = Address;
+-      Address = Address & (VirtualMemSize - 1);
+-
+       uint64_t PageOffset = Address & (0x0FFF);
+-      Address >>= 12;
++      const auto PageIndex = GetL2PageIndex(Address);
+ 
+       uintptr_t* Pointers = reinterpret_cast<uintptr_t*>(PagePointer);
+-      uint64_t LocalPagePointer = Pointers[Address];
++      uint64_t LocalPagePointer = Pointers[PageIndex];
+       if (!LocalPagePointer) {
+         // We don't have a page pointer for this address
+         // Allocate one now if we can
+@@ -423,7 +433,7 @@ private:
+           CacheBlockMapping(FullAddress, Entry, false, lk);
+           return;
+         }
+-        Pointers[Address] = NewPageBacking;
++        Pointers[PageIndex] = NewPageBacking;
+         LocalPagePointer = NewPageBacking;
+       }
+ 
+@@ -460,14 +470,20 @@ private:
+ 
+   size_t TotalCacheSize;
+ 
+-  // Start with 8k entries in L1 to give 128KB of L1 cache to each thread.
+-  // Max out at 1 million entries to give each thread 16MB of L1 cache maximum.
+-  constexpr static size_t MIN_L1_ENTRIES = 8 * 1024;        // Must be a power of 2
+-  constexpr static size_t MAX_L1_ENTRIES = 1 * 1024 * 1024; // Must be a power of 2
+-
++  constexpr static size_t MIN_L1_ENTRIES = 8 * 1024;
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  const size_t MAX_L1_ENTRIES = WineNX::FEX::L1Entries();
++  const size_t CODE_SIZE = WineNX::FEX::L2BackingSize();
++#else
++  constexpr static size_t MAX_L1_ENTRIES = 1 * 1024 * 1024;
+   constexpr static size_t CODE_SIZE = 128 * 1024 * 1024;
++#endif
+   constexpr static size_t SIZE_PER_PAGE = FEXCore::Utils::FEX_PAGE_SIZE * sizeof(LookupCacheEntry);
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  const size_t MAX_L1_SIZE = MAX_L1_ENTRIES * sizeof(LookupCacheEntry);
++#else
+   constexpr static size_t MAX_L1_SIZE = MAX_L1_ENTRIES * sizeof(LookupCacheEntry);
++#endif
+ 
+   size_t AllocateOffset {};
+ 
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 22c7e46..ca52640 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -393,7 +393,26 @@ void OpDispatchBuilder::PUSHSegmentOp(OpcodeArgs, uint32_t SegmentReg) {
+ }
+ 
+ void OpDispatchBuilder::POPOp(OpcodeArgs) {
+-  Ref Value = Pop(OpSizeFromSrc(Op));
++  const auto Size = OpSizeFromSrc(Op);
++  if (!Op->Dest.IsGPR()) {
++    Ref SP = LoadGPRRegister(X86State::REG_RSP);
++    Ref Value = _LoadMemGPR(Size, SP, Size);
++    auto Address = DecodeAddress(Op, Op->Dest, MemoryAccessType::DEFAULT, false);
++    const auto& Dest = Op->Dest;
++    bool StackBase = false;
++    if (Dest.IsGPRDirect()) {
++      StackBase = Dest.Data.GPR.GPR == X86State::REG_RSP;
++    } else if (Dest.IsGPRIndirect() || Dest.IsGPRIndirectRelocation()) {
++      StackBase = Dest.Data.GPRIndirect.GPR == X86State::REG_RSP;
++    } else if (Dest.IsSIB() || Dest.IsSIBRelocation()) {
++      StackBase = Dest.Data.SIB.Base == X86State::REG_RSP;
++    }
++    if (StackBase) Address.Offset += IR::OpSizeToSize(Size);
++    _StoreMemGPRAutoTSO(Size, Address, Value, Size);
++    StoreGPRRegister(X86State::REG_RSP, Add(GetGPROpSize(), SP, IR::OpSizeToSize(Size)));
++    return;
++  }
++  Ref Value = Pop(Size);
+   StoreResultGPR(Op, Value);
+ }
+ 
 diff --git a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
-index d63ec3e..7d7b0e9 100644
+index d63ec3e..c7ee236 100644
 --- a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
 +++ b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
 @@ -14,19 +14,32 @@
@@ -275,7 +596,8 @@ index d63ec3e..7d7b0e9 100644
  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
 +#endif
  
- CodeBuffer::CodeBuffer(size_t Size)
+-CodeBuffer::CodeBuffer(size_t Size)
++CodeBuffer::CodeBuffer(size_t Size, size_t CacheLimit)
    : AllocatedSize(Size) {
    Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
 -  LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
@@ -299,8 +621,227 @@ index d63ec3e..7d7b0e9 100644
  
    FEXCore::Allocator::VirtualName("FEXMemJIT", Ptr, Size);
  
+@@ -35,12 +48,21 @@ CodeBuffer::CodeBuffer(size_t Size)
+ 
+   LookupCache = fextl::make_unique<GuestToHostMap>();
+ 
+-  CodeBufferEnd = Ptr + UsableSize();
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  Storage.Initialize(Ptr, AllocatedSize, CacheLimit,
++    [](size_t Bytes) { return FEXCore::Allocator::VirtualAlloc(Bytes, true); },
++    [](void* Base, size_t Bytes) { FEXCore::Allocator::VirtualFree(Base, Bytes); });
++#else
++  (void)CacheLimit;
++#endif
++  CodeBufferEnd = Ptr + AllocatedSize - FEXCore::Utils::FEX_PAGE_SIZE;
+   CodeBufferOffset = Ptr;
+ }
+ 
+ CodeBuffer::~CodeBuffer() {
++#if !defined(FEX_HORIZON) && !defined(FEX_HORIZON_CACHE_TEST)
+   FEXCore::Allocator::VirtualFree(Ptr, AllocatedSize);
++#endif
+ }
+ 
+ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::AllocateNew(size_t Size) {
+@@ -66,7 +88,11 @@ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::AllocateNew(size_t Size)
+   }
+ #endif
+ 
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  auto Buffer = fextl::make_shared<CodeBuffer>(Size, CodeCacheLimit);
++#else
+   auto Buffer = fextl::make_shared<CodeBuffer>(Size);
++#endif
+ 
+   Latest = Buffer;
+ 
+@@ -76,6 +102,9 @@ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::AllocateNew(size_t Size)
+ }
+ 
+ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::GetLatest() {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  std::scoped_lock Lock(CacheMutex);
++#endif
+   if (!Latest) {
+     AllocateNew(INITIAL_CODE_SIZE);
+   }
+@@ -83,17 +112,24 @@ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::GetLatest() {
+ }
+ 
+ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::StartLargerCodeBuffer() {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  std::scoped_lock Lock(CacheMutex);
++#endif
+   if (!Latest) {
+     // Allocate initial CodeBuffer and return it
+-    return GetLatest();
++    return AllocateNew(INITIAL_CODE_SIZE);
+   }
+ 
+-  auto NewCodeBufferSize = GetLatest()->TotalAllocationSize();
++  auto NewCodeBufferSize = Latest->TotalAllocationSize();
+   NewCodeBufferSize = std::min<size_t>(NewCodeBufferSize * 2, MAX_CODE_SIZE);
+   return AllocateNew(NewCodeBufferSize);
+ }
+ 
+ fextl::shared_ptr<CodeBuffer> SharedCodeBufferManager::StartMaximalCodeBuffer() {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  std::scoped_lock Lock(CacheMutex);
++  CodeCacheLimit = 0;
++#endif
+   return AllocateNew(MAX_CODE_SIZE);
+ }
+ } // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.h b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.h
+index c047eb8..c966427 100644
+--- a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.h
++++ b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.h
+@@ -14,6 +14,9 @@ $end_info$
+ 
+ #include <cstddef>
+ #include <cstdint>
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++#include "code_storage.h"
++#endif
+ 
+ namespace FEXCore {
+ struct GuestToHostMap;
+@@ -23,7 +26,7 @@ namespace FEXCore::CPU {
+ struct CodeBuffer {
+   fextl::unique_ptr<GuestToHostMap> LookupCache;
+ 
+-  CodeBuffer(size_t Size);
++  CodeBuffer(size_t Size, size_t CacheLimit = 0);
+   CodeBuffer(const CodeBuffer&) = delete;
+   CodeBuffer& operator=(const CodeBuffer&) = delete;
+   CodeBuffer(CodeBuffer&& oth) = delete;
+@@ -39,6 +42,10 @@ struct CodeBuffer {
+   };
+ 
+   CodeBufferAllocation AtomicAllocateBuffer(size_t Size) {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    auto Result = Storage.Allocate(Size);
++    return {Result.BufferBase, Result.BufferAllocationOffset};
++#else
+     Size = FEXCore::AlignUp(Size, 16);
+     LOGMAN_THROW_A_FMT(reinterpret_cast<uintptr_t>(CodeBufferOffset.load()) % 16 == 0, "Buffer needs to always be 16B aligned!");
+ 
+@@ -64,34 +71,57 @@ struct CodeBuffer {
+       .BufferBase = Ptr,
+       .BufferAllocationOffset = ExpectedOffset,
+     };
++#endif
+   }
+ 
+   // Returns the total number of bytes available for storing code
+   size_t UsableSize() const {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    return Storage.UsableSize();
++#else
+     return AllocatedSize - FEXCore::Utils::FEX_PAGE_SIZE;
++#endif
+   }
+ 
+   // Returns the full size of the buffer, including the guard page.
+   size_t TotalAllocationSize() const {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    return Storage.Capacity();
++#else
+     return AllocatedSize;
++#endif
+   }
+ 
+   // Returns the num of bytes currently allocated from the allocator.
+   size_t AllocatedSpaceUsed() const {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    return Storage.Used();
++#else
+     return CodeBufferOffset - Ptr;
++#endif
+   }
+ 
+   // Trivially reset the allocator.
+   void Reset() {
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++    Storage.Reset();
++#else
+     CodeBufferOffset = Ptr;
++#endif
+   }
+ 
+   // Returns the base of the buffer.
+   uint8_t* GetBufferBase() const {
+     return Ptr;
+   }
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  bool Contains(uintptr_t Address) const { return Storage.Contains(Address); }
++#endif
+ 
+ private:
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  WineNX::FEX::CodeStorage Storage;
++#endif
+   uint8_t* Ptr;
+   uint8_t* CodeBufferEnd;
+   size_t AllocatedSize; // including guard page; see UsableSize()
+@@ -127,7 +157,17 @@ public:
+ 
+   virtual void OnCodeBufferAllocated(const std::shared_ptr<CodeBuffer>&) {};
+ 
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  void SetCodeCacheLimit(size_t Limit) {
++    std::scoped_lock Lock(CacheMutex);
++    CodeCacheLimit = Limit;
++  }
++#endif
+ private:
++#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
++  size_t CodeCacheLimit {};
++  std::mutex CacheMutex;
++#endif
+   fextl::shared_ptr<CodeBuffer> Latest;
+ 
+   fextl::shared_ptr<CodeBuffer> AllocateNew(size_t Size);
+diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
+index e85f09a..6db2614 100644
+--- a/FEXCore/Source/Utils/AllocatorHooks.cpp
++++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
+@@ -16,6 +16,9 @@
+ #include <malloc.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#ifdef FEX_HORIZON
++#include "Windows/Common/CRT/HorizonHeap.h"
++#endif
+ #include <string.h>
+ #include <unistd.h>
+ 
+@@ -24,7 +27,21 @@ using mmap_hook_type = void* (*)(void* addr, size_t length, int prot, int flags,
+ using munmap_hook_type = int (*)(void* addr, size_t length);
+ using vma_name_hook_type = void (*)(const char* name, const void* address, size_t size);
+ 
+-#ifdef ENABLE_FEX_ALLOCATOR
++#ifdef FEX_HORIZON
++namespace Heap = FEX::Windows::HorizonHeap;
++void* malloc(size_t size) { return Heap::Allocate(size); }
++void* calloc(size_t n, size_t size) { return Heap::Calloc(n, size); }
++void* memalign(size_t align, size_t size) { return Heap::Allocate(size, align); }
++void* valloc(size_t size) { return Heap::Allocate(size, 4096); }
++int posix_memalign(void** result, size_t align, size_t size) { return Heap::PosixMemalign(result, align, size); }
++void* realloc(void* ptr, size_t size) { return Heap::Reallocate(ptr, size); }
++void free(void* ptr) { Heap::Free(ptr); }
++size_t malloc_usable_size(void* ptr) { return Heap::Size(ptr); }
++void* aligned_alloc(size_t align, size_t size) { return Heap::Allocate(size, align); }
++void aligned_free(void* ptr) { Heap::Free(ptr); }
++void InitializeThread() {}
++void SetupAllocatorHooks(vma_name_hook_type) {}
++#elif defined(ENABLE_FEX_ALLOCATOR)
+ typedef void* (*rp_mmap_hook_type)(size_t size, size_t alignment, size_t* offset, size_t* mapped_size);
+ typedef void (*rp_munmap_hook_type)(void* address, size_t offset, size_t mapped_size);
+ typedef void (*vma_name_hook_type)(const char* name, const void* address, size_t size);
 diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
-index 01e5bb2..e1b8593 100644
+index 01e5bb2..a285b46 100644
 --- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
 +++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
 @@ -11,6 +11,7 @@
@@ -600,319 +1141,8 @@ index 034c2ca..2885a02 100644
  
    FEX::FetchHostFeatures(Features, HostFeatures, !IsWine, CTR, MIDR);
  
-diff --git a/Source/Windows/Common/FEXUnixLib.cpp b/Source/Windows/Common/FEXUnixLib.cpp
---- a/Source/Windows/Common/FEXUnixLib.cpp
-+++ b/Source/Windows/Common/FEXUnixLib.cpp
-@@ -43,3 +43,6 @@
- #endif
- bool Init(HMODULE NtDll) {
-+#ifdef FEX_HORIZON
-+  if (UnixCallDispatcher && UnixLibHandle) return true;
-+#endif
-   const auto Sym = GetProcAddress(NtDll, "__wine_unix_call_dispatcher");
-@@ -87,6 +90,8 @@
- #endif
- 
-+#ifndef FEX_HORIZON
-   // Give a log saying that the unix lib was loaded.
-   LogMan::Msg::IFmt("FEX: Loaded FEXUnixLib");
-+#endif
-   return true;
- }
-diff --git a/Source/Windows/Common/Horizon.cpp b/Source/Windows/Common/Horizon.cpp
-new file mode 100644
-index 0000000..86bc956
---- /dev/null
-+++ b/Source/Windows/Common/Horizon.cpp
-@@ -0,0 +1,71 @@
-+// SPDX-License-Identifier: MIT
-+#include <FEXCore/Utils/Horizon.h>
-+#include <FEXCore/Utils/LogManager.h>
-+#include "FEXUnixLib.h"
-+#include "unixlib.h"
-+#include "jit_registry.h"
-+#include <mutex>
-+#include <libloaderapi.h>
-+
-+namespace FEXCore::Allocator {
-+namespace {
-+WineNX::FEX::JitRegistry Mappings;
-+std::mutex MappingLock;
-+
-+NTSTATUS Call(unsigned Function, void* Args) {
-+  return FEX::Windows::UnixLib::Call(static_cast<FEXUnixLibFunctions>(Function), Args);
-+}
-+}
-+
-+bool HorizonInitialize() {
-+  if (!FEX::Windows::UnixLib::Available() && !FEX::Windows::UnixLib::Init(GetModuleHandleW(L"ntdll.dll"))) return false;
-+  wine_nx_fex_query Args {WINE_NX_FEX_ABI_VERSION, sizeof(Args)};
-+  return Call(WINE_NX_FEX_QUERY, &Args) == 0;
-+}
-+
-+bool HorizonAttachThread() {
-+  return Call(WINE_NX_FEX_ATTACH_THREAD, nullptr) == 0;
-+}
-+
-+void* HorizonAllocateJit(size_t Size) {
-+  std::scoped_lock Lock(MappingLock);
-+  auto* Entry = Mappings.FindFree();
-+  if (!Entry) return nullptr;
-+  wine_nx_fex_memory Args {Size, 0, 0};
-+  if (Call(WINE_NX_FEX_ALLOC, &Args)) return nullptr;
-+  Entry->RW.store(Args.rw, std::memory_order_relaxed);
-+  Entry->Size.store(Size, std::memory_order_relaxed);
-+  Entry->RX.store(Args.rx, std::memory_order_release);
-+  return reinterpret_cast<void*>(Args.rx);
-+}
-+
-+bool HorizonFreeJit(void* Pointer) {
-+  std::scoped_lock Lock(MappingLock);
-+  auto* Entry = Mappings.FindBase(reinterpret_cast<uintptr_t>(Pointer));
-+  if (!Entry) return false;
-+  wine_nx_fex_memory Args {Entry->Size.load(), reinterpret_cast<uintptr_t>(Pointer), 0};
-+  if (Call(WINE_NX_FEX_FREE, &Args)) ERROR_AND_DIE_FMT("Horizon JIT release failed");
-+  Entry->RX.store(0, std::memory_order_release);
-+  return true;
-+}
-+
-+void* HorizonWritableAddress(const void* Pointer) {
-+  return reinterpret_cast<void*>(Mappings.WritableAddress(reinterpret_cast<uintptr_t>(Pointer)));
-+}
-+
-+void HorizonFlushICache(void* Pointer, size_t Size) {
-+  if (!Size) return;
-+  if (HorizonWritableAddress(Pointer) == Pointer) {
-+    __builtin___clear_cache(static_cast<char*>(Pointer), static_cast<char*>(Pointer) + Size);
-+    return;
-+  }
-+  wine_nx_fex_memory Args {Size, reinterpret_cast<uintptr_t>(Pointer), 0};
-+  if (Call(WINE_NX_FEX_FLUSH, &Args)) ERROR_AND_DIE_FMT("Horizon JIT cache flush failed");
-+}
-+}
-+
-+namespace FEX::Windows::HorizonHeap {
-+NTSTATUS Call(unsigned Function, void* Args) {
-+  return UnixLib::Call(static_cast<FEXUnixLibFunctions>(Function), Args);
-+}
-+}
-diff --git a/Source/Windows/Common/OvercommitTracker.h b/Source/Windows/Common/OvercommitTracker.h
-index ba521e8..440433e 100644
---- a/Source/Windows/Common/OvercommitTracker.h
-+++ b/Source/Windows/Common/OvercommitTracker.h
-@@ -12,7 +12,7 @@ namespace FEX::Windows {
-  */
- class OvercommitTracker {
- private:
--  bool IsWine;
-+  [[maybe_unused]] bool IsWine;
-   FEXCore::IntervalList<uint64_t> OvercommitIntervals;
-   std::shared_mutex OvercommitIntervalsMutex;
- 
-@@ -35,15 +35,18 @@ public:
-     auto Query = OvercommitIntervals.Query(FaultAddress);
- 
-     if (Query.Enclosed) {
-+#ifndef FEX_HORIZON
-       if (IsWine) {
-         MEMORY_BASIC_INFORMATION Info;
-         NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress), MemoryBasicInformation, &Info, sizeof(Info), nullptr);
-         const auto CommitSize = reinterpret_cast<SIZE_T>(Info.BaseAddress) + Info.RegionSize - reinterpret_cast<SIZE_T>(Info.AllocationBase);
-         VirtualAlloc(reinterpret_cast<void*>(Info.AllocationBase), CommitSize, MEM_COMMIT, PAGE_READWRITE);
--      } else {
-+      } else
-+#endif
-+      {
-         static constexpr size_t MaxFaultCommitSize = 1024 * 64;
-         const auto AlignedFaultAddress = reinterpret_cast<void*>(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK);
--        VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE);
-+        return VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE) != nullptr;
-       }
-       return true;
-     }
-diff --git a/Source/Windows/include/winternl.h b/Source/Windows/include/winternl.h
-index a987c3a..fb6d3d5 100644
---- a/Source/Windows/include/winternl.h
-+++ b/Source/Windows/include/winternl.h
-@@ -561,6 +561,7 @@ NTSTATUS WINAPI NtRaiseException(EXCEPTION_RECORD*, CONTEXT*, BOOL);
- NTSTATUS WINAPI NtReadFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
- NTSTATUS WINAPI NtSetContextThread(HANDLE, const CONTEXT*);
- NTSTATUS WINAPI NtSuspendThread(HANDLE, PULONG);
-+NTSTATUS WINAPI NtResumeThread(HANDLE, PULONG);
- NTSTATUS WINAPI NtTerminateProcess(HANDLE, LONG);
- NTSTATUS WINAPI NtTerminateThread(HANDLE, LONG);
- NTSTATUS WINAPI NtUnlockFile(HANDLE, PIO_STATUS_BLOCK, PLARGE_INTEGER, PLARGE_INTEGER, ULONG);
-diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
---- a/Source/Windows/WOW64/Module.cpp
-+++ b/Source/Windows/WOW64/Module.cpp
-@@ -544,6 +544,9 @@ void BTCpuProcessInit() {
- 
-   FEX::Windows::Allocator::SetupHooks(NtDll);
-   FEX::Windows::UnixLib::Init(NtDll);
-+#ifdef FEX_HORIZON
-+  if (!FEXCore::Allocator::HorizonInitialize()) ERROR_AND_DIE_FMT("Horizon FEX initialization failed");
-+#endif
-   if (FEX::Windows::UnixLib::Available()) {
-     FEXCore::DiskCache::SetFileMapper(FEX::Windows::UnixLib::MapFile);
-   }
-@@ -571,7 +574,9 @@ void BTCpuProcessInit() {
-   // Allocate the syscall/unixcall trampolines in the lower 2GB of the address space
-   SIZE_T Size = 4;
-   void* Addr = nullptr;
--  NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-+  if (NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) ||
-+      !Addr || reinterpret_cast<uintptr_t>(Addr) > 0x7ffffffb)
-+    ERROR_AND_DIE_FMT("FEX syscall bridge allocation failed");
-   InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Addr), Size, PAGE_EXECUTE);
-   *reinterpret_cast<uint32_t*>(Addr) = 0x2ecd2ecd;
-   BridgeInstrs::Syscall = Addr;
-@@ -582,6 +587,9 @@ void BTCpuProcessInit() {
-   if (Sym) {
-     WineUnixCall = *reinterpret_cast<decltype(WineUnixCall)*>(Sym);
-   }
-+#ifdef FEX_HORIZON
-+  if (!WineUnixCall) ERROR_AND_DIE_FMT("Wine Unix dispatcher is missing");
-+#endif
- 
-   FEX::Windows::SetupEnvironmentVariableValues(NtDll);
- 
-@@ -605,6 +613,9 @@ void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {}
- 
- void BTCpuThreadInit() {
-   static constexpr size_t DefaultWow64CS {4};
-+#ifdef FEX_HORIZON
-+  if (!FEXCore::Allocator::HorizonAttachThread()) ERROR_AND_DIE_FMT("FEX exception stack allocation failed");
-+#endif
-   std::scoped_lock Lock(ThreadCreationMutex);
-   FEX::Windows::InitCRTThread();
-   auto* Thread = CTX->CreateThread();
-@@ -660,11 +671,14 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
-   bool Self = ThreadTID == GetCurrentThreadId();
-   if (!Self) {
-     // If we are suspending a thread that isn't ourselves, try to suspend it first so we know internal JIT locks aren't being held.
--    RtlWow64SuspendThread(*ThreadDup, NULL);
-+    if (RtlWow64SuspendThread(*ThreadDup, nullptr)) {
-+      return;
-+    }
-   }
- 
-   auto [Err, TLS] = GetThreadTLS(*ThreadDup);
-   if (Err) {
-+    if (!Self) NtResumeThread(*ThreadDup, nullptr);
-     return;
-   }
- 
-@@ -674,6 +688,7 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
-     auto it = Threads.find(ThreadTID);
-     if (it == Threads.end()) {
-       // Thread already terminated
-+      if (!Self) NtResumeThread(*ThreadDup, nullptr);
-       return;
-     }
- 
-@@ -693,6 +708,7 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
- 
-   FEX::Windows::CallRetStack::DestroyThread(ThreadState);
-   CTX->DestroyThread(ThreadState);
-+  TLS.ThreadState() = nullptr;
-   if (Self) {
-     FEX::Windows::DeinitCRTThread();
-   }
-@@ -835,7 +851,10 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
-     ULONG TmpProt;
-     void* TmpAddress = &TLS.ThreadState()->InterruptFaultPage;
-     SIZE_T TmpSize = FEXCore::Utils::FEX_PAGE_SIZE;
--    NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PAGE_READONLY, &TmpProt);
-+    if (Err = NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PAGE_READONLY, &TmpProt); Err) {
-+      TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
-+      return Err;
-+    }
-   }
- 
-   // Spin until the JIT is interrupted
-@@ -855,12 +874,18 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
- 
-   // NtSuspendThread may return before the thread is actually suspended, so a sync operation like NtGetContextThread
-   // needs to be called to ensure it is before we unset CONTROL_PAUSED
--  std::ignore = NtGetContextThread(*ThreadDup, &TmpContext);
-+  if (Err = NtGetContextThread(*ThreadDup, &TmpContext); Err) {
-+    TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
-+    NtResumeThread(*ThreadDup, nullptr);
-+    return Err;
-+  }
- 
-   // Mark the CPU area as dirty, to force the JIT context to be restored from it on entry as it may be changed using
-   // SetThreadContext (which doesn't use the BTCpu API)
-   if (!(TLS.ControlWord().fetch_or(ControlBits::WOW_CPU_AREA_DIRTY, std::memory_order::relaxed) & ControlBits::WOW_CPU_AREA_DIRTY)) {
-     if (Err = Context::FlushThreadStateContext(*ThreadDup); Err) {
-+      TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
-+      NtResumeThread(*ThreadDup, nullptr);
-       return Err;
-     }
-   }
-@@ -886,7 +911,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
-   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-     const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
- 
--    if (FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {
-+    if (Thread && FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {
-       return true;
-     }
- 
-@@ -894,6 +919,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
-       return true;
-     }
- 
-+    if (!Thread) return false;
-     if (Context::HandleSuspendInterrupt(TLS, Context, FaultAddress)) {
-       LogMan::Msg::DFmt("Resumed from suspend");
-       return true;
-diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
---- a/FEXCore/Source/CMakeLists.txt
-+++ b/FEXCore/Source/CMakeLists.txt
-@@ -300,5 +300,7 @@
- add_library(JemallocLibs STATIC Utils/AllocatorHooks.cpp)
--if (ENABLE_FEX_ALLOCATOR)
-+if (FEX_HORIZON)
-+  target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/" "${CMAKE_SOURCE_DIR}/Source/Windows/include/")
-+elseif (ENABLE_FEX_ALLOCATOR)
-   target_compile_definitions(JemallocLibs PRIVATE ENABLE_FEX_ALLOCATOR=1)
-   target_link_libraries(JemallocLibs PUBLIC rpmalloc)
-   target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/")
-diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
---- a/FEXCore/Source/Utils/AllocatorHooks.cpp
-+++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
-@@ -17,6 +17,9 @@
- #include <malloc.h>
- #include <stdlib.h>
- #include <stdio.h>
-+#ifdef FEX_HORIZON
-+#include "Windows/Common/CRT/HorizonHeap.h"
-+#endif
- #include <string.h>
- #include <unistd.h>
- 
-@@ -28,4 +28,18 @@
--#ifdef ENABLE_FEX_ALLOCATOR
-+#ifdef FEX_HORIZON
-+namespace Heap = FEX::Windows::HorizonHeap;
-+void* malloc(size_t size) { return Heap::Allocate(size); }
-+void* calloc(size_t n, size_t size) { return Heap::Calloc(n, size); }
-+void* memalign(size_t align, size_t size) { return Heap::Allocate(size, align); }
-+void* valloc(size_t size) { return Heap::Allocate(size, 4096); }
-+int posix_memalign(void** result, size_t align, size_t size) { return Heap::PosixMemalign(result, align, size); }
-+void* realloc(void* ptr, size_t size) { return Heap::Reallocate(ptr, size); }
-+void free(void* ptr) { Heap::Free(ptr); }
-+size_t malloc_usable_size(void* ptr) { return Heap::Size(ptr); }
-+void* aligned_alloc(size_t align, size_t size) { return Heap::Allocate(size, align); }
-+void aligned_free(void* ptr) { Heap::Free(ptr); }
-+void InitializeThread() {}
-+void SetupAllocatorHooks(vma_name_hook_type) {}
-+#elif defined(ENABLE_FEX_ALLOCATOR)
- typedef void* (*rp_mmap_hook_type)(size_t size, size_t alignment, size_t* offset, size_t* mapped_size);
- typedef void (*rp_munmap_hook_type)(void* address, size_t offset, size_t mapped_size);
- typedef void (*vma_name_hook_type)(const char* name, const void* address, size_t size);
 diff --git a/Source/Windows/Common/CRT/CMakeLists.txt b/Source/Windows/Common/CRT/CMakeLists.txt
+index da998cb..34ca43a 100644
 --- a/Source/Windows/Common/CRT/CMakeLists.txt
 +++ b/Source/Windows/Common/CRT/CMakeLists.txt
 @@ -1,2 +1,7 @@
@@ -925,6 +1155,7 @@ diff --git a/Source/Windows/Common/CRT/CMakeLists.txt b/Source/Windows/Common/CR
 +endif()
  add_subdirectory(Musl)
 diff --git a/Source/Windows/Common/CRT/CRT.cpp b/Source/Windows/Common/CRT/CRT.cpp
+index addea79..4d374b5 100644
 --- a/Source/Windows/Common/CRT/CRT.cpp
 +++ b/Source/Windows/Common/CRT/CRT.cpp
 @@ -3,7 +3,12 @@
@@ -940,7 +1171,8 @@ diff --git a/Source/Windows/Common/CRT/CRT.cpp b/Source/Windows/Common/CRT/CRT.c
  #include "CRT.h"
  
  extern "C" {
-@@ -41,6 +41,14 @@
+@@ -40,7 +45,15 @@ void RunFuncArray(TFuncIt Begin, TFuncIt End, TArgs... Args) {
+ 
  namespace FEX::Windows {
  void InitCRTProcess() {
 +#ifdef FEX_HORIZON
@@ -955,7 +1187,9 @@ diff --git a/Source/Windows/Common/CRT/CRT.cpp b/Source/Windows/Common/CRT/CRT.c
  
    auto GNUCtorBegin = &__CTOR_LIST__[1];
    auto GNUCtorEnd = GNUCtorBegin;
-@@ -58,10 +58,14 @@
+@@ -56,12 +69,16 @@ void InitCRTProcess() {
+ }
+ 
  void InitCRTThread() {
 +#ifndef FEX_HORIZON
    rpmalloc_thread_initialize();
@@ -970,8 +1204,46 @@ diff --git a/Source/Windows/Common/CRT/CRT.cpp b/Source/Windows/Common/CRT/CRT.c
 +#endif
  }
  } // namespace FEX::Windows
+diff --git a/Source/Windows/Common/CRT/HorizonHeap.cpp b/Source/Windows/Common/CRT/HorizonHeap.cpp
+new file mode 100644
+index 0000000..a760ca7
+--- /dev/null
++++ b/Source/Windows/Common/CRT/HorizonHeap.cpp
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: MIT
++#define _SECIMP
++#define _CRTIMP
++#include <cstdlib>
++#include "HorizonHeap.h"
++
++namespace Heap = FEX::Windows::HorizonHeap;
++
++void* calloc(size_t Count, size_t Size) {
++  return Heap::Calloc(Count, Size);
++}
++
++void free(void* Pointer) {
++  Heap::Free(Pointer);
++}
++
++void* malloc(size_t Size) {
++  return Heap::Allocate(Size);
++}
++
++void* realloc(void* Pointer, size_t Size) {
++  return Heap::Reallocate(Pointer, Size);
++}
++
++DLLEXPORT_FUNC(void*, _aligned_malloc, (size_t Size, size_t Alignment)) {
++  return Heap::Allocate(Size, Alignment);
++}
++
++DLLEXPORT_FUNC(void, _aligned_free, (void* Pointer)) {
++  Heap::Free(Pointer);
++}
 diff --git a/Source/Windows/Common/CRT/HorizonHeap.h b/Source/Windows/Common/CRT/HorizonHeap.h
 new file mode 100644
+index 0000000..e37f8d0
 --- /dev/null
 +++ b/Source/Windows/Common/CRT/HorizonHeap.h
 @@ -0,0 +1,96 @@
@@ -1071,73 +1343,196 @@ new file mode 100644
 +  return 0;
 +}
 +} // namespace FEX::Windows::HorizonHeap
-diff --git a/Source/Windows/Common/CRT/HorizonHeap.cpp b/Source/Windows/Common/CRT/HorizonHeap.cpp
+diff --git a/Source/Windows/Common/FEXUnixLib.cpp b/Source/Windows/Common/FEXUnixLib.cpp
+index 3188034..4d166b5 100644
+--- a/Source/Windows/Common/FEXUnixLib.cpp
++++ b/Source/Windows/Common/FEXUnixLib.cpp
+@@ -44,6 +44,9 @@ static NTSTATUS __attribute__((naked)) TrampolineCall(unixlib_handle_t, unsigned
+ }
+ #endif
+ bool Init(HMODULE NtDll) {
++#ifdef FEX_HORIZON
++  if (UnixCallDispatcher && UnixLibHandle) return true;
++#endif
+   const auto Sym = GetProcAddress(NtDll, "__wine_unix_call_dispatcher");
+   WineServerHandleToFd = reinterpret_cast<wine_server_handle_to_fd_t>(GetProcAddress(NtDll, "wine_server_handle_to_fd"));
+ 
+@@ -87,8 +90,10 @@ bool Init(HMODULE NtDll) {
+   UnixCallDispatcher = *reinterpret_cast<decltype(__wine_unix_call_dispatcher)*>(Sym);
+ #endif
+ 
++#ifndef FEX_HORIZON
+   // Give a log saying that the unix lib was loaded.
+   LogMan::Msg::IFmt("FEX: Loaded FEXUnixLib");
++#endif
+   return true;
+ }
+ 
+diff --git a/Source/Windows/Common/Horizon.cpp b/Source/Windows/Common/Horizon.cpp
 new file mode 100644
+index 0000000..6a265e1
 --- /dev/null
-+++ b/Source/Windows/Common/CRT/HorizonHeap.cpp
-@@ -0,0 +1,31 @@
++++ b/Source/Windows/Common/Horizon.cpp
+@@ -0,0 +1,69 @@
 +// SPDX-License-Identifier: MIT
-+#define _SECIMP
-+#define _CRTIMP
-+#include <cstdlib>
-+#include "HorizonHeap.h"
++#include <FEXCore/Utils/Horizon.h>
++#include <FEXCore/Utils/LogManager.h>
++#include "FEXUnixLib.h"
++#include "unixlib.h"
++#include "jit_registry.h"
++#include <mutex>
++#include <libloaderapi.h>
 +
-+namespace Heap = FEX::Windows::HorizonHeap;
++namespace FEXCore::Allocator {
++namespace {
++WineNX::FEX::JitRegistry Mappings;
++std::mutex MappingLock;
 +
-+void* calloc(size_t Count, size_t Size) {
-+  return Heap::Calloc(Count, Size);
++NTSTATUS Call(unsigned Function, void* Args) {
++  return FEX::Windows::UnixLib::Call(static_cast<FEXUnixLibFunctions>(Function), Args);
++}
 +}
 +
-+void free(void* Pointer) {
-+  Heap::Free(Pointer);
++bool HorizonInitialize() {
++  if (!FEX::Windows::UnixLib::Available() && !FEX::Windows::UnixLib::Init(GetModuleHandleW(L"ntdll.dll"))) return false;
++  wine_nx_fex_query Args {WINE_NX_FEX_ABI_VERSION, sizeof(Args)};
++  return Call(WINE_NX_FEX_QUERY, &Args) == 0;
 +}
 +
-+void* malloc(size_t Size) {
-+  return Heap::Allocate(Size);
++bool HorizonAttachThread() {
++  return Call(WINE_NX_FEX_ATTACH_THREAD, nullptr) == 0;
 +}
 +
-+void* realloc(void* Pointer, size_t Size) {
-+  return Heap::Reallocate(Pointer, Size);
++void* HorizonAllocateJit(size_t Size) {
++  std::scoped_lock Lock(MappingLock);
++  auto* Entry = Mappings.FindFree();
++  if (!Entry) return nullptr;
++  wine_nx_fex_memory Args {Size, 0, 0};
++  if (Call(WINE_NX_FEX_ALLOC, &Args)) return nullptr;
++  Mappings.Publish(Entry, Args.rx, Args.rw, Size);
++  return reinterpret_cast<void*>(Args.rx);
 +}
 +
-+DLLEXPORT_FUNC(void*, _aligned_malloc, (size_t Size, size_t Alignment)) {
-+  return Heap::Allocate(Size, Alignment);
++bool HorizonFreeJit(void* Pointer) {
++  std::scoped_lock Lock(MappingLock);
++  auto* Entry = Mappings.FindBase(reinterpret_cast<uintptr_t>(Pointer));
++  if (!Entry) return false;
++  wine_nx_fex_memory Args {Entry->Size.load(), reinterpret_cast<uintptr_t>(Pointer), 0};
++  if (Call(WINE_NX_FEX_FREE, &Args)) ERROR_AND_DIE_FMT("Horizon JIT release failed");
++  Entry->RX.store(0, std::memory_order_release);
++  return true;
 +}
 +
-+DLLEXPORT_FUNC(void, _aligned_free, (void* Pointer)) {
-+  Heap::Free(Pointer);
++void* HorizonWritableAddress(const void* Pointer) {
++  return reinterpret_cast<void*>(Mappings.WritableAddress(reinterpret_cast<uintptr_t>(Pointer)));
 +}
++
++void HorizonFlushICache(void* Pointer, size_t Size) {
++  if (!Size) return;
++  if (HorizonWritableAddress(Pointer) == Pointer) {
++    __builtin___clear_cache(static_cast<char*>(Pointer), static_cast<char*>(Pointer) + Size);
++    return;
++  }
++  wine_nx_fex_memory Args {Size, reinterpret_cast<uintptr_t>(Pointer), 0};
++  if (Call(WINE_NX_FEX_FLUSH, &Args)) ERROR_AND_DIE_FMT("Horizon JIT cache flush failed");
++}
++}
++
++namespace FEX::Windows::HorizonHeap {
++NTSTATUS Call(unsigned Function, void* Args) {
++  return UnixLib::Call(static_cast<FEXUnixLibFunctions>(Function), Args);
++}
++}
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 155403d..579d586 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -339,6 +339,9 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
+ }
+ 
+ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t Size, bool ForWriteLocked) {
++#ifdef FEX_HORIZON
++  if (!ForWriteLocked) return false;
++#endif
+   const auto End = Address + Size;
+   std::shared_lock Lock(IntervalsLock);
+ 
+diff --git a/Source/Windows/Common/OvercommitTracker.h b/Source/Windows/Common/OvercommitTracker.h
+index ba521e8..440433e 100644
+--- a/Source/Windows/Common/OvercommitTracker.h
++++ b/Source/Windows/Common/OvercommitTracker.h
+@@ -12,7 +12,7 @@ namespace FEX::Windows {
+  */
+ class OvercommitTracker {
+ private:
+-  bool IsWine;
++  [[maybe_unused]] bool IsWine;
+   FEXCore::IntervalList<uint64_t> OvercommitIntervals;
+   std::shared_mutex OvercommitIntervalsMutex;
+ 
+@@ -35,15 +35,18 @@ public:
+     auto Query = OvercommitIntervals.Query(FaultAddress);
+ 
+     if (Query.Enclosed) {
++#ifndef FEX_HORIZON
+       if (IsWine) {
+         MEMORY_BASIC_INFORMATION Info;
+         NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress), MemoryBasicInformation, &Info, sizeof(Info), nullptr);
+         const auto CommitSize = reinterpret_cast<SIZE_T>(Info.BaseAddress) + Info.RegionSize - reinterpret_cast<SIZE_T>(Info.AllocationBase);
+         VirtualAlloc(reinterpret_cast<void*>(Info.AllocationBase), CommitSize, MEM_COMMIT, PAGE_READWRITE);
+-      } else {
++      } else
++#endif
++      {
+         static constexpr size_t MaxFaultCommitSize = 1024 * 64;
+         const auto AlignedFaultAddress = reinterpret_cast<void*>(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK);
+-        VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE);
++        return VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE) != nullptr;
+       }
+       return true;
+     }
 diff --git a/Source/Windows/Common/WinAPI/Alloc.cpp b/Source/Windows/Common/WinAPI/Alloc.cpp
+index ded646b..a37f3b9 100644
 --- a/Source/Windows/Common/WinAPI/Alloc.cpp
 +++ b/Source/Windows/Common/WinAPI/Alloc.cpp
-@@ -15,4 +15,4 @@
+@@ -12,7 +12,7 @@
+ #include <processenv.h>
+ #include "../Priv.h"
+ 
 -#ifndef _M_ARM64EC
 +#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
  namespace {
  SYSTEM_BASIC_INFORMATION BasicInfo;
  
-@@ -34,5 +34,5 @@
+@@ -32,7 +32,7 @@ MEM_ADDRESS_REQUIREMENTS MakeWOW64AddressReqs() {
+ 
+ DLLEXPORT_FUNC(void*, VirtualAlloc, (void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)) {
    NTSTATUS Status;
 -#ifndef _M_ARM64EC
 +#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
    if (!lpAddress) {
      // Add address requirements for WOW64 to limit allocations to outside the 32-bit user address space
      MEM_EXTENDED_PARAMETER ExtParam {};
-@@ -47,5 +47,5 @@
+@@ -45,7 +45,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc, (void* lpAddress, SIZE_T dwSize, DWORD flAll
+   } else {
+ #endif
      Status = NtAllocateVirtualMemory(NtCurrentProcess(), &lpAddress, 0, &dwSize, flAllocationType, flProtect);
 -#ifndef _M_ARM64EC
 +#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
    }
  #endif
    if (Status) {
-@@ -76,5 +76,5 @@
+@@ -74,7 +74,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
+                (HANDLE Process, void* BaseAddress, SIZE_T Size, ULONG AllocationType, ULONG PageProtection,
+                 MEM_EXTENDED_PARAMETER* ExtendedParameters, ULONG ParameterCount)) {
    NTSTATUS Status;
 -#ifndef _M_ARM64EC
 +#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
    if (!BaseAddress) {
      // Add address requirements for WOW64 to limit allocations to outside the 32-bit user address space
      auto* NewExtParams = reinterpret_cast<MEM_EXTENDED_PARAMETER*>(alloca((ParameterCount + 1) * sizeof(MEM_EXTENDED_PARAMETER)));
-@@ -94,6 +94,6 @@
+@@ -93,7 +93,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
+ #endif
      Status = NtAllocateVirtualMemoryEx(Process ? Process : NtCurrentProcess(), &BaseAddress, &Size, AllocationType, PageProtection,
                                         ExtendedParameters, ParameterCount);
 -#ifndef _M_ARM64EC
@@ -1145,92 +1540,116 @@ diff --git a/Source/Windows/Common/WinAPI/Alloc.cpp b/Source/Windows/Common/WinA
    }
  #endif
    if (Status) {
-diff --git a/Source/Windows/include/winternl.h b/Source/Windows/include/winternl.h
---- a/Source/Windows/include/winternl.h
-+++ b/Source/Windows/include/winternl.h
-@@ -585,5 +585,6 @@
- NTSTATUS WINAPI RtlMultiByteToUnicodeSize(DWORD*, LPCSTR, ULONG);
- BOOL WINAPI RtlQueryPerformanceCounter(LARGE_INTEGER*);
- BOOL WINAPI RtlQueryPerformanceFrequency(LARGE_INTEGER*);
-+PVOID WINAPI RtlReAllocateHeap(HANDLE, ULONG, PVOID, SIZE_T);
- void WINAPI RtlReleasePebLock(void);
- void WINAPI RtlReleaseSRWLockExclusive(RTL_SRWLOCK*);
-diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
---- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
-+++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
-@@ -395,6 +395,25 @@
- void OpDispatchBuilder::POPOp(OpcodeArgs) {
--  Ref Value = Pop(OpSizeFromSrc(Op));
-+  const auto Size = OpSizeFromSrc(Op);
-+  if (!Op->Dest.IsGPR()) {
-+    Ref SP = LoadGPRRegister(X86State::REG_RSP);
-+    Ref Value = _LoadMemGPR(Size, SP, Size);
-+    auto Address = DecodeAddress(Op, Op->Dest, MemoryAccessType::DEFAULT, false);
-+    const auto& Dest = Op->Dest;
-+    bool StackBase = false;
-+    if (Dest.IsGPRDirect()) {
-+      StackBase = Dest.Data.GPR.GPR == X86State::REG_RSP;
-+    } else if (Dest.IsGPRIndirect() || Dest.IsGPRIndirectRelocation()) {
-+      StackBase = Dest.Data.GPRIndirect.GPR == X86State::REG_RSP;
-+    } else if (Dest.IsSIB() || Dest.IsSIBRelocation()) {
-+      StackBase = Dest.Data.SIB.Base == X86State::REG_RSP;
-+    }
-+    if (StackBase) Address.Offset += IR::OpSizeToSize(Size);
-+    _StoreMemGPRAutoTSO(Size, Address, Value, Size);
-+    StoreGPRRegister(X86State::REG_RSP, Add(GetGPROpSize(), SP, IR::OpSizeToSize(Size)));
-+    return;
-+  }
-+  Ref Value = Pop(Size);
-   StoreResultGPR(Op, Value);
- }
- 
- void OpDispatchBuilder::POPAOp(OpcodeArgs) {
-diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
---- a/FEXCore/Source/Interface/Core/Core.cpp
-+++ b/FEXCore/Source/Interface/Core/Core.cpp
-@@ -91,7 +91,11 @@
-   , CPUID {this}
-   , CodeCache {*this} {
--  if (!Config.Is64BitMode()) {
--    // When operating in 32-bit mode, the virtual memory we care about is only the lower 32-bits.
--    Config.VirtualMemSize = 1ULL << 32;
--  }
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+  Config.VirtualMemSize = 1ULL << 32;
-+#else
-+  if (!Config.Is64BitMode()) {
-+    // When operating in 32-bit mode, the virtual memory we care about is only the lower 32-bits.
-+    Config.VirtualMemSize = 1ULL << 32;
-+  }
-+#endif
- 
-diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
---- a/FEXCore/Source/Interface/Core/LookupCache.h
-+++ b/FEXCore/Source/Interface/Core/LookupCache.h
-@@ -459,11 +459,13 @@
-   size_t TotalCacheSize;
- 
--  // Start with 8k entries in L1 to give 128KB of L1 cache to each thread.
--  // Max out at 1 million entries to give each thread 16MB of L1 cache maximum.
--  constexpr static size_t MIN_L1_ENTRIES = 8 * 1024;        // Must be a power of 2
--  constexpr static size_t MAX_L1_ENTRIES = 1 * 1024 * 1024; // Must be a power of 2
--
--  constexpr static size_t CODE_SIZE = 128 * 1024 * 1024;
-+  constexpr static size_t MIN_L1_ENTRIES = 8 * 1024;
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+  constexpr static size_t MAX_L1_ENTRIES = 64 * 1024;
-+  constexpr static size_t CODE_SIZE = 16 * 1024 * 1024;
-+#else
-+  constexpr static size_t MAX_L1_ENTRIES = 1 * 1024 * 1024;
-+  constexpr static size_t CODE_SIZE = 128 * 1024 * 1024;
-+#endif
-   constexpr static size_t SIZE_PER_PAGE = FEXCore::Utils::FEX_PAGE_SIZE * sizeof(LookupCacheEntry);
-   constexpr static size_t MAX_L1_SIZE = MAX_L1_ENTRIES * sizeof(LookupCacheEntry);
- 
 diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 62a8dd2..7bfc4d9 100644
 --- a/Source/Windows/WOW64/Module.cpp
 +++ b/Source/Windows/WOW64/Module.cpp
-@@ -980,7 +980,8 @@
+@@ -546,6 +546,9 @@ void BTCpuProcessInit() {
+ 
+   FEX::Windows::Allocator::SetupHooks(NtDll);
+   FEX::Windows::UnixLib::Init(NtDll);
++#ifdef FEX_HORIZON
++  if (!FEXCore::Allocator::HorizonInitialize()) ERROR_AND_DIE_FMT("Horizon FEX initialization failed");
++#endif
+   if (FEX::Windows::UnixLib::Available()) {
+     FEXCore::DiskCache::SetFileMapper(FEX::Windows::UnixLib::MapFile);
+   }
+@@ -573,7 +576,9 @@ void BTCpuProcessInit() {
+   // Allocate the syscall/unixcall trampolines in the lower 2GB of the address space
+   SIZE_T Size = 4;
+   void* Addr = nullptr;
+-  NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
++  if (NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) ||
++      !Addr || reinterpret_cast<uintptr_t>(Addr) > 0x7ffffffb)
++    ERROR_AND_DIE_FMT("FEX syscall bridge allocation failed");
+   InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Addr), Size, PAGE_EXECUTE);
+   *reinterpret_cast<uint32_t*>(Addr) = 0x2ecd2ecd;
+   BridgeInstrs::Syscall = Addr;
+@@ -583,6 +588,9 @@ void BTCpuProcessInit() {
+   if (Sym) {
+     WineUnixCall = *reinterpret_cast<decltype(WineUnixCall)*>(Sym);
+   }
++#ifdef FEX_HORIZON
++  if (!WineUnixCall) ERROR_AND_DIE_FMT("Wine Unix dispatcher is missing");
++#endif
+ 
+   FEX::Windows::SetupEnvironmentVariableValues(NtDll);
+ 
+@@ -607,6 +615,9 @@ void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {}
+ 
+ void BTCpuThreadInit() {
+   static constexpr size_t DefaultWow64CS {4};
++#ifdef FEX_HORIZON
++  if (!FEXCore::Allocator::HorizonAttachThread()) ERROR_AND_DIE_FMT("FEX exception stack allocation failed");
++#endif
+   std::scoped_lock Lock(ThreadCreationMutex);
+   FEX::Windows::InitCRTThread();
+   auto* Thread = CTX->CreateThread();
+@@ -660,11 +671,14 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
+   bool Self = ThreadTID == GetCurrentThreadId();
+   if (!Self) {
+     // If we are suspending a thread that isn't ourselves, try to suspend it first so we know internal JIT locks aren't being held.
+-    RtlWow64SuspendThread(*ThreadDup, NULL);
++    if (RtlWow64SuspendThread(*ThreadDup, nullptr)) {
++      return;
++    }
+   }
+ 
+   auto [Err, TLS] = GetThreadTLS(*ThreadDup);
+   if (Err) {
++    if (!Self) NtResumeThread(*ThreadDup, nullptr);
+     return;
+   }
+ 
+@@ -673,6 +687,7 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
+     auto it = Threads.find(ThreadTID);
+     if (it == Threads.end()) {
+       // Thread already terminated
++      if (!Self) NtResumeThread(*ThreadDup, nullptr);
+       return;
+     }
+ 
+@@ -690,6 +705,7 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
+ 
+   FEX::Windows::CallRetStack::DestroyThread(ThreadState);
+   CTX->DestroyThread(ThreadState);
++  TLS.ThreadState() = nullptr;
+   if (Self) {
+     FEX::Windows::DeinitCRTThread();
+   }
+@@ -838,7 +854,10 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
+     ULONG TmpProt;
+     void* TmpAddress = &TLS.ThreadState()->InterruptFaultPage;
+     SIZE_T TmpSize = FEXCore::Utils::FEX_PAGE_SIZE;
+-    NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PAGE_READONLY, &TmpProt);
++    if (Err = NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PAGE_READONLY, &TmpProt); Err) {
++      TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
++      return Err;
++    }
+   }
+ 
+   // Spin until the JIT is interrupted
+@@ -856,12 +875,18 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
+ 
+   // NtSuspendThread may return before the thread is actually suspended, so a sync operation like NtGetContextThread
+   // needs to be called to ensure it is before we unset CONTROL_PAUSED
+-  std::ignore = NtGetContextThread(*ThreadDup, &TmpContext);
++  if (Err = NtGetContextThread(*ThreadDup, &TmpContext); Err) {
++    TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
++    NtResumeThread(*ThreadDup, nullptr);
++    return Err;
++  }
+ 
+   // Mark the CPU area as dirty, to force the JIT context to be restored from it on entry as it may be changed using
+   // SetThreadContext (which doesn't use the BTCpu API)
+   if (!(TLS.ControlWord().fetch_or(ControlBits::WOW_CPU_AREA_DIRTY, std::memory_order::relaxed) & ControlBits::WOW_CPU_AREA_DIRTY)) {
+     if (Err = Context::FlushThreadStateContext(*ThreadDup); Err) {
++      TLS.ControlWord().fetch_and(~ControlBits::PAUSED, std::memory_order::relaxed);
++      NtResumeThread(*ThreadDup, nullptr);
+       return Err;
+     }
+   }
+@@ -881,12 +906,13 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
    auto* Exception = Ptrs->ExceptionRecord;
    auto TLS = GetTLS();
    auto Thread = TLS.ThreadState();
@@ -1240,77 +1659,37 @@ diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
  
    if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
      const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
-diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
---- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-+++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-@@ -841,7 +841,15 @@
-     if (AllocatedInfo.BufferAllocationOffset == nullptr) {
-       // If it didn't fit then clear the buffer and try again.
-       // This has the possibility of migrating the SharedCodeBuffer. See above in `Arm64JITCore::ClearCache()`
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+      const auto PreviousSize = CurrentCodeBuffer->TotalAllocationSize();
-+#endif
-       CTX->ClearCodeCache(ThreadState);
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+      if (CurrentCodeBuffer->TotalAllocationSize() <= PreviousSize && Size > CurrentCodeBuffer->UsableSize()) {
-+        ERROR_AND_DIE_FMT("Compiled block of {} bytes exceeds available code buffer", Size);
-+      }
-+#endif
-       continue;
+ 
+-    if (FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {
++    if (Thread && FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {
+       return true;
      }
-   }
-diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
---- a/FEXCore/Source/Interface/Core/Frontend.cpp
-+++ b/FEXCore/Source/Interface/Core/Frontend.cpp
-@@ -1553,6 +1553,17 @@
-       }
-       uint64_t OpEndAddress = OpAddress + DecodeInst->InstSize;
  
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+      if (BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && CTX->Config.SMCChecks != FEXCore::Config::CONFIG_SMC_NONE) {
-+        bool Writable = CheckRangeExecutable(OpAddress, 1) && ExecutableRangeWritable;
-+        Writable |= CheckRangeExecutable(OpEndAddress - 1, 1) && ExecutableRangeWritable;
-+        if (Writable) {
-+          BlockIt->ForceFullSMCDetection = true;
-+          BlockIt->DataMasks.clear();
-+        }
-+      }
-+#endif
-+
-       DecodedMinAddress = std::min(DecodedMinAddress, OpAddress);
-       DecodedMaxAddress = std::max(DecodedMaxAddress, OpEndAddress);
+@@ -894,6 +920,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+       return true;
+     }
  
-@@ -1570,7 +1581,7 @@
-       BlockIt->Size += DecodeInst->InstSize;
- 
-       // if we weren't provided relocations (guest JIT), try to detect what we can
--      if (WantsDataMasks && BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && BlockInfo.Is64BitMode && !Relocations) {
-+      if (WantsDataMasks && !BlockIt->ForceFullSMCDetection && BlockIt->BlockStatus == DecodedBlockStatus::SUCCESS && BlockInfo.Is64BitMode && !Relocations) {
-         DetectDataMasks(OpAddress, *BlockIt);
-       }
- 
-diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
---- a/Source/Windows/Common/InvalidationTracker.cpp
-+++ b/Source/Windows/Common/InvalidationTracker.cpp
-@@ -340,5 +340,8 @@
- }
- 
- bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t Size, bool ForWriteLocked) {
-+#ifdef FEX_HORIZON
-+  if (!ForWriteLocked) return false;
-+#endif
-   const auto End = Address + Size;
-   std::shared_lock Lock(IntervalsLock);
-diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
---- a/FEXCore/Source/Interface/Core/Frontend.cpp
-+++ b/FEXCore/Source/Interface/Core/Frontend.cpp
-@@ -1334,6 +1334,9 @@
-           .NumInstructions = BlockIt->NumInstructions - SplitIdx,
-           .DecodedInstructions = BlockIt->DecodedInstructions + SplitIdx,
-           .BlockStatus = BlockIt->BlockStatus,
-+#if defined(FEX_HORIZON) || defined(FEX_HORIZON_CACHE_TEST)
-+          .ForceFullSMCDetection = BlockIt->ForceFullSMCDetection,
-+#endif
-         };
- 
-         if (BlockIt->DataMasks.size()) {
++    if (!Thread) return false;
+     if (Context::HandleSuspendInterrupt(TLS, Context, FaultAddress)) {
+       LogMan::Msg::DFmt("Resumed from suspend");
+       return true;
+diff --git a/Source/Windows/include/winternl.h b/Source/Windows/include/winternl.h
+index a987c3a..09cf0c4 100644
+--- a/Source/Windows/include/winternl.h
++++ b/Source/Windows/include/winternl.h
+@@ -561,6 +561,7 @@ NTSTATUS WINAPI NtRaiseException(EXCEPTION_RECORD*, CONTEXT*, BOOL);
+ NTSTATUS WINAPI NtReadFile(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG, PLARGE_INTEGER, PULONG);
+ NTSTATUS WINAPI NtSetContextThread(HANDLE, const CONTEXT*);
+ NTSTATUS WINAPI NtSuspendThread(HANDLE, PULONG);
++NTSTATUS WINAPI NtResumeThread(HANDLE, PULONG);
+ NTSTATUS WINAPI NtTerminateProcess(HANDLE, LONG);
+ NTSTATUS WINAPI NtTerminateThread(HANDLE, LONG);
+ NTSTATUS WINAPI NtUnlockFile(HANDLE, PIO_STATUS_BLOCK, PLARGE_INTEGER, PLARGE_INTEGER, ULONG);
+@@ -585,6 +586,7 @@ NTSTATUS WINAPI RtlMultiByteToUnicodeN(LPWSTR, DWORD, LPDWORD, LPCSTR, DWORD);
+ NTSTATUS WINAPI RtlMultiByteToUnicodeSize(DWORD*, LPCSTR, ULONG);
+ BOOL WINAPI RtlQueryPerformanceCounter(LARGE_INTEGER*);
+ BOOL WINAPI RtlQueryPerformanceFrequency(LARGE_INTEGER*);
++PVOID WINAPI RtlReAllocateHeap(HANDLE, ULONG, PVOID, SIZE_T);
+ void WINAPI RtlReleasePebLock(void);
+ void WINAPI RtlReleaseSRWLockExclusive(RTL_SRWLOCK*);
+ NTSTATUS WINAPI RtlSleepConditionVariableSRW(RTL_CONDITION_VARIABLE*, RTL_SRWLOCK*, const LARGE_INTEGER*, ULONG);

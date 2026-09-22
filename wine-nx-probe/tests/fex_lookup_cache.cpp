@@ -1,4 +1,5 @@
 #include "Interface/Core/LookupCache.h"
+#include "cache_policy.h"
 #include <FEXCore/Core/SignalDelegator.h>
 #include <FEXCore/Debug/InternalThreadState.h>
 #include <FEXCore/HLE/SyscallHandler.h>
@@ -17,6 +18,7 @@ static void check(bool condition, const char* message) {
 
 class Syscalls final : public FEXCore::HLE::SyscallHandler {
 public:
+  bool wide_guest = false;
   std::map<uint64_t, uint64_t> reservations;
   void HandleSyscall(FEXCore::Core::CpuStateFrame*) override { std::abort(); }
   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState*, uint64_t address) override {
@@ -26,8 +28,9 @@ public:
     return std::nullopt;
   }
   void MarkOvercommitRange(uint64_t start, uint64_t length) override {
-    printf("FEX lookup reservation: %llu KiB\n", static_cast<unsigned long long>(length / 1024));
-    check(length == 25 * 1024 * 1024, "unexpected per-thread reservation");
+    const size_t expected = WineNX::FEX::LookupAddressSpace(wide_guest) / 4096 * 8 +
+                            WineNX::FEX::L2BackingSize() + WineNX::FEX::L1Entries() * 16;
+    check(length == expected, "unexpected per-thread reservation");
     check(reservations.emplace(start, length).second, "duplicate reservation");
   }
   void UnmarkOvercommitRange(uint64_t start, uint64_t length) override {
@@ -47,8 +50,11 @@ static void add(FEXCore::Core::InternalThreadState* thread, uint64_t address, ui
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) return 2;
+  if (argc != 4) return 2;
   const bool wide = std::atoi(argv[1]) == 64, dynamic = !strcmp(argv[2], "dynamic");
+  const bool wide_host = !strcmp(argv[3], "wide");
+  if (wide_host) setenv("WINE_NX_FEX_WIDE_HOST", "1", 1);
+  else unsetenv("WINE_NX_FEX_WIDE_HOST");
   FEXCore::Config::Initialize();
   FEXCore::Config::Load();
   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, wide ? "1" : "0");
@@ -59,6 +65,7 @@ int main(int argc, char** argv) {
   features.HostType = FEXCore::HostFeatures::HostTypeEnum::Wow64;
   features.CPUMIDRs.assign(4, 0x411fd071);
   Syscalls syscalls;
+  syscalls.wide_guest = wide;
   FEXCore::SignalDelegator signals;
   auto context = FEXCore::Context::Context::CreateNewContext(features);
   context->SetSignalDelegator(&signals);
@@ -66,14 +73,22 @@ int main(int argc, char** argv) {
   context->EnableExitOnHLT();
   check(context->InitCore(), "core initialization failed");
   std::vector<FEXCore::Core::InternalThreadState*> threads;
-  for (unsigned i = 0; i < 16; ++i) threads.push_back(context->CreateThread());
+  const unsigned thread_count = wide_host ? 4 : 16;
+  for (unsigned i = 0; i < thread_count; ++i) threads.push_back(context->CreateThread());
   check(syscalls.reservations.size() == threads.size(), "missing reservations");
   auto* thread = threads.front();
   auto& cache = *thread->LookupCache;
-  check(cache.GetVirtualMemorySize() == (1ULL << 32), "wrong lookup index mask");
-  check(cache.GetScaledL1PointerMask() == ((dynamic ? 8192 : 65536) - 1) * 16, "wrong L1 mask");
+  check(cache.GetVirtualMemorySize() == WineNX::FEX::LookupAddressSpace(wide), "wrong lookup index mask");
+  check(cache.GetScaledL1PointerMask() == ((dynamic ? 8192 : WineNX::FEX::L1Entries()) - 1) * 16,
+        "wrong L1 mask");
 
-  const uint64_t low = 0x31001000, high = low + (1ULL << 32);
+  const uint64_t low = 0x31001000, high = low + (1ULL << 28);
+  const auto page_slot = [wide](uint64_t address) {
+    auto page = address >> 12;
+    page ^= page >> 16;
+    return page & ((WineNX::FEX::LookupAddressSpace(wide) >> 12) - 1);
+  };
+  check(page_slot(low) != page_slot(high), "lookup hash kept a fixed-window collision");
   add(thread, low, 0x12340);
   add(thread, high, 0x56780);
   for (unsigned i = 0; i < 8; ++i) {
@@ -95,7 +110,7 @@ int main(int argc, char** argv) {
 
   for (unsigned pass = 0; pass < 2; ++pass) {
     { auto lock = cache.AcquireWriteLock(); cache.ClearThreadLocalCaches(lock); }
-    for (unsigned i = 0; i < 600; ++i) {
+    for (unsigned i = 0; i < (wide_host ? 1100U : 600U); ++i) {
       const uint64_t address = 0x32000000 + i * 4096;
       add(thread, address, 0x10000 + i * 16);
       evict_l1(cache, address);
@@ -106,7 +121,7 @@ int main(int argc, char** argv) {
   }
 
   const uintptr_t first = wide ? 0x101000000ULL : 0x01000000ULL;
-  const uintptr_t second = wide ? first + (1ULL << 32) : first + (1ULL << 30);
+  const uintptr_t second = first + (1ULL << 28);
   for (auto address : {first, second}) {
     check(mmap(reinterpret_cast<void*>(address), 4096, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) != MAP_FAILED, "guest mapping failed");
@@ -135,6 +150,6 @@ int main(int argc, char** argv) {
   munmap(reinterpret_cast<void*>(first), 4096);
   munmap(reinterpret_cast<void*>(second), 4096);
   munmap(stack, 65536);
-  printf("FEX lookup %u %s: 16 threads, aliases, invalidation, rollover, dispatcher and cleanup passed\n",
-         wide ? 64 : 32, dynamic ? "dynamic" : "fixed");
+  printf("FEX lookup %u %s host %s: %u threads, aliases, invalidation, rollover, dispatcher and cleanup passed\n",
+         wide ? 64 : 32, dynamic ? "dynamic" : "fixed", wide_host ? "wide" : "stock", thread_count);
 }

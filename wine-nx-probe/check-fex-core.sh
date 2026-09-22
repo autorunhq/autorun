@@ -22,7 +22,7 @@ cmake -S "$source_dir" -B "$build" -G Ninja \
     -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
     -DCMAKE_CXX_FLAGS="-DFEX_HORIZON_CACHE_TEST -I$probe/fex"
 cmake --build "$build" --target FEXCore JemallocDummy -j "${WINE_NX_JOBS:-4}"
-for test in fex_pop_fault fex_lookup_cache fex_code_buffer fex_writable_code; do
+for test in fex_pop_fault fex_lookup_cache fex_code_buffer fex_writable_code fex_segmented_cache; do
     "$host_cxx" -std=c++20 -O2 -g -Wall -Wextra -Werror \
         -DARCHITECTURE_arm64=1 -DFEX_DISABLE_TELEMETRY=1 -DFEX_HORIZON_CACHE_TEST \
         -I"$probe/fex" -isystem "$source_dir/FEXCore/include" -isystem "$source_dir/FEXHeaderUtils" \
@@ -38,8 +38,11 @@ for test in fex_pop_fault fex_lookup_cache fex_code_buffer fex_writable_code; do
 done
 "$build/fex_code_buffer"
 for mode in 32 64; do
+    "$build/fex_segmented_cache" "$mode"
     "$build/fex_writable_code" "$mode"
     "$build/fex_pop_fault" "$mode"
-    "$build/fex_lookup_cache" "$mode" fixed
-    "$build/fex_lookup_cache" "$mode" dynamic
+    "$build/fex_lookup_cache" "$mode" fixed stock
+    "$build/fex_lookup_cache" "$mode" dynamic stock
+    "$build/fex_lookup_cache" "$mode" fixed wide
+    "$build/fex_lookup_cache" "$mode" dynamic wide
 done

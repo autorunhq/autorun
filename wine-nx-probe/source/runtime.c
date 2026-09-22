@@ -23,11 +23,12 @@
 #include "unix_private.h"
 #include "horizon_private.h"
 #include "launcher.h"
+#include "low_window.h"
 #include "autorun_install.h"
 #include "forwarder.h"
-#include "low_window.h"
 #include "launcher_list.h"
 #include "launcher_settings.h"
+#include "fex_options.h"
 #include "config_json.h"
 #include "pointer_cursor.h"
 #include "compositor.h"
@@ -1149,11 +1150,7 @@ static void runtime_report_interpreter(void)
 
     if (!wine_nx_runtime_verbose)
     {
-        /* Without verbose traces a white screen says nothing about whether a
-         * program is still loading, computing or drawing. Every 10 seconds, if
-         * anything changed: completed file reads and the time inside NtReadFile,
-         * read requests to the SD card, their time and the reads the cache
-         * served, system calls, frames shown and dynarec entries. */
+        /* Report progress every 10 seconds, or a heartbeat every 30 when idle. */
         extern unsigned int wine_nx_file_reads __attribute__((weak));
         extern unsigned long long wine_nx_file_read_100ns __attribute__((weak));
         extern unsigned int wine_nx_syscalls __attribute__((weak));
@@ -1205,7 +1202,7 @@ static void runtime_report_interpreter(void)
         if (!start) start = now;
         if (++calls % 2) return;
         if (reads == last_reads && frames == last_frames && usb_reads == last_usb_reads &&
-            usb_hits == last_usb_hits) return;
+            usb_hits == last_usb_hits && calls % 6) return;
         last_reads = reads;
         last_frames = frames;
         last_usb_reads = usb_reads;
@@ -1653,6 +1650,54 @@ static const char runtime_environment[] =
     "windir=C:\\windows\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0";
 
+static size_t runtime_fex_environment( const char *target, char *buffer, size_t size )
+{
+    struct launcher_kv kv = {{0}, 0};
+    char path[768], configured[64];
+    size_t used = 0;
+    const char *tso = "0", *multiblock = "1", *maxinst = "1000";
+    int i;
+
+    if (!runtime_fex) return 0;
+    {
+        void *start, *limit;
+        static const char wide_host[] = "WINE_NX_FEX_WIDE_HOST=1";
+
+        horizon_get_address_space_limits( &start, &limit );
+        if ((uintptr_t)limit > 0x100000000ULL)
+        {
+            if (sizeof(wide_host) > size) return 0;
+            memcpy( buffer, wide_host, sizeof(wide_host) );
+            used = sizeof(wide_host);
+        }
+    }
+    if (target[1] != ':' &&
+        launcher_program_settings_path( RUNTIME_DIR, target, path, sizeof(path) ) &&
+        !launcher_kv_load( &kv, path ))
+    {
+        log_line( "[FEX] program settings are too large; using defaults" );
+        kv.size = 0;
+        kv.text[0] = 0;
+    }
+    for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
+    {
+        const struct nx_fex_option *option = nx_fex_options + i;
+        const char *value = nx_fex_option_default( option );
+        int length;
+
+        if (launcher_kv_get( &kv, option->name, configured, sizeof(configured) ) &&
+            nx_fex_option_choice( option, configured ) >= 0) value = configured;
+        length = snprintf( buffer + used, size - used, "%s=%s", option->name, value );
+        if (length < 0 || (size_t)length + 1 > size - used) return 0;
+        used += length + 1;
+        if (option->id == NX_FEX_TSO) tso = option->values[nx_fex_option_choice( option, value )];
+        else if (option->id == NX_FEX_MULTIBLOCK) multiblock = option->values[nx_fex_option_choice( option, value )];
+        else if (option->id == NX_FEX_MAXINST) maxinst = option->values[nx_fex_option_choice( option, value )];
+    }
+    log_line( "[FEX] TSO=%s multiblock=%s maxinst=%s", tso, multiblock, maxinst );
+    return used;
+}
+
 /* Horizon has no console device: the standard handles are files next to the
  * runtime, copied into this log when the process exits. */
 static HANDLE runtime_open_std_file( const char *path, ACCESS_MASK access, ULONG disposition )
@@ -1677,7 +1722,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     RTL_USER_PROCESS_PARAMETERS *params;
     char nt_path[640], dll_path[1024], current_dir[512];
     char cmdline[1024], args_buf[896], args_path[512];
-    size_t chars, size, i;
+    char fex_environment[NX_FEX_OPTION_COUNT * 80];
+    size_t chars, size, i, fex_environment_size;
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
     char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "";
@@ -1685,6 +1731,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
                                                      dxvk_dir, sizeof(dxvk_dir) );
 
     if (!target_to_dos_path( target, dos_path, dos_path_size )) return NULL;
+    fex_environment_size = runtime_fex_environment( target, fex_environment, sizeof(fex_environment) );
     dos_dirname( dos_path, current_dir, sizeof(current_dir) );
     snprintf( nt_path, sizeof(nt_path), "\\??\\%s", dos_path );
     if (runtime_dxvk &&
@@ -1775,6 +1822,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars += strlen( dos_path ) + 1;
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
+    chars += fex_environment_size;
     size = sizeof(*params) + chars * sizeof(WCHAR);
 
     if (!(params = calloc( 1, size ))) return NULL;
@@ -1813,6 +1861,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         }
         do *cursor++ = (unsigned char)*value; while (*value++);
     }
+    for (i = 0; i < fex_environment_size; i++) *cursor++ = (unsigned char)fex_environment[i];
     *cursor++ = 0;
     params->EnvironmentSize = (cursor - (WCHAR *)params->Environment) * sizeof(WCHAR);
 
@@ -2459,10 +2508,7 @@ static int runtime_describe_image( void *module, SIZE_T size, void **entry )
               module, (unsigned long)size,
               (unsigned long long)IMAGE_FIELD(ImageBase),
               IMAGE_FIELD(AddressOfEntryPoint), nt->FileHeader.Machine );
-    /* A program with no relocations only works at the address it was linked for.
-     * The low addresses belong to this runtime unless Horizon gave the process a
-     * 32-bit address space, which is what the forwarders are for; started any
-     * other way the program reads and writes the wrong addresses and dies. */
+    /* A program with no relocations only works at the address it was linked for. */
     {
         const IMAGE_DATA_DIRECTORY *relocs = guest32 ?
             &nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC] :
@@ -2470,8 +2516,7 @@ static int runtime_describe_image( void *module, SIZE_T size, void **entry )
 
         if ((ULONG_PTR)module != (ULONG_PTR)IMAGE_FIELD(ImageBase) && !relocs->Size &&
             !(IMAGE_FIELD(DllCharacteristics) & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE))
-            log_line( "[IMAGE] this program cannot be moved: no relocations, linked for 0x%llx, mapped at %p. "
-                      "It needs Wine-NX started through a 32-bit forwarder.",
+            log_line( "[IMAGE] this program cannot be moved: no relocations, linked for 0x%llx, mapped at %p.",
                       (unsigned long long)IMAGE_FIELD(ImageBase), module );
     }
     log_line( "[IMAGE] subsystem=%u dll_char=0x%x imports=0x%x/0x%x sections=%u",
@@ -3730,17 +3775,6 @@ int main( int argc, char **argv )
     virtual_init();
     log_line( "[INIT] virtual memory ready" );
 
-    /* TEMPORARY: verify __libnx_exception_handler wiring. Set to 0 to disable. */
-#define WINE_NX_TEST_FAULT 0
-#if WINE_NX_TEST_FAULT
-    log_line( "[TEST] about to deliberately deref NULL to verify exception handler" );
-    fflush( log_file );
-    {
-        volatile int *null_ptr = (volatile int *)(uintptr_t)0;
-        volatile int observed = *null_ptr;
-        log_line( "[TEST] NULL deref did NOT fault, value=%d (handler not wired correctly)", observed );
-    }
-#endif
     wine_nx_runtime_environment_init();
     log_line( "[INIT] Wine NLS/environment ready" );
     teb = virtual_alloc_first_teb();
@@ -3755,16 +3789,23 @@ int main( int argc, char **argv )
     /* Upstream's dbg_init also copies the debug channels to the page after
      * the WoW64 PEB, where the Windows-side ntdlls look them up. Left zeroed,
      * every channel is off there, so loader errors such as a missing DLL never
-     * reach the log. Only the default entry is written: errors, and fixmes
-     * with verbose traces. dbg_init itself is not called because it moves the
+     * reach the log. dbg_init itself is not called because it moves the
      * unix-side debug buffers into TEBs, which the runtime's threads lack. */
     {
         struct __wine_debug_channel *options = (void *)((char *)teb->Peb + 2 * page_size);
+        static const char channels[][15] = { "iphlpapi", "secur32", "winsock" };
+        unsigned int i = 0;
 
-        options[0].name[0] = 0;
+        for (; wine_nx_runtime_verbose && i < ARRAY_SIZE(channels); i++)
+        {
+            memcpy( options[i].name, channels[i], sizeof(channels[i]) );
+            options[i].flags = (1 << __WINE_DBCL_ERR) | (1 << __WINE_DBCL_WARN) |
+                               (1 << __WINE_DBCL_FIXME) | (1 << __WINE_DBCL_TRACE);
+        }
+        options[i].name[0] = 0;
         /* Wine reports a good deal at warning level and returns quietly after
          * it, which is where wined3d refuses to start, so verbose runs want it. */
-        options[0].flags = (1 << __WINE_DBCL_ERR) |
+        options[i].flags = (1 << __WINE_DBCL_ERR) |
                            (wine_nx_runtime_verbose ? (1 << __WINE_DBCL_FIXME) | (1 << __WINE_DBCL_WARN) : 0);
     }
     {

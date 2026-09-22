@@ -7,7 +7,7 @@ typedef uint32_t Result, Handle;
 #define R_FAILED(rc) ((rc) != 0)
 #define R_SUCCEEDED(rc) ((rc) == 0)
 #define MAKERESULT(module, description) ((module) | ((description) << 9))
-enum { Module_Kernel = 1, Module_Libnx = 345, KernelError_OutOfMemory = 104,
+enum { Module_Kernel = 1, Module_Libnx = 345, KernelError_ResourceExhausted = 103, KernelError_OutOfMemory = 104,
        LibnxError_OutOfMemory = 2, LibnxError_JitUnavailable = 38 };
 enum { CodeMapOperation_MapOwner, CodeMapOperation_MapSlave, CodeMapOperation_UnmapOwner, CodeMapOperation_UnmapSlave };
 enum { Perm_Rw = 3, Perm_Rx = 5 };

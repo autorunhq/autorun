@@ -66,7 +66,9 @@ def validate_payload(directory):
     if (manifest.get('version'), manifest.get('revision')) != (VERSION, REVISION):
         raise ValueError('FEX payload does not match the pinned release')
     for key, file in (('patch_sha256', 'horizon.patch'), ('abi_sha256', 'unixlib.h'),
-                      ('jit_registry_sha256', 'jit_registry.h')):
+                      ('jit_registry_sha256', 'jit_registry.h'),
+                      ('code_storage_sha256', 'code_storage.h'),
+                      ('cache_policy_sha256', 'cache_policy.h')):
         if manifest.get(key) != source_digest(PROBE / 'fex' / file):
             raise ValueError(f'FEX payload does not match {file}')
     modules = manifest.get('modules', {})
@@ -121,6 +123,8 @@ def build_payload(source, arm64ec, wow64, output):
                 'patch_sha256': source_digest(PROBE / 'fex/horizon.patch'),
                 'abi_sha256': source_digest(PROBE / 'fex/unixlib.h'),
                 'jit_registry_sha256': source_digest(PROBE / 'fex/jit_registry.h'),
+                'code_storage_sha256': source_digest(PROBE / 'fex/code_storage.h'),
+                'cache_policy_sha256': source_digest(PROBE / 'fex/cache_policy.h'),
                 'licenses': {path.name: digest(path) for path in sorted(licenses.iterdir()) if path.is_file()}}
     (output / 'fex-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     validate_payload(output)
