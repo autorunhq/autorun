@@ -78,7 +78,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_FEX
-#define WINE_NX_RUNTIME_BUILD "nx-low-window-2"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)

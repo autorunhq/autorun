@@ -26,6 +26,14 @@ classes = dict((uuid, name) for uuid, _, name in mk.classes_of('quartz'))
 assert classes.get('e436ebb3-524f-11ce-9f53-0020af0ba770') == 'FilterGraph'
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('wbemprox'))
 assert classes.get('4590f811-1d3a-11d0-891f-00aa004b2e24') == 'WbemLocator'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('gameux'))
+assert classes.get('9a5ea990-3034-4d6f-9128-01f3c61022bc') == 'GameExplorer'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('netprofm'))
+assert classes.get('dcb00c01-570f-4a9b-8d69-199fdba5723b') == 'NetworkListManager'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('msctf'))
+assert classes.get('33c53a50-f456-4884-b049-85fd643ecfed') == 'TF_InputProcessorProfiles'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('explorerframe'))
+assert classes.get('56fdf344-fd6d-11d0-958a-006097c9a090') == 'TaskbarList'
 # and a DLL that cannot serve a class is not asked to.
 assert mk.classes_of('kernel32') == []
 assert mk.classes_of('not-a-dll') == []

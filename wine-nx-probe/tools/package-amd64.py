@@ -23,15 +23,11 @@ parser.add_argument('--pe', type=Path, default=probe / 'build-wine-amd64-pe')
 parser.add_argument('--build', type=Path, default=probe / 'build-switch-amd64')
 parser.add_argument('--jobs', type=int, default=8)
 parser.add_argument('--no-build', action='store_true', help='Package existing DLLs without invoking make')
-parser.add_argument('--minimal', action='store_true', help='Only console smoke-test dependencies')
 parser.add_argument('--vulkan', action='store_true', help='Include Vulkan DLLs for a mesa-switch runtime')
 parser.add_argument('--dxvk', type=Path, help='AMD64 payload produced by tools/build-dxvk.py (requires --vulkan)')
 parser.add_argument('--vkd3d', type=Path, help='AMD64 payload produced by tools/build-vkd3d.py (requires --dxvk)')
 parser.add_argument('--fex', type=Path, help='ARM64EC and WoW64 payload produced by build-fex.sh')
-parser.add_argument('--interpreter-nro', type=Path, help='Include an interpreter-only diagnostic NRO')
 args = parser.parse_args()
-if args.vulkan and args.minimal:
-    parser.error('--vulkan requires the full GUI package')
 if args.dxvk and not args.vulkan:
     parser.error('--dxvk requires --vulkan')
 if args.vkd3d and not args.dxvk:
@@ -44,9 +40,7 @@ env = os.environ.copy()
 if env.get('WINE_NX_LLVM_MINGW'):
     env['PATH'] = str(Path(env['WINE_NX_LLVM_MINGW']) / 'bin') + os.pathsep + env['PATH']
 readobj = shutil.which('llvm-readobj', path=env['PATH'])
-cc64 = shutil.which('x86_64-w64-mingw32-clang', path=env['PATH'])
-windres64 = shutil.which('x86_64-w64-mingw32-windres', path=env['PATH'])
-if not readobj or not cc64 or not windres64 or not (pe / 'Makefile').is_file():
+if not readobj or not (pe / 'Makefile').is_file():
     parser.error('Configure the multi-architecture PE build and put LLVM-MinGW on PATH first.')
 cache_path = build / 'CMakeCache.txt'
 if not cache_path.is_file():
@@ -71,9 +65,6 @@ if enabled('WINE_NX_LSFG') and args.vulkan:
     lsfg_revision = (probe / 'lsfg/revision.txt').read_text().strip()
     if b'[LSFG]' not in nro.read_bytes():
         parser.error('The NRO has no LSFG-VK support; rebuild it first')
-if args.interpreter_nro and (not args.interpreter_nro.is_file() or
-                            args.interpreter_nro.read_bytes()[16:20] != b'NRO0'):
-    parser.error('Invalid interpreter NRO')
 mesa_revision = None
 if args.vulkan:
     if b'a Vulkan surface has the screen' not in nro.read_bytes():
@@ -245,23 +236,27 @@ def validate_external_imports(paths, modules):
 
 
 game_runtime = (
-    'cfgmgr32', 'concrt140', 'dwmapi', 'mfplat', 'mfreadwrite', 'msvcp140', 'normaliz',
-    'powrprof', 'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'x3daudio1_7',
-    'xapofx1_5',
+    'cfgmgr32', 'concrt140', 'dwmapi', 'explorerframe', 'gameux', 'mfplat', 'mfplay', 'mfreadwrite',
+    'mscoree', 'msctf', 'msvcp140', 'mswsock', 'netprofm', 'normaliz', 'powrprof',
+    'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'wtsapi32',
+    'x3daudio1_7',
+    'xapofx1_5', 'xaudio2_9',
 )
+game_runtime64 = ('vcruntime140_1',)
 common = 'ntdll kernel32 kernelbase msvcrt ucrtbase advapi32 sechost'.split()
 dxvk_paths = [args.dxvk / name for name in DXVK_DLLS] if args.dxvk else []
 vkd3d_paths = [args.vkd3d / name for name in VKD3D_DLLS] if args.vkd3d else []
 if args.vulkan:
     common += ['vulkan-1', 'winevulkan']
-if not args.minimal:
-    common += ('user32 win32u gdi32 imm32 ole32 oleaut32 combase coml2 rpcrt4 shell32 '
-               'comdlg32 comctl32 shlwapi shcore version ws2_32 winmm mmdevapi avrt '
-               'dsound opengl32 wined3d d3d9 d3d11 dxgi dinput8 xinput1_3 xinput1_4 '
-               'xinput9_1_0 dbghelp windowscodecs '
-               'd3dx9_38 d3dx9_43 winhttp oleacc wsock32 psapi').split()
-    common += game_runtime
-native_seeds = common + ['winebox64', 'winebox64ec', 'wow64', 'wow64win', 'apisetschema']
+common += ('user32 win32u gdi32 imm32 ole32 oleaut32 combase coml2 rpcrt4 shell32 '
+           'comdlg32 comctl32 shlwapi shcore version ws2_32 winmm mmdevapi avrt '
+           'dsound opengl32 wined3d d3d9 d3d11 dxgi dinput8 xinput1_3 xinput1_4 '
+           'xinput9_1_0 dbghelp windowscodecs '
+           'd3dx9_38 d3dx9_43 winhttp oleacc wsock32 psapi').split()
+common += game_runtime
+native_seeds = common + list(game_runtime64) + [
+    'winebox64', 'winebox64ec', 'wow64', 'wow64win', 'apisetschema',
+]
 if args.dxvk:
     native_seeds += ['d3d10', 'd3d10_1', 'd3dcompiler_43', 'd3dcompiler_47']
     native_seeds += sorted({import_host(name) for path in dxvk_paths for name, symbols in imports(path)
@@ -280,88 +275,30 @@ if args.fex:
     native.update(FEX_DLLS)
 prebuild(common, 'i386')
 guest = stage_closure(common, 'i386', 'syswow64')
-if not args.minimal:
-    for compiler, directory, entry, modules in (
-            ('x86_64', 'system32', 'DllMain', native),
-            ('i686', 'syswow64', '_DllMain@12', guest)):
-        driver = stage / 'drive_c/windows' / directory / 'winenxaudio.drv'
-        run([f'{compiler}-w64-mingw32-clang', '-Os', '-Wall', '-Wextra', '-Werror',
-             '-fno-builtin', '-nostdlib', '-shared', f'-Wl,--entry,{entry}', '-Wl,--dynamicbase',
-             '-o', str(driver), str(probe / 'source/audio_driver.c')])
-        if b'winenxaudio.drv\0' not in driver.read_bytes():
-            raise ValueError('Audio driver has no module identity')
-        modules.add('winenxaudio.drv')
+for compiler, directory, entry, modules in (
+        ('x86_64', 'system32', 'DllMain', native),
+        ('i686', 'syswow64', '_DllMain@12', guest)):
+    driver = stage / 'drive_c/windows' / directory / 'winenxaudio.drv'
+    run([f'{compiler}-w64-mingw32-clang', '-Os', '-Wall', '-Wextra', '-Werror',
+         '-fno-builtin', '-nostdlib', '-shared', f'-Wl,--entry,{entry}', '-Wl,--dynamicbase',
+         '-o', str(driver), str(probe / 'source/audio_driver.c')])
+    if b'winenxaudio.drv\0' not in driver.read_bytes():
+        raise ValueError('Audio driver has no module identity')
+    modules.add('winenxaudio.drv')
 
 drive = stage / 'drive_c'
-run(['x86_64-w64-mingw32-clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-msse2',
-     str(probe / 'tests/pe64_smoke.c'), '-o', str(drive / 'pe64-smoke.exe')])
-
-win64 = drive / 'win64-tests'
-win64.mkdir()
-win64_tests = []
-pe64_flags = [cc64, '-Os', '-Wall', '-Wextra', '-Werror', '-fno-builtin', '-nostdlib',
-              '-Wl,--entry,start', '-Wl,--image-base,0x140000000', '-Wl,--dynamicbase']
-
-
-def build_pe64(name, source, libraries, extra=()):
-    output = win64 / f'pe64-{name}.exe'
-    run(pe64_flags + list(extra) + [str(probe / f'tests/{source}'), '-o', str(output)] +
-        [f'-l{library}' for library in libraries])
-    win64_tests.append(output.name)
-
-
-for test in ('functional', 'threads', 'lifecycle'):
-    build_pe64(test, f'pe32_{test}.c', ('kernel32', 'ntdll'))
-if not args.minimal:
-    for test in ('messages', 'timers'):
-        build_pe64(test, f'pe32_{test}.c', ('user32', 'kernel32', 'ntdll'))
-    resource = stage_root / 'pe64-video-startup.res.o'
-    run([windres64, '-I', str(probe.parent), str(probe / 'tests/pe32_video_startup.rc'), str(resource)])
-    output = win64 / 'pe64-video-startup.exe'
-    run(pe64_flags + [str(probe / 'tests/pe32_video_startup.c'), str(resource), '-o', str(output),
-                      '-luser32', '-lkernel32', '-lntdll'])
-    win64_tests.append(output.name)
-    build_pe64('section', 'pe32_section.c', ('kernel32', 'ntdll'))
-    build_pe64('wasapi', 'pe32_wasapi.c', ('ole32', 'user32', 'kernel32', 'ntdll'))
-    build_pe64('audio', 'pe32_audio.c', ('winmm', 'kernel32', 'ntdll'))
-    build_pe64('opengl', 'pe32_opengl.c', ('opengl32', 'gdi32', 'user32', 'kernel32', 'ntdll'))
-    build_pe64('d3d9', 'pe32_d3d9.c', ('d3d9', 'gdi32', 'user32', 'kernel32', 'ntdll'))
-if args.vulkan:
-    imports64 = stage_root / 'imports64'
-    imports64.mkdir()
-    winebuild = pe / 'tools/winebuild/winebuild'
-    if not winebuild.is_file():
-        raise ValueError(f'Missing configured winebuild: {winebuild}')
-    run([str(winebuild), '-w', '--implib', '-o', str(imports64 / 'libvulkan-1.a'),
-         '-b', 'x86_64-windows', '--export', str(probe.parent / 'dlls/vulkan-1/vulkan-1.spec')])
-    build_pe64('vulkan', 'pe32_vulkan.c', ('vulkan-1', 'user32', 'kernel32', 'ntdll'),
-               ('-Wno-missing-field-initializers', '-idirafter', str(probe.parent / 'include'),
-                '-L', str(imports64)))
 if args.dxvk:
     destination = drive / 'dxvk64'
     destination.mkdir()
     for path in dxvk_paths:
         shutil.copy2(path, destination / path.name)
     shutil.copy2(args.dxvk / 'dxvk-manifest.json', destination / 'dxvk-manifest.json')
-    build_pe64('dxvk-d3d9', 'pe32_d3d9.c', ('d3d9', 'gdi32', 'user32', 'kernel32', 'ntdll'))
-    libraries = ('d3d11', 'dxgi', 'd3dcompiler_47', 'dxguid', 'user32', 'kernel32', 'ntdll')
-    build_pe64('dxvk-d3d11', 'pe64_d3d11.c', libraries, ('-DTEST_REQUIRE_DXVK=1',))
-    build_pe64('dxvk-d3d11-fullscreen', 'pe64_d3d11.c', libraries,
-               ('-DTEST_REQUIRE_DXVK=1', '-DTEST_FULLSCREEN=1', '-DTEST_WIDTH=800', '-DTEST_HEIGHT=600'))
-    for name in ('dxvk-d3d9', 'dxvk-d3d11', 'dxvk-d3d11-fullscreen'):
-        (win64 / f'pe64-{name}.wine-nx.txt').write_text('d3d=dxvk\n')
-    (destination / 'DarkSoulsII.wine-nx.txt').write_text('d3d=dxvk\n')
-    shutil.copy2(probe / 'DXVK.md', stage / 'DXVK-README.md')
 if args.vkd3d:
     destination = drive / 'vkd3d64'
     destination.mkdir()
     for path in vkd3d_paths:
         shutil.copy2(path, destination / path.name)
     shutil.copy2(args.vkd3d / 'vkd3d-manifest.json', destination / 'vkd3d-manifest.json')
-for test in ('smoke', 'functional', 'threads', 'lifecycle'):
-    run(['i686-w64-mingw32-clang', '-Os', '-fno-builtin', '-nostdlib', '-Wl,--entry,_start@0',
-         '-Wl,--image-base,0x10000000', '-Wl,--dynamicbase',
-         str(probe / f'tests/pe32_{test}.c'), '-o', str(drive / f'pe32-{test}.exe'), '-lkernel32', '-lntdll'])
 for name in ('fonts', 'nls'):
     destination = stage / 'share/wine' / name
     destination.mkdir(parents=True, exist_ok=True)
@@ -375,13 +312,6 @@ for name in ('fonts', 'nls'):
             (drive / 'windows/fonts').mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, drive / 'windows/fonts' / path.name)
 shutil.copy2(nro, stage / 'wine-nx-runtime.nro')
-if args.interpreter_nro:
-    shutil.copy2(args.interpreter_nro, stage / 'wine-nx-runtime-interpreter.nro')
-(stage / 'target.txt').write_text('sdmc:/switch/wine/drive_c/win64-tests/pe64-functional.exe\n')
-(stage / 'run-entry.txt').write_text('1\n')
-if args.vulkan:
-    (stage / 'vulkan-probe.txt').write_text('1\n')
-shutil.copy2(probe / 'AMD64.md', stage / 'AMD64-README.md')
 licenses = stage / 'licenses'
 licenses.mkdir()
 if args.fex:
@@ -390,7 +320,6 @@ if args.fex:
         shutil.copy2(args.fex / 'licenses' / name, licenses / name)
 if lsfg_revision:
     shutil.copy2(probe / 'vendor/lsfg-vk/LICENSE.md', licenses / 'LSFG-VK-GPL-3.0.txt')
-    shutil.copy2(probe / 'lsfg/README.md', stage / 'LSFG-README.md')
     (stage / 'lsfg').mkdir()
 for source, name in ((probe.parent / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (probe / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
@@ -401,7 +330,7 @@ if args.dxvk:
         shutil.copy2(args.dxvk / 'licenses' / name, licenses / name)
     modules = {path.name: path for path in (drive / 'windows/system32').iterdir()}
     modules.update({path.name: path for path in dxvk_paths})
-    validate_external_imports(dxvk_paths + sorted(win64.glob('pe64-dxvk-*.exe')), modules)
+    validate_external_imports(dxvk_paths, modules)
 if args.vkd3d:
     for name in vkd3d_manifest['licenses']:
         shutil.copy2(args.vkd3d / 'licenses' / name, licenses / name)
@@ -414,23 +343,8 @@ for directory, modules in (('system32', native), ('syswow64', guest)):
         missing = [dep for dep, symbols in imports(path) if not apiset(dep) and dep not in modules]
         if missing:
             raise ValueError(f'{path}: missing {missing}')
-for path in drive.rglob('pe*.exe'):
-    headers = inspect(path, '--file-headers')
-    if path.name.startswith('pe32-') and 'Arch: i386\n' not in headers:
-        raise ValueError(f'Not i386: {path}')
-    if path.name.startswith('pe64-') and 'Arch: x86_64\n' not in headers:
-        raise ValueError(f'Not AMD64: {path}')
-    modules = guest if 'Arch: i386\n' in headers else native
-    missing = [dep for dep, symbols in imports(path) if not apiset(dep) and dep not in modules]
-    if missing:
-        raise ValueError(f'{path}: missing {missing}')
-tls = inspect(win64 / 'pe64-lifecycle.exe', '--coff-tls-directory')
-if not re.search(r'AddressOfCallBacks: 0x[1-9a-fA-F][0-9a-fA-F]*', tls):
-    raise ValueError('pe64-lifecycle.exe has no TLS callbacks')
-if 'Type: DIR64' not in inspect(win64 / 'pe64-lifecycle.exe', '--coff-basereloc'):
-    raise ValueError('pe64-lifecycle.exe has no 64-bit base relocations')
 audio_driver = stage / 'drive_c/windows/system32/winenxaudio.drv'
-if not args.minimal and 'Arch: x86_64\n' not in inspect(audio_driver, '--file-headers'):
+if 'Arch: x86_64\n' not in inspect(audio_driver, '--file-headers'):
     raise ValueError('The native audio driver is not AMD64')
 for name in ('ntdll', 'kernel32', 'kernelbase'):
     info = inspect(stage / f'drive_c/windows/system32/{name}.dll', '--coff-load-config')
@@ -448,11 +362,9 @@ files = sorted(path for path in stage.rglob('*') if path.is_file() and
 manifest = {
     'box64': '2f130fab1d6e1a4ee8a71dc60cfdfcc839ad192a',
     'wine': subprocess.check_output(['git', '-C', str(probe.parent), 'rev-parse', 'HEAD'], text=True).strip(),
-    'hardware_verified': False,
     'features': {'amd64': True, 'dynarec': enabled('WINE_NX_BOX64_DYNAREC'),
                  'vulkan': args.vulkan, 'dxvk': bool(args.dxvk), 'vkd3d': bool(args.vkd3d),
-                 'lsfg': bool(lsfg_revision), 'fex': bool(args.fex),
-                 'interpreter_fallback': bool(args.interpreter_nro)},
+                  'lsfg': bool(lsfg_revision), 'fex': bool(args.fex)},
     'mesa_switch': mesa_revision,
     'dxvk': dxvk_manifest,
     'vkd3d': vkd3d_manifest,
@@ -461,8 +373,6 @@ manifest = {
              'revision': lsfg_revision,
              'patch_sha256': hashlib.sha256((probe / 'lsfg/horizon.patch').read_bytes()).hexdigest()}
             if lsfg_revision else None,
-    'validation': {'default': 'win64-tests/pe64-functional.exe',
-                   'win64': ['pe64-smoke.exe'] + win64_tests},
     'files': {str(path.relative_to(stage)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
 }
 (stage / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')

@@ -20,3 +20,8 @@ python3 "$root/wine-nx-probe/tests/check_horizon_guest_reserve.py"
 python3 "$root/wine-nx-probe/tests/check_horizon_address_space_limit.py"
 python3 "$root/wine-nx-probe/tests/check_wow64_unix_tables.py"
 python3 "$root/wine-nx-probe/tests/check_package_amd64.py"
+python3 "$root/wine-nx-probe/tests/check_horizon_thread_fds.py"
+python3 "$root/wine-nx-probe/tests/check_shared_cpu_context.py"
+if [ -d "$root/wine-nx-probe/vendor/libusbhsfs/.git" ]; then
+    python3 "$root/wine-nx-probe/tests/check_usb_storage.py"
+fi

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 import zipfile
@@ -17,8 +18,10 @@ files = {
     'low-window/low-window.patch': root / 'mesosphere/low-window.patch',
     'low-window/LICENSE.Atmosphere': source / 'LICENSE',
 }
-if b'nx-low-window-2' not in runtime.read_bytes():
-    raise SystemExit('The NRO does not contain the low-window build marker')
+runtime_data = runtime.read_bytes()
+marker = re.search(rb'(nx-amd64-fex-\d+)\0', runtime_data)
+if not marker or b'[LOWVA]' not in runtime_data:
+    raise SystemExit('The NRO does not contain the AMD64/FEX low-window runtime')
 contents = {name: path.read_bytes() for name, path in files.items()}
 loader = contents['atmosphere/kips/autorun-loader.kip']
 if (len(loader) < 0x100 or loader[:4] != b'KIP1' or
@@ -29,7 +32,7 @@ if (len(loader) < 0x100 or loader[:4] != b'KIP1' or
 manifest = {
     'atmosphere_revision': '5388824be146a89619e8d641acd64599cf1c5f62',
     'program_id': '0548EABB35576000',
-    'runtime_build': 'nx-low-window-2',
+    'runtime_build': marker.group(1).decode(),
     'hardware_verified': False,
     'sha256': {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()},
 }

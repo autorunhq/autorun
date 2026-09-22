@@ -186,10 +186,6 @@ python3 wine-nx-probe/tools/package-wow64-full.py # the whole SD-card payload as
 python3 wine-nx-probe/tools/package-wow64-dxvk.py # the Mesa 26 runtime, Vulkan and DXVK, over that payload
 ```
 
-The AMD64 component and package flow is documented in
-[`wine-nx-probe/AMD64.md`](../wine-nx-probe/AMD64.md). The pinned DXVK build and
-Mesa requirements are in [`wine-nx-probe/DXVK.md`](../wine-nx-probe/DXVK.md).
-
 The packagers copy the ARM64 PE modules (`winebox64.dll`, `wow64.dll`,
 `ntdll.dll`, `win32u.dll`, `wow64win.dll`) from the PE build tree without
 rebuilding them. After changing `dlls/winebox64`,
@@ -297,6 +293,4 @@ References that shaped the port without being part of the build:
 
 ## More
 
-- [AMD64 build and validation](../wine-nx-probe/AMD64.md)
-- [DXVK build and validation](../wine-nx-probe/DXVK.md)
 - [Build-by-build notes](../wine-nx-probe/README.md)

@@ -21,6 +21,26 @@ root = Path(__file__).resolve().parents[2]
 
 COCLASS = re.compile(
     r'\[(?P<attrs>[^\]]*?)\]\s*coclass\s+(?P<name>\w+)', re.S)
+INCLUDE = re.compile(r'^\s*#include\s+"(?P<name>[^"\n]+\.idl)"', re.M)
+EXTRA_IDL = {'gameux': (root / 'include/gameux.idl',)}
+
+
+def idl_text(path, seen=None):
+    seen = set() if seen is None else seen
+    path = path.resolve()
+    if path in seen:
+        return ''
+    seen.add(path)
+    text = path.read_text()
+    expanded = [text]
+    for include in INCLUDE.finditer(text):
+        name = include.group('name')
+        for candidate in (path.parent / name, root / 'include' / name):
+            if candidate.is_file():
+                expanded.append(idl_text(candidate, seen))
+                break
+    return '\n'.join(expanded)
+
 
 def classes_of(dll):
     """(uuid, threading, coclass name) for each class this DLL serves."""
@@ -29,11 +49,12 @@ def classes_of(dll):
     if not spec.exists() or 'DllGetClassObject' not in spec.read_text():
         return []
     found = []
-    for idl in sorted(source.glob('*.idl')):
+    idls = list(sorted(source.glob('*.idl'))) + list(EXTRA_IDL.get(dll, ()))
+    for idl in idls:
         # A typelib is a description of interfaces, not a list of what is served.
         if idl.name.endswith('_tlb.idl'):
             continue
-        for match in COCLASS.finditer(idl.read_text()):
+        for match in COCLASS.finditer(idl_text(idl)):
             attrs = match.group('attrs')
             uuid = re.search(r'uuid\s*\(\s*([0-9a-fA-F-]{36})\s*\)', attrs)
             if not uuid:

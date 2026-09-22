@@ -20,11 +20,17 @@ tree = ast.parse(package.read_text(), filename=str(package))
 game_runtime = next(ast.literal_eval(node.value) for node in tree.body
                     if isinstance(node, ast.Assign) and
                     any(isinstance(target, ast.Name) and target.id == 'game_runtime' for target in node.targets))
+game_runtime64 = next(ast.literal_eval(node.value) for node in tree.body
+                      if isinstance(node, ast.Assign) and
+                      any(isinstance(target, ast.Name) and target.id == 'game_runtime64' for target in node.targets))
 assert set(game_runtime) == {
-    'cfgmgr32', 'concrt140', 'dwmapi', 'mfplat', 'mfreadwrite', 'msvcp140', 'normaliz',
-    'powrprof', 'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'x3daudio1_7',
-    'xapofx1_5',
+    'cfgmgr32', 'concrt140', 'dwmapi', 'explorerframe', 'gameux', 'mfplat', 'mfplay', 'mfreadwrite',
+    'mscoree', 'msctf', 'msvcp140', 'mswsock', 'netprofm', 'normaliz', 'powrprof',
+    'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'wtsapi32',
+    'x3daudio1_7',
+    'xapofx1_5', 'xaudio2_9',
 }
+assert set(game_runtime64) == {'vcruntime140_1'}
 assert "tools/make-classes-reg.py" in package.read_text().replace('\\', '/')
 helpers = ast.Module(body=[node for node in tree.body
                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in selected],
@@ -319,14 +325,17 @@ with tempfile.TemporaryDirectory(prefix='autorun-amd64-merge-') as temp:
     for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
         (runtime / name).write_text('keep\n')
     archive = temp / 'amd64.zip'
-    def make_archive(fex, missing=None):
+    runtime_markers = re.findall(r'#define WINE_NX_RUNTIME_BUILD "(nx-amd64-[^"]+)"',
+                                (root / 'wine-nx-probe/source/runtime.c').read_text())
+    def make_archive(fex, missing=None, runtime_fex=None):
         manifest = {'features': {name: True for name in
                     ('amd64', 'dynarec', 'vulkan', 'dxvk', 'vkd3d', 'lsfg')}}
         manifest['features']['fex'] = fex
-        marker = 'fex-2609' if fex else 'box64-3'
+        kind = 'fex-' if (fex if runtime_fex is None else runtime_fex) else 'box64-'
+        marker = next(value for value in runtime_markers if value.startswith('nx-amd64-' + kind))
         with ZipFile(archive, 'w') as z:
             z.writestr('switch/wine/build-manifest.json', json.dumps(manifest))
-            z.writestr('switch/wine/wine-nx-runtime.nro', f'NRO0 nx-amd64-{marker}\0'.encode())
+            z.writestr('switch/wine/wine-nx-runtime.nro', f'NRO0 {marker}\0'.encode())
             z.writestr('switch/wine/drive_c/windows/system32/winebox64ec.dll', b'cpu')
             if fex:
                 for dll in ('libarm64ecfex.dll', 'libwow64fex.dll'):
@@ -355,5 +364,14 @@ with tempfile.TemporaryDirectory(prefix='autorun-amd64-merge-') as temp:
             assert f'no FEX CPU module: {dll}' in str(error), error
         else:
             raise AssertionError(f'accepted a FEX package without {dll}')
+
+    for fex in (False, True):
+        make_archive(fex, runtime_fex=not fex)
+        try:
+            autorun_namespace['merge_amd64'](archive, stage)
+        except AssertionError as error:
+            assert 'inconsistent FEX support' in str(error), error
+        else:
+            raise AssertionError('accepted a runtime/manifest mismatch')
 
 print('PASS: the Autorun package merges the complete AMD64 graphics runtime without replacing package settings')
