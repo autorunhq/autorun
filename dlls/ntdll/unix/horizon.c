@@ -6266,12 +6266,13 @@ static int horizon_server_handle_get_object_info( struct horizon_server_connecti
     pthread_mutex_lock( &horizon_server_objects_mutex );
     object = horizon_server_find_handle_object_locked( request->handle, 0 );
     if (!object) reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
-    else if (object->type != HORIZON_SERVER_OBJECT_THREAD)
+    else if (object->type != HORIZON_SERVER_OBJECT_THREAD && object->type != HORIZON_SERVER_OBJECT_MAPPING)
         reply.header.error = HORIZON_STATUS_NOT_IMPLEMENTED;
     else
     {
         entry = horizon_server_find_handle_locked( request->handle );
-        reply.access = entry ? entry->thread_access : HORIZON_THREAD_ALL_ACCESS;
+        reply.access = object->type == HORIZON_SERVER_OBJECT_MAPPING ? object->mapping_access :
+                       entry ? entry->thread_access : HORIZON_THREAD_ALL_ACCESS;
         reply.ref_count = object->refs;
         for (entry = horizon_server_handles; entry; entry = entry->next)
             if (entry->object == object) reply.handle_count++;

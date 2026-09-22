@@ -76,6 +76,7 @@ python3 "$root/wine-nx-probe/tests/check_sims2_layout.py"
 python3 "$root/wine-nx-probe/tests/check_horizon_sock_bind.py"
 python3 "$root/wine-nx-probe/tests/check_dxvk_payload.py"
 python3 "$root/wine-nx-probe/tests/check_vulkan_wow64_mapping.py"
+python3 "$root/wine-nx-probe/tests/check_d3dkmt_resources.py"
 python3 "$root/wine-nx-probe/tests/check_package_amd64.py"
 if [ -f "$root/wine-nx-probe/vendor/dxvk/src/dxvk/dxvk_device_info.cpp" ]; then
     python3 "$root/wine-nx-probe/tests/check_dxvk_requirements.py"

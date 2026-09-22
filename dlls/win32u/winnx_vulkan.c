@@ -18,6 +18,7 @@
 #if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -49,6 +50,34 @@ struct nx_vi_surface_create_info
 extern VkResult wine_nx_vkCreateViSurfaceNN( VkInstance instance, const struct nx_vi_surface_create_info *info,
                                              const VkAllocationCallbacks *allocator, VkSurfaceKHR *surface )
     __asm__("vkCreateViSurfaceNN");
+
+extern VkResult nvk_switch_allocate_shared_memory(
+    VkDevice device, const VkMemoryAllocateInfo *allocate_info,
+    const VkAllocationCallbacks *allocator, uint32_t nvmap_id,
+    VkDeviceMemory *memory_out );
+extern bool nvk_switch_export_memory( VkDeviceMemory memory,
+                                      uint32_t *nvmap_id_out,
+                                      void **reference_out );
+extern void nvk_switch_release_memory_reference( void *reference );
+
+VkResult wine_nx_vk_allocate_shared_memory(
+    VkDevice device, const VkMemoryAllocateInfo *allocate_info,
+    uint32_t nvmap_id, VkDeviceMemory *memory_out )
+{
+    return nvk_switch_allocate_shared_memory( device, allocate_info, NULL,
+                                               nvmap_id, memory_out );
+}
+
+BOOL wine_nx_vk_export_memory( VkDeviceMemory memory, uint32_t *nvmap_id,
+                               void **reference )
+{
+    return nvk_switch_export_memory( memory, nvmap_id, reference );
+}
+
+void wine_nx_vk_release_memory_reference( void *reference )
+{
+    nvk_switch_release_memory_reference( reference );
+}
 
 struct nx_vk_surface
 {
@@ -147,8 +176,10 @@ static void nx_map_instance_extensions( struct vulkan_instance_extensions *exten
 
 static void nx_map_device_extensions( struct vulkan_device_extensions *extensions )
 {
-    nx_log( "[NXVK] device extensions through the Switch driver: VK_KHR_swapchain %u, VK_EXT_external_memory_host %u",
-            extensions->has_VK_KHR_swapchain, extensions->has_VK_EXT_external_memory_host );
+    if (extensions->has_VK_EXT_external_memory_host)
+        extensions->has_VK_KHR_external_memory_win32 = 1;
+    if (extensions->has_VK_KHR_external_memory_win32)
+        extensions->has_VK_EXT_external_memory_host = 1;
 }
 
 static const struct vulkan_driver_funcs nx_vulkan_driver_funcs =

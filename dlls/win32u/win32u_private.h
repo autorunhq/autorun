@@ -227,6 +227,14 @@ extern HANDLE open_shared_semaphore_from_name( const WCHAR *name );
 extern D3DKMT_HANDLE d3dkmt_create_resource( int fd, D3DKMT_HANDLE *global );
 extern D3DKMT_HANDLE d3dkmt_open_resource( D3DKMT_HANDLE global, HANDLE shared, D3DKMT_HANDLE *mutex_local, D3DKMT_HANDLE *sync_local );
 extern NTSTATUS d3dkmt_destroy_resource( D3DKMT_HANDLE local );
+#ifdef __SWITCH__
+extern D3DKMT_HANDLE d3dkmt_create_nvmap_resource( SIZE_T size, uint32_t nvmap_id,
+                                                   void *reference, D3DKMT_HANDLE *global );
+extern BOOL d3dkmt_resource_get_nvmap( D3DKMT_HANDLE local, uint32_t *nvmap_id, SIZE_T *size );
+#ifdef WINE_NX_MESA_SWITCH
+extern void wine_nx_vk_release_memory_reference( void *reference );
+#endif
+#endif
 
 extern D3DKMT_HANDLE d3dkmt_create_sync( int fd, D3DKMT_HANDLE *global );
 extern D3DKMT_HANDLE d3dkmt_open_sync( D3DKMT_HANDLE global, HANDLE shared );

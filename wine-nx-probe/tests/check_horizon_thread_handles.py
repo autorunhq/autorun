@@ -47,7 +47,7 @@ fixture = r'''
 #define TRACE(...) ((void)0)
 ''' + definitions + '\n' + block(source, 'enum horizon_server_object_type\n') + ';\n' + r'''
 struct horizon_server_object {
-    unsigned refs, id;
+    unsigned refs, id, mapping_access;
     int type, file_fd, file_peer_fd, completion_closed;
     struct horizon_server_object *thread_next;
     struct horizon_thread_state thread;
@@ -153,6 +153,8 @@ static HANDLE duplicate(HANDLE handle, ACCESS_MASK access, ULONG options) {
 int main(void) {
     struct horizon_server_object self = {.refs = 1, .type = HORIZON_SERVER_OBJECT_THREAD};
     struct horizon_server_object other = {.refs = 1, .type = HORIZON_SERVER_OBJECT_THREAD};
+    struct horizon_server_object section = {.refs = 1, .type = HORIZON_SERVER_OBJECT_MAPPING,
+                                            .mapping_access = SECTION_ALL_ACCESS};
     struct horizon_server_handle_entry *entry;
     struct horizon_open_thread_request open = {0};
     I386_CONTEXT ctx = {.ContextFlags = CONTEXT_I386_FULL};
@@ -218,6 +220,18 @@ int main(void) {
     assert(NtQueryObject((HANDLE)0xdead, ObjectBasicInformation, &info, sizeof(info), &size) == STATUS_INVALID_HANDLE && !size);
     assert(NtQueryObject(alias, ObjectBasicInformation, &info, sizeof(info) - 1, &size) == STATUS_INFO_LENGTH_MISMATCH && !size);
     assert(NtCompareObjects((HANDLE)0xdead, (HANDLE)0xdead) == STATUS_INVALID_HANDLE);
+    entry = horizon_server_create_handle_for_object_locked(&section);
+    alias = wine_server_ptr_handle(entry->handle);
+    info = query_info(alias);
+    assert(info.HandleCount == 1 && info.PointerCount == 2 && info.GrantedAccess == SECTION_ALL_ACCESS);
+    clone = duplicate(alias, 0, DUPLICATE_SAME_ACCESS);
+    assert(!NtCompareObjects(alias, clone));
+    assert(query_info(alias).HandleCount == 2);
+    entry = horizon_server_find_handle_locked(wine_server_obj_handle(clone));
+    horizon_server_unlink_handle_locked(entry);
+    entry->object->refs--;
+    free(entry);
+    assert(query_info(alias).HandleCount == 1);
     connection.thread = NULL;
     assert(NtQueryObject(NtCurrentThread(), ObjectBasicInformation, &info, sizeof(info), NULL) == STATUS_INVALID_HANDLE);
     while ((entry = horizon_server_handles)) {
@@ -225,7 +239,7 @@ int main(void) {
         entry->object->refs--;
         free(entry);
     }
-    assert(self.refs == 1 && other.refs == 1);
+    assert(self.refs == 1 && other.refs == 1 && section.refs == 1);
     puts("Horizon thread handles: object queries, duplication, identity and FEX context access passed");
 }
 '''

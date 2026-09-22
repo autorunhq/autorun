@@ -56,6 +56,11 @@ static pthread_mutex_t present_lock = PTHREAD_MUTEX_INITIALIZER;
  * runtime, which has no dynamic linker. */
 extern PFN_vkVoidFunction wine_nx_vkGetDeviceProcAddr( VkDevice device, const char *name ) __asm__("vkGetDeviceProcAddr");
 extern PFN_vkVoidFunction wine_nx_vkGetInstanceProcAddr( VkInstance instance, const char *name ) __asm__("vkGetInstanceProcAddr");
+extern VkResult wine_nx_vk_allocate_shared_memory( VkDevice device,
+                                                    const VkMemoryAllocateInfo *allocate_info,
+                                                    uint32_t nvmap_id, VkDeviceMemory *memory_out );
+extern BOOL wine_nx_vk_export_memory( VkDeviceMemory memory, uint32_t *nvmap_id,
+                                      void **reference );
 
 static uint64_t nx_frame_interval;
 static VkPresentModeKHR nx_present_mode = VK_PRESENT_MODE_FIFO_KHR;
@@ -141,7 +146,11 @@ static const UINT EXTERNAL_FENCE_WIN32_BITS = VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQ
 
 static BOOL use_external_memory(void)
 {
+#ifdef __SWITCH__
+    return TRUE;
+#else
     return zero_bits != 0;
+#endif
 }
 
 struct mempool
@@ -322,7 +331,7 @@ static struct fence *fence_from_handle( VkFence handle )
 }
 
 #ifdef __SWITCH__
-static LONG nx_host_import_logs;  /* [NXVK] lines about the first imports only */
+static LONG nx_host_import_logs;
 
 /* The program's Vulkan memory, logged every 256 allocations and on failures:
  * DXVK sub-allocates, so an allocator that churns or fails shows nowhere else. */
@@ -454,7 +463,21 @@ static VkExternalMemoryHandleTypeFlagBits get_host_external_memory_type(void)
     driver_funcs->p_map_device_extensions( &extensions );
     if (extensions.has_VK_KHR_external_memory_fd) return VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
     if (extensions.has_VK_EXT_external_memory_dma_buf) return VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    if (extensions.has_VK_EXT_external_memory_host) return VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
     return 0;
+}
+
+static void map_external_memory_properties( VkExternalMemoryProperties *properties,
+                                            VkExternalMemoryHandleTypeFlagBits handle_type )
+{
+    properties->compatibleHandleTypes = handle_type;
+    properties->exportFromImportedHandleTypes = handle_type;
+#ifdef __SWITCH__
+    if ((handle_type & EXTERNAL_MEMORY_WIN32_BITS) &&
+        get_host_external_memory_type() == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
+        properties->externalMemoryFeatures |= VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT |
+                                               VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+#endif
 }
 
 static VkExternalSemaphoreHandleTypeFlagBits get_host_external_semaphore_type(void)
@@ -728,7 +751,7 @@ static VkResult init_physical_device( struct vulkan_physical_device *physical_de
         }
     }
 
-    if (zero_bits && physical_device->extensions.has_VK_EXT_external_memory_host && !physical_device->map_placed_align)
+    if (use_external_memory() && physical_device->extensions.has_VK_EXT_external_memory_host && !physical_device->map_placed_align)
     {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_mem_props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
         VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &host_mem_props};
@@ -740,13 +763,18 @@ static VkResult init_physical_device( struct vulkan_physical_device *physical_de
     }
 
     driver_funcs->p_map_device_extensions( &extensions );
-    if (extensions.has_VK_KHR_external_memory_win32 && zero_bits && !physical_device->map_placed_align)
+    if (extensions.has_VK_KHR_external_memory_win32 && zero_bits && !physical_device->map_placed_align &&
+        get_host_external_memory_type() != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
     {
         WARN( "Cannot export WOW64 memory without VK_EXT_map_memory_placed\n" );
         extensions.has_VK_KHR_external_memory_win32 = 0;
     }
+#ifdef __SWITCH__
+    extensions.has_VK_KHR_win32_keyed_mutex = 0;
+#else
     extensions.has_VK_KHR_win32_keyed_mutex = extensions.has_VK_KHR_timeline_semaphore &&
                                               extensions.has_VK_KHR_external_semaphore_fd;
+#endif
 
     /* filter out unsupported client device extensions */
 #define USE_VK_EXT(x) client_physical_device->extensions.has_ ## x = extensions.has_ ## x;
@@ -1253,8 +1281,11 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
     VkImportMemoryWin32HandleInfoKHR *import_win32 = NULL;
     VkDeviceMemory host_device_memory = VK_NULL_HANDLE;
     VkExportMemoryAllocateInfo *export_info = NULL;
+    VkExternalMemoryHandleTypeFlagBits host_memory_type = get_host_external_memory_type();
     struct device_memory *memory;
     BOOL nt_shared = FALSE;
+    BOOL native_shared_request;
+    uint32_t shared_nvmap_id = 0;
     uint32_t mem_flags;
     void *mapping = NULL;
     VkResult res;
@@ -1272,7 +1303,13 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
             {
                 nt_shared = !(export_info->handleTypes & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT |
                                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT));
-                export_info->handleTypes = get_host_external_memory_type();
+                export_info->handleTypes = host_memory_type;
+#ifdef __SWITCH__
+                if (host_memory_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
+                {
+                    *next = (*next)->pNext; next = &prev;
+                }
+#endif
             }
             break;
         case VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR:
@@ -1295,9 +1332,12 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         }
     }
 
+    native_shared_request = host_memory_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT &&
+                            (export_info || import_win32);
     /* For host visible memory, we try to use VK_EXT_external_memory_host on wow64 to ensure that mapped pointer is 32-bit. */
     mem_flags = physical_device->memory_properties.memoryTypes[alloc_info->memoryTypeIndex].propertyFlags;
-    if (physical_device->external_memory_align && (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info &&
+    if (!native_shared_request && physical_device->external_memory_align &&
+        (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info &&
 #ifdef __SWITCH__
         !nx_driver_maps_preferred() &&
 #endif
@@ -1342,64 +1382,122 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
             break;
         }
 
-        if (device->client.device->extensions.has_VK_KHR_win32_keyed_mutex && memory->sync)
+#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
+        if (native_shared_request)
         {
-            VkSemaphoreTypeCreateInfo semaphore_type = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
-            VkSemaphoreCreateInfo semaphore_create = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &semaphore_type};
-            VkImportSemaphoreFdInfoKHR fd_info = {.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+            SIZE_T shared_size;
 
-            semaphore_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-            if ((res = device->p_vkCreateSemaphore( device->host.device, &semaphore_create, NULL, &memory->semaphore ))) goto failed;
+            if (!memory->local || !d3dkmt_resource_get_nvmap( memory->local, &shared_nvmap_id, &shared_size ) ||
+                alloc_info->allocationSize > shared_size)
+            {
+                res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                goto failed;
+            }
+            alloc_info->allocationSize = shared_size;
+        }
+        else
+#endif
+        {
+            if (device->client.device->extensions.has_VK_KHR_win32_keyed_mutex && memory->sync)
+            {
+                VkSemaphoreTypeCreateInfo semaphore_type = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+                VkSemaphoreCreateInfo semaphore_create = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &semaphore_type};
+                VkImportSemaphoreFdInfoKHR fd_info = {.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
 
-            fd_info.handleType = get_host_external_semaphore_type();
-            fd_info.semaphore = memory->semaphore;
-            if ((fd_info.fd = d3dkmt_object_get_fd( memory->sync )) < 0)
+                semaphore_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+                if ((res = device->p_vkCreateSemaphore( device->host.device, &semaphore_create, NULL, &memory->semaphore ))) goto failed;
+
+                fd_info.handleType = get_host_external_semaphore_type();
+                fd_info.semaphore = memory->semaphore;
+                if ((fd_info.fd = d3dkmt_object_get_fd( memory->sync )) < 0)
+                {
+                    res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                    goto failed;
+                }
+
+                if ((res = device->p_vkImportSemaphoreFdKHR( device->host.device, &fd_info ))) goto failed;
+            }
+
+            if ((fd_info.fd = d3dkmt_object_get_fd( memory->local )) < 0)
             {
                 res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
                 goto failed;
             }
 
-            if ((res = device->p_vkImportSemaphoreFdKHR( device->host.device, &fd_info ))) goto failed;
+            fd_info.handleType = get_host_external_memory_type();
+            fd_info.pNext = alloc_info->pNext;
+            alloc_info->pNext = &fd_info;
         }
-
-        if ((fd_info.fd = d3dkmt_object_get_fd( memory->local )) < 0)
-        {
-            res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-            goto failed;
-        }
-
-        fd_info.handleType = get_host_external_memory_type();
-        fd_info.pNext = alloc_info->pNext;
-        alloc_info->pNext = &fd_info;
     }
 
     set_transient_client_handle(instance, (uintptr_t)&memory->obj.obj);
-    if ((res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory ))) goto failed;
+#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
+    if (native_shared_request)
+        res = wine_nx_vk_allocate_shared_memory( device->host.device, alloc_info,
+                                                 shared_nvmap_id, &host_device_memory );
+    else
+#endif
+        res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory );
+    if (res) goto failed;
 
     if (export_info)
     {
         if (!memory->local)
         {
-            VkMemoryGetFdInfoKHR get_fd_info = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = host_device_memory};
-            int fd = -1;
-
-            switch ((get_fd_info.handleType = get_host_external_memory_type()))
+#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
+            if (native_shared_request)
             {
-            case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
-            case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
-                if ((res = device->p_vkGetMemoryFdKHR( device->host.device, &get_fd_info, &fd ))) goto failed;
-                break;
-            default:
-                FIXME( "Unsupported handle type %#x\n", get_fd_info.handleType );
-                break;
+                void *reference;
+
+                if (!wine_nx_vk_export_memory( host_device_memory, &shared_nvmap_id, &reference ))
+                {
+                    res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                    goto failed;
+                }
+                memory->local = d3dkmt_create_nvmap_resource( alloc_info->allocationSize,
+                                                               shared_nvmap_id, reference,
+                                                               nt_shared ? NULL : &memory->global );
+                if (!memory->local)
+                {
+                    res = VK_ERROR_OUT_OF_HOST_MEMORY;
+                    goto failed;
+                }
             }
+            else
+#endif
+            {
+                VkMemoryGetFdInfoKHR get_fd_info = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = host_device_memory};
+                int fd = -1;
 
-            memory->local = d3dkmt_create_resource( fd, nt_shared ? NULL : &memory->global );
-            close( fd );
+                switch ((get_fd_info.handleType = get_host_external_memory_type()))
+                {
+                case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+                case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT:
+                    if ((res = device->p_vkGetMemoryFdKHR( device->host.device, &get_fd_info, &fd ))) goto failed;
+                    break;
+                default:
+                    FIXME( "Unsupported handle type %#x\n", get_fd_info.handleType );
+                    res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                    break;
+                }
 
-            if (!memory->local) goto failed;
+                if (fd < 0) goto failed;
+
+                memory->local = d3dkmt_create_resource( fd, nt_shared ? NULL : &memory->global );
+                close( fd );
+
+                if (!memory->local)
+                {
+                    res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                    goto failed;
+                }
+            }
         }
-        if (nt_shared && !(memory->shared = create_shared_resource_handle( memory->local, &export_win32 ))) goto failed;
+        if (nt_shared && !(memory->shared = create_shared_resource_handle( memory->local, &export_win32 )))
+        {
+            res = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            goto failed;
+        }
     }
 
     vulkan_object_init( &memory->obj.obj, host_device_memory );
@@ -1419,7 +1517,7 @@ failed:
     if (nx_memory_log_failure())
         nx_vk_trace( "[NXVK] vkAllocateMemory of %llu bytes of memory type %u failed: %d%s",
                      (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, res,
-                     mapping ? " (with an imported 32-bit mapping)" : "" );
+                     mapping ? " (with an imported host mapping)" : "" );
 #endif
     if (host_device_memory) device->p_vkFreeMemory( device->host.device, host_device_memory, NULL );
     if (mapping)
@@ -1432,7 +1530,7 @@ failed:
     d3dkmt_destroy_mutex( memory->mutex );
     d3dkmt_destroy_sync( memory->sync );
     free( memory );
-    return VK_ERROR_OUT_OF_HOST_MEMORY;
+    return res;
 }
 
 static void win32u_vkFreeMemory( VkDevice client_device, VkDeviceMemory client_memory, const VkAllocationCallbacks *allocator )
@@ -1488,6 +1586,7 @@ static VkResult win32u_vkGetMemoryWin32HandleKHR( VkDevice client_device, const 
     {
     case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT:
     case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT:
+        if (!memory->global) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
         TRACE( "Returning global D3DKMT handle %#x\n", memory->global );
         *handle = UlongToPtr( memory->global );
         return VK_SUCCESS;
@@ -1496,7 +1595,9 @@ static VkResult win32u_vkGetMemoryWin32HandleKHR( VkDevice client_device, const 
     case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT:
     case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP_BIT:
     case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT:
-        NtDuplicateObject( NtCurrentProcess(), memory->shared, NtCurrentProcess(), handle, 0, 0, DUPLICATE_SAME_ATTRIBUTES | DUPLICATE_SAME_ACCESS );
+        if (!memory->shared || NtDuplicateObject( NtCurrentProcess(), memory->shared, NtCurrentProcess(), handle,
+                                                  0, 0, DUPLICATE_SAME_ATTRIBUTES | DUPLICATE_SAME_ACCESS ))
+            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
         TRACE( "Returning NT shared handle %p -> %p\n", memory->shared, *handle );
         return VK_SUCCESS;
 
@@ -1755,8 +1856,7 @@ static void get_physical_device_external_buffer_properties( struct vulkan_physic
     if (handle_type & EXTERNAL_MEMORY_WIN32_BITS) buffer_info->handleType = get_host_external_memory_type();
 
     p_vkGetPhysicalDeviceExternalBufferProperties( physical_device->host.physical_device, buffer_info, buffer_properties );
-    buffer_properties->externalMemoryProperties.compatibleHandleTypes = handle_type;
-    buffer_properties->externalMemoryProperties.exportFromImportedHandleTypes = handle_type;
+    map_external_memory_properties( &buffer_properties->externalMemoryProperties, handle_type );
 }
 
 static void win32u_vkGetPhysicalDeviceExternalBufferProperties( VkPhysicalDevice client_physical_device, const VkPhysicalDeviceExternalBufferInfo *buffer_info,
@@ -1898,8 +1998,7 @@ static VkResult get_physical_device_image_format_properties( struct vulkan_physi
         case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
         {
             VkExternalImageFormatProperties *props = (VkExternalImageFormatProperties *)*next;
-            props->externalMemoryProperties.compatibleHandleTypes = handle_type;
-            props->externalMemoryProperties.exportFromImportedHandleTypes = handle_type;
+            map_external_memory_properties( &props->externalMemoryProperties, handle_type );
             break;
         }
         case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT: break;

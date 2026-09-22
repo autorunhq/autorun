@@ -328,7 +328,7 @@ add_library(wine-win32u-real OBJECT
     ../dlls/win32u/clipboard.c
     ../dlls/win32u/clipping.c
     ../dlls/win32u/cursoricon.c
-    ../dlls/win32u/d3dkmt_switch_stub.c
+    ../dlls/win32u/d3dkmt_switch.c
     ../dlls/win32u/dc.c
     ../dlls/win32u/dce.c
     ../dlls/win32u/defwnd.c
