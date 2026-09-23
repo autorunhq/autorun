@@ -191,7 +191,7 @@ struct launcher
     int status, clock_hour, clock_minute, battery, charging;
 
     struct launcher_kv look;
-    int top_row, show_hidden, hide_missing;
+    int show_hidden, hide_missing;
     char browse_dir[512];
 
     SDL_Thread *thread;
@@ -1002,15 +1002,12 @@ static void draw_backdrop( struct launcher *l, int current );
 static void draw_cover( struct ui *ui, const struct program *p, SDL_Rect rect, int radius, int brightness,
                         int alpha );
 
-/* The library is one list that scrolls, so the only thing to work out is how
- * many covers stand between the margins the header keeps: as many as fit at
- * about the size the reference gives them, sharing what is left over. */
 #define GRID_CARD_TARGET 200
 
 static void grid_layout( const struct launcher *l, struct grid *g )
 {
     const struct ui *ui = &l->ui;
-    int width = ui->width - 2 * SHELL_MARGIN, available = ui->height - UI_HEADER_HEIGHT - FOOTER_SPACE, h, rows;
+    int width = ui->width - 2 * SHELL_MARGIN, available = ui->height - UI_HEADER_HEIGHT - FOOTER_SPACE, h, page_size;
 
     g->gap_x = 22;
     g->gap_y = 16;
@@ -1021,9 +1018,8 @@ static void grid_layout( const struct launcher *l, struct grid *g )
     if (g->card < 64) g->card = 64;
     g->rows = (available - 24 + g->gap_y) / (g->card + g->caption + g->gap_y);
     if (g->rows < 1) g->rows = 1;
-    rows = (l->visible_count + g->columns - 1) / g->columns;
-    if (rows < 1) rows = 1;
-    g->first = launcher_first_visible( l->top_row, l->selection / g->columns, rows, g->rows ) * g->columns;
+    page_size = g->columns * g->rows;
+    g->first = l->selection / page_size * page_size;
     h = g->rows * (g->card + g->caption) + (g->rows - 1) * g->gap_y;
     g->x0 = SHELL_MARGIN;
     g->y0 = UI_HEADER_HEIGHT + (available - h) / 2 + 4;
@@ -1150,20 +1146,21 @@ static void draw_library( struct launcher *l )
 {
     /* A does what is in focus: with the header in focus it is that, not the game
      * the selection is remembered on. */
-    struct ui_hint hints[] = { { UI_A, "Play" }, { UI_Y, "Options" }, { UI_PLUS, "Menu" } };
+    struct ui_hint hints[] = { { UI_ZL, NULL }, { UI_ZR, "Page" },
+                              { UI_A, "Play" }, { UI_Y, "Options" }, { UI_PLUS, "Menu" } };
     /* With nothing to act on, only the menu means anything. */
     static const struct ui_hint empty_hints[] = { { UI_PLUS, "Menu" } };
     struct ui *ui = &l->ui;
     struct grid g;
-    int shown, i;
+    int shown, i, first_hint;
 
-    if (l->zone == ZONE_HEADER) hints[0].label = "Select";
+    if (l->zone == ZONE_HEADER) hints[2].label = "Select";
 
     draw_backdrop( l, l->visible_count ? l->visible[l->selection] : -1 );
     ui_fill( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 0, 0, 0, 120 } );
     grid_layout( l, &g );
-    l->top_row = g.first / g.columns;
     shown = g.columns * g.rows;
+    first_hint = l->visible_count > shown ? 0 : 2;
 
     draw_shell( l, 0 );
     for (i = g.first; i < l->visible_count && i < g.first + shown; i++)
@@ -1182,7 +1179,7 @@ static void draw_library( struct launcher *l )
         draw_card( l, l->selection, g.x0 + column * (g.card + g.gap_x),
                    g.y0 + row * (g.card + g.caption + g.gap_y), &g, l->zone != ZONE_HEADER );
     }
-    /* Decode what is just off the bottom too, so scrolling on shows it at once. */
+    /* Prefetch the next page. */
     for (i = g.first + shown; i < l->visible_count && i < g.first + 2 * shown; i++)
         request_icon( l, l->visible[i] );
 
@@ -1195,7 +1192,17 @@ static void draw_library( struct launcher *l )
                                           : "Press + and choose Add game to browse for a Windows executable.",
                          ui->dim, 1 );
     }
-    if (l->visible_count) ui_hints_right( ui, hints, sizeof(hints) / sizeof(hints[0]), ui->width - SHELL_MARGIN, HOME_HINT_Y );
+    if (l->visible_count > shown)
+    {
+        char page[32];
+
+        snprintf( page, sizeof(page), "Page %d / %d", g.first / shown + 1,
+                  (l->visible_count + shown - 1) / shown );
+        ui_text( ui, ui->small, SHELL_MARGIN, HOME_HINT_Y - TTF_FontHeight( ui->small ) / 2, page, ui->dim );
+    }
+    if (l->visible_count)
+        ui_hints_right( ui, hints + first_hint, sizeof(hints) / sizeof(hints[0]) - first_hint,
+                        ui->width - SHELL_MARGIN, HOME_HINT_Y );
     else ui_hints_right( ui, empty_hints, 1, ui->width - SHELL_MARGIN, HOME_HINT_Y );
     ui_fade( ui );
 }
@@ -2898,50 +2905,36 @@ static void save_look( struct launcher *l )
     launcher_kv_save( &l->look, path );
 }
 
-/* What Wine-NX is built from and on; README.md's Credits section has the same list. */
-static const struct { const char *name, *value, *help; } credits[] =
+static const struct { const char *name, *by; } credits[] =
 {
-    { "Wine", "WineHQ, LGPL-2.1+",
-      "https://www.winehq.org\nThe Windows API, the loader, WoW64 and the Direct3D, OpenGL and Vulkan layers." },
-    { "Box64", "ptitSeb, MIT",
-      "https://github.com/ptitSeb/box64\nRuns x86 and x86-64 code through its interpreter and ARM64 dynarec." },
-    { "DXVK", "Philip Rebohle, zlib",
-      "https://github.com/doitsujin/dxvk\nDirect3D over Vulkan, for programs set to d3d=dxvk." },
-    { "VKD3D-Proton", "VKD3D-Proton contributors, LGPL-2.1",
-      "https://github.com/HansKristian-Work/vkd3d-proton\nDirect3D 12 over Vulkan." },
-    { "Mesa", "Mesa3D, MIT",
-      "https://mesa3d.org\nOpenGL through nvc0 and Vulkan through NVK on the Switch GPU." },
-    { "mesa-switch", "danfromtico, NaGaa95 and others",
-      "https://github.com/danfromtico/mesa-switch\nThe Switch port of Mesa 26, with nvc0 and NVK, that the runtime links." },
-    { "Switch Mesa and libdrm_nouveau", "fincs, Subv, Jules Blok, MIT",
-      "devkitPro's Switch ports of Mesa 20.1 and libdrm_nouveau, the earlier OpenGL path." },
-    { "libnx", "switchbrew, ISC",
-      "https://github.com/switchbrew/libnx\nThe Horizon system library the runtime is written against." },
-    { "devkitPro", "devkitA64 and portlibs",
-      "https://devkitpro.org\nThe toolchain and the Switch builds of the libraries below." },
-    { "SDL2 and SDL2_ttf", "Sam Lantinga, zlib",
-      "https://www.libsdl.org\nThe launcher's drawing, input and text." },
-    { "FreeType", "FreeType Project, FTL",
-      "https://freetype.org\nFont rendering for the launcher." },
-    { "HarfBuzz", "HarfBuzz authors, MIT",
-      "https://harfbuzz.github.io\nText shaping for the launcher." },
-    { "libpng, zlib, bzip2", "libpng, zlib and BSD licenses",
-      "https://www.libpng.org  https://zlib.net  https://sourceware.org/bzip2\nProgram icons and compressed data." },
-    { "llvm-mingw", "Martin Storsjo, Apache-2.0",
-      "https://github.com/mstorsjo/llvm-mingw\nBuilds Wine's and DXVK's Windows DLLs (LLVM, libc++, mingw-w64)." },
-    { "7-Zip", "Igor Pavlov, LGPL-2.1",
-      "https://www.7-zip.org\n7zr.exe, the benchmark and archive test program on the card." },
-    { "dolphin-nx", "NaGaa95, reference",
-      "https://github.com/NaGaa95/dolphin-nx\nA Nintendo Switch port used as a platform reference." },
-    { "Atmosphere", "Atmosphere-NX, reference",
-      "https://github.com/Atmosphere-NX/Atmosphere\nIts kernel source is how Autorun learns what Horizon's memory calls allow." },
-    { "tico-dolphin", "ticohq, reference",
-      "https://github.com/ticohq/tico-dolphin\nJIT and exception handling on Horizon." },
-    { "WineBox64 NX", "Ibnuard, reference",
-      "https://github.com/Ibnuard/winebox64_nx\nA proof of concept running x86-64 Wine under Box64 on Horizon; "
-      "reference for Autorun's Box64 and libnx integration." },
-    { "sphaira", "ITotalJustice, NaGaa95",
-      "https://github.com/NaGaa95/sphaira\nHome menu forwarder builder." },
+    { "RUNTIME & TRANSLATION", NULL },
+    { "Wine", "WineHQ  /  LGPL-2.1+" },
+    { "Box64", "ptitSeb  /  MIT" },
+    { "FEX", "Ryan Houdek (Sonicadvance1) and contributors  /  MIT" },
+    { "GRAPHICS", NULL },
+    { "DXVK", "Philip Rebohle and contributors  /  zlib" },
+    { "VKD3D-Proton", "Hans-Kristian Arntzen, Philip Rebohle and contributors  /  LGPL-2.1" },
+    { "Mesa", "Mesa3D  /  MIT" },
+    { "mesa-switch", "danfromtico, NaGaa95 and contributors" },
+    { "Switch Mesa & libdrm_nouveau", "fincs, Subv, Jules Blok  /  MIT" },
+    { "LSFG-VK", "Pancake (PancakeTAS) and contributors  /  GPL-3.0+" },
+    { "PLATFORM", NULL },
+    { "libnx", "switchbrew  /  ISC" },
+    { "devkitPro", "devkitA64 and portlibs" },
+    { "Atmosphere", "Atmosphere-NX  /  Horizon platform reference" },
+    { "INTERFACE & LIBRARIES", NULL },
+    { "SDL2 & SDL2_ttf", "Sam Lantinga and contributors  /  zlib" },
+    { "FreeType", "FreeType Project  /  FTL" },
+    { "HarfBuzz", "HarfBuzz authors  /  MIT" },
+    { "libpng, zlib & bzip2", "libpng, zlib and BSD licenses" },
+    { "TOOLS", NULL },
+    { "llvm-mingw", "Martin Storsjo  /  Apache-2.0" },
+    { "7-Zip", "Igor Pavlov  /  LGPL-2.1" },
+    { "sphaira", "ITotalJustice, NaGaa95  /  Home menu forwarders" },
+    { "REFERENCES & INSPIRATION", NULL },
+    { "dolphin-nx", "NaGaa95" },
+    { "tico-dolphin", "ticohq" },
+    { "WineBox64 NX", "Ibnuard" },
 };
 #define CREDIT_COUNT (sizeof(credits) / sizeof(credits[0]))
 
@@ -3200,28 +3193,93 @@ static void controls_screen( struct launcher *l, const char *path, const char *u
 
 static void credits_screen( struct launcher *l )
 {
-    struct ui_row rows[CREDIT_COUNT];
-    struct ui_list list = {0};
+    struct ui *ui = &l->ui;
+    struct ui_input input;
+    const SDL_Color background = { 5, 8, 10, 255 }, accent = { 151, 200, 181, 255 };
+    const int logo_width = 320, title_gap = 256, entry_height = 92, section_height = 132;
+    int logo_height = 0, width, height, y, end_y = ui->height / 2 - 50 + title_gap;
+    int old_hide_overlays = ui->hide_overlays, done = 0;
+    Uint32 started = SDL_GetTicks(), finished = 0;
+    float scroll, distance;
     size_t i;
 
-    memset( rows, 0, sizeof(rows) );
+    if (l->logo && !SDL_QueryTexture( l->logo, NULL, NULL, &width, &height ) && width > 0)
+        logo_height = height * logo_width / width;
     for (i = 0; i < CREDIT_COUNT; i++)
+        end_y += credits[i].by ? entry_height : section_height;
+    end_y += ui->height / 2;
+    distance = end_y - (ui->height - logo_height - 100) / 2;
+    ui->hide_overlays = 1;
+    ui->footer_count = 0;
+    ui_start_screen( ui );
+    while (!done && ui_begin_frame( ui ))
     {
-        snprintf( rows[i].label, sizeof(rows[i].label), "%s", credits[i].name );
-        snprintf( rows[i].value, sizeof(rows[i].value), "%s", credits[i].value );
-        rows[i].help = credits[i].help;
-    }
-    for (;;)
-    {
-        enum ui_action action = ui_list_run( &l->ui, &list, "Credits", NULL, rows, CREDIT_COUNT, 0 );
+        Uint32 now = SDL_GetTicks();
 
-        if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return;
-        if (action == UI_ACTION_CHOOSE)
+        while (ui_poll( ui, &input ))
+            if (input.button == UI_B || input.button == UI_PLUS || input.touch == UI_TOUCH_TAP ||
+                (finished && input.button == UI_A)) done = 1;
+        if (done || !ui->running) break;
+        scroll = (now - started) * 0.052f;
+        if (scroll >= distance)
         {
-            ui_message( &l->ui, rows[list.selection].label, rows[list.selection].help );
-            ui_start_screen( &l->ui );
+            scroll = distance;
+            if (!finished) finished = now;
+            if (now - finished >= 5000) break;
         }
+        ui_fill( ui, 0, 0, ui->width, ui->height, background );
+        y = ui->height / 2 - 50 - (int)scroll;
+        if (y > -100)
+        {
+            ui_text_centered( ui, ui->large, ui->width / 2, y, "Autorun", ui->value );
+            ui_text_centered( ui, ui->normal, ui->width / 2, y + 52, "People and projects behind the port", ui->dim );
+        }
+        y += title_gap;
+        for (i = 0; i < CREDIT_COUNT; i++)
+        {
+            int section = !credits[i].by;
+            int block_height = section ? section_height : entry_height;
+
+            if (y + block_height > 0 && y < ui->height)
+            {
+                if (section)
+                {
+                    ui_fill( ui, ui->width / 2 - 24, y + 32, 48, 2, accent );
+                    ui_text_centered( ui, ui->small, ui->width / 2, y + 56, credits[i].name, accent );
+                }
+                else
+                {
+                    ui_text_centered( ui, ui->normal, ui->width / 2, y, credits[i].name, ui->value );
+                    ui_text_centered( ui, ui->small, ui->width / 2, y + 36, credits[i].by, ui->dim );
+                }
+            }
+            y += block_height;
+        }
+        y = end_y - (int)scroll;
+        if (y < ui->height)
+        {
+            if (logo_height)
+            {
+                SDL_Rect rect = { (ui->width - logo_width) / 2, y, logo_width, logo_height };
+
+                SDL_SetTextureColorMod( l->logo, 255, 255, 255 );
+                SDL_SetTextureAlphaMod( l->logo, 255 );
+                SDL_RenderCopy( ui->renderer, l->logo, NULL, &rect );
+            }
+            ui_text_centered( ui, ui->large, ui->width / 2, y + logo_height + 16, "Autorun", ui->value );
+            ui_text_centered( ui, ui->normal, ui->width / 2, y + logo_height + 64, "ticoverse.com", accent );
+        }
+        ui_gradient( ui, 0, 0, ui->width, 80, background, (SDL_Color){ 5, 8, 10, 0 }, 0 );
+        ui_gradient( ui, 0, ui->height - 80, ui->width, 80, (SDL_Color){ 5, 8, 10, 0 }, background, 0 );
+        ui_fade( ui );
+        if (finished && now - finished > 4600)
+            ui_fill( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 5, 8, 10, (now - finished - 4600) * 255 / 400 } );
+        ui->scrolling_text = 1;
+        ui_present( ui );
+        ui_wait( ui );
     }
+    ui->hide_overlays = old_hide_overlays;
+    ui_start_screen( ui );
 }
 
 /* The sections of Settings, in the order they stand in the list. */
@@ -3355,8 +3413,8 @@ static void settings_menu( struct launcher *l )
         }
 #endif
         snprintf( rows[SET_CREDITS].label, sizeof(rows[0].label), "Credits" );
-        snprintf( rows[SET_CREDITS].value, sizeof(rows[0].value), "Wine, Box64, DXVK, Mesa..." );
-        rows[SET_CREDITS].help = "The projects and platform references used by Autorun.";
+        rows[SET_CREDITS].kind = UI_ROW_ACTION;
+        rows[SET_CREDITS].help = "People and projects behind Autorun.";
         rows[SET_CREDITS].adjustable = 0;
 
         action = ui_settings_run( ui, &list, "Settings", NULL, sections,
@@ -4025,7 +4083,7 @@ static int run_library( struct launcher *l, char *target, size_t size )
                     if (step < 0 && l->history_selection > 0) l->history_selection--;
                     if (step > 0 && l->history_selection + 1 < l->history_count) l->history_selection++;
                 }
-                else l->selection = launcher_grid_move( l->selection, l->visible_count, g.columns, step, 0 );
+                else l->selection = launcher_grid_move( l->selection, l->visible_count, g.columns, g.rows, step, 0 );
                 break;
             }
             case UI_UP:
@@ -4047,7 +4105,7 @@ static int run_library( struct launcher *l, char *target, size_t size )
                 }
                 else
                 {
-                    int next = launcher_grid_move( l->selection, l->visible_count, g.columns, 0, down ? 1 : -1 );
+                    int next = launcher_grid_move( l->selection, l->visible_count, g.columns, g.rows, 0, down ? 1 : -1 );
 
                     /* The top row has nowhere above it but the header. */
                     if (next == l->selection && !down)
@@ -4059,6 +4117,15 @@ static int run_library( struct launcher *l, char *target, size_t size )
                 }
                 break;
             }
+            case UI_ZL:
+            case UI_ZR:
+                if (!home)
+                {
+                    l->selection = launcher_grid_page( l->selection, l->visible_count, g.columns, g.rows,
+                                                       input.button == UI_ZL ? -1 : 1 );
+                    l->zone = ZONE_CONTENT;
+                }
+                break;
             case UI_L:
             case UI_R:
                 if (home != (input.button == UI_L)) ui_start_screen( ui );

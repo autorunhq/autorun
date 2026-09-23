@@ -107,22 +107,49 @@ static void test_dos_paths(void)
 
 static void test_grid(void)
 {
-    /* 23 programs in 5 columns: one list that scrolls, not pages of ten. */
-    assert( launcher_grid_move( 0, 23, 5, 1, 0 ) == 1 );
-    assert( launcher_grid_move( 4, 23, 5, 1, 0 ) == 5 );      /* the row's end: on to the next */
-    assert( launcher_grid_move( 22, 23, 5, 1, 0 ) == 22 );    /* the end stays put */
-    assert( launcher_grid_move( 5, 23, 5, -1, 0 ) == 4 );
-    assert( launcher_grid_move( 0, 23, 5, -1, 0 ) == 0 );
-    assert( launcher_grid_move( 2, 23, 5, 0, 1 ) == 7 );
-    assert( launcher_grid_move( 7, 23, 5, 0, 1 ) == 12 );     /* no page to stop at */
-    assert( launcher_grid_move( 7, 23, 5, 0, -1 ) == 2 );
-    assert( launcher_grid_move( 2, 23, 5, 0, -1 ) == 2 );     /* the top row: for the header */
-    assert( launcher_grid_move( 21, 23, 5, 0, 1 ) == 21 );    /* nothing below the last row */
-    assert( launcher_grid_move( 4, 8, 5, 0, 1 ) == 7 );       /* a short row below: its last program */
-    assert( launcher_grid_move( 0, 0, 5, 1, 0 ) == 0 );
-    assert( launcher_grid_page( 3, 23, 5, 2, 1 ) == 13 && launcher_grid_page( 13, 23, 5, 2, 1 ) == 18 );
-    assert( launcher_grid_page( 18, 23, 5, 2, 1 ) == 18 && launcher_grid_page( 18, 23, 5, 2, -1 ) == 8 );
-    assert( launcher_grid_page( 5, 23, 5, 2, -1 ) == 0 && launcher_grid_page( 0, 0, 5, 2, 1 ) == 0 );
+    int count, columns, rows, selection, next, direction;
+
+    assert( launcher_grid_move( 0, 23, 5, 2, 1, 0 ) == 1 );
+    assert( launcher_grid_move( 4, 23, 5, 2, 1, 0 ) == 10 );
+    assert( launcher_grid_move( 9, 23, 5, 2, 1, 0 ) == 15 );
+    assert( launcher_grid_move( 10, 23, 5, 2, -1, 0 ) == 4 );
+    assert( launcher_grid_move( 15, 23, 5, 2, -1, 0 ) == 9 );
+    assert( launcher_grid_move( 5, 23, 5, 2, -1, 0 ) == 5 );
+    assert( launcher_grid_move( 0, 23, 5, 2, -1, 0 ) == 0 );
+    assert( launcher_grid_move( 19, 23, 5, 2, 1, 0 ) == 22 );
+    assert( launcher_grid_move( 22, 23, 5, 2, 1, 0 ) == 22 );
+    assert( launcher_grid_move( 2, 23, 5, 2, 0, 1 ) == 7 );
+    assert( launcher_grid_move( 7, 23, 5, 2, 0, 1 ) == 12 );
+    assert( launcher_grid_move( 7, 23, 5, 2, 0, -1 ) == 2 );
+    assert( launcher_grid_move( 2, 23, 5, 2, 0, -1 ) == 2 );
+    assert( launcher_grid_move( 21, 23, 5, 2, 0, 1 ) == 21 );
+    assert( launcher_grid_move( 4, 8, 5, 2, 0, 1 ) == 7 );
+    assert( launcher_grid_move( 4, 8, 5, 2, 1, 0 ) == 4 );
+    assert( launcher_grid_move( 0, 0, 5, 2, 1, 0 ) == 0 );
+    assert( launcher_grid_page( 3, 23, 5, 2, 1 ) == 13 );
+    assert( launcher_grid_page( 13, 23, 5, 2, 1 ) == 22 );
+    assert( launcher_grid_page( 18, 23, 5, 2, -1 ) == 8 );
+    assert( launcher_grid_page( 5, 23, 5, 2, -1 ) == 5 );
+    assert( launcher_grid_page( 22, 23, 5, 2, 1 ) == 22 );
+    assert( launcher_grid_page( 0, 0, 5, 2, 1 ) == 0 );
+
+    for (count = 1; count <= LAUNCHER_MAX_ENTRIES; count++)
+        for (columns = 1; columns <= 6; columns++)
+            for (rows = 1; rows <= 3; rows++)
+                for (selection = 0; selection < count; selection++)
+                    for (direction = -1; direction <= 1; direction += 2)
+                    {
+                        next = launcher_grid_move( selection, count, columns, rows, direction, 0 );
+                        assert( next >= 0 && next < count );
+                        if (next / (columns * rows) == selection / (columns * rows))
+                            assert( next / columns == selection / columns );
+                        next = launcher_grid_move( selection, count, columns, rows, 0, direction );
+                        assert( next >= 0 && next < count );
+                        next = launcher_grid_page( selection, count, columns, rows, direction );
+                        assert( next >= 0 && next < count );
+                        if (next != selection)
+                            assert( next / (columns * rows) == selection / (columns * rows) + direction );
+                    }
 }
 
 int main(void)

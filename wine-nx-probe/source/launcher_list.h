@@ -141,14 +141,23 @@ static inline int launcher_find( const struct launcher_entry *entries, int count
     return 0;
 }
 
-/* Move the selection in a grid of `columns` that scrolls without end rather
- * than turning pages: left and right walk the whole list, up and down move a
- * row, and the ends of the list stay put so the caller can leave for the header. */
-static inline int launcher_grid_move( int selection, int count, int columns, int dx, int dy )
+/* Horizontal row edges turn the page, keeping the same row when it exists. */
+static inline int launcher_grid_move( int selection, int count, int columns, int rows, int dx, int dy )
 {
-    int next;
+    int next, page_size, first, row;
 
-    if (count <= 0 || columns <= 0) return 0;
+    if (count <= 0 || columns <= 0 || rows <= 0) return 0;
+    page_size = columns * rows;
+    first = selection / page_size * page_size;
+    row = (selection - first) / columns;
+    if (dx > 0 && (selection % columns == columns - 1 || selection == count - 1))
+    {
+        if (first + page_size >= count) return selection;
+        next = first + page_size + row * columns;
+        return next < count ? next : count - 1;
+    }
+    if (dx < 0 && selection % columns == 0)
+        return first ? first - page_size + row * columns + columns - 1 : selection;
     next = selection + dx + dy * columns;
     /* Down from the last full row lands on the last program rather than nowhere. */
     if (dy > 0 && next >= count && selection + columns - selection % columns < count) next = count - 1;
@@ -156,17 +165,17 @@ static inline int launcher_grid_move( int selection, int count, int columns, int
     return next;
 }
 
-/* The same column, a screenful of rows further down (direction 1) or up. */
+/* Page shortcuts preserve the slot, clamped to the last available program. */
 static inline int launcher_grid_page( int selection, int count, int columns, int rows, int direction )
 {
-    int next;
+    int next, page_size, first;
 
     if (count <= 0 || columns <= 0 || rows <= 0) return 0;
-    next = selection + direction * columns * rows;
-    while (next >= count) next -= columns;
-    if (next < 0) next = selection % columns;
-    if (next >= count) next = count - 1;
-    return next;
+    page_size = columns * rows;
+    first = (selection / page_size + direction) * page_size;
+    if (first < 0 || first >= count) return selection;
+    next = first + selection % page_size;
+    return next < count ? next : count - 1;
 }
 
 /* The first visible row, moved only as far as needed to show "selected". */

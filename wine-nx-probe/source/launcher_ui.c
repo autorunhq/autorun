@@ -29,7 +29,7 @@
 enum glyph
 {
     GLYPH_A, GLYPH_B, GLYPH_X, GLYPH_Y, GLYPH_PLUS, GLYPH_MINUS, GLYPH_L, GLYPH_R, GLYPH_LEFT, GLYPH_RIGHT,
-    GLYPH_UP, GLYPH_DOWN, GLYPH_COUNT
+    GLYPH_UP, GLYPH_DOWN, GLYPH_ZL, GLYPH_ZR, GLYPH_COUNT
 };
 
 static char last_error[256];
@@ -316,6 +316,7 @@ int ui_init( struct ui *ui, const void *font_data, size_t font_size, int animati
         [GLYPH_A] = { "A", 0 }, [GLYPH_B] = { "B", 0 }, [GLYPH_X] = { "X", 0 }, [GLYPH_Y] = { "Y", 0 },
         [GLYPH_PLUS] = { "+", 0 }, [GLYPH_MINUS] = { "-", 0 }, [GLYPH_L] = { "L", 1 }, [GLYPH_R] = { "R", 1 },
         [GLYPH_LEFT] = { "<", 0 }, [GLYPH_RIGHT] = { ">", 0 }, [GLYPH_UP] = { "^", 0 }, [GLYPH_DOWN] = { "v", 0 },
+        [GLYPH_ZL] = { "ZL", 1 }, [GLYPH_ZR] = { "ZR", 1 },
     };
     Uint32 flags = 0;
     int i;
@@ -816,6 +817,8 @@ static SDL_Texture *button_glyph( struct ui *ui, int button )
     case UI_MINUS: return ui->glyphs[GLYPH_MINUS];
     case UI_L: return ui->glyphs[GLYPH_L];
     case UI_R: return ui->glyphs[GLYPH_R];
+    case UI_ZL: return ui->glyphs[GLYPH_ZL];
+    case UI_ZR: return ui->glyphs[GLYPH_ZR];
     case UI_LEFT: return ui->glyphs[GLYPH_LEFT];
     case UI_RIGHT: return ui->glyphs[GLYPH_RIGHT];
     case UI_UP: return ui->glyphs[GLYPH_UP];
@@ -1037,6 +1040,7 @@ int ui_begin_frame( struct ui *ui )
         SDL_GameControllerClose( ui->controller );
         ui->controller = NULL;
         ui->held = ui->stick_x = ui->stick_y = 0;
+        ui->trigger_left = ui->trigger_right = 0;
     }
     ui->scrolling_text = 0;
     repeat_held( ui );
@@ -1118,6 +1122,8 @@ static int key_button( SDL_Keycode key )
     case SDLK_MINUS: case SDLK_KP_MINUS: return UI_MINUS;
     case SDLK_PAGEUP: case SDLK_l: return UI_L;
     case SDLK_PAGEDOWN: case SDLK_r: return UI_R;
+    case SDLK_LEFTBRACKET: return UI_ZL;
+    case SDLK_RIGHTBRACKET: return UI_ZR;
     }
     return UI_NONE;
 }
@@ -1147,15 +1153,20 @@ int ui_poll( struct ui *ui, struct ui_input *input )
             break;
         case SDL_CONTROLLERAXISMOTION:
         {
+            int trigger = event.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ||
+                          event.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
             int *latch = event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX ? &ui->stick_x :
-                         event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY ? &ui->stick_y : NULL;
+                         event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY ? &ui->stick_y :
+                         event.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? &ui->trigger_left :
+                         event.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT ? &ui->trigger_right : NULL;
             int value = event.caxis.value;
 
             if (!latch) continue;
             if (value > -STICK_RELEASE && value < STICK_RELEASE) *latch = 0;
             if (*latch || (value > -STICK_PRESS && value < STICK_PRESS)) continue;
             *latch = 1;
-            if (latch == &ui->stick_x) input->button = value < 0 ? UI_LEFT : UI_RIGHT;
+            if (trigger) input->button = latch == &ui->trigger_left ? UI_ZL : UI_ZR;
+            else if (latch == &ui->stick_x) input->button = value < 0 ? UI_LEFT : UI_RIGHT;
             else input->button = value < 0 ? UI_UP : UI_DOWN;
             break;
         }
@@ -1225,7 +1236,7 @@ void ui_present( struct ui *ui )
         SDL_SetRenderTarget( ui->renderer, NULL );
         SDL_RenderCopy( ui->renderer, ui->screen, NULL, NULL );
     }
-    ui_draw_toast( ui );
+    if (!ui->hide_overlays) ui_draw_toast( ui );
     if (ui_present_hook) ui_present_hook( ui->renderer );
     SDL_RenderPresent( ui->renderer );
 }

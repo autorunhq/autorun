@@ -4,7 +4,8 @@
  *
  * Run it in a folder whose "sdmc:" holds switch/wine/drive_c (paths on the card
  * are relative there). A script of steps drives it, one step per line:
- *   key NAME    press a key (up, down, left, right, a, b, x, y, plus, minus, l, r)
+ *   key NAME    press a key (up, down, left, right, a, b, x, y, plus, minus, l, r, zl, zr)
+ *   trigger NAME VALUE    send a controller trigger axis event (zl or zr, 0 to 32767)
  *   tap X Y     tap the touch screen
  *   wait N      let N frames pass
  *   shot FILE   save the next frame as a PNG
@@ -228,6 +229,7 @@ static SDL_Keycode key_code( const char *name )
         { "up", SDLK_UP }, { "down", SDLK_DOWN }, { "left", SDLK_LEFT }, { "right", SDLK_RIGHT },
         { "a", SDLK_RETURN }, { "b", SDLK_ESCAPE }, { "x", SDLK_x }, { "y", SDLK_y }, { "plus", SDLK_PLUS },
         { "minus", SDLK_MINUS }, { "l", SDLK_PAGEUP }, { "r", SDLK_PAGEDOWN },
+        { "zl", SDLK_LEFTBRACKET }, { "zr", SDLK_RIGHTBRACKET },
     };
     size_t i;
 
@@ -263,6 +265,18 @@ static void on_frame( SDL_Renderer *renderer )
         if (sscanf( line, "key %255s", arg ) == 1)
         {
             push_key( key_code( arg ) );
+            wait_frames = 1;
+            return;
+        }
+        if (sscanf( line, "trigger %255s %d", arg, &x ) == 2)
+        {
+            SDL_Event event = { .type = SDL_CONTROLLERAXISMOTION };
+
+            assert( !strcmp( arg, "zl" ) || !strcmp( arg, "zr" ) );
+            assert( x >= 0 && x <= 32767 );
+            event.caxis.axis = !strcmp( arg, "zl" ) ? SDL_CONTROLLER_AXIS_TRIGGERLEFT : SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+            event.caxis.value = x;
+            SDL_PushEvent( &event );
             wait_frames = 1;
             return;
         }

@@ -25,6 +25,8 @@ enum ui_button
     UI_DOWN = SDL_CONTROLLER_BUTTON_DPAD_DOWN,
     UI_LEFT = SDL_CONTROLLER_BUTTON_DPAD_LEFT,
     UI_RIGHT = SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+    UI_ZL = SDL_CONTROLLER_BUTTON_MAX,
+    UI_ZR,
 };
 
 enum ui_touch
@@ -107,11 +109,13 @@ struct ui
     int back_focused;
     /* How many modals are open: only the first dims what is behind it. */
     int modal_depth;
+    int hide_overlays;
 
     SDL_GameController *controller;
     int held;
     Uint32 held_since, held_last;
     int stick_x, stick_y;
+    int trigger_left, trigger_right;
     struct
     {
         int active, vertical;

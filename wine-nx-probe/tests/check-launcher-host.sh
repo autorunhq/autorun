@@ -178,7 +178,7 @@ grep -q "launcher returned 1 target 'sdmc:/switch/wine/drive_c/Vanguard/Game.exe
 }
 echo "launcher host run: Home history row, taps, swipes, boundaries, header focus and Y Options passed"
 
-# A library larger than one screenful: the grid has to scroll, and the buttons
+# A library larger than one page: the grid has to page, and the buttons
 # have to be acted on while the icon worker posts an event per cover decoded.
 # tests/launcher_shot.py stages the games and reads back which cover each card
 # ended up showing, so a cover that went missing or came from another game
@@ -208,18 +208,53 @@ wait 8
 key up
 wait 45
 shot $shots/scroll-back.png
+key right
+key right
+key right
+key right
+key right
+wait 35
+shot $shots/page-upper.png
+key left
+wait 20
+shot $shots/page-upper-back.png
+key down
+key right
+wait 35
+shot $shots/page-lower.png
+key left
+wait 20
+shot $shots/page-lower-back.png
+trigger zr 32767
+trigger zr 25000
+wait 35
+shot $shots/page-trigger-held.png
+trigger zr 0
+trigger zr 32767
+trigger zr 0
+wait 35
+shot $shots/page-trigger-next.png
+key zl
+trigger zl 32767
+trigger zl 0
+wait 35
+shot $shots/page-trigger-back.png
 SCRIPT
 ( cd "$build/big" && SDL_VIDEODRIVER=dummy "$build/launcher_host" "$font" "$build/scroll-script.txt" \
     > "$build/scroll-out.txt" 2>&1 ) || { cat "$build/scroll-out.txt"; exit 1; }
 grep -q "120 catalog games (120 registered, 120 shown)" "$build/scroll-out.txt" || { cat "$build/scroll-out.txt"; exit 1; }
-# Four presses down put the selection on row 4, so the two rows shown are 3 and
-# 4: games 15 to 24, with the selection the sixth card. Four back up show
-# the first two rows again. A screen that never moved means the buttons were
-# never read, which is what a queue full of the worker's events causes.
+# Four presses down select game 20, the first slot of the third page.
 python3 "$probe/tests/launcher_shot.py" check "$shots/scroll-top.png" 0 0
-python3 "$probe/tests/launcher_shot.py" check "$shots/scroll-down.png" 15 5
+python3 "$probe/tests/launcher_shot.py" check "$shots/scroll-down.png" 20 0
 python3 "$probe/tests/launcher_shot.py" check "$shots/scroll-back.png" 0 0
-echo "launcher host run: a library past one screenful scrolls and keeps every cover"
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-upper.png" 10 0
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-upper-back.png" 0 4
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-lower.png" 10 5
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-lower-back.png" 0 9
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-trigger-held.png" 10 9
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-trigger-next.png" 20 9
+python3 "$probe/tests/launcher_shot.py" check "$shots/page-trigger-back.png" 0 9
+echo "launcher host run: library row edges and triggers turn pages and keep every cover"
 
 # The same library from cold, with the presses coming while the worker is still
 # decoding covers and posting an event for each one. A frame that spent itself
@@ -239,5 +274,5 @@ shot $shots/busy-scrolled.png
 SCRIPT
 ( cd "$build/big" && SDL_VIDEODRIVER=dummy "$build/launcher_host" "$font" "$build/busy-script.txt" \
     > "$build/busy-out.txt" 2>&1 ) || { cat "$build/busy-out.txt"; exit 1; }
-python3 "$probe/tests/launcher_shot.py" check "$shots/busy-scrolled.png" 15 5 3
+python3 "$probe/tests/launcher_shot.py" check "$shots/busy-scrolled.png" 20 0 3
 echo "launcher host run: buttons are read while the covers are still being decoded"
