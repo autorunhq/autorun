@@ -31,7 +31,7 @@ pe32-lifecycle.exe. Select one in target.txt and remove args.txt to run it.
 For archive integrity testing, args.txt can contain:
 C:\\7zr.exe t C:\\7zr-sample.7z
 For extraction: C:\\7zr.exe x C:\\7zr-tree.7z -oC:\\7zr-out -y
-Logs: sdmc:/switch/wine/wine-nx-runtime.log and horizon-trace.log.
+Logs: sdmc:/switch/wine/logs/autorun_runtime.log and horizon-trace.log.
 ''')
 subprocess.run([sys.executable, str(verify), str(stage)], check=True)
 archive = build / 'wine-nx-dynarec-1.zip'

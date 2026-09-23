@@ -73,9 +73,14 @@ Adding a game enables DXVK, which draws Direct3D games through the Switch's
 Vulkan driver. To keep new games on WineD3D, turn off **Settings -> Give a new
 game DXVK**.
 
-**WarCraft III** needs a one-time setup, which Autorun includes: run
-`C:\WarCraft III Setup\war3-setup.exe` once before playing. Its folder has a
-`README.txt` with the details.
+Before the first program on a card, Autorun sets up the Windows components a
+PC's Windows installation would have registered: DirectShow and the MP3 decoder,
+which game movies and music play through (Fallout: New Vegas, Fable, WarCraft
+III and others). It runs by itself, once, and the game starts right after it.
+
+**WarCraft III** also has a one-time settings program: run
+`C:\WarCraft III Setup\war3-setup.exe` once before playing (**+** -> **Run a
+program once** works). Its folder has a `README.txt` with the details.
 
 ### Settings a game expects to already have
 
@@ -99,6 +104,11 @@ Speed Underground 2 and Halo are two. Autorun notices when a game needs this and
 offers to set it up: **Settings -> System -> Make a 32-bit forwarder** adds an
 "Autorun 32-bit" icon to the HOME menu. Start those games from that icon.
 
+It works the other way too: a game that does not need it is sent from "Autorun
+32-bit" to the Autorun icon (made with **Make an Autorun forwarder**), since in
+32 bits large games run out of memory and close. To keep a game in "Autorun
+32-bit" anyway, set **Address space** to 32-bit in its options.
+
 ## Using the launcher
 
 | Button | What it does |
@@ -107,13 +117,15 @@ offers to set it up: **Settings -> System -> Make a 32-bit forwarder** adds an
 | **Y** | The game's options |
 | **L / R** | Switch between Home (recently played) and the Library |
 | **−** | Settings (on Home), filter and sort (in the Library) |
-| **+** | Add a game, or exit Autorun |
+| **+** | Add a game, run a program once without adding it (a setup, a patch), or exit Autorun |
 
 The touchscreen works everywhere too.
 
 **A game's options (Y)** - mark it as a favorite or hide it, change its title,
 give it command-line arguments, download its artwork, pick how its graphics are
-drawn (Direct3D 9 through Wine or DXVK), and give it its own controls.
+drawn (Direct3D 9 through Wine or DXVK), how a picture smaller than the screen is
+enlarged (FSR 1.0, or whole-pixel steps for pixel art), and give it its own
+controls.
 
 **Settings (−)** - show hidden games, the controls every game uses by default,
 a [SteamGridDB](https://www.steamgriddb.com) API key for artwork, returning to
@@ -139,12 +151,34 @@ or W A S D. Games with controller support see an Xbox 360 controller.
 
 **Hold + and − together for a second** to close a game.
 
+**Minus + right stick click** opens the on-screen keyboard over the game (it
+also opens by itself when a text field is selected; **Settings -> On-screen
+keyboard** turns that off). It types like a real keyboard, one key at a time,
+so names and chat boxes can be edited:
+
+| On the keyboard | Does |
+|---|---|
+| D-pad, left stick | Move between keys |
+| **A**, or tap a key | Press it |
+| **B** | Backspace |
+| **Y** / **X** | Space / Shift for the next key |
+| **L**, **R** | Cursor left, right |
+| **+** | Enter |
+| **ZL**, **ZR** | Keyboard to the top, back to the bottom |
+| **−** | Close it |
+
+While it is open, the game gets no controller input.
+
 ## If something goes wrong
 
-Every run leaves two logs in `switch/wine` on the SD card:
+Every run leaves its logs in `switch/wine/logs` on the SD card:
 
-- `wine-nx-runtime.log` - the last run, whatever it was.
-- `game-NAME.log` - the last run of that game, kept per game.
+- `autorun_runtime.log` - the last run, whatever it was.
+- `NAME.log` - the last run of that game, kept per game. A run with verbose
+  traces or the profiler on gets its own file, such as `NAME_verbose.log` or
+  `NAME_verbose_profiler.log`, so it doesn't replace the plain one.
+- `stdout.txt`, `stderr.txt` and `stdin.txt` - the program's standard output,
+  error and input. What a program writes to them is also in its log.
 
 When reporting a problem, include the game's log and say what you saw. Turning
 on **Verbose traces** in the game's options gives more detail, at some speed

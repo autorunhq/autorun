@@ -146,6 +146,19 @@ static void test_settings( const char *dir )
     settings.dxvk_hud = 0;
     assert( LAUNCHER_FRAME_LIMIT_COUNT == 8 );
     assert( launcher_dxvk_config( &settings, config, sizeof(config) ) );
+    /* A game's own dxvk.conf follows, so its lines win; one without a final
+     * newline gets one, and one that does not fit is refused whole. */
+    {
+        char with_game[256];
+        static const char game[] = "d3d9.maxAvailableMemory = 512";
+
+        assert( launcher_dxvk_config( &settings, with_game, sizeof(with_game) ) );
+        assert( launcher_dxvk_config_add( with_game, sizeof(with_game), game, sizeof(game) - 1 ) );
+        assert( strstr( with_game, "d3d9.presentInterval" ) < strstr( with_game, "d3d9.maxAvailableMemory = 512\n" ) );
+        assert( with_game[strlen( with_game ) - 1] == '\n' );
+        assert( launcher_dxvk_config_add( with_game, sizeof(with_game), "", 0 ) );
+        assert( !launcher_dxvk_config_add( with_game, strlen( with_game ) + 8, game, sizeof(game) - 1 ) );
+    }
     assert( strstr( config, "dxgi.syncInterval = 1" ) );
     assert( !strstr( config, "dxvk.enableDescriptorBuffer" ) );
     settings.dxvk_hud = 1;
@@ -157,6 +170,23 @@ static void test_settings( const char *dir )
             !strcmp( path, "dxvk64\\versions\\2.7.1" ) );
     assert( launcher_dxvk_version_directory( 0x014c, "", path, sizeof(path) ) && !strcmp( path, "dxvk" ) );
     assert( !launcher_dxvk_version_directory( 0x8664, "../bad", path, sizeof(path) ) );
+
+    load_text( &kv, "upscaling=fsr\nupscaling-sharpness=80%\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.upscaling == 1 && settings.upscaling_sharpness == 4 );
+
+    load_text( &kv, "upscaling=integer\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.upscaling == 2 && settings.upscaling_sharpness == 2 );
+
+    settings.upscaling = 1;
+    settings.upscaling_sharpness = 3;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "upscaling=fsr" ) && strstr( kv.text, "upscaling-sharpness=60%" ) );
+
+    settings.upscaling = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "upscaling=" ) && !strstr( kv.text, "upscaling-sharpness=" ) );
 
     snprintf( path, sizeof(path), "%s/game.wine-nx.txt", dir );
     load_text( &kv, "# written by hand\n" );

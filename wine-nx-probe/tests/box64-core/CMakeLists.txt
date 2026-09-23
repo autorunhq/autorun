@@ -17,7 +17,8 @@ add_executable(box64-execution-dynarec ../box64_execution.c
     "${probe}/source/wow64_box64_bridge.c" "${probe}/source/wow64_box64_engine.c"
     "${probe}/source/wow64_box64_dynarec.c")
 target_compile_definitions(box64-execution-dynarec PRIVATE __WINESRC__ _WIN64)
-target_include_directories(box64-execution-dynarec PRIVATE "${probe}/../include" "${probe}/source")
+target_include_directories(box64-execution-dynarec PRIVATE "${probe}/../include" "${probe}/source"
+    "${probe}/../dlls/ntdll/unix")  # horizon_code_memory.h, whose functions this build does not link
 target_compile_options(box64-execution-dynarec PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections)
 target_link_options(box64-execution-dynarec PRIVATE -Wl,--gc-sections)
 target_link_libraries(box64-execution-dynarec PRIVATE box64-core-dynarec m)

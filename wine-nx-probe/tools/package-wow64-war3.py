@@ -43,7 +43,7 @@ setup = pe / 'war3-setup.exe'
 subprocess.run([str(tools / 'i686-w64-mingw32-clang'), '-Os', '-Wall', '-Wextra', '-Werror', '-fno-builtin',
                 '-nostdlib', '-Wl,--entry,_start@0', '-Wl,--image-base,0x10000000', '-Wl,--dynamicbase',
                 '-o', str(setup), str(probe / 'tools/war3_setup.c'),
-                '-lole32', '-ladvapi32', '-lkernel32', '-lntdll'], check=True, env=env)
+                '-ladvapi32', '-lkernel32', '-lntdll'], check=True, env=env)
 
 shutil.rmtree(stage_root, ignore_errors=True)
 shutil.copytree(base, stage, ignore=shutil.ignore_patterns('*.log', '.DS_Store', '*-README.txt'))
@@ -114,7 +114,7 @@ while queue:
    game down a lot.
 
 What the setup program does, each step as a [WAR3 SETUP] line in
-wine-nx-runtime.log, ending with "done, all steps worked":
+autorun_runtime.log, ending with "done, all steps worked":
 - Sets the game to 1280x720, 32-bit colour, 60 Hz. The Switch screen, where the
   pointer and the touchscreen are, is always 1280x720; at another resolution the
   game's menus do not line up with them (no highlight, clicks landing elsewhere).
@@ -126,11 +126,11 @@ wine-nx-runtime.log, ending with "done, all steps worked":
   does the same for one launch.
 - Offers the game only the Switch's own 1280x720 display mode (EmulateModelist
   for war3.exe), so the movies play across the full width.
-- Registers the MP3 decoder l3codeca.acm, for the movies' sound.
-- Registers DirectShow (quartz.dll, devenum.dll), which the movies play through.
-  The first quartz.dll line reports a failure: quartz needs devenum registered,
-  so it is registered again after devenum, and that second line is the one that
-  counts. The game registers its own video decoder, blizzard.ax.
+
+DirectShow, which the movies play through, and the MP3 decoder for their sound
+are registered by Autorun itself before the first program on the card
+(C:\\windows\\autorun-setup.exe, [AUTORUN SETUP] lines in the log). The game
+registers its own video decoder, blizzard.ax.
 
 The movies: WarCraft III's Movies are AVI files, which quartz.dll reads without
 GStreamer; the picture goes through Wine's GDI video renderer, and build 84 showed

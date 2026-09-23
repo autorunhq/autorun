@@ -74,7 +74,7 @@ Copy the switch/wine folder to the SD card, merging folders; the runtime NRO
 changed and opengl32.dll must be in drive_c/windows/syswow64.
 Choose C:\\\\pe32-opengl.exe in the launcher. Expected: one second each of full
 red, green and blue, then [OPENGL TEST] PASS and exit_code=0x0000002a in
-wine-nx-runtime.log. The GL_VENDOR, GL_RENDERER and GL_VERSION lines name the
+autorun_runtime.log. The GL_VENDOR, GL_RENDERER and GL_VERSION lines name the
 driver; [NXGL] lines show the screen passing to OpenGL and back.
 
 OpenGL goes through devkitPro's Mesa (nouveau) and EGL on the Switch GPU. While

@@ -63,7 +63,7 @@ shutil.copy2(mesa_nro, stage / 'wine-nx-runtime.nro')
 # d3dx9_26, with the scripts\NFS_XtendedInput.asi its ASI loader loads, which
 # adds msvcp140, which loads concrt140 when it starts. quartz delay-loads ddraw
 # too. Their imports, and the DLLs that exports they use forward to, come along.
-NFS_DLLS = 'ddraw dinput8 netapi32 shfolder tapi32 dbghelp vcruntime140 msvcp140 concrt140 xinput1_4 d3dx9_26'.split()
+NFS_DLLS = 'ddraw dinput dinput8 netapi32 shfolder tapi32 dbghelp vcruntime140 msvcp140 concrt140 xinput1_4 d3dx9_26'.split()
 # Fallout New Vegas (GOG) imports xinput1_3 and d3dx9_38, and its Galaxy.dll and
 # GalaxyWrp.dll import the 2012 runtimes. d3dx9 loads images through
 # windowscodecs, which it delay-imports, so no import walk reaches it.
@@ -149,6 +149,16 @@ subprocess.run([str(toolchain / 'i686-w64-mingw32-clang'), '-O1', '-mwindows',
                 '-o', str(socket_test), str(probe / 'tests/win32/socket-test.c'), '-lws2_32'], check=True)
 assert 'Arch: i386\n' in readobj('--file-headers', socket_test)
 
+# What wineboot registers on a computer and nothing does on the Switch:
+# DirectShow, DirectX Media Objects and the MP3 decoder. The runtime runs it
+# before the first program on a card (source/runtime.c), for every game.
+autorun_setup = stage / 'drive_c/windows/autorun-setup.exe'
+subprocess.run([str(toolchain / 'i686-w64-mingw32-clang'), '-Os', '-Wall', '-Wextra', '-Werror',
+                '-fno-builtin', '-nostdlib', '-Wl,--entry,_start@0', '-Wl,--image-base,0x10000000',
+                '-Wl,--dynamicbase', '-o', str(autorun_setup), str(tools / 'autorun_setup.c'),
+                '-lole32', '-ladvapi32', '-lkernel32', '-lntdll'], check=True)
+assert 'Arch: i386\n' in readobj('--file-headers', autorun_setup)
+
 # The Sims 2 Ultimate Collection is shipped installed; what is left is telling
 # the game where each of its packs is, which its release does with a batch file
 # of reg add lines whose every path comes from the folder it is run in.
@@ -159,13 +169,15 @@ subprocess.run([str(toolchain / 'i686-w64-mingw32-clang'), '-Os', '-Wall', '-Wex
                 '-Wl,--dynamicbase', '-o', str(sims2 / 'sims2-setup.exe'),
                 str(tools / 'sims2_setup.c'), '-ladvapi32', '-lkernel32', '-lntdll'], check=True)
 assert 'Arch: i386\n' in readobj('--file-headers', sims2 / 'sims2-setup.exe')
+# DXVK's settings for the game, which the setup copies beside each executable.
+shutil.copy2(tools / 'sims2/dxvk.conf', sims2 / 'dxvk.conf')
 (sims2 / 'README.txt').write_text('''The Sims 2 Ultimate Collection
 ==============================
 
 Copy the collection onto the card -- leave __Installer and Support behind, they
 are for a computer -- and run sims2-setup.exe once from the launcher. It writes
 what the release's own "Instalar Registros" batch file writes, with the card's
-paths, and says what it did in wine-nx-runtime.log as [SIMS2 SETUP] lines.
+paths, and says what it did in autorun_runtime.log as [SIMS2 SETUP] lines.
 Running it again is harmless.
 
 Where the packs go does not matter much. Each one is recognised by the
@@ -173,6 +185,16 @@ executable in its TSBin, not by the name of the folder around it, so a release
 that calls them Base and EP1-EP9 and one that spells out "The Sims 2 Nightlife"
 both work, and the collection may keep a folder of its own around them. Put
 sims2-setup.exe's folder beside the packs, or beside the folder holding them.
+
+The setup also copies dxvk.conf from its folder into each pack's TSBin, next to
+the executable. It holds the game to 512 MB of video memory: DXVK's own profile
+for The Sims 2 reports 2 GB, and on the Switch the game fills the shared 1.5 GB
+and crashes. A dxvk.conf already in TSBin is left as it is.
+
+It also sets the game's own Graphics Rules.sgr (TSData\\Res\\Config in each pack)
+for the Switch's 1280x720 screen: in its screen resolution option every default
+becomes 1280x720, and a maximum below that is raised to it. Nothing else in the
+file changes, and the file as it was is kept as Graphics Rules.sgr.original.
 
 The game is the newest expansion's executable, TSBin\\Sims2EP9.exe. It has no
 relocations and is linked for 0x400000, so it requires the 39-bit Autorun
@@ -396,7 +418,7 @@ no-balance.txt and the rest -- and the first run moves each into settings.json
 and takes the file away, saying so in the log. A setting a newer build added is
 kept when an older one writes the file back.
 
-wine-nx-runtime.log holds the run. Its [PROGRESS] lines report OpenGL frames,
+autorun_runtime.log holds the run. Its [PROGRESS] lines report OpenGL frames,
 the time in eglSwapBuffers and in opengl32 calls, the megabytes Wine copies for
 32-bit buffer mappings (copy_mb), whether the GPU maps the program's own pages
 (pinned=1, or -1 with pin_rc when nvservices refused them), and the slowest

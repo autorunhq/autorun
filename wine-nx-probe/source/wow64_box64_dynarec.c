@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef __SWITCH__
 #include <switch.h>
 #else
@@ -38,6 +39,10 @@
 #include <unistd.h>
 #endif
 
+#include "box64_code_arena.h"
+#ifdef __SWITCH__
+#include "horizon_code_memory.h"
+#endif
 #include "box64_options.h"
 #include "alternate.h"
 #include "box64context.h"
@@ -60,29 +65,91 @@
  * object per arena. Atmosphère creates only 10 of those objects for the whole
  * system (kern_init_slab_setup.cpp, SlabCountKCodeMemory), so 8 MB arenas
  * stopped translation at 80 MB, and WarCraft III went on in the interpreter
- * too slowly to draw a frame. Arenas double from 16 MB to 256 MB and take
- * memory only once needed. */
+ * too slowly to draw a frame. Each arena doubles the code memory taken so far,
+ * up to 256 MB, and is taken only once needed -- but the heap only has a large
+ * block to give early, so the first arena is sized from the program's image
+ * instead of starting at the smallest. */
 #define NX_ARENA_FIRST    (16 * 1024 * 1024)
+#define NX_ARENA_IMAGE_MAX (128 * 1024 * 1024)  /* the first arena, however large the image */
 #define NX_ARENA_LARGEST  (256 * 1024 * 1024)
 #define NX_ARENA_SMALLEST (1024 * 1024)
+#define NX_WINDOW_SPARE   (64 * 1024 * 1024)   /* left to stacks and section anchors */
+#define NX_ARENA_RETRY_NS (5ull * 1000 * 1000 * 1000)  /* between tries once one fails */
 #define NX_MAX_ARENAS 32
 #define NX_LOCK_ADDRESS_SLOTS 8192
 #define NX_MAX_STOP_PAGES 4
 
+/* The image the runtime is about to run, in bytes: the first arena is sized
+ * from it, since a program translates its own code before anything else. */
+size_t wine_nx_box64_image_size;
+
+/* Rounded up to a power of two, between NX_ARENA_FIRST and NX_ARENA_IMAGE_MAX.
+ * The Sims 2's 46 MB image gets 64 MB, Quake III's 6 MB gets the smallest: a
+ * game that is not going to translate much should not hold the memory. */
+/* What the address space the runtime keeps for its own mappings still has in
+ * one piece, or 0 where that window is not this runtime's to walk. */
+static size_t window_run(void)
+{
+#ifdef __SWITCH__
+    if (&wine_nx_native_window_free) return wine_nx_native_window_free();
+#endif
+    return 0;
+}
+
+static size_t first_arena_size(void)
+{
+    size_t size = NX_ARENA_FIRST;
+
+    while (size < wine_nx_box64_image_size && size < NX_ARENA_IMAGE_MAX) size *= 2;
+    return size;
+}
+
 struct nx_arena
 {
 #ifdef __SWITCH__
-    Jit jit;
+    Jit jit;                            /* when libnx placed it */
+    struct wine_nx_code_memory code;    /* when this runtime did */
+    void *source;                       /* the heap the code memory is over */
 #endif
     uint8_t *rw;
     uint8_t *rx;
     size_t size;
-    size_t used;
+    struct code_arena alloc;  /* chunks inside it, reused once a block is freed */
     uint8_t *starts;  /* a bit per 16 bytes, set where an allocation begins */
 };
 
 static struct nx_arena arenas[NX_MAX_ARENAS];
 static unsigned int arena_count;
+static int arenas_exhausted;  /* the kernel has no code memory object left */
+static int arenas_full;       /* an allocation failed and nothing was freed since */
+static unsigned long long retry_at;  /* no arena is asked for before this time, in ns */
+static struct code_quarantine quarantine;   /* freed chunks not yet handed out again */
+static unsigned long long quarantine_bytes; /* what they hold */
+static unsigned long long last_purge;       /* when cold blocks were last looked for */
+static unsigned long long next_room_check;  /* when a full arena set is next looked at */
+
+/* How long a freed chunk waits before it is handed out again, how often cold
+ * blocks are looked for once there is no more code memory to take, and, for
+ * the tests, a limit on the bytes translated code may hold (0: none). */
+unsigned long long wine_nx_box64_quarantine_ns = 2000000000ull;
+unsigned long long wine_nx_box64_purge_interval_ns = 250000000ull;
+size_t wine_nx_box64_code_limit;
+
+/* For [PROGRESS]: purges, the blocks and bytes they gave back, their time. */
+unsigned int wine_nx_box64_purges, wine_nx_box64_purged_blocks;
+unsigned long long wine_nx_box64_purged_bytes, wine_nx_box64_purge_ns;
+
+static unsigned long long nx_now_ns(void)
+{
+#ifdef __SWITCH__
+    return armTicksToNs( armGetSystemTick() );
+#else
+    struct timespec now;
+
+    clock_gettime( CLOCK_MONOTONIC, &now );
+    return (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec;
+#endif
+}
 static pthread_mutex_t arena_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static int dynarec_ready;
@@ -100,7 +167,8 @@ int box64_rdtsc = 1;
 char *ftrace_name = NULL; /* no Box64 trace file; log levels default from it */
 cpu_ext_t cpuext = {0}; /* no optional host instructions: portable across Switch models */
 
-uint64_t wine_nx_box64_dynarec_bytes;
+uint64_t wine_nx_box64_dynarec_bytes;     /* translated code held right now */
+uint64_t wine_nx_box64_code_translated;   /* and every byte ever translated */
 uint64_t wine_nx_box64_arena_bytes;  /* code memory reserved in all arenas */
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 unsigned long long wine_nx_box64_native_entries;
@@ -133,11 +201,36 @@ static size_t align_up( size_t value, size_t alignment )
 
 /* Called with arena_mutex held. Maps an arena of size bytes, or returns 0 with
  * the reason in *rc. */
-static int map_arena( struct nx_arena *arena, size_t size, unsigned int *rc )
+static int map_arena( struct nx_arena *arena, size_t size, int place_here, unsigned int *rc )
 {
     memset( arena, 0, sizeof(*arena) );
     *rc = 0;
+    (void)place_here;
 #ifdef __SWITCH__
+    /* The runtime places the aliases itself when place_here says the place it
+     * keeps for code has room (horizon.c): above everything a 32-bit program
+     * can address where the address space reaches that far, and the window it
+     * keeps for itself where the whole space is 4 GB. Otherwise, and when that
+     * fails, libnx looks by probing the address space at random, which finds
+     * holes outside the window: build 229 reached 150 MB that way. jitCreate
+     * is also the way when the runtime is not there, as in the tests. */
+    if (place_here && &wine_nx_code_memory_map && (arena->source = memalign( 0x1000, size )))
+    {
+        if (wine_nx_code_memory_map( arena->source, size, &arena->code, rc ))
+        {
+            arena->rw = arena->code.rw;
+            arena->rx = arena->code.rx;
+        }
+        else
+        {
+            /* No run that large. libnx looks by probing the address space at
+             * random, which finds smaller holes this walk skipped: build 226
+             * reached 133 MB that way where a 4 GB window alone gives 100. */
+            free( arena->source );
+            arena->source = NULL;
+        }
+    }
+    if (!arena->rw)
     {
         Result res = jitCreate( &arena->jit, size );
 
@@ -146,18 +239,18 @@ static int map_arena( struct nx_arena *arena, size_t size, unsigned int *rc )
             *rc = res;
             return 0;
         }
-    }
-    if (arena->jit.type != JitType_CodeMemory)
-    {
-        jitClose( &arena->jit );
-        return 0;
-    }
-    arena->rw = jitGetRwAddr( &arena->jit );
-    arena->rx = jitGetRxAddr( &arena->jit );
-    if (!arena->rw || !arena->rx)
-    {
-        jitClose( &arena->jit );
-        return 0;
+        if (arena->jit.type != JitType_CodeMemory)
+        {
+            jitClose( &arena->jit );
+            return 0;
+        }
+        arena->rw = jitGetRwAddr( &arena->jit );
+        arena->rx = jitGetRxAddr( &arena->jit );
+        if (!arena->rw || !arena->rx)
+        {
+            jitClose( &arena->jit );
+            return 0;
+        }
     }
 #else
     {
@@ -182,6 +275,7 @@ static int map_arena( struct nx_arena *arena, size_t size, unsigned int *rc )
     }
 #endif
     arena->size = size;
+    code_arena_init( &arena->alloc, arena->rw, size );
     return 1;
 }
 
@@ -203,7 +297,10 @@ unsigned int wine_nx_box64_release_arenas( unsigned long long *bytes )
 
         if (!arena->size) continue;
 #ifdef __SWITCH__
-        jitClose( &arena->jit );
+        if (arena->code.handle && &wine_nx_code_memory_unmap) wine_nx_code_memory_unmap( &arena->code );
+        else jitClose( &arena->jit );
+        free( arena->source );
+        arena->source = NULL;
 #else
         munmap( arena->rw, arena->size );
         munmap( arena->rx, arena->size );
@@ -212,10 +309,16 @@ unsigned int wine_nx_box64_release_arenas( unsigned long long *bytes )
         free( arena->starts );
         arena->starts = NULL;
         arena->rw = arena->rx = NULL;
-        arena->size = arena->used = 0;
+        arena->size = 0;
+        memset( &arena->alloc, 0, sizeof(arena->alloc) );
         closed++;
     }
     arena_count = 0;
+    arenas_exhausted = arenas_full = 0;
+    retry_at = last_purge = next_room_check = 0;
+    free( quarantine.entries );
+    memset( &quarantine, 0, sizeof(quarantine) );
+    quarantine_bytes = 0;
     dynarec_ready = 0;
     wine_nx_box64_arena_bytes = 0;
     pthread_mutex_unlock( &arena_mutex );
@@ -223,33 +326,71 @@ unsigned int wine_nx_box64_release_arenas( unsigned long long *bytes )
     return closed;
 }
 
-/* Called with arena_mutex held. The next arena doubles the last one, from
- * NX_ARENA_FIRST up to NX_ARENA_LARGEST, and holds at least minimum bytes;
- * smaller sizes are tried when the heap has no block that large. When even
- * NX_ARENA_SMALLEST fails the kernel has no code memory left, and later calls
- * give up at once instead of asking again for every block. */
+/* Called with arena_mutex held. Ten arenas is all a process gets, so each one
+ * is asked for as much as it can hold: the first covers the program's own
+ * image, which is what most of the translation comes from, and every arena
+ * after it doubles the code memory taken so far, up to NX_ARENA_LARGEST.
+ * Smaller sizes are tried when the heap has no block that large -- and it is
+ * the later arenas that get them, since a running game leaves the heap in
+ * pieces. The Sims 2 filled ten arenas at 16, 32, 16 and 8 MB apiece with
+ * 120 MB, and interpreted everything it met afterwards.
+ *
+ * A size the heap refuses is named in the log, with the result that refused
+ * it: libnx (module 345) means no block that large, the kernel (module 1,
+ * 0xce01) means no code memory object left. When even NX_ARENA_SMALLEST fails
+ * later calls give up at once instead of asking again for every block. */
 static int create_arena( size_t minimum )
 {
-    static int exhausted;
     struct nx_arena *arena;
     size_t smallest = align_up( NX_ARENA_SMALLEST, 0x1000 );
     size_t floor = align_up( minimum > smallest ? minimum : smallest, 0x1000 );
-    size_t size = NX_ARENA_FIRST;
-    unsigned int i, rc = 0;
-    char message[192];
+    size_t size = wine_nx_box64_arena_bytes ? (size_t)wine_nx_box64_arena_bytes * 2 : first_arena_size();
+    size_t room;
+    unsigned int rc = 0, used = 0;
+    char message[384];
 
-    if (exhausted || arena_count >= NX_MAX_ARENAS) return 0;
-    for (i = 0; i < arena_count && size < NX_ARENA_LARGEST; i++) size *= 2;
-    if (size < floor) size = floor;
-    arena = &arenas[arena_count];
-    while (!map_arena( arena, size, &rc ))
+    if (arenas_exhausted || arena_count >= NX_MAX_ARENAS) return 0;
+    /* An arena that could not be made is not worth asking for again on the
+     * next block: measuring the window walks it a block at a time, the sizes
+     * tried each create a code memory object and give it back, and all of it
+     * holds the lock every mapping needs. Build 227 did that whenever a freed
+     * block let a translation be tried again, and the run crawled with its
+     * threads waiting rather than working. */
+    if (retry_at)
     {
+        if (nx_now_ns() < retry_at) return 0;
+        retry_at = 0;
+    }
+    if (size > NX_ARENA_LARGEST) size = NX_ARENA_LARGEST;
+    /* What is free where code may be mapped, less what has to be left to the
+     * thread stacks and section anchors that share it when that place is the
+     * window: an anchor with nowhere to go is a DLL that will not load. Where
+     * the address space reaches past 4 GB this is hundreds of gigabytes and
+     * only NX_ARENA_LARGEST binds. Sizes are whole megabytes, since the kernel
+     * refuses anything that is not a page multiple and build 227 asked for
+     * what was left over to the byte and halved its way down. */
+    /* The window's free space decides where an arena is tried, never how large
+     * it is asked for: capping the size at what the window could spare, as
+     * builds 230 to 232 did, spent all ten code memory objects on arenas of a
+     * megabyte or five while libnx had larger holes elsewhere, and The Sims 2
+     * got 73 MB where 229 had 150. */
+    room = window_run();
+    if (size < floor) size = floor;
+    size &= ~(size_t)0xfffff;
+    if (size < floor) size = align_up( floor, 0x1000 );
+    arena = &arenas[arena_count];
+    used = snprintf( message, sizeof(message), "[DYNAREC] code arena %u:", arena_count + 1 );
+    while (!map_arena( arena, size, room > NX_WINDOW_SPARE && size <= (room - NX_WINDOW_SPARE) / 2, &rc ))
+    {
+        if (used < sizeof(message))
+            used += snprintf( message + used, sizeof(message) - used, " %zu MB refused (rc=%#x)", size >> 20, rc );
         if (size <= floor)
         {
-            if (floor == smallest) exhausted = 1;
-            snprintf( message, sizeof(message), "[DYNAREC] no code arena after %u (%llu MB): rc=%#x for %zu KB; "
-                      "new x86 code runs in the interpreter", arena_count,
-                      (unsigned long long)(wine_nx_box64_arena_bytes >> 20), rc, minimum >> 10 );
+            if (floor == smallest) arenas_exhausted = 1;
+            retry_at = nx_now_ns() + NX_ARENA_RETRY_NS;
+            snprintf( message, sizeof(message), "[DYNAREC] no code arena after %u (%llu MB): rc=%#x for %zu KB, "
+                      "largest run left %zu MB; new x86 code runs in the interpreter", arena_count,
+                      (unsigned long long)(wine_nx_box64_arena_bytes >> 20), rc, minimum >> 10, room >> 20 );
             if (&wine_nx_runtime_trace) wine_nx_runtime_trace( message );
             return 0;
         }
@@ -257,8 +398,8 @@ static int create_arena( size_t minimum )
     }
     arena->starts = calloc( (size / 16 + 7) / 8, 1 );  /* without it, faults are just not described */
     wine_nx_box64_arena_bytes += size;
-    snprintf( message, sizeof(message), "[DYNAREC] code arena %u: %zu MB (%llu MB in all)", arena_count + 1,
-              size >> 20, (unsigned long long)(wine_nx_box64_arena_bytes >> 20) );
+    snprintf( message + used, sizeof(message) - used, " %zu MB at %p (%llu MB in all, window had %zu MB in one piece)",
+              size >> 20, arena->rx, (unsigned long long)(wine_nx_box64_arena_bytes >> 20), room >> 20 );
     if (&wine_nx_runtime_trace) wine_nx_runtime_trace( message );
     __atomic_store_n( &arena_count, arena_count + 1, __ATOMIC_RELEASE );
     return 1;
@@ -322,6 +463,8 @@ static int *const nx_box64_values[NX_BOX64_OPTION_COUNT] =
     [NX_BOX64_SEP] = &box64env.dynarec_sep,
     [NX_BOX64_WEAKBARRIER] = &box64env.dynarec_weakbarrier,
     [NX_BOX64_X87DOUBLE] = &box64env.dynarec_x87double,
+    [NX_BOX64_PURGE] = &box64env.dynarec_purge,
+    [NX_BOX64_PURGE_AGE] = &box64env.dynarec_purge_age,
 };
 
 /* Set by the runtime before the first run: the program's .box64.txt. */
@@ -396,6 +539,9 @@ static void init_box64_env(void)
      * catch, instead of the 0 ARM64's UDIV gives: one compare next to a slow
      * division. The interpreter always checks. */
     box64env.dynarec_div0 = 1;
+    /* Purge ages in 10 ms ticks here (wine_nx_box64_purge_clock): 10 s, the
+     * launcher's default, rather than Box64's 4096 translations. */
+    box64env.dynarec_purge_age = 1000;
     apply_box64_options();
 }
 
@@ -541,36 +687,277 @@ void wine_nx_box64_invalidate( uintptr_t addr, size_t size, int destroy )
     }
 }
 
+/* Whether a block is worth translating: the translator's passes run before it
+ * asks for room, so without this every entry into untranslated code pays for a
+ * translation that is thrown away. A block larger than this is rare, and one
+ * that does not fit is only interpreted. */
+#define NX_BLOCK_ROOM (32 * 1024)
+#define NX_PURGE_BATCH 4096
+
+extern int wine_nx_box64_holds_translator_lock( void );
+
+/* The dynablock_t at the start of an allocated chunk, if it is one: Box64
+ * writes a pointer to it there and keeps the struct inside the allocation, so
+ * a pointer anywhere else is a chunk whose block is not written yet. */
+static dynablock_t *chunk_block( const struct nx_arena *arena, uint32_t payload )
+{
+    const struct code_chunk *chunk = code_chunk_at( &arena->alloc, payload - CODE_ARENA_HEADER );
+    uintptr_t start = (uintptr_t)arena->rw + payload;
+    uintptr_t end = (uintptr_t)arena->rw + payload - CODE_ARENA_HEADER + chunk->size;
+    dynablock_t *db = *(dynablock_t **)start;
+
+    if ((uintptr_t)db < start || (uintptr_t)db + sizeof(*db) > end) return NULL;
+    return db;
+}
+
+/* Called with arena_mutex held. Chunks whose quarantine is over go back to
+ * their arena -- unless a thread is inside the block they held, which it may
+ * have entered from a jump table entry it read just before the block was
+ * purged: it keeps its code until it leaves. */
+static void release_quarantine_locked( unsigned long long now )
+{
+    const struct code_quarantine_entry *oldest;
+
+    while ((oldest = code_quarantine_oldest( &quarantine )) &&
+           now - oldest->stamp >= wine_nx_box64_quarantine_ns)
+    {
+        struct code_quarantine_entry entry = *oldest;
+        struct nx_arena *arena = &arenas[entry.arena];
+        dynablock_t *db = chunk_block( arena, entry.payload );
+        uint32_t size = code_chunk_at( &arena->alloc, entry.payload - CODE_ARENA_HEADER )->size, room;
+
+        code_quarantine_drop_oldest( &quarantine );
+        if (db && __atomic_load_n( &db->in_used, __ATOMIC_ACQUIRE ) &&
+            code_quarantine_push( &quarantine, entry.arena, entry.payload, now ))
+            continue;
+        room = code_arena_free( &arena->alloc, entry.payload );
+        quarantine_bytes -= size;
+        /* Translation is worth trying again only once a hole this size exists;
+         * searching the bins for one is what the room check must not do. */
+        if (room >= code_arena_round( NX_BLOCK_ROOM )) __atomic_store_n( &arenas_full, 0, __ATOMIC_RELAXED );
+    }
+}
+
+/* The age of a block is Box64's tick when a thread last entered it, which the
+ * code it generates reads from my_context->tick. Box64 moves that on once per
+ * translation; here it is time, in wine_nx_box64_purge_tick_ns: once the code memory
+ * is full hardly anything is translated, a clock of translations stops, nothing
+ * grows old, and build 232 made 906 purges that freed 17 MB between them. It
+ * is set from every return from a gate -- games make thousands of those a
+ * second -- and from every allocation. Never 0, which marks a block as never
+ * entered. */
+unsigned long long wine_nx_box64_purge_tick_ns = 10000000ull;  /* 10 ms: PURGE_AGE=1000 is 10 s */
+
+void wine_nx_box64_purge_clock(void)
+{
+    static unsigned long long started;
+    unsigned long long now;
+
+    if (!box64env.dynarec_purge || !my_context) return;
+    now = nx_now_ns();
+    if (!started) started = now;
+    __atomic_store_n( &my_context->tick, (uint32_t)((now - started) / wine_nx_box64_purge_tick_ns) + 1, __ATOMIC_RELAXED );
+}
+
+/* Called with arena_mutex held. Once no more code memory can be had, blocks no
+ * thread has entered for BOX64_DYNAREC_PURGE_AGE ticks of the clock above give
+ * their room back, as Box64's own PurgeDynarecMap does: a block counts the
+ * threads inside it, and with CALLRET one that calls out keeps its count until
+ * the call returns into it, so a block a native return address points into is
+ * never taken. Blocks translated before the purge was on count nothing and are
+ * left alone, as are ones never entered (tick 0), unfinished or already gone.
+ * FreeDynablock takes the lock back, so the lock is dropped around it; the
+ * translator lock, which the caller holds, keeps every other free out. */
+static int purge_needed( unsigned long long now )
+{
+    if (!box64env.dynarec_purge || !wine_nx_box64_holds_translator_lock()) return 0;
+    if (!wine_nx_box64_code_limit && !arenas_exhausted && arena_count < NX_MAX_ARENAS && !retry_at) return 0;
+    return now - last_purge >= wine_nx_box64_purge_interval_ns;
+}
+
+/* Below an eighth of the code memory free, cold blocks are looked for before
+ * the last hole goes: what a purge frees waits out its quarantine, and until
+ * it comes back every block the program meets is interpreted. */
+static int low_on_room(void)
+{
+    unsigned long long total = wine_nx_box64_code_limit ? wine_nx_box64_code_limit : wine_nx_box64_arena_bytes;
+    unsigned long long used = wine_nx_box64_dynarec_bytes + quarantine_bytes;
+
+    return total && (used >= total || total - used < total / 8);
+}
+
+static void purge_locked( unsigned long long now )
+{
+    static dynablock_t *batch[NX_PURGE_BATCH];
+    uint32_t tick = __atomic_load_n( &my_context->tick, __ATOMIC_RELAXED );
+    unsigned int i, count = 0, freed = 0;
+    unsigned long long bytes = 0, started = nx_now_ns();
+
+    last_purge = now;
+    for (i = 0; i < arena_count && count < NX_PURGE_BATCH; i++)
+    {
+        struct nx_arena *arena = &arenas[i];
+        uint32_t offset = 0;
+
+        while (offset < arena->alloc.size && count < NX_PURGE_BATCH)
+        {
+            const struct code_chunk *chunk = code_chunk_at( &arena->alloc, offset );
+            dynablock_t *db;
+
+            if (!chunk->free && (db = chunk_block( arena, offset + CODE_ARENA_HEADER )))
+            {
+                uint32_t entered = __atomic_load_n( &db->tick, __ATOMIC_RELAXED );
+
+                if (entered && db->done && !db->gone && tick > entered &&
+                    tick - entered >= (uint32_t)box64env.dynarec_purge_age &&
+                    !__atomic_load_n( &db->in_used, __ATOMIC_ACQUIRE ))
+                    batch[count++] = db;
+            }
+            offset += chunk->size;
+        }
+    }
+    pthread_mutex_unlock( &arena_mutex );
+    for (i = 0; i < count; i++)
+    {
+        dynablock_t *db = batch[i];
+
+        if (db->gone || __atomic_load_n( &db->in_used, __ATOMIC_ACQUIRE )) continue;
+        bytes += db->size;
+        FreeDynablock( db, 0, 1 );
+        freed++;
+    }
+    pthread_mutex_lock( &arena_mutex );
+    __atomic_add_fetch( &wine_nx_box64_purges, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &wine_nx_box64_purged_blocks, freed, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &wine_nx_box64_purged_bytes, bytes, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &wine_nx_box64_purge_ns, nx_now_ns() - started, __ATOMIC_RELAXED );
+}
+
+/* Called with arena_mutex held: a chunk of size bytes from any arena, or 0. */
+static uint32_t alloc_locked( size_t size, struct nx_arena **found )
+{
+    uint32_t offset = 0;
+    unsigned int i;
+
+    if (wine_nx_box64_code_limit &&
+        wine_nx_box64_dynarec_bytes + quarantine_bytes + size > wine_nx_box64_code_limit) return 0;
+    for (i = 0; i < arena_count && !offset; i++)
+        if ((offset = code_arena_alloc( &arenas[i].alloc, size ))) *found = &arenas[i];
+    return offset;
+}
+
 uintptr_t AllocDynarecMap( uintptr_t x64_addr, size_t size, int is_new )
 {
     struct nx_arena *arena = NULL;
+    unsigned long long now;
     uintptr_t result;
-    unsigned int i;
+    uint32_t offset, held;
 
     (void)x64_addr;
     (void)is_new;
     if (!size || !dynarec_ready) return 0;
     size = align_up( size, 16 );
+    wine_nx_box64_purge_clock();
+    now = nx_now_ns();
     pthread_mutex_lock( &arena_mutex );
-    for (i = 0; i < arena_count && !arena; i++)
-        if (size <= arenas[i].size - arenas[i].used) arena = &arenas[i];
-    if (!arena && create_arena( size )) arena = &arenas[arena_count - 1];
-    if (!arena)
+    release_quarantine_locked( now );
+    if (low_on_room() && purge_needed( now )) purge_locked( now );
+    offset = alloc_locked( size, &arena );
+    if (!offset && !wine_nx_box64_code_limit && create_arena( size ))
     {
+        arena = &arenas[arena_count - 1];
+        offset = code_arena_alloc( &arena->alloc, size );
+    }
+    if (!offset && purge_needed( now ))
+    {
+        purge_locked( now );
+        release_quarantine_locked( now );
+        offset = alloc_locked( size, &arena );
+    }
+    if (!offset)
+    {
+        __atomic_store_n( &arenas_full, 1, __ATOMIC_RELAXED );
         pthread_mutex_unlock( &arena_mutex );
         return 0;
     }
-    result = (uintptr_t)arena->rw + arena->used;
-    if (arena->starts) arena->starts[arena->used / 16 >> 3] |= 1 << (arena->used / 16 & 7);
-    arena->used += size;
-    __atomic_add_fetch( &wine_nx_box64_dynarec_bytes, size, __ATOMIC_RELAXED );
+    if (arena->starts) arena->starts[offset / 16 >> 3] |= 1 << (offset / 16 & 7);
+    held = code_chunk_at( &arena->alloc, offset - CODE_ARENA_HEADER )->size - CODE_ARENA_HEADER;
+    result = (uintptr_t)arena->rw + offset;
+    __atomic_add_fetch( &wine_nx_box64_dynarec_bytes, held, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &wine_nx_box64_code_translated, held, __ATOMIC_RELAXED );
     pthread_mutex_unlock( &arena_mutex );
     return result;
 }
 
+/* Box64 frees a translation when the guest code behind it goes or changes, for
+ * every block it starts and then cancels, and when a purge takes a cold one.
+ * The chunk waits in the quarantine before it can hold anything else. The
+ * address is the one AllocDynarecMap returned, moved to the executable alias if
+ * the block was finished (Box64Core.cmake), so the arena is found by either. */
 void FreeDynarecMap( uintptr_t addr )
 {
-    (void)addr; /* bump allocation; blocks are never freed yet */
+    struct nx_arena *arena;
+    size_t offset;
+
+    if (!addr) return;
+    pthread_mutex_lock( &arena_mutex );
+    if ((arena = find_arena( (const void *)addr, &offset )) && offset >= CODE_ARENA_HEADER)
+    {
+        struct code_chunk *chunk = code_chunk_at( &arena->alloc, (uint32_t)offset - CODE_ARENA_HEADER );
+
+        if (!chunk->free)
+        {
+            if (arena->starts) arena->starts[offset / 16 >> 3] &= ~(1 << (offset / 16 & 7));
+            __atomic_sub_fetch( &wine_nx_box64_dynarec_bytes, chunk->size - CODE_ARENA_HEADER, __ATOMIC_RELAXED );
+            if (code_quarantine_push( &quarantine, (uint32_t)(arena - arenas), (uint32_t)offset, nx_now_ns() ))
+                quarantine_bytes += chunk->size;
+            else if (code_arena_free( &arena->alloc, (uint32_t)offset ) >= code_arena_round( NX_BLOCK_ROOM ))
+                __atomic_store_n( &arenas_full, 0, __ATOMIC_RELAXED );
+        }
+    }
+    pthread_mutex_unlock( &arena_mutex );
+}
+
+/* Asked before every block that is not translated yet, which once the code
+ * memory is full is every block the program meets: one atomic read while
+ * there is room, and no search -- walking the arenas here cost half of The
+ * Sims 2's main thread. Once full, now and then the quarantine is emptied of
+ * what has waited long enough, and with purge on one translation is let
+ * through, since its allocation is what purges cold blocks. */
+int wine_nx_box64_code_room(void)
+{
+    unsigned long long now, next;
+
+    if (!__atomic_load_n( &arenas_full, __ATOMIC_RELAXED )) return 1;
+    wine_nx_box64_purge_clock();
+    now = nx_now_ns();
+    next = __atomic_load_n( &next_room_check, __ATOMIC_RELAXED );
+    if (now < next || !__atomic_compare_exchange_n( &next_room_check, &next, now + wine_nx_box64_purge_interval_ns,
+                                                    0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+        return 0;
+    if (!pthread_mutex_trylock( &arena_mutex ))
+    {
+        release_quarantine_locked( now );
+        pthread_mutex_unlock( &arena_mutex );
+    }
+    return !__atomic_load_n( &arenas_full, __ATOMIC_RELAXED ) || box64env.dynarec_purge;
+}
+
+/* For the tests: purge from now on, blocks become cold after age translations,
+ * translated code may hold headroom bytes more than it does now, and freed
+ * chunks wait quarantine_ns. */
+void wine_nx_box64_test_purge( unsigned int age, size_t headroom, unsigned long long quarantine_ns )
+{
+    /* age is in ticks of the purge clock, a microsecond here: the test's
+     * drivers translate a block in about that. */
+    wine_nx_box64_purge_tick_ns = 1000;
+    pthread_mutex_lock( &arena_mutex );
+    box64env.dynarec_purge = 1;
+    box64env.dynarec_purge_age = age;
+    wine_nx_box64_code_limit = wine_nx_box64_dynarec_bytes + quarantine_bytes + headroom;
+    wine_nx_box64_quarantine_ns = quarantine_ns;
+    wine_nx_box64_purge_interval_ns = 0;
+    pthread_mutex_unlock( &arena_mutex );
 }
 
 void *DynarecMapExecutableAddress( void *addr )
@@ -610,14 +997,16 @@ int wine_nx_box64_is_translated_pc( uintptr_t pc )
     size_t offset;
     struct nx_arena *arena = find_arena( (void *)pc, &offset );
 
-    return arena && offset < arena->used;
+    return arena && offset < arena->size;
 }
 
 /* For the exception handler: names the x86 instruction behind a native pc in
  * translated code, with the guest registers a block keeps in x10-x17. It runs
- * on the libnx exception stack without locks, which is safe because
- * allocations are never freed: a start bit, once set, stays, and a block's
- * dynablock_t lies inside its own allocation. Returns 0 outside the code. */
+ * on the libnx exception stack, where it must not take a lock. A chunk that
+ * was freed clears its start bit, so the walk back can reach a bit belonging
+ * to a block that has gone; what it finds is only described when the block
+ * still points at the allocation it was found in. Returns 0 outside the
+ * code. */
 /* The allocation starts with a pointer to its dynablock_t, written through the
  * writable alias; Box64Core.cmake moves the block's own code pointers
  * (actual_block, block, jmpnext) to the executable alias once it is emitted. */
@@ -627,7 +1016,7 @@ static dynablock_t *block_at( const struct nx_arena *arena, size_t offset )
     uintptr_t start, actual;
     dynablock_t *db;
 
-    if (!arena->starts || offset >= arena->used) return NULL;
+    if (!arena->starts || offset >= arena->size) return NULL;
     while (!(arena->starts[bit >> 3] & (1 << (bit & 7))))
     {
         if (bit == first) return NULL;
@@ -635,7 +1024,7 @@ static dynablock_t *block_at( const struct nx_arena *arena, size_t offset )
     }
     start = (uintptr_t)arena->rw + bit * 16;
     db = *(dynablock_t **)start;
-    if ((uintptr_t)db - start >= arena->used - bit * 16) return NULL;
+    if ((uintptr_t)db - start >= arena->size - bit * 16) return NULL;
     actual = (uintptr_t)db->actual_block;
     if (actual != (uintptr_t)arena->rx + bit * 16 && actual != start) return NULL;
     return db;
@@ -649,7 +1038,7 @@ int wine_nx_box64_describe_native_pc( uintptr_t pc, const unsigned long long *x,
     dynablock_t *db;
 
     if (!arena) return 0;
-    if (!arena->starts || offset >= arena->used)
+    if (!arena->starts || offset >= arena->size)
     {
         snprintf( buf, size, "[BOX64 FAULT] pc=%lx in the code arena but %s", (unsigned long)pc,
                   arena->starts ? "past its allocations" : "without a block map (out of memory?)" );
@@ -732,7 +1121,7 @@ int wine_nx_box64_callret_trap( uintptr_t *pc )
     dynablock_t *db;
     int i, site = 0;
 
-    if (!arena || offset + 4 > arena->used || *(const uint32_t *)(arena->rw + offset) != ARCH_UDF) return 0;
+    if (!arena || offset + 4 > arena->size || *(const uint32_t *)(arena->rw + offset) != ARCH_UDF) return 0;
     if (!(db = block_at( arena, offset )) || !db->callret_size) return 0;
     for (i = 0; i < db->callret_size && !site; i++)
         site = (uintptr_t)db->block + db->callrets[i].offs == *pc && !db->callrets[i].type;

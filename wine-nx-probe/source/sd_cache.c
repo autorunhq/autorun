@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/iosupport.h>
@@ -24,6 +25,7 @@
 unsigned int wine_nx_sd_reads;         /* read requests sent to the FS service */
 unsigned int wine_nx_sd_hits;          /* reads the cache served without one */
 unsigned long long wine_nx_sd_read_ns; /* time spent in those requests */
+unsigned long long wine_nx_sd_bytes;   /* bytes those requests brought back */
 
 extern void wine_nx_runtime_trace( const char *msg );
 
@@ -31,7 +33,13 @@ static const devoptab_t *sd_cache_base;
 static devoptab_t sd_cache_device;
 static pthread_mutex_t sd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct sd_cache_file *sd_cache_files;
-static struct sd_cache_pool sd_cache_pool = { .max = 256 };  /* 32 MB */
+/* Whole chunks on every miss (fill_min 0). Readahead from 16 KB halved the
+ * bytes The Sims 2 took from the card but nearly tripled the requests, and on
+ * the hardware a request costs 0.83 ms before its transfer at 42 MB/s: card
+ * time went from 41.7 to 39.3 s, which is not worth a request every few
+ * kilobytes. The game rereads close to what it just read more than the
+ * replay in tests/sd_read_cache.c does. */
+static struct sd_cache_pool sd_cache_pool = { .max = SD_CACHE_POOL_MIN, .cap = SD_CACHE_POOL_MAX };
 static int sd_cache_off;
 
 struct sd_cache_fill_ctx
@@ -47,7 +55,64 @@ static ssize_t sd_cache_base_read( struct _reent *r, void *fd, char *ptr, size_t
 
     __atomic_add_fetch( &wine_nx_sd_reads, 1, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_sd_read_ns, armTicksToNs( armGetSystemTick() - start ), __ATOMIC_RELAXED );
+    if (ret > 0) __atomic_add_fetch( &wine_nx_sd_bytes, (unsigned long long)ret, __ATOMIC_RELAXED );
     return ret;
+}
+
+/* The game's own memory comes first: the cache grows into the heap left free
+ * above this floor, and only into part of it, so that a game whose appetite
+ * grows later still finds room. mallinfo walks the heap, so the size is
+ * settled a few times a minute and outside the lock. */
+#define SD_CACHE_FREE_FLOOR_MB 512
+#define SD_CACHE_FREE_SHARE    3     /* of what is free above the floor */
+#define SD_CACHE_STEP          128   /* chunks, 16 MB: what makes a move worth it */
+
+static unsigned int sd_cache_room(void)
+{
+    extern char *fake_heap_start, *fake_heap_end;
+    struct mallinfo heap = mallinfo();
+    unsigned long long heap_size = (unsigned long long)(fake_heap_end - fake_heap_start);
+    /* What malloc holds unused plus what it has not taken from the heap yet,
+     * and the chunks the cache is already holding, which it can keep. */
+    unsigned long long free_mb = (heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0)) >> 20;
+    unsigned long long room = free_mb + (((unsigned long long)sd_cache_pool.used * SD_CACHE_CHUNK) >> 20);
+    unsigned long long chunks;
+
+    if (room <= SD_CACHE_FREE_FLOOR_MB) return SD_CACHE_POOL_MIN;
+    chunks = (room - SD_CACHE_FREE_FLOOR_MB) / SD_CACHE_FREE_SHARE * (1024 * 1024 / SD_CACHE_CHUNK);
+    if (chunks < SD_CACHE_POOL_MIN) return SD_CACHE_POOL_MIN;
+    if (chunks > SD_CACHE_POOL_MAX) return SD_CACHE_POOL_MAX;
+    return (unsigned int)chunks;
+}
+
+/* Called before the lock is taken, from the read path. */
+static void sd_cache_resize(void)
+{
+    static u64 settled_at;
+    u64 now = armGetSystemTick();
+    unsigned int target;
+
+    if (settled_at && armTicksToNs( now - settled_at ) < 5000000000ull) return;
+    settled_at = now;
+    target = sd_cache_room();
+    pthread_mutex_lock( &sd_cache_mutex );
+    if ((target > sd_cache_pool.max ? target - sd_cache_pool.max : sd_cache_pool.max - target) >= SD_CACHE_STEP)
+    {
+        sd_cache_pool.max = target;
+        sd_cache_trim( &sd_cache_pool );
+    }
+    pthread_mutex_unlock( &sd_cache_mutex );
+}
+
+/* Megabytes the cache is holding, for the runtime's [PROGRESS] line. */
+unsigned int wine_nx_sd_cache_mb(void)
+{
+    unsigned int used;
+
+    pthread_mutex_lock( &sd_cache_mutex );
+    used = sd_cache_pool.used;
+    pthread_mutex_unlock( &sd_cache_mutex );
+    return (unsigned int)(((unsigned long long)used * SD_CACHE_CHUNK) >> 20);
 }
 
 static long long sd_cache_fill( void *ctx, long long offset, char *buf, size_t size )
@@ -132,6 +197,7 @@ static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t
         return direct;
     }
 
+    if (!sd_cache_off) sd_cache_resize();
     pthread_mutex_lock( &sd_cache_mutex );
     if (!sd_cache_off && (file = sd_cache_find( sd_cache_files, fd )) && file->cacheable &&
         (pos = sd_cache_base->seek_r( r, fd, 0, SEEK_CUR )) != -1)
@@ -157,6 +223,19 @@ static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t
     }
     if ((size_t)got != len) sd_cache_report_short_read( r, fd, got, len );
     return (ssize_t)got;  /* -1 keeps the errno of the failed request */
+}
+
+/* A write makes what the cache holds for that path out of date. Every write on
+ * the card comes through here, so caching a file a program opened for writing
+ * is safe: it reads its own bytes back from the card. */
+static ssize_t sd_cache_write_file( struct _reent *r, void *fd, const char *ptr, size_t len )
+{
+    struct sd_cache_file *file;
+
+    pthread_mutex_lock( &sd_cache_mutex );
+    if ((file = sd_cache_find( sd_cache_files, fd ))) sd_cache_written( sd_cache_files, &sd_cache_pool, file->path );
+    pthread_mutex_unlock( &sd_cache_mutex );
+    return sd_cache_base->write_r( r, fd, ptr, len );
 }
 
 static int sd_cache_rename( struct _reent *r, const char *old_name, const char *new_name )
@@ -198,6 +277,7 @@ int wine_nx_sd_cache_install(void)
     sd_cache_device.open_r = sd_cache_open;
     sd_cache_device.close_r = sd_cache_close;
     sd_cache_device.read_r = sd_cache_read_file;
+    if (sd_cache_base->write_r) sd_cache_device.write_r = sd_cache_write_file;
     if (sd_cache_base->rename_r) sd_cache_device.rename_r = sd_cache_rename;
     if (sd_cache_base->unlink_r) sd_cache_device.unlink_r = sd_cache_unlink;
     if (sd_cache_base->ftruncate_r) sd_cache_device.ftruncate_r = sd_cache_ftruncate;

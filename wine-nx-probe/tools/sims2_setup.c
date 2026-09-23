@@ -30,8 +30,17 @@
  *   reads a custom video made as a VP6 AVI the same way. The DLL is the
  *   release's to copy, nobody else having it to give away, and registering a
  *   codec that is not there costs nothing.
+ * - dxvk.conf, from beside this program, into each pack's TSBin next to its
+ *   executable, where DXVK reads it: the game's own DXVK profile reports 2 GB
+ *   of video memory, and on the Switch it fills the shared 1.5 GB and
+ *   crashes. One already there is the player's and is left alone.
+ * - Graphics Rules.sgr, in each pack's TSData\Res\Config, edited where it
+ *   is rather than shipped (it is the game's): in its ScreenModeResolution
+ *   option every default becomes 1280x720, the Switch's screen, and a maximum
+ *   below that is raised to it. Nothing else in the file changes; the file as
+ *   it was is kept once as Graphics Rules.sgr.original.
  *
- * Each step is reported to wine-nx-runtime.log as a [SIMS2 SETUP] line; the
+ * Each step is reported to autorun_runtime.log as a [SIMS2 SETUP] line; the
  * exit code is 0 when every step worked. Running it again is harmless. */
 #include <windows.h>
 #include <winternl.h>
@@ -193,6 +202,150 @@ static BOOL file_exists( const WCHAR *path )
     DWORD attributes = GetFileAttributesW( path );
 
     return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void rewrite_digits( char *out, unsigned int *at, unsigned int value )
+{
+    char digits[12];
+    unsigned int n = 0;
+
+    do digits[n++] = '0' + value % 10; while ((value /= 10) && n < sizeof(digits));
+    while (n) out[(*at)++] = digits[--n];
+}
+
+static BOOL word_is( const char *p, const char *end, const char *word )
+{
+    while (*word && p < end && *p == *word) { p++; word++; }
+    return !*word && (p == end || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n');
+}
+
+/* The part of Graphics Rules.sgr that picks the screen size: the numbers of
+ * its ScreenModeResolution option, rewritten where they stand. Returns how
+ * many changed, and the new text's length in *out_size. */
+static unsigned int resolution_rules( const char *in, unsigned int size, char *out, unsigned int *out_size )
+{
+    unsigned int i = 0, at = 0, changed = 0;
+    BOOL inside = FALSE;
+
+    while (i < size)
+    {
+        unsigned int start = i, end = i, p;
+
+        while (end < size && in[end] != '\n') end++;
+        if (end < size) end++;  /* with its newline */
+        for (p = start; p < end && (in[p] == ' ' || in[p] == '\t'); p++) ;
+        if (word_is( in + p, in + end, "option" ))
+        {
+            unsigned int q = p + 6;
+
+            while (q < end && (in[q] == ' ' || in[q] == '\t')) q++;
+            inside = word_is( in + q, in + end, "ScreenModeResolution" );
+        }
+        else if (word_is( in + p, in + end, "end" )) inside = FALSE;
+        else if (inside && word_is( in + p, in + end, "uintProp" ))
+        {
+            static const struct { const char *name; unsigned int value; BOOL at_least; } props[] =
+            {
+                { "defaultResWidth", 1280, FALSE }, { "defaultResHeight", 720, FALSE },
+                { "maxResWidth", 1280, TRUE }, { "maxResHeight", 720, TRUE },
+            };
+            unsigned int q = p + 8, k, number_start, number_end, value = 0;
+
+            while (q < end && (in[q] == ' ' || in[q] == '\t')) q++;
+            for (k = 0; k < sizeof(props) / sizeof(props[0]); k++)
+                if (word_is( in + q, in + end, props[k].name )) break;
+            if (k < sizeof(props) / sizeof(props[0]))
+            {
+                number_start = q;
+                while (number_start < end && in[number_start] != ' ' && in[number_start] != '\t') number_start++;
+                while (number_start < end && (in[number_start] == ' ' || in[number_start] == '\t')) number_start++;
+                for (number_end = number_start; number_end < end && in[number_end] >= '0' && in[number_end] <= '9';
+                     number_end++)
+                    value = value * 10 + (in[number_end] - '0');
+                if (number_end > number_start &&
+                    (props[k].at_least ? value < props[k].value : value != props[k].value))
+                {
+                    while (start < number_start) out[at++] = in[start++];
+                    rewrite_digits( out, &at, props[k].value );
+                    start = number_end;
+                    changed++;
+                }
+            }
+        }
+        while (start < end) out[at++] = in[start++];
+        i = end;
+    }
+    *out_size = at;
+    return changed;
+}
+
+static BOOL read_whole( const WCHAR *path, char **data, DWORD *size )
+{
+    HANDLE file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    DWORD done = 0;
+
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    *size = GetFileSize( file, NULL );
+    *data = HeapAlloc( GetProcessHeap(), 0, *size + 1 );
+    if (*size == INVALID_FILE_SIZE || !*data || !ReadFile( file, *data, *size, &done, NULL ) || done != *size)
+    {
+        CloseHandle( file );
+        return FALSE;
+    }
+    CloseHandle( file );
+    return TRUE;
+}
+
+static BOOL write_whole( const WCHAR *path, const char *data, DWORD size )
+{
+    HANDLE file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
+    DWORD done = 0;
+    BOOL ok;
+
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ok = WriteFile( file, data, size, &done, NULL ) && done == size;
+    return CloseHandle( file ) && ok;
+}
+
+/* One pack's Graphics Rules.sgr set for the Switch's screen. A pack without
+ * the file is not a failure: the stuff packs have none. */
+static BOOL screen_rules( const WCHAR *pack )
+{
+    static WCHAR path[MAX_PATH * 2], original[MAX_PATH * 2];
+    unsigned int at = 0, changed, out_size;
+    char *data, *out;
+    DWORD size;
+
+    wide_append( path, &at, MAX_PATH * 2, pack );
+    wide_append( path, &at, MAX_PATH * 2, L"\\TSData\\Res\\Config\\Graphics Rules.sgr" );
+    if (!file_exists( path )) return TRUE;
+    if (!read_whole( path, &data, &size ))
+    {
+        report( "read", path, "failed, error", GetLastError() );
+        return FALSE;
+    }
+    /* A number can only grow by a digit, and there are a few dozen of them. */
+    if (!(out = HeapAlloc( GetProcessHeap(), 0, size + 256 ))) return FALSE;
+    if (!(changed = resolution_rules( data, size, out, &out_size )))
+    {
+        report( "keep", path, "already 1280x720, error", 0 );
+        return TRUE;
+    }
+    at = 0;
+    wide_append( original, &at, MAX_PATH * 2, path );
+    wide_append( original, &at, MAX_PATH * 2, L".original" );
+    if (!file_exists( original ) && !CopyFileW( path, original, TRUE ))
+    {
+        report( "keep the original of", path, "failed, error", GetLastError() );
+        return FALSE;
+    }
+    if (!write_whole( path, out, out_size ))
+    {
+        report( "write", path, "failed, error", GetLastError() );
+        return FALSE;
+    }
+    report( "set 1280x720 in", path, "ok, values changed", changed );
+    return TRUE;
 }
 
 /* A pack is known by the executable in its TSBin, not by the name of the
@@ -540,6 +693,34 @@ void __stdcall start(void)
     }
 
     /* The movies' codec, by the two names Video for Windows opens it under. */
+    /* DXVK's settings for the game, beside each pack's executable. */
+    {
+        static WCHAR source[MAX_PATH], target[MAX_PATH * 2];
+
+        join( source, MAX_PATH, setup_folder, L"dxvk.conf" );
+        for (i = 0; i < PACK_COUNT && file_exists( source ); i++)
+        {
+            unsigned int n = 0;
+
+            if (!pack_found[i]) continue;
+            wide_append( target, &n, MAX_PATH * 2, pack_path[i] );
+            wide_append( target, &n, MAX_PATH * 2, L"\\TSBin\\dxvk.conf" );
+            if (file_exists( target ))
+                report( "keep", target, "already there, error", 0 );
+            else if (CopyFileW( source, target, TRUE ))
+                report( "copy", target, "ok, error", 0 );
+            else
+            {
+                report( "copy", target, "failed, error", GetLastError() );
+                ok = FALSE;
+            }
+        }
+    }
+
+    /* And each pack's screen size, in the game's own rules file. */
+    for (i = 0; i < PACK_COUNT; i++)
+        if (pack_found[i]) ok &= screen_rules( pack_path[i] );
+
     ok &= set_machine_string( drivers32, L"vidc.VP60", L"vp6vfw.dll" );
     ok &= set_machine_string( drivers32, L"vidc.VP61", L"vp6vfw.dll" );
 

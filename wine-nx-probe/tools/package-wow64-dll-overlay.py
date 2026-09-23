@@ -3,10 +3,10 @@
 overlay for a card that already holds a Wine-NX package.
 
 Wine's loader names every DLL it cannot find ("Library X (which is needed by Y)
-not found"), so pass those names, or the wine-nx-runtime.log that has them:
+not found"), so pass those names, or the autorun_runtime.log that has them:
 
     package-wow64-dll-overlay.py ddraw dinput8 netapi32 shfolder tapi32
-    package-wow64-dll-overlay.py --log debug/wine-nx-runtime.log
+    package-wow64-dll-overlay.py --log debug/autorun_runtime.log
 
 With a log, the DLLs that same run loaded from syswow64 are left out, since the
 card evidently has them. Anything else the imports reach is included, which can
@@ -30,7 +30,7 @@ marker = re.search(r'nx-wow64-dynarec-(\d+)', (probe / 'source/runtime.c').read_
 
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('dlls', nargs='*', help='DLL names, with or without .dll')
-parser.add_argument('--log', type=Path, help='a wine-nx-runtime.log to read missing and present DLLs from')
+parser.add_argument('--log', type=Path, help='a autorun_runtime.log to read missing and present DLLs from')
 parser.add_argument('--name', default='dlls', help='label for the overlay zip')
 args = parser.parse_args()
 

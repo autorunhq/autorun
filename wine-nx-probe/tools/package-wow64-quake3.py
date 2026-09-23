@@ -120,7 +120,7 @@ to wait for, and writes the frame rate to drive_c/quake3/qconsole.log. Try the
 faster QVM code generator with vm_game 2, vm_cgame 2 and vm_ui 2, and fewer
 draw calls with +set r_vbo 1.
 
-wine-nx-runtime.log holds the runtime's own view: [PROGRESS] lines report the
+autorun_runtime.log holds the runtime's own view: [PROGRESS] lines report the
 frames, the time inside opengl32 and the slowest calls.
 ''')
 

@@ -40,6 +40,7 @@ struct wine_nx_launcher_options
     int framebuffer;
     int reopen_launcher;  /* come back here when a program ends, rather than to the menu */
     int dxvk_on_add;      /* a game added to the library starts with DXVK enabled */
+    int swkbd_auto;       /* the on-screen keyboard opens when a text field takes focus */
 };
 
 /* Show the launcher. Returns 1 with the chosen program's path in target, or 0
@@ -47,7 +48,7 @@ struct wine_nx_launcher_options
 int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target, size_t target_size );
 void wine_nx_launcher_usb_changed(void);
 
-/* A line in wine-nx-runtime.log (runtime.c). */
+/* A line in autorun_runtime.log (runtime.c). */
 void wine_nx_runtime_trace( const char *msg );
 
 /* What launcher_platform_status found. */

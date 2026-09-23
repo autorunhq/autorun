@@ -70,7 +70,7 @@ coherent mapping without explicit cache flush/invalidate calls. Look for
 "coherent CPU-GPU-CPU copy passed" with values 1 and 2. It then shows red,
 green and blue for a second each
 through a Win32 surface, copying one pixel of every frame back from the GPU.
-Its [VULKAN TEST] lines in wine-nx-runtime.log end with PASS and the program
+Its [VULKAN TEST] lines in autorun_runtime.log end with PASS and the program
 exits with 0x2a; on a failure, "FAIL step" names the step. The screen should
 turn red, green and blue.
 

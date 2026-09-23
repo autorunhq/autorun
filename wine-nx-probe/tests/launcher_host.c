@@ -460,6 +460,7 @@ static unsigned int install_forwarder( const char **step )
     return 0x4A8;
 }
 
+
 int main( int argc, char **argv )
 {
     struct wine_nx_launcher_options options = { .runtime_dir = "sdmc:/switch/wine", .build = "nx-host-test",

@@ -1,0 +1,46 @@
+/* FSR 1.0 upscaling, first pass: EASU (tools/fsr1/ffx_fsr1.h) from the game's
+ * image to the rectangle it is shown in. The source is read through a UNORM
+ * view of the sRGB image, so EASU filters the perceptual values FSR is made
+ * for, into the intermediate image RCAS reads. Outside the rectangle is
+ * black. */
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D source;
+layout(binding = 2, rgba8) uniform writeonly image2D midImage;
+layout(push_constant) uniform pushConstants {
+    vec2 origin;        /* top-left of the rectangle, whole pixels */
+    vec2 extents;       /* its size, whole pixels */
+    vec2 src_extents;   /* the game's image */
+    float sharpness;    /* RCAS's, linear: 0 leaves EASU's result as it is */
+} constants;
+
+#define A_GPU 1
+#define A_GLSL 1
+#include "fsr1/ffx_a.h"
+
+#define FSR_EASU_F 1
+AF4 FsrEasuRF( AF2 p ) { return textureGather( source, p, 0 ); }
+AF4 FsrEasuGF( AF2 p ) { return textureGather( source, p, 1 ); }
+AF4 FsrEasuBF( AF2 p ) { return textureGather( source, p, 2 ); }
+#include "fsr1/ffx_fsr1.h"
+
+void main()
+{
+    ivec2 id = ivec2( gl_GlobalInvocationID.xy ), p = id - ivec2( constants.origin );
+    vec4 c = vec4( 0.0, 0.0, 0.0, 1.0 );
+
+    if (all( greaterThanEqual( p, ivec2( 0 ) ) ) && all( lessThan( p, ivec2( constants.extents ) ) ))
+    {
+        AU4 con0, con1, con2, con3;
+        AF3 pix;
+
+        FsrEasuCon( con0, con1, con2, con3, constants.src_extents.x, constants.src_extents.y,
+                    constants.src_extents.x, constants.src_extents.y, constants.extents.x, constants.extents.y );
+        FsrEasuF( pix, AU2( p ), con0, con1, con2, con3 );
+        c.rgb = pix;
+    }
+    imageStore( midImage, id, c );
+}

@@ -296,6 +296,15 @@ int wine_nx_box64_mutex_lock( pthread_mutex_t *mutex )
     return ret;
 }
 
+#ifdef WINE_NX_BOX64_DYNAREC
+/* Whether this thread is the translator: a purge frees blocks, which only the
+ * holder of Box64's translator lock may do without taking it again. */
+int wine_nx_box64_holds_translator_lock(void)
+{
+    return active_engine && active_engine->held_mutex == &core_context.mutex_dyndump;
+}
+#endif
+
 int wine_nx_box64_mutex_unlock( pthread_mutex_t *mutex )
 {
     int ret = pthread_mutex_unlock( mutex );
@@ -777,6 +786,13 @@ NTSTATUS wine_nx_box64_run( I386_CONTEXT *context, ULONG fs_base,
     int use_dynarec;
 #endif
     if (executed) *executed = 0;
+#ifdef WINE_NX_BOX64_DYNAREC
+    {
+        /* Every return from a gate moves the dynarec's purge clock on. */
+        extern void wine_nx_box64_purge_clock( void );
+        wine_nx_box64_purge_clock();
+    }
+#endif
     if (!context || !gates || !host || !host->read || !gates->syscall ||
         !gates->unix_call || gates->syscall == gates->unix_call || !budget ||
         completion_pc == gates->syscall || completion_pc == gates->unix_call)

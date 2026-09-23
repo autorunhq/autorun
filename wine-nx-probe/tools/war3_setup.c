@@ -15,18 +15,17 @@
  *   1280x720 mode. For each movie the game switches to 800x600, which Wine
  *   would fake by scaling it into a 960x720 box in the middle of the screen.
  *   With 800x600 refused, the game keeps 1280x720 and the movie fills the width.
- * - The MP3 decoder l3codeca.acm under Drivers32, for the movies' sound.
- * - DirectShow: quartz.dll and devenum.dll registered as regsvr32 would, since
- *   Wine's first-run setup does not run on the Switch. quartz is registered
- *   before and after devenum, because its filters need devenum's monikers.
- *   blizzard.ax, the game's video decoder, is registered by the game itself.
  *
- * Each step is reported to wine-nx-runtime.log as a [WAR3 SETUP] line; the
+ * DirectShow and the MP3 decoder the movies play through are no longer this
+ * program's: Autorun's components setup (autorun_setup.c) registers them for
+ * every game, before the first one runs. blizzard.ax, the game's own video
+ * decoder, is registered by the game itself.
+ *
+ * Each step is reported to autorun_runtime.log as a [WAR3 SETUP] line; the
  * exit code is 0 when every step that matters worked. Running it again is
  * harmless. */
 #include <windows.h>
 #include <winternl.h>
-#include <ole2.h>
 
 __declspec(dllimport) NTSTATUS NTAPI NtDisplayString( const UNICODE_STRING *str );
 
@@ -132,41 +131,15 @@ static BOOL delete_value( HKEY root, const WCHAR *path, const WCHAR *name )
     return !status;
 }
 
-/* What regsvr32 does for a DLL: load it and call its DllRegisterServer. */
-static BOOL register_dll( const WCHAR *name )
-{
-    HRESULT (WINAPI *register_server)(void);
-    HMODULE module;
-    HRESULT hr;
-
-    if (!(module = LoadLibraryW( name )))
-    {
-        report( "load", name, "failed, error", GetLastError() );
-        return FALSE;
-    }
-    if (!(register_server = (void *)GetProcAddress( module, "DllRegisterServer" )))
-    {
-        report( "register", name, "has no DllRegisterServer, error", GetLastError() );
-        FreeLibrary( module );
-        return FALSE;
-    }
-    hr = register_server();
-    report( "register", name, SUCCEEDED(hr) ? "ok, hr" : "failed, hr", (DWORD)hr );
-    FreeLibrary( module );
-    return SUCCEEDED(hr);
-}
-
 void __stdcall start(void)
 {
     static const WCHAR war3[] = L"Software\\Blizzard Entertainment\\Warcraft III";
     static const WCHAR video[] = L"Software\\Blizzard Entertainment\\Warcraft III\\Video";
     static const WCHAR misc[] = L"Software\\Blizzard Entertainment\\Warcraft III\\Misc";
-    static const WCHAR drivers32[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32";
     static const WCHAR war3_driver[] = L"Software\\Wine\\AppDefaults\\war3.exe\\X11 Driver";
     BOOL ok = TRUE;
-    HRESULT hr;
 
-    report( "start", NULL, "build", 1 );
+    report( "start", NULL, "build", 2 );
 
     ok &= set_dword( HKEY_CURRENT_USER, video, L"reswidth", 1280 );
     ok &= set_dword( HKEY_CURRENT_USER, video, L"resheight", 720 );
@@ -175,16 +148,6 @@ void __stdcall start(void)
     ok &= delete_value( HKEY_CURRENT_USER, misc, L"seenintromovie" );
     ok &= set_dword( HKEY_CURRENT_USER, war3, L"Gfx OpenGL", 1 );
     ok &= set_string( HKEY_CURRENT_USER, war3_driver, L"EmulateModelist", L"Y" );
-    ok &= set_string( HKEY_LOCAL_MACHINE, drivers32, L"msacm.l3acm", L"l3codeca.acm" );
-
-    hr = OleInitialize( NULL );
-    report( "OleInitialize", NULL, SUCCEEDED(hr) ? "ok, hr" : "failed, hr", (DWORD)hr );
-    /* The first quartz registration fails while devenum is not registered yet;
-     * only the second one counts. */
-    if (!register_dll( L"quartz.dll" )) report( "register", L"quartz.dll", "first try, repeated after devenum", 0 );
-    ok &= register_dll( L"devenum.dll" );
-    ok &= register_dll( L"quartz.dll" );
-    if (SUCCEEDED(hr)) OleUninitialize();
 
     report( ok ? "done, all steps worked" : "done, a step FAILED (see above)", NULL, "exit code", !ok );
     ExitProcess( !ok );

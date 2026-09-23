@@ -208,7 +208,7 @@ for name in ['static void list_add_mapping(', 'static void list_remove_mapping('
              'static struct horizon_mapping *find_overlap_mapping(', 'static struct horizon_mapping *alloc_mapping(',
              'static VirtmemReservation *reserve_fixed_range_locked(', 'static VirtmemReservation *reserve_fixed_range(',
              'static void remove_reservation_locked(', 'static void remove_reservation(',
-             'static void *find_anchor_run_locked(', 'static void *find_anchor_region_locked(', 'static void *find_anchor_address_locked(', 'static int replace_reservation_mapping(', 'static int change_reservation_mapping(', 'static int split_reservation_mapping(', 'static size_t page_align_size(',
+             'static void *find_anchor_run_locked(', 'static char *anchor_region_end_overlapping(', 'static void *find_free_run_locked(', 'static void *find_anchor_region_locked(', 'static void *find_anchor_address_locked(', 'static int replace_reservation_mapping(', 'static int change_reservation_mapping(', 'static int split_reservation_mapping(', 'static size_t page_align_size(',
              'void *horizon_reserve_native_code(', 'void horizon_release_native_code(',
              'static void section_failure(', 'static void *horizon_section_anchor(', 'static int horizon_section_unanchor(',
              'static int horizon_section_alias(', 'static int horizon_section_unalias(']:
@@ -467,6 +467,25 @@ int main(void)
         assert( find_anchor_region_locked( HORIZON_ANCHOR_REGION ) == window + 2 * HORIZON_ANCHOR_REGION );
         /* Nothing that large left in the window. */
         assert( !find_anchor_region_locked( 3 * HORIZON_ANCHOR_REGION ) );
+        /* An anchor region with nothing in it yet is still taken: the kernel
+         * and the mapping tree both see it free, and build 227 put a code
+         * arena in one, after which every anchor there failed with EEXIST. */
+        {
+            unsigned int saved_count = anchor_region_count;
+            __typeof__(anchor_regions) saved;
+
+            memcpy( saved, anchor_regions, sizeof(saved) );
+            anchor_regions[0].start = anchor_regions[0].cursor = window + 2 * HORIZON_ANCHOR_REGION;
+            anchor_regions[0].end = window + 3 * HORIZON_ANCHOR_REGION;
+            anchor_region_count = 1;
+            assert( find_free_run_locked( window, window + 4 * HORIZON_ANCHOR_REGION, 0x100000 ) ==
+                    window + 3 * HORIZON_ANCHOR_REGION );
+            assert( !find_anchor_region_locked( 2 * HORIZON_ANCHOR_REGION ) );
+            /* The anchors themselves still go in it. */
+            assert( find_anchor_run_locked( 0x50000 ) == window + 2 * HORIZON_ANCHOR_REGION );
+            memcpy( anchor_regions, saved, sizeof(saved) );
+            anchor_region_count = saved_count;
+        }
         list_remove_mapping( entry_at( window ) );
         {
             char *saved_start = anchor_regions[0].start, *saved_end = anchor_regions[0].end;

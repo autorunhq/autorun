@@ -88,6 +88,15 @@ info = inspect(sevenzip, "--coff-imports")
 assert "Arch: i386\n" in info and "Type: HIGHLOW" in inspect(sevenzip, "--coff-basereloc"), "7zr must be relocatable"
 deps = re.findall(r"^Import \{\n  Name: (.+)$", info, re.M)
 syswow64 = {p.name.lower() for p in (stage / "drive_c/windows/syswow64").glob("*.dll")}
+# The components setup the runtime runs before the first program on a card.
+components = stage / "drive_c/windows/autorun-setup.exe"
+if components.is_file():
+    info = inspect(components, "--coff-imports")
+    assert "Arch: i386\n" in info
+    for symbol in ("OleInitialize", "LoadLibraryExW", "RegSetValueExW", "NtDisplayString"):
+        assert f"Symbol: {symbol} " in info, f"Missing components setup import: {symbol}"
+    deps = re.findall(r"^Import \{\n  Name: (.+)$", info, re.M)
+    assert deps and all(dep.lower() in syswow64 for dep in deps), deps
 assert all(dep.lower() in syswow64 for dep in deps), f"7zr load-time imports not staged: {deps}"
 assert (stage / "wine-nx-runtime.nro").read_bytes()[16:20] == b"NRO0"
 target = (stage / "target.txt").read_text().strip()
@@ -152,11 +161,12 @@ elif target == "sdmc:/switch/wine/drive_c/WarCraft III Setup/war3-setup.exe":
     setup = stage / "drive_c/WarCraft III Setup/war3-setup.exe"
     info = inspect(setup, "--coff-imports")
     assert "Arch: i386\n" in info and "Type: HIGHLOW" in inspect(setup, "--coff-basereloc")
-    for symbol in ("RegSetValueExW", "OleInitialize", "LoadLibraryW", "NtDisplayString"):
+    for symbol in ("RegSetValueExW", "RegDeleteValueW", "NtDisplayString"):
         assert f"Symbol: {symbol} " in info, f"Missing setup import: {symbol}"
     deps = re.findall(r"^Import \{\n  Name: (.+)$", info, re.M)
     assert deps and all(dep.lower() in syswow64 for dep in deps), deps
-    # What the setup registers, and what WarCraft III's movies load through it.
+    # What the components setup registers (autorun-setup.exe, staged with the
+    # full package), and what WarCraft III's movies load through it.
     assert {"quartz.dll", "devenum.dll", "msacm32.dll", "ddraw.dll", "dsound.dll", "d3d9.dll"} <= syswow64
     for name in ("l3codeca.acm", "msacm32.drv"):
         assert (stage / "drive_c/windows/syswow64" / name).is_file(), f"{name} not staged"

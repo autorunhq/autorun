@@ -80,7 +80,7 @@ volume, stop and reset. Mono or stereo PCM of 8 to 32 bits and float input are
 converted, and other rates such as 44.1 kHz are resampled to 48 kHz. No
 microphone, MIDI synthesis or multi-client mixing yet. The audio driver and
 MMDeviceEnumerator are registered at startup, and registry changes are saved
-to system.reg and user.reg in sdmc:/switch/wine.
+to system.reg and user.reg in sdmc:/switch/wine/registry.
 
 OpenTTD plays sound effects with -s win32 -m null, which the OpenTTD package
 selects, with the OpenSFX base set.

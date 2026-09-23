@@ -67,6 +67,14 @@ static int horizon_get_stack_region(void **start, void **end)
     *end = (void *)stack_hi;
     return 1;
 }
+/* 4 GB unless a case says otherwise: the window keeps more of the stack region
+ * only where the dynarec's code memory has nowhere else to go. */
+static uintptr_t space_limit = 0x100000000ull;
+static void horizon_get_address_space_limits(void **start, void **limit)
+{
+    *start = (void *)0x8000000ull;
+    *limit = (void *)space_limit;
+}
 static int overlaps_native(uintptr_t start, size_t size)
 {
     for (size_t i = 0; i < native_count; i++)
@@ -100,7 +108,8 @@ fixture += block('static struct range_entry *free_ranges_lower_bound(')
 fixture += block('static void free_ranges_exclude(')
 fixture += block('static void free_ranges_restore_exclusions(')
 # The window left for native thread stacks, from the real source.
-fixture += re.search(r'^#define HORIZON_NATIVE_STACKS .*$', source, re.M)[0] + '\n'
+for name in ('HORIZON_NATIVE_STACKS', 'HORIZON_NATIVE_STACKS_4G'):
+    fixture += re.search(r'^#define %s .*$' % name, source, re.M)[0] + '\n'
 # The window the runtime hands horizon.c for its own placements.
 fixture += 'void *horizon_native_window_start, *horizon_native_window_end;\n'
 for marker in ('static void mmap_add_reserved_area(', 'static int mmap_is_in_reserved_area(',
@@ -131,6 +140,35 @@ static int munmap(void *ptr, size_t size)
 '''
 fixture += block('static void *alloc_free_area_in_range(')
 fixture += block('static void unmap_area(')
+fixture += block('static void mmap_remove_reserved_area(')
+fixture += r'''
+/* The thread-local pages the kernel has, as the test places them, and one
+ * view the program already has. Wine's remove_reserved_area also unmaps the
+ * host reservation, which this fixture does not model. */
+#include <pthread.h>
+#include <signal.h>
+struct file_view;
+static pthread_mutex_t virtual_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void server_enter_uninterrupted_section( pthread_mutex_t *m, sigset_t *s ) { (void)s; pthread_mutex_lock(m); }
+static void server_leave_uninterrupted_section( pthread_mutex_t *m, sigset_t *s ) { (void)s; pthread_mutex_unlock(m); }
+static unsigned long long tls_pages[8];
+static unsigned int tls_page_count;
+static uintptr_t view_start, view_end;
+static unsigned long long horizon_next_thread_local_page( unsigned long long addr, unsigned long long limit )
+{
+    unsigned long long best = 0;
+    unsigned int i;
+    for (i = 0; i < tls_page_count; i++)
+        if (tls_pages[i] >= addr && tls_pages[i] < limit && (!best || tls_pages[i] < best)) best = tls_pages[i];
+    return best;
+}
+static struct file_view *find_view_range( const void *addr, size_t size )
+{
+    return (uintptr_t)addr < view_end && view_start < (uintptr_t)addr + size ? (struct file_view *)1 : NULL;
+}
+static void remove_reserved_area( void *addr, size_t size ) { mmap_remove_reserved_area( addr, size ); }
+'''
+fixture += block('unsigned int horizon_drop_thread_local_pages(')
 fixture += r'''
 static void cleanup(void)
 {
@@ -178,15 +216,15 @@ int main(void)
     assert(mmap_is_in_reserved_area((void *)0x11000000, a.size) == 1);
     /* Future libnx allocations cannot split the protected guest range into
      * 16 MiB gaps. Native allocation still has space outside the reservation. */
-    for (uintptr_t p = 0x1000000; p < 0x20000000; p += 0x1000000)
+    for (uintptr_t p = 0x1000000; p < (uintptr_t)horizon_native_window_start; p += 0x1000000)
         assert(anon_mmap_tryfixed((void *)p, 0x100000, PROT_NONE, 0) == MAP_FAILED);
     /* Unlike generic native mappings, thread stack mirrors MUST lie in the
      * kernel stack region. Build 103 reserved all of it. The window left at
      * the top takes more of them, with their guard pages, than the 96 threads
      * Horizon allows; a stack a megabyte, placed two megabytes apart. */
     {
-        uintptr_t window = HORIZON_NATIVE_STACKS < (stack_hi - stack_lo) / 2
-                           ? HORIZON_NATIVE_STACKS : (stack_hi - stack_lo) / 2;
+        uintptr_t window = HORIZON_NATIVE_STACKS_4G < (stack_hi - stack_lo) / 8 * 5
+                           ? HORIZON_NATIVE_STACKS_4G : (stack_hi - stack_lo) / 8 * 5;
         uintptr_t stacks = 0;
         for (uintptr_t p = stack_hi - window + 0x10000; p + 0x104000 <= stack_hi; p += 0x200000)
         {
@@ -228,16 +266,35 @@ int main(void)
     native[native_count++] = (struct native_map){0x400000, 0x28000000};
     native[native_count++] = (struct native_map){0x78200000, 0xf8200000};
     horizon_reserve_guest_address_space();
-    assert(horizon_native_window_start == (char *)stack_hi - (stack_hi - stack_lo) / 2);
+    /* Five eighths of the stack region: both aliases of every code arena come
+     * out of the window, and half of it ran the dynarec out of room. */
+    assert(horizon_native_window_start == (char *)stack_hi - (stack_hi - stack_lo) / 8 * 5);
     assert(horizon_native_window_end == (void *)stack_hi);
     assert(mmap_is_in_reserved_area((void *)0x40000000, 0xafd0000) == 1);
-    assert(!mmap_is_in_reserved_area((void *)(stack_hi - (stack_hi - stack_lo) / 2), 0x1000));
+    assert(!mmap_is_in_reserved_area((void *)(stack_hi - (stack_hi - stack_lo) / 8 * 5), 0x1000));
     {
         struct alloc_area big = {.size = 0xafd0000, .align_mask = 0xffff};
         void *p = alloc_free_area_in_range(&big, (char *)0x10000, (char *)0x100000000ull);
         assert(p && p != MAP_FAILED);
         assert((uintptr_t)p >= stack_hi && (uintptr_t)p + big.size <= 0x78200000);
     }
+    /* A 39-bit address space: libnx can place code memory outside the window,
+     * so the window is half the region again and the program keeps the rest.
+     * Fallout New Vegas reserves its own memory low, and five eighths here
+     * took 256 MB of what it addresses. */
+    cleanup();
+    space_limit = 0x8000000000ull;
+    stack_lo = 0x8000000;
+    stack_hi = 0x80000000;
+    horizon_reserve_guest_address_space();
+    assert(horizon_native_window_start == (char *)stack_hi - HORIZON_NATIVE_STACKS);
+    assert(horizon_native_window_end == (void *)stack_hi);
+    assert(mmap_is_in_reserved_area((void *)0x50000000, 0x1000) == 1);  /* still the guest's */
+    cleanup();
+    space_limit = 0x100000000ull;
+    stack_lo = 0x200000;
+    stack_hi = 0x40000000;
+
     cleanup();
     stack_query_ok = 0;
     horizon_reserve_guest_address_space();
@@ -260,8 +317,48 @@ int main(void)
     assert(!mmap_is_in_reserved_area((void *)0x100000000ull, 0x1000));
     assert(!mmap_is_in_reserved_area((void *)stack_lo, 0x1000));
     cleanup();
+    /* The kernel's thread-local pages: one put in the middle of the guest's
+     * reservation, one in the native window and one inside a view the program
+     * already has. Only the first is taken out; its neighbours stay reserved,
+     * and no allocation handed out afterwards covers it. The Sims 2 was given
+     * 4 MB with such a page inside, could not commit it and crashed. */
+    host_addr_space_limit = (void *)0x100000000ull;
+    free_ranges_end = free_ranges + 2;
+    stack_lo = 0x200000;
+    stack_hi = 0x40000000;
+    horizon_reserve_guest_address_space();
+    {
+        const unsigned long long inside = 0x4644000, window = (uintptr_t)horizon_native_window_start + 0x10000;
+        const unsigned long long viewed = 0x9100000;
+        struct alloc_area big = {.size = 0x400000, .align_mask = 0xffff};
+        unsigned int found = 0, dropped, i;
+
+        assert(mmap_is_in_reserved_area((void *)(uintptr_t)inside, 0x1000) == 1);
+        tls_pages[0] = inside;
+        tls_pages[1] = window;
+        tls_pages[2] = viewed;
+        tls_page_count = 3;
+        view_start = 0x9000000;
+        view_end = 0x9400000;
+        dropped = horizon_drop_thread_local_pages(&found);
+        assert(found == 3 && dropped == 1);
+        assert(!mmap_is_in_reserved_area((void *)(uintptr_t)inside, 0x1000));
+        assert(mmap_is_in_reserved_area((void *)(uintptr_t)(inside - 0x1000), 0x1000) == 1);
+        assert(mmap_is_in_reserved_area((void *)(uintptr_t)(inside + 0x1000), 0x1000) == 1);
+        assert(mmap_is_in_reserved_area((void *)(uintptr_t)viewed, 0x1000) == 1);
+        for (i = 0; i < 64; i++)
+        {
+            char *p = alloc_free_area_in_range(&big, (char *)0x10000, (char *)0x18000000);
+            if (!p || p == MAP_FAILED) break;
+            assert((uintptr_t)p + big.size <= inside || (uintptr_t)p > inside);
+        }
+        assert(i > 4);
+        tls_page_count = 0;
+        view_start = view_end = 0;
+    }
+    cleanup();
     puts("Horizon guest reservation: native stacks within kernel limits, query failure, guest "
-         "allocation/reuse, Most Wanted's reservation and large address spaces passed");
+         "allocation/reuse, Most Wanted's reservation, large address spaces and thread-local pages passed");
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

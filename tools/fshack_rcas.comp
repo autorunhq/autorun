@@ -1,0 +1,40 @@
+/* FSR 1.0 upscaling, second pass: RCAS (tools/fsr1/ffx_fsr1.h) sharpens what
+ * EASU wrote to the intermediate image into the swapchain image. Reads stay
+ * inside the rectangle the picture is in, so the black bars around it do not
+ * darken its edges. */
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 1) uniform writeonly image2D outImage;
+layout(binding = 2, rgba8) uniform readonly image2D midImage;
+layout(push_constant) uniform pushConstants {
+    vec2 origin;
+    vec2 extents;
+    vec2 src_extents;
+    float sharpness;
+} constants;
+
+#define A_GPU 1
+#define A_GLSL 1
+#include "fsr1/ffx_a.h"
+
+ivec2 rect_min, rect_max;
+
+#define FSR_RCAS_F 1
+AF4 FsrRcasLoadF( ASU2 p ) { return imageLoad( midImage, clamp( p, rect_min, rect_max ) ); }
+void FsrRcasInputF( inout AF1 r, inout AF1 g, inout AF1 b ) {}
+#include "fsr1/ffx_fsr1.h"
+
+void main()
+{
+    ivec2 id = ivec2( gl_GlobalInvocationID.xy );
+    vec4 c = vec4( 0.0, 0.0, 0.0, 1.0 );
+
+    rect_min = ivec2( constants.origin );
+    rect_max = rect_min + ivec2( constants.extents ) - 1;
+    if (all( greaterThanEqual( id, rect_min ) ) && all( lessThanEqual( id, rect_max ) ))
+        FsrRcasF( c.r, c.g, c.b, AU2( id ), AU4( floatBitsToUint( constants.sharpness ), 0u, 0u, 0u ) );
+    imageStore( outImage, id, c );
+}

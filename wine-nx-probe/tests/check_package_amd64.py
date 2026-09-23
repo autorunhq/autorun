@@ -345,9 +345,12 @@ with tempfile.TemporaryDirectory(prefix='autorun-amd64-merge-') as temp:
             z.writestr('switch/wine/drive_c/vkd3d64/d3d12.dll', b'vkd3d')
             for name in ('run-entry.txt', 'target.txt', 'vulkan-probe.txt'):
                 z.writestr(f'switch/wine/{name}', 'replace\n')
+        return marker
 
-    for fex, expected in ((False, '3'), (True, 'fex-2609')):
-        make_archive(fex)
+    for fex in (False, True):
+        expected = make_archive(fex).removeprefix('nx-amd64-')
+        if not fex:
+            expected = expected.removeprefix('box64-')
         assert autorun_namespace['merge_amd64'](archive, stage) == expected
         assert (runtime / 'drive_c/dxvk64/dxgi.dll').read_bytes() == b'dxvk'
         if fex:

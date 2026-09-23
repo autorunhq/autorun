@@ -204,9 +204,9 @@ static void test_save_and_load(void)
     char path[512], tmp[512], user_file[512], text_file[8192];
 
     for (i = 0; i < sizeof(binary); i++) binary[i] = i * 7;
-    snprintf(path, sizeof(path), "%ssystem.reg", registry_dir);
-    snprintf(tmp, sizeof(tmp), "%ssystem.reg.tmp", registry_dir);
-    snprintf(user_file, sizeof(user_file), "%suser.reg", registry_dir);
+    snprintf(path, sizeof(path), "%sregistry/system.reg", registry_dir);
+    snprintf(tmp, sizeof(tmp), "%sregistry/system.reg.tmp", registry_dir);
+    snprintf(user_file, sizeof(user_file), "%sregistry/user.reg", registry_dir);
     /* main's requests are persisted in one maintenance pass. */
     horizon_registry_flush();
     assert(!access(path, F_OK) && !access(user_file, F_OK) && access(tmp, F_OK));
@@ -269,7 +269,9 @@ static void test_save_and_load(void)
 
     horizon_reg_release(&horizon_registry, horizon_registry.root);
     horizon_registry.root = NULL;
-    assert(!unlink(path) && !unlink(user_file) && !rmdir(registry_dir));
+    assert(!unlink(path) && !unlink(user_file));
+    snprintf(path, sizeof(path), "%sregistry", registry_dir);
+    assert(!rmdir(path) && !rmdir(registry_dir));
 }
 static struct horizon_reg_key *concurrent_key;
 static void mutate_during_write(void)

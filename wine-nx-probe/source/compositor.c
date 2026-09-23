@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "compositor.h"
+#include "osk.h"
 #include "thread_profile.h"
 #include "compositor_gl.h"
 
@@ -74,6 +75,13 @@ static void request_frame( void )
 {
     comp.frame = 1;
     pthread_cond_signal( &comp.wake );
+}
+
+void wine_nx_compositor_redraw( void )
+{
+    pthread_mutex_lock( &comp.lock );
+    request_frame();
+    pthread_mutex_unlock( &comp.lock );
 }
 
 static void clear_dirty( struct wine_nx_layer *layer )
@@ -315,6 +323,11 @@ static void *presenter_thread( void *arg )
     struct wine_nx_layer **drawn = NULL, *layer, *dead;
     struct compositor_gl_quad *quads = NULL;
     struct compositor_gl gl;
+    /* The floating keyboard (osk.c): a layer of the presenter's own, drawn
+     * over the windows, and the picture it last took. */
+    struct wine_nx_layer *keyboard = NULL;
+    unsigned int keyboard_generation = 0;
+    struct wine_nx_osk_frame osk;
     int capacity = 0, attached, attach_failed = 0, count, cursor_x, cursor_y, cursor_visible, i, j;
     char error[256] = "";
 
@@ -398,14 +411,14 @@ static void *presenter_thread( void *arg )
             if (layer->visible_width && layer->visible_height) count++;
             link = &layer->next;
         }
-        if (count > capacity)
+        if (count + 1 > capacity)  /* and the keyboard */
         {
-            struct compositor_gl_quad *new_quads = realloc( quads, sizeof(*quads) * count * 2 );
-            struct wine_nx_layer **new_drawn = realloc( drawn, sizeof(*drawn) * count * 2 );
+            struct compositor_gl_quad *new_quads = realloc( quads, sizeof(*quads) * (count + 1) * 2 );
+            struct wine_nx_layer **new_drawn = realloc( drawn, sizeof(*drawn) * (count + 1) * 2 );
 
             if (new_quads) quads = new_quads;
             if (new_drawn) drawn = new_drawn;
-            if (new_quads && new_drawn) capacity = count * 2;
+            if (new_quads && new_drawn) capacity = (count + 1) * 2;
         }
         count = 0;
         for (layer = comp.layers; layer && count < capacity; layer = layer->next)
@@ -425,6 +438,48 @@ static void *presenter_thread( void *arg )
             quads[i].width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
             quads[i].height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
             quads[i].src_x = quads[i].src_y = 0;
+        }
+        if (count < capacity && wine_nx_osk_frame( comp.width, comp.height, &osk ))
+        {
+            if (keyboard && (keyboard->width != osk.width || keyboard->height != osk.height))
+            {
+                compositor_gl_release( &gl, &keyboard->texture );
+                pthread_mutex_destroy( &keyboard->pixels_lock );
+                free( keyboard->pixels );
+                free( keyboard );
+                keyboard = NULL;
+            }
+            if (!keyboard && (keyboard = calloc( 1, sizeof(*keyboard) )))
+            {
+                keyboard->width = osk.width;
+                keyboard->height = osk.height;
+                pthread_mutex_init( &keyboard->pixels_lock, NULL );
+                if (!(keyboard->pixels = malloc( (size_t)osk.width * osk.height * 4 )))
+                {
+                    pthread_mutex_destroy( &keyboard->pixels_lock );
+                    free( keyboard );
+                    keyboard = NULL;
+                }
+                keyboard_generation = 0;
+            }
+            if (keyboard && keyboard_generation != osk.generation &&
+                (keyboard_generation = wine_nx_osk_copy( comp.width, comp.height, keyboard->pixels,
+                                                         keyboard->width * 4, 0 )))
+            {
+                keyboard->dirty_left = keyboard->dirty_top = 0;
+                keyboard->dirty_right = keyboard->width;
+                keyboard->dirty_bottom = keyboard->height;
+            }
+            if (keyboard && keyboard_generation)
+            {
+                quads[count].texture = &keyboard->texture;
+                quads[count].x = osk.x;
+                quads[count].y = osk.y;
+                quads[count].width = keyboard->width;
+                quads[count].height = keyboard->height;
+                quads[count].src_x = quads[count].src_y = 0;
+                drawn[count++] = keyboard;
+            }
         }
         cursor_x = comp.cursor_x;
         cursor_y = comp.cursor_y;
@@ -454,6 +509,13 @@ stopped:
     comp.state = STATE_STOPPED;
     pthread_cond_broadcast( &comp.idle );
     pthread_mutex_unlock( &comp.lock );
+    if (keyboard)
+    {
+        compositor_gl_release( &gl, &keyboard->texture );
+        pthread_mutex_destroy( &keyboard->pixels_lock );
+        free( keyboard->pixels );
+        free( keyboard );
+    }
     compositor_gl_destroy( &gl );
     if (attached) backend->detach();
     if (backend->quit) backend->quit();

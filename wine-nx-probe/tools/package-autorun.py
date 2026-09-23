@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build one SD-card archive with the x86 and AMD64 graphics runtimes."""
+"""Build one SD-card archive with the x86 and AMD64 graphics runtimes.
+
+The archive is autorun-NNN.zip, NNN the x86 runtime's build. --no-amd64 leaves
+the AMD64 half out, for a card that only runs 32-bit programs."""
 from pathlib import Path
 from pathlib import PurePosixPath
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -16,10 +19,12 @@ tools = probe / 'tools'
 build = probe / 'build-switch-wow64-dynarec'
 stage_root = build / 'full-sd-card'
 stage = stage_root / 'switch/wine'
+marker = re.search(r'nx-wow64-dynarec-(\d+)', (probe / 'source/runtime.c').read_text()).group(1)
 default_amd64 = probe / 'build-switch-amd64/wine-nx-amd64-box64-mesa-dxvk-vkd3d.zip'
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('--amd64', type=Path,
                     default=Path(os.environ.get('WINE_NX_AMD64_PACKAGE', default_amd64)))
+parser.add_argument('--no-amd64', action='store_true', help='leave the AMD64 runtime out')
 args = parser.parse_args()
 
 
@@ -86,8 +91,10 @@ with ZipFile(overlay) as z:
         assert name.startswith('switch/wine/'), name
     z.extractall(stage_root)
 
-assert args.amd64.is_file(), f'{args.amd64} is missing; build the AMD64 DXVK/VKD3D package first'
-marker = merge_amd64(args.amd64, stage_root)
+if not args.no_amd64:
+    assert args.amd64.is_file(), f'{args.amd64} is missing; build the AMD64 DXVK/VKD3D package first, ' \
+                                 'or pass --no-amd64'
+    print(f'AMD64 runtime build {merge_amd64(args.amd64, stage_root)} merged')
 subprocess.run([sys.executable, str(tools / 'verify-wow64-package.py'), str(stage)], check=True)
 
 archive = build / f'autorun-{marker}.zip'

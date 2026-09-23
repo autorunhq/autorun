@@ -98,6 +98,6 @@ printf '%s\n' 'Real x86 console application: 7-Zip 26.03 7zr.exe (build nx-wow64
     'args.txt applies only to the program its first word names. Tests in the menu: pe32-lifecycle.exe' \
     '(threads), pe32-timers.exe (window timers) and pe32-messages.exe (messages and clipboard) each' \
     'expect [PE32 TEST] PASS ALL and exit_code=0x0000002a.' \
-    'Log: sdmc:/switch/wine/wine-nx-runtime.log; close from HOME after it parks.' > "$stage/README.txt"
+    'Log: sdmc:/switch/wine/logs/autorun_runtime.log; close from HOME after it parks.' > "$stage/README.txt"
 python3 "$root/wine-nx-probe/tools/verify-wow64-package.py"
 echo "Staged WoW64 loader test in $stage"

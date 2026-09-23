@@ -4485,6 +4485,9 @@ void virtual_free_horizon_native( void *token )
  * only places there, the dynarec's code memory, and the region section anchors
  * are packed into. */
 #define HORIZON_NATIVE_STACKS ((ULONG_PTR)512 * 1024 * 1024)
+/* Where the whole address space is 4 GB the window also holds every code
+ * arena, two aliases apiece, and 512 MB of it ran the dynarec dry. */
+#define HORIZON_NATIVE_STACKS_4G ((ULONG_PTR)768 * 1024 * 1024)
 
 /* The window itself, for the runtime's own placements. */
 void *horizon_native_window_start = NULL;
@@ -4495,6 +4498,40 @@ void *horizon_native_window_end = NULL;
  * created, as Wine's preloader does on other hosts. These are PROT_NONE host
  * reservations, not guest views or committed RAM: Wine can allocate inside
  * them, and unmap_area restores the reservation when a guest view is freed. */
+/* Takes the kernel's thread-local pages out of the guest's reservations. The
+ * reservations are this process's bookkeeping, not kernel mappings, so the
+ * kernel sees them as free and puts a thread-local page wherever its random
+ * search lands when a new thread needs one -- which in a 32-bit address space
+ * is often inside memory the program has reserved. The Sims 2 reserved 4 MB,
+ * a page landed in it, committing the 4 MB then failed and the game wrote
+ * through the memory it did not get. The runtime creates the pages a process
+ * will ever need before the program starts (runtime.c) and this takes them
+ * out, so no allocation is ever handed one. A page inside a view the program
+ * already has is left alone and counted: nothing can move it. Returns how many
+ * were taken out, and how many were found below 4 GB. */
+unsigned int horizon_drop_thread_local_pages( unsigned int *found )
+{
+    unsigned long long page = 0;
+    unsigned int dropped = 0;
+    sigset_t sigset;
+
+    *found = 0;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    while ((page = horizon_next_thread_local_page( page, (ULONG_PTR)limit_4g )))
+    {
+        (*found)++;
+        if (mmap_is_in_reserved_area( (void *)(ULONG_PTR)page, 0x1000 ) == 1 &&
+            !find_view_range( (void *)(ULONG_PTR)page, 0x1000 ))
+        {
+            remove_reserved_area( (void *)(ULONG_PTR)page, 0x1000 );
+            dropped++;
+        }
+        page += 0x1000;
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return dropped;
+}
+
 static void horizon_reserve_guest_address_space(void)
 {
     struct range_entry *range;
@@ -4515,8 +4552,30 @@ static void horizon_reserve_guest_address_space(void)
         wine_nx_runtime_trace( "[VA] early guest reservations disabled: native stack region unavailable" );
         return;
     }
-    /* Keep room for native stacks and code aliases outside guest reservations. */
-    stack_room = min( HORIZON_NATIVE_STACKS, ((ULONG_PTR)stack_end - (ULONG_PTR)stack_start) / 2 );
+    /* Native thread stacks can only be placed in this region, since
+     * virtmemFindStack searches it alone, so leave a window at its top for
+     * them and for the code memory the dynarec maps. Build 103 reserved the
+     * whole region and no native worker thread could start. Both are placed
+     * at random with 0x200 attempts, so the window does not have to be empty:
+     * 96 threads, all Horizon allows, take a megabyte of kernel stack each,
+     * and the code arenas are bounded. A region too small keeps half. */
+    /* Half of the region, and five eighths of it where the whole address space
+     * is 4 GB. What the window has to hold decides it: thread stacks and
+     * section anchors everywhere, and on a 4 GB address space the dynarec's
+     * code memory as well, two aliases per arena, which ran out at 133 MB.
+     * A 36- or 39-bit address space has room above everything a 32-bit
+     * program can address, so code goes there instead and the three eighths
+     * stay the program's: Fallout New Vegas reserves its own memory low, and
+     * taking them left it unable to start. */
+    {
+        void *space_start, *space_limit;
+        ULONG_PTR region = (ULONG_PTR)stack_end - (ULONG_PTR)stack_start;
+
+        horizon_get_address_space_limits( &space_start, &space_limit );
+        stack_room = (ULONG_PTR)space_limit > limit_4g
+                     ? min( HORIZON_NATIVE_STACKS, region / 2 )
+                     : min( HORIZON_NATIVE_STACKS_4G, region / 8 * 5 );
+    }
     window_start = (char *)ROUND_ADDR( (ULONG_PTR)stack_end - stack_room, granularity_mask );
     /* horizon.c places section anchors in here itself rather than asking
      * libnx, whose search picks addresses at random. */

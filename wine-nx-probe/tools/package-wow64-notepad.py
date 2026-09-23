@@ -109,7 +109,7 @@ clicks and moves the cursor there. Menus from the menu bar take the left button 
 Try in Notepad: the blinking caret, Edit > Cut/Copy/Paste, the right-click menu (B),
 Format > Font..., Format > Word Wrap and Search > Find.
 Tests in the menu (each ends with [PE32 TEST] PASS ALL and exit_code=0x0000002a in
-wine-nx-runtime.log): pe32-messages.exe (messages between threads, message waits,
+autorun_runtime.log): pe32-messages.exe (messages between threads, message waits,
 clipboard), pe32-timers.exe (window timers), pe32-lifecycle.exe (threads).
 pe32-video-startup.exe reproduces OpenTTD's LoadIcon, LoadCursor, RegisterClass and
 CreateWindow startup sequence. Its [VIDEO TEST] lines bracket each call; the final
@@ -119,7 +119,7 @@ Verified on hardware: cursor and buttons, menus, Word Wrap, the Format > Font di
 (build 11), the launcher, and pe32-messages.exe and pe32-timers.exe passing (build 16).
 The Notepad caret, Copy/Paste and Find await hardware confirmation.
 
-Logs: sdmc:/switch/wine/wine-nx-runtime.log, and horizon-trace.log with verbose logs.
+Logs: sdmc:/switch/wine/logs/autorun_runtime.log, and horizon-trace.log with verbose logs.
 Since build 18 the log always has Wine's error messages (err:), including those of
 32-bit DLLs such as a DLL that cannot be found; verbose logs add fixme: messages.
 Install by merging switch/ into the SD root.

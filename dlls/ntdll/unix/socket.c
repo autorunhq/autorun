@@ -1678,7 +1678,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
 #ifdef __SWITCH__
     /* Trace every AFD IOCTL so we can see what ws2_32 asks for. The names are
      * shortened to the last two hex nibbles of the function code (CTL_CODE
-     * field 4..15) so each call shows up identifiable in wine-nx-runtime.log. */
+     * field 4..15) so each call shows up identifiable in autorun_runtime.log. */
     {
         extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
         extern int wine_nx_runtime_verbose __attribute__((weak));

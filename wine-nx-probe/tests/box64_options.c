@@ -44,7 +44,9 @@ int main(void)
         if (nx_box64_options[i].advanced) advanced_count++;
         else main_count++;
     }
-    assert( main_count == 6 && advanced_count == 10 );
+    assert( main_count == 6 && advanced_count == 12 );
+    option = nx_box64_option_find( "BOX64_DYNAREC_PURGE_AGE" );
+    assert( option && nx_box64_option_choice( option, 1000 ) >= 0 && nx_box64_option_choice( option, 4096 ) < 0 );
     option = nx_box64_option_find( "BOX64_DYNAREC_FORWARD" );
     assert( option && nx_box64_option_choice( option, 1024 ) >= 0 );
     assert( nx_box64_option_choice( option, 64 ) < 0 );

@@ -27,6 +27,7 @@
 #include "win32u_private.h"
 #include "wine/opengl_driver.h"
 #include "wine/debug.h"
+#include "../../wine-nx-probe/source/osk.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 
@@ -120,11 +121,139 @@ extern unsigned long long horizon_interrupt_time(void);
 unsigned int wine_nx_gl_swaps;
 unsigned long long wine_nx_gl_swap_time;  /* 100 ns */
 
+/* The floating keyboard (wine-nx-probe/source/osk.c), put into the back
+ * buffer just before it is shown: its picture in a texture of each context's
+ * own, blitted from a framebuffer of its own onto the window's. Everything
+ * the blit and the upload depend on is put back as the program left it. */
+struct nx_osk_gl
+{
+    EGLContext context;
+    GLuint texture, framebuffer;
+    int width, height;
+    unsigned int generation;
+    void *pixels;
+};
+static struct nx_osk_gl nx_osk_gl[8];
+static unsigned int nx_osk_gl_next;
+static PFN_glGenFramebuffers p_glGenFramebuffers;
+static PFN_glBindFramebuffer p_glBindFramebuffer;
+static PFN_glFramebufferTexture2D p_glFramebufferTexture2D;
+static PFN_glBlitFramebuffer p_glBlitFramebuffer;
+static PFN_glIsFramebuffer p_glIsFramebuffer;
+static PFN_glBindBuffer p_glBindBuffer;
+
+static void nx_osk_draw( struct opengl_drawable *base )
+{
+    struct wine_nx_osk_frame frame;
+    struct nx_osk_gl *osk = NULL;
+    EGLint width = 0, height = 0;
+    EGLContext context;
+    GLint read_fb, draw_fb, texture, unpack_buffer, row_length, skip_pixels, skip_rows, alignment;
+    GLboolean scissor, srgb;
+    unsigned int i;
+
+    if (!wine_nx_osk_visible()) return;
+    if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
+        !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
+        !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
+        return;
+    if (!p_glBlitFramebuffer)
+    {
+        p_glGenFramebuffers = (void *)funcs->p_eglGetProcAddress( "glGenFramebuffers" );
+        p_glBindFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" );
+        p_glFramebufferTexture2D = (void *)funcs->p_eglGetProcAddress( "glFramebufferTexture2D" );
+        p_glIsFramebuffer = (void *)funcs->p_eglGetProcAddress( "glIsFramebuffer" );
+        p_glBindBuffer = (void *)funcs->p_eglGetProcAddress( "glBindBuffer" );
+        if (!p_glGenFramebuffers || !p_glBindFramebuffer || !p_glFramebufferTexture2D || !p_glIsFramebuffer ||
+            !p_glBindBuffer)
+            return;
+        p_glBlitFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBlitFramebuffer" );
+        if (!p_glBlitFramebuffer) return;
+    }
+    for (i = 0; i < ARRAY_SIZE(nx_osk_gl) && !osk; i++)
+        if (nx_osk_gl[i].context == context) osk = &nx_osk_gl[i];
+    if (!osk)
+    {
+        /* A context not seen before: its names are its own, so the slot's
+         * old ones are only forgotten, never deleted from here. */
+        osk = &nx_osk_gl[nx_osk_gl_next++ % ARRAY_SIZE(nx_osk_gl)];
+        free( osk->pixels );
+        memset( osk, 0, sizeof(*osk) );
+        osk->context = context;
+    }
+
+    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &read_fb );
+    funcs->p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb );
+    funcs->p_glGetIntegerv( GL_TEXTURE_BINDING_2D, &texture );
+    funcs->p_glGetIntegerv( GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer );
+    funcs->p_glGetIntegerv( GL_UNPACK_ROW_LENGTH, &row_length );
+    funcs->p_glGetIntegerv( GL_UNPACK_SKIP_PIXELS, &skip_pixels );
+    funcs->p_glGetIntegerv( GL_UNPACK_SKIP_ROWS, &skip_rows );
+    funcs->p_glGetIntegerv( GL_UNPACK_ALIGNMENT, &alignment );
+    scissor = funcs->p_glIsEnabled( GL_SCISSOR_TEST );
+    srgb = funcs->p_glIsEnabled( GL_FRAMEBUFFER_SRGB );
+
+    /* Names the program deleted, or a context that took an old one's place. */
+    if (!osk->texture || !funcs->p_glIsTexture( osk->texture ) || !p_glIsFramebuffer( osk->framebuffer ))
+    {
+        funcs->p_glGenTextures( 1, &osk->texture );
+        p_glGenFramebuffers( 1, &osk->framebuffer );
+        osk->width = osk->height = 0;
+    }
+    funcs->p_glBindTexture( GL_TEXTURE_2D, osk->texture );
+    p_glBindBuffer( GL_PIXEL_UNPACK_BUFFER, 0 );
+    funcs->p_glPixelStorei( GL_UNPACK_ROW_LENGTH, 0 );
+    funcs->p_glPixelStorei( GL_UNPACK_SKIP_PIXELS, 0 );
+    funcs->p_glPixelStorei( GL_UNPACK_SKIP_ROWS, 0 );
+    funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
+    if (osk->width != frame.width || osk->height != frame.height)
+    {
+        free( osk->pixels );
+        osk->pixels = malloc( (size_t)frame.width * frame.height * 4 );
+        funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, frame.width, frame.height, 0, GL_BGRA,
+                               GL_UNSIGNED_BYTE, NULL );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+        osk->width = frame.width;
+        osk->height = frame.height;
+        osk->generation = 0;
+    }
+    if (osk->pixels && osk->generation != frame.generation &&
+        (osk->generation = wine_nx_osk_copy( width, height, osk->pixels, frame.width * 4, 0 )))
+        funcs->p_glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height, GL_BGRA, GL_UNSIGNED_BYTE,
+                                  osk->pixels );
+    if (osk->generation)
+    {
+        p_glBindFramebuffer( GL_READ_FRAMEBUFFER, osk->framebuffer );
+        p_glFramebufferTexture2D( GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, osk->texture, 0 );
+        p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+        if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+        if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
+        /* The picture's first row is its top; the window's first is its bottom. */
+        p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
+                             frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+        if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+        if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+    }
+
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, draw_fb );
+    funcs->p_glBindTexture( GL_TEXTURE_2D, texture );
+    p_glBindBuffer( GL_PIXEL_UNPACK_BUFFER, unpack_buffer );
+    funcs->p_glPixelStorei( GL_UNPACK_ROW_LENGTH, row_length );
+    funcs->p_glPixelStorei( GL_UNPACK_SKIP_PIXELS, skip_pixels );
+    funcs->p_glPixelStorei( GL_UNPACK_SKIP_ROWS, skip_rows );
+    funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, alignment );
+}
+
 static BOOL nx_drawable_swap( struct opengl_drawable *base )
 {
-    unsigned long long start = horizon_interrupt_time();
-    BOOL ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
+    unsigned long long start;
+    BOOL ret;
 
+    nx_osk_draw( base );
+    start = horizon_interrupt_time();
+    ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_gl_swaps, 1, __ATOMIC_RELAXED );
     return ret;

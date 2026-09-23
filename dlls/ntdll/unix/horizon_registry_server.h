@@ -4,10 +4,12 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Where system.reg and user.reg live; the host test uses a scratch directory. */
+/* The runtime's folder: system.reg and user.reg are in its registry/, the
+ * classes the payload ships in config/. The host test uses a scratch folder. */
 #ifndef HORIZON_REGISTRY_DIR
 #define HORIZON_REGISTRY_DIR "sdmc:/switch/wine/"
 #endif
+#include "horizon_registry_paths.h"
 
 static long long horizon_registry_now(void)
 {
@@ -191,7 +193,7 @@ static int horizon_registry_write_snapshot( const char *name, const char *data, 
 
 int horizon_registry_flush(void)
 {
-    static const char *const names[] = { "system.reg", "user.reg" };
+    static const char *const names[] = { HORIZON_REGISTRY_SUBDIR "system.reg", HORIZON_REGISTRY_SUBDIR "user.reg" };
     static const char *const roots[] = { "\\\\Machine", "\\\\User\\\\S-1-5-21-0-0-0-1000" };
     unsigned int i;
     int success = 1;
@@ -315,8 +317,9 @@ static unsigned int horizon_registry_init(void)
      * before system.reg, so anything a program has written for itself since
      * still wins. */
     horizon_registry_load_hive( machine, "config/classes.reg" );
-    horizon_registry_load_hive( machine, "system.reg" );
-    horizon_registry_load_hive( user, "user.reg" );
+    horizon_registry_move_hives( HORIZON_REGISTRY_DIR );
+    horizon_registry_load_hive( machine, HORIZON_REGISTRY_SUBDIR "system.reg" );
+    horizon_registry_load_hive( user, HORIZON_REGISTRY_SUBDIR "user.reg" );
     horizon_registry_hives[0] = machine;
     horizon_registry_hives[1] = user;
     memset( horizon_registry_generation, 0, sizeof(horizon_registry_generation) );

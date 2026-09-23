@@ -59,11 +59,45 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 # sdl2-compat looks for SDL3 next to the program, not in Homebrew's lib folder.
 ln -s /opt/homebrew/lib/libSDL3.0.dylib "$build/libSDL3.dylib"
 
+# The floating keyboard: what its buttons and taps send, and its picture.
+clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I "$probe/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
+    "$probe/tests/osk.c" "$probe/source/osk.c" \
+    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -o "$build/osk"
+"$build/osk" "$font" "$shots"
+
 card="$build/card/sdmc:"
 mkdir -p "$card/switch/wine/drive_c/openttd" "$card/games/deep/er/still"
 ln -s "$drive_c/notepad.exe" "$drive_c/7zr.exe" "$card/switch/wine/drive_c/"
 ln -s "$drive_c/notepad.exe" "$card/switch/wine/drive_c/openttd/openttd.exe"
 ln -s "$drive_c/notepad.exe" "$card/games/deep/er/still/Deep.exe"
+
+# + -> Run a program once: the browser's pick starts at once and stays out of
+# the library.
+cat > "$build/once-script.txt" <<SCRIPT
+wait 10
+key plus
+wait 3
+key down
+wait 2
+key a
+wait 3
+key a
+wait 3
+key a
+wait 3
+key a
+wait 5
+SCRIPT
+( cd "$build/card" && SDL_VIDEODRIVER=dummy "$build/launcher_host" "$font" "$build/once-script.txt" \
+    > "$build/once-out.txt" 2>&1 ) || { cat "$build/once-out.txt"; exit 1; }
+grep -q "launcher returned 1 target 'sdmc:/switch/wine/drive_c/openttd/openttd.exe'" "$build/once-out.txt" || {
+    cat "$build/once-out.txt"; exit 1; }
+if [ -f "$card/switch/wine/launcher-library-v2.ini" ] && grep -q '^\[game ' "$card/switch/wine/launcher-library-v2.ini"; then
+    cat "$card/switch/wine/launcher-library-v2.ini"; exit 1
+fi
+rm -f "$card/switch/wine/launcher-library-v2.ini" "$card/switch/wine/target.txt"
+echo "launcher host run: + Run a program once starts it without adding it"
 
 # An empty explicit catalog must stay empty even though drive_c contains several
 # executables. Add OpenTTD through the browser, verify that adding did not launch
@@ -120,6 +154,7 @@ grep -q "launcher returned 1 target 'sdmc:/switch/wine/drive_c/openttd/openttd.e
     cat "$build/restart-out.txt"; exit 1;
 }
 echo "launcher host run: empty home, explicit add, persistence, details and start passed"
+
 
 # Eight played covers exercise Home's row: animated hit testing, swipe selection,
 # both ends, the header, Y Options, and the square library.

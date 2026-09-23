@@ -17,6 +17,7 @@
 
 #include "compositor.h"
 #include "compositor_gl.h"
+#include "osk.h"
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
@@ -27,6 +28,45 @@ static const struct compositor_gl_funcs funcs =
     COMPOSITOR_GL_FUNCS
 #undef USE_GL_FUNC
 };
+
+/* The profiler's thread list (thread_profile.c) is the Switch's. */
+void wine_nx_thread_register( char kind, unsigned int tid, void *teb ) { (void)kind; (void)tid; (void)teb; }
+void wine_nx_thread_unregister( void ) {}
+
+/* A floating keyboard (osk.c) of one colour, shown when the test says. */
+static int keyboard_shown;
+static unsigned int keyboard_generation = 1;
+static uint32_t keyboard_color;
+
+int wine_nx_osk_frame( int screen_width, int screen_height, struct wine_nx_osk_frame *frame )
+{
+    if (!__atomic_load_n( &keyboard_shown, __ATOMIC_ACQUIRE ) || screen_width != SCREEN_W || screen_height != SCREEN_H)
+        return 0;
+    frame->x = 120;
+    frame->y = 120;
+    frame->width = frame->height = 40;
+    frame->generation = __atomic_load_n( &keyboard_generation, __ATOMIC_ACQUIRE );
+    return 1;
+}
+
+unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels, int stride, int rgba )
+{
+    int x, y;
+
+    (void)screen_width; (void)screen_height; (void)rgba;
+    if (!__atomic_load_n( &keyboard_shown, __ATOMIC_ACQUIRE )) return 0;
+    for (y = 0; y < 40; y++)
+        for (x = 0; x < 40; x++) ((uint32_t *)((char *)pixels + y * stride))[x] = 0xff000000u | keyboard_color;
+    return __atomic_load_n( &keyboard_generation, __ATOMIC_ACQUIRE );
+}
+
+static void show_keyboard( int shown, uint32_t color )
+{
+    keyboard_color = color;
+    __atomic_add_fetch( &keyboard_generation, 1, __ATOMIC_RELEASE );
+    __atomic_store_n( &keyboard_shown, shown, __ATOMIC_RELEASE );
+    wine_nx_compositor_redraw();
+}
 
 /* What the backend saw, guarded by shot_lock. */
 static pthread_mutex_t shot_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -270,6 +310,15 @@ int main(void)
     wait_pixel( "pointer fill", 701, 502, 0xffffff );
     wine_nx_compositor_cursor( 700, 500, 0 );
     wait_pixel( "pointer hidden", 701, 502, 0x000000 );
+
+    /* The floating keyboard goes over the windows, takes a new picture when
+     * it changes, and leaves them as they were when it goes. */
+    show_keyboard( 1, 0x00aabbcc );
+    wait_pixel( "keyboard over a window", 130, 130, 0xaabbcc );
+    show_keyboard( 1, 0x00445566 );
+    wait_pixel( "keyboard redrawn", 130, 130, 0x445566 );
+    show_keyboard( 0, 0 );
+    wait_pixel( "keyboard gone", 130, 130, 0xff0000 );
 
     /* Suspended: the screen is given up at once, and nothing is drawn until the
      * resume, which brings the changes made meanwhile. */

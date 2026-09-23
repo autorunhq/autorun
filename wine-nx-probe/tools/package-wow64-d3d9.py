@@ -73,7 +73,7 @@ Choose C:\\pe32-d3d9.exe in the launcher. It opens a Direct3D 9 device on the
 whole screen, clears through red, green and blue for a second each with a white
 triangle in the lower left, and reads every frame back from the GPU before
 showing it, so a blank screen cannot pass. Expect [D3D9 TEST] PASS and
-exit_code=0x0000002a in wine-nx-runtime.log; a failure reports which step and
+exit_code=0x0000002a in autorun_runtime.log; a failure reports which step and
 the HRESULT it returned.
 
 The adapter, driver and shader-model lines say what wined3d reports over Mesa,

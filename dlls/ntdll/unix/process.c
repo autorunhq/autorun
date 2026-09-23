@@ -989,6 +989,13 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         extern void wine_nx_box64_trace_exit( const I386_CONTEXT * ) __attribute__((weak));
         if (wine_nx_box64_trace_exit) wine_nx_box64_trace_exit( get_cpu_area( IMAGE_FILE_MACHINE_I386 ) );
         horizon_registry_flush();
+        {
+            /* The runtime wants it for a program it ran for itself (the
+             * components setup). */
+            extern unsigned int wine_nx_program_exit_code __attribute__((weak));
+
+            if (&wine_nx_program_exit_code) wine_nx_program_exit_code = exit_code;
+        }
         if (&wine_nx_runtime_trace)
         {
             char buf[96];

@@ -26,6 +26,8 @@ enum nx_box64_option_id
     NX_BOX64_SEP,
     NX_BOX64_WEAKBARRIER,
     NX_BOX64_X87DOUBLE,
+    NX_BOX64_PURGE,
+    NX_BOX64_PURGE_AGE,
     NX_BOX64_OPTION_COUNT
 };
 
@@ -91,6 +93,12 @@ static const struct nx_box64_option nx_box64_options[NX_BOX64_OPTION_COUNT] =
     { NX_BOX64_X87DOUBLE, "BOX64_DYNAREC_X87DOUBLE",
       "Controls when x87 values use double precision instead of the faster float path.",
       1, 0, 3, { 0, 1, 2 }, { "0 - Automatic", "1 - Double", "2 - Honor control" } },
+    { NX_BOX64_PURGE, "BOX64_DYNAREC_PURGE",
+      "Once code memory is full, lets translated code the game has not run for a while give its room back, so new code is translated instead of interpreted. Costs a little on every block; for games that run out of code memory, as on a 32-bit address space.",
+      1, 0, 2, { 0, 1 }, { "0 - Off", "1 - On" } },
+    { NX_BOX64_PURGE_AGE, "BOX64_DYNAREC_PURGE_AGE",
+      "How long translated code has to go unused before a purge may take it back, in 10 ms ticks.",
+      1, 1000, 4, { 500, 1000, 3000, 6000 }, { "5 s", "10 s", "30 s", "60 s" } },
 };
 
 static inline const struct nx_box64_option *nx_box64_option_find( const char *name )

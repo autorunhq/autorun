@@ -696,6 +696,49 @@ static BOOL wine_nx_cursor_pos( POINT *pos )
     return !status;
 }
 
+/* One key, down or up, with a real scan code the way wine_nx_send_keys
+ * derives it - so DirectInput's keyboard state buffer and GetAsyncKeyState
+ * see it, not only whatever WM_CHAR a message loop's TranslateMessage makes
+ * of it. */
+static void wine_nx_send_vk( HKL layout, BYTE vk, BOOL up )
+{
+    INPUT input = {0};
+    UINT scan = NtUserMapVirtualKeyEx( vk, MAPVK_VK_TO_VSC_EX, layout );
+
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = scan & 0xff;
+    input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+    if ((scan & 0xff00) == 0xe000) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    NtUserSendHardwareInput( 0, 0, &input, 0 );
+}
+
+/* The floating keyboard (wine-nx-probe/source/osk.c) queues the keys pressed
+ * on it, each due at its time; they go to whichever window has focus, as the
+ * controller's do. */
+extern int wine_nx_osk_next_key( unsigned long long now_ns, unsigned short *vk, int *up ) __attribute__((weak));
+extern unsigned long long wine_nx_osk_clock( void ) __attribute__((weak));
+extern void wine_nx_keyboard_open( void ) __attribute__((weak));
+
+static BOOL wine_nx_send_keyboard_keys( void )
+{
+    unsigned long long now;
+    unsigned short vk;
+    HKL layout = 0;
+    BOOL sent = FALSE;
+    int up;
+
+    if (!&wine_nx_osk_next_key || !&wine_nx_osk_clock) return FALSE;
+    now = wine_nx_osk_clock();
+    while (wine_nx_osk_next_key( now, &vk, &up ))
+    {
+        if (!sent) layout = NtUserGetKeyboardLayout( 0 );
+        wine_nx_send_vk( layout, vk, up );
+        sent = TRUE;
+    }
+    return sent;
+}
+
 /* Whether to draw the arrow, from the cursor the program set and its show
  * count. Until a program sets a cursor there is none and the arrow is shown; a
  * program that later sets none, over a cursor it draws itself, hides it, and
@@ -774,6 +817,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     else if (moved) nxdrv_trace_hot( "[NXINPUT] move x=%d y=%d buttons=%x", x, y, buttons, 0 );
     last_buttons = buttons;
     keys = wine_nx_send_keys();
+    keys |= wine_nx_send_keyboard_keys();
     wine_nx_update_cursor();
     wine_nx_fb_present();
     return moved || first || keys;
@@ -789,6 +833,20 @@ void wine_nx_drv_SetCursor( HWND hwnd, HCURSOR cursor )
     (void)hwnd;
     (void)cursor;
     wine_nx_update_cursor();
+}
+
+/**********************************************************************
+ *           wine_nx_drv_ShowSoftwareKeyboard
+ *
+ * Shows the floating keyboard; what is typed on it goes to whichever window
+ * has focus, so hwnd is not needed.
+ */
+BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND hwnd )
+{
+    (void)hwnd;
+    if (!&wine_nx_keyboard_open) return FALSE;
+    wine_nx_keyboard_open();
+    return TRUE;
 }
 
 /**********************************************************************

@@ -137,6 +137,16 @@ function(wine_nx_add_box64_core target)
     # block dirty also flushes the caches, as every other rewrite does; a
     # stale fetch would run the NOP and return into changed code unchecked.
     string(PREPEND dynablock_source "void* DynarecMapWritableAddress(void* addr);\n")
+    # Translation is not free: the passes that decide how large a block will be
+    # run before it asks the arenas for room. Once the last code memory object
+    # is full every entry into untranslated code translated it again, threw the
+    # work away and interpreted it -- the main thread of The Sims 2 spent all
+    # of its time in the translator. A block that already exists is still
+    # returned; only new ones are refused, and those are interpreted.
+    wine_nx_box64_patch(dynablock_source
+        "        return block;\n    }\n\n    #ifndef WIN32"
+        "        return block;\n    }\n    {\n        extern int wine_nx_box64_code_room(void);\n        if(!wine_nx_box64_code_room())\n            return NULL;\n    }\n\n    #ifndef WIN32"
+        "no translation without room for the block")
     # Every system call and unix call ends at a gate, which is on a page the
     # dynarec may not translate. Box64 finds that out only after taking the
     # global translator lock, twice per gate (LinkNext, then EmuRun), so every

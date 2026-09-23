@@ -154,6 +154,59 @@ static void put_code( unsigned char *memory, ULONG offset, const unsigned char *
     wine_nx_box64_invalidate( BASE + offset, size, 0 );
 #endif
 }
+#ifdef WINE_NX_BOX64_DYNAREC
+/* Purge: 512 small functions, each its own block, called by two drivers of
+ * 256 calls each, with translated code held to a fraction of what they need.
+ * Translation goes on only if blocks no longer entered give their room back,
+ * and every sum stays right whether a function was translated, purged or
+ * translated again. */
+#define PURGE_FUNCS   0x9000u
+#define PURGE_COUNT   512u
+#define PURGE_DRIVERS 0xa000u
+#define PURGE_DRIVER  0x600u
+static ULONG purge_expected( unsigned int group )
+{
+    ULONG sum = 0;
+    unsigned int i;
+
+    for (i = group * (PURGE_COUNT / 2); i < (group + 1) * (PURGE_COUNT / 2); i++) sum += i + 1;
+    return sum;
+}
+static void put_purge_program( unsigned char *memory )
+{
+    unsigned int i, group;
+
+    for (i = 0; i < PURGE_COUNT; i++)
+    {
+        unsigned char *fn = memory + PURGE_FUNCS + i * 8;
+        ULONG value = i + 1;
+
+        fn[0] = 0x05;                        /* add eax, value */
+        memcpy( fn + 1, &value, 4 );
+        fn[5] = 0xc3;                        /* ret */
+        fn[6] = fn[7] = 0xcc;
+    }
+    for (group = 0; group < 2; group++)
+    {
+        unsigned char *code = memory + PURGE_DRIVERS + group * PURGE_DRIVER;
+        ULONG at = BASE + PURGE_DRIVERS + group * PURGE_DRIVER;
+
+        *code++ = 0x31; *code++ = 0xc0;      /* xor eax, eax */
+        at += 2;
+        for (i = group * (PURGE_COUNT / 2); i < (group + 1) * (PURGE_COUNT / 2); i++)
+        {
+            LONG rel = (LONG)(BASE + PURGE_FUNCS + i * 8) - (LONG)(at + 5);
+
+            *code++ = 0xe8;                  /* call function i */
+            memcpy( code, &rel, 4 );
+            code += 4;
+            at += 5;
+        }
+        memcpy( code, (const unsigned char[]){ 0xba,0x20,0x80,0,0x10, 0xff,0xe2 }, 7 );
+    }
+    wine_nx_box64_invalidate( BASE + PURGE_FUNCS, PURGE_DRIVERS + 2 * PURGE_DRIVER - PURGE_FUNCS, 0 );
+}
+#endif
 static void init_context( I386_CONTEXT *ctx, ULONG pc, ULONG sp )
 {
     XMM_SAVE_AREA32 fx = {0};
@@ -876,6 +929,49 @@ int main(void)
     }
     printf( "Native operand/decoder fault recovery: %d faults, subsequent atomic execution passed\n",
             native_faults );
+#ifdef WINE_NX_BOX64_DYNAREC
+    {
+        extern void wine_nx_box64_test_purge( unsigned int age, size_t headroom, unsigned long long quarantine_ns );
+        extern unsigned int wine_nx_box64_purges, wine_nx_box64_purged_blocks;
+        extern unsigned long long wine_nx_box64_quarantine_ns;
+        extern uint64_t wine_nx_box64_dynarec_bytes;
+        static const unsigned int order[] = { 0, 1, 0, 1, 1, 0 };
+        unsigned int round, before;
+
+        put_purge_program( memory );
+        /* 48 KB for what one driver's 256 blocks need several times over. */
+        wine_nx_box64_test_purge( 10, 48 * 1024, 0 );
+        for (round = 0; round < sizeof(order) / sizeof(order[0]); round++)
+        {
+            init_context( &context, BASE + PURGE_DRIVERS + order[round] * PURGE_DRIVER, BASE + 0x6000 );
+            assert( !wine_nx_box64_run( &context, 0, &f.gates, &host, &f, BASE + 0x8020, 1000000, &executed ) );
+            if (context.Eax != purge_expected( order[round] ))
+                printf( "FAIL purge round %u: eax=%u, expected %u\n", round, (unsigned)context.Eax,
+                        (unsigned)purge_expected( order[round] ) );
+            assert( context.Eax == purge_expected( order[round] ) );
+        }
+        printf( "Purge: %u passes gave back %u blocks; %llu bytes of code held\n", wine_nx_box64_purges,
+                wine_nx_box64_purged_blocks, (unsigned long long)wine_nx_box64_dynarec_bytes );
+        assert( wine_nx_box64_purges > 0 && wine_nx_box64_purged_blocks > 0 );
+
+        /* With a quarantine, a purged block's memory is not reused for a while:
+         * the sums are still right, and room comes back once it is over. */
+        before = wine_nx_box64_purged_blocks;
+        wine_nx_box64_quarantine_ns = 20000000;  /* 20 ms */
+        for (round = 0; round < sizeof(order) / sizeof(order[0]); round++)
+        {
+            init_context( &context, BASE + PURGE_DRIVERS + order[round] * PURGE_DRIVER, BASE + 0x6000 );
+            assert( !wine_nx_box64_run( &context, 0, &f.gates, &host, &f, BASE + 0x8020, 1000000, &executed ) );
+            assert( context.Eax == purge_expected( order[round] ) );
+#ifndef __SWITCH__
+            usleep( 30000 );
+#endif
+        }
+        assert( wine_nx_box64_purged_blocks > before );
+        printf( "Purge with a 20 ms quarantine: %u more blocks, every sum right\n",
+                wine_nx_box64_purged_blocks - before );
+    }
+#endif
     assert( release_guest( memory ) == 0 );
 #ifndef __SWITCH__
     assert( !sigaction( SIGSEGV, &previous_segv, NULL ) );

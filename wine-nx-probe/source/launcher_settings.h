@@ -189,6 +189,8 @@ struct launcher_settings
     int lsfg_enabled;
     int lsfg_performance;
     int lsfg_flow;
+    int upscaling;
+    int upscaling_sharpness;
     /* Whether the program's own keys apply over the shared ones: -1 they do
      * when it has a file of them, which is what a card written before this
      * setting existed means; 0 Autorun's keys alone, the file kept for when it
@@ -196,7 +198,12 @@ struct launcher_settings
     int own_controls;
 };
 
-enum { LAUNCHER_FRAME_LIMIT_COUNT = 8, LAUNCHER_HUD_COUNT = 4 };
+enum {
+    LAUNCHER_FRAME_LIMIT_COUNT = 8,
+    LAUNCHER_HUD_COUNT = 4,
+    LAUNCHER_UPSCALING_COUNT = 3,
+    LAUNCHER_SHARPNESS_COUNT = 6
+};
 static const int launcher_frame_limits[] = { 0, 30, 40, 45, 60, 75, 90, 120 };
 static const char *const launcher_frame_limit_labels[] =
     { "Off", "30", "40", "45", "60", "75", "90", "120" };
@@ -205,6 +212,10 @@ static const char *const launcher_hud_values[] =
     { "0", "fps", "api,fps,frametimes", "version,api,devinfo,fps,memory,frametimes,compiler" };
 static const char *const launcher_lsfg_flow_labels[] = { "12.5%", "25%", "50%" };
 static const char *const launcher_lsfg_flow_values[] = { "0.125", "0.25", "0.5" };
+static const char *const launcher_upscaling_labels[] = { "Off (Bilinear)", "FSR 1.0", "Integer" };
+static const char *const launcher_upscaling_values[] = { "off", "fsr", "integer" };
+static const char *const launcher_sharpness_labels[] = { "0%", "20%", "40%", "60%", "80%", "100%" };
+static const float launcher_sharpness_values[] = { 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
 
 static inline int launcher_dxvk_config( const struct launcher_settings *settings, char *out, size_t size )
 {
@@ -230,6 +241,25 @@ static inline int launcher_dxvk_config( const struct launcher_settings *settings
                               launcher_frame_limits[settings->frame_limit] );
         if (extra < 0 || (size_t)extra >= size - length) return 0;
     }
+    return 1;
+}
+
+/* The dxvk.conf beside the program goes after the launcher's lines. Without
+ * DXVK_CONFIG_FILE that is the one file DXVK reads, games are set up with one,
+ * and a later line wins over an earlier one and over DXVK's own profile for the
+ * game. Naming only the launcher's file dropped The Sims 2's: DXVK's profile
+ * then reported 2 GB of video memory on a 1.5 GB heap, which the game filled
+ * in five seconds. Returns 0 when both do not fit. */
+static inline int launcher_dxvk_config_add( char *out, size_t size, const char *game, size_t game_size )
+{
+    size_t length = strlen( out );
+
+    if (!game_size) return 1;
+    if (length + game_size + 2 > size) return 0;
+    memcpy( out + length, game, game_size );
+    length += game_size;
+    if (out[length - 1] != '\n') out[length++] = '\n';
+    out[length] = 0;
     return 1;
 }
 
@@ -373,6 +403,22 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     if (launcher_kv_get( kv, "lsfg-flow", value, sizeof(value) ))
         for (int i = 0; i < 3; i++)
             if (!strcasecmp( value, launcher_lsfg_flow_values[i] )) settings->lsfg_flow = i;
+    settings->upscaling = 0;
+    if (launcher_kv_get( kv, "upscaling", value, sizeof(value) ) ||
+        launcher_kv_get( kv, "upscale", value, sizeof(value) ))
+    {
+        for (int i = 0; i < LAUNCHER_UPSCALING_COUNT; i++)
+            if (!strcasecmp( value, launcher_upscaling_values[i] )) settings->upscaling = i;
+        if (!strcasecmp( value, "1" )) settings->upscaling = 1;
+        else if (!strcasecmp( value, "2" )) settings->upscaling = 2;
+    }
+    settings->upscaling_sharpness = 2;
+    if (launcher_kv_get( kv, "upscaling-sharpness", value, sizeof(value) ) ||
+        launcher_kv_get( kv, "sharpness", value, sizeof(value) ))
+    {
+        for (int i = 0; i < LAUNCHER_SHARPNESS_COUNT; i++)
+            if (!strcasecmp( value, launcher_sharpness_labels[i] )) settings->upscaling_sharpness = i;
+    }
 }
 
 /* Store settings, leaving out what matches the global settings. */
@@ -382,7 +428,9 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
 
     if (settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
-        settings->lsfg_flow < 0 || settings->lsfg_flow >= 3) return 0;
+        settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
+        settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
+        settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT) return 0;
     return launcher_kv_set( kv, "title", settings->title[0] ? settings->title : NULL ) &&
            launcher_kv_set( kv, "hidden", settings->hidden ? "1" : NULL ) &&
            launcher_kv_set( kv, "verbose", states[settings->verbose + 1] ) &&
@@ -404,6 +452,10 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "lsfg-performance", settings->lsfg_performance ? NULL : "0" ) &&
            launcher_kv_set( kv, "lsfg-flow", settings->lsfg_flow == 1 ? NULL :
                             launcher_lsfg_flow_values[settings->lsfg_flow] ) &&
+           launcher_kv_set( kv, "upscaling", settings->upscaling ?
+                            launcher_upscaling_values[settings->upscaling] : NULL ) &&
+           launcher_kv_set( kv, "upscaling-sharpness", settings->upscaling == 1 && settings->upscaling_sharpness != 2 ?
+                            launcher_sharpness_labels[settings->upscaling_sharpness] : NULL ) &&
            launcher_kv_set( kv, "own-controls", states[settings->own_controls + 1] );
 }
 

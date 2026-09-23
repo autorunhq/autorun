@@ -1685,6 +1685,7 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
+    ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
@@ -1852,6 +1853,7 @@ static int prepare_program_graphics( struct launcher *l, struct program *p )
     }
     return 1;
 }
+
 
 static int start_program( struct launcher *l, struct program *p, char *target, size_t size )
 {
@@ -2278,14 +2280,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
 
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
-                 "Writes Wine's traces to wine-nx-runtime.log, which slows the program down. "
+                 "Writes Wine's traces to autorun_runtime.log, which slows the program down. "
                  "Global follows the setting in Settings (X on the library)." );
         row->adjustable = 1;
         snprintf( row->value, sizeof(row->value), "%s",
                   state_text( p->settings.verbose, l->options->verbose, "On", "Off", buffer, sizeof(buffer) ) );
 
         ADD_ROW( ROW_PROFILE, SECTION_DIAGNOSTICS, "Profiler",
-                 "Samples where every thread spends its time and writes [PROF] lines to wine-nx-runtime.log." );
+                 "Samples where every thread spends its time and writes [PROF] lines to autorun_runtime.log." );
         row->adjustable = 1;
         snprintf( row->value, sizeof(row->value), "%s",
                   state_text( p->settings.profile, l->options->profile, "On", "Off", buffer, sizeof(buffer) ) );
@@ -2341,6 +2343,22 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             row->kind = UI_ROW_SWITCH;
             row->on = p->settings.vsync;
             snprintf( row->value, sizeof(row->value), "%s", p->settings.vsync ? "Enabled" : "Disabled" );
+
+            ADD_ROW( ROW_UPSCALING, SECTION_GRAPHICS, "Upscaling",
+                     "How a Vulkan or DXVK game drawing fewer pixels than the screen is enlarged. FSR 1.0 is "
+                     "AMD's edge-aware upscaler with sharpening. Integer enlarges by whole steps with square "
+                     "pixels for pixel art, leaving wider black bars." );
+            row->kind = UI_ROW_DROPDOWN;
+            snprintf( row->value, sizeof(row->value), "%s", launcher_upscaling_labels[p->settings.upscaling] );
+
+            if (p->settings.upscaling == 1)
+            {
+                ADD_ROW( ROW_UPSCALING_SHARPNESS, SECTION_GRAPHICS, "FSR Sharpness",
+                         "How strongly FSR's second pass (RCAS) sharpens the enlarged picture. 0% leaves it "
+                         "as the first pass drew it." );
+                row->kind = UI_ROW_DROPDOWN;
+                snprintf( row->value, sizeof(row->value), "%s", launcher_sharpness_labels[p->settings.upscaling_sharpness] );
+            }
         }
 
 #ifdef WINE_NX_LSFG
@@ -2634,6 +2652,40 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
         }
 
+        case ROW_UPSCALING:
+            if (action == UI_ACTION_RESET) p->settings.upscaling = 0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                struct ui_row items[LAUNCHER_UPSCALING_COUNT] = {0};
+                int selected;
+
+                for (i = 0; i < LAUNCHER_UPSCALING_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s", launcher_upscaling_labels[i] );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_UPSCALING_COUNT, p->settings.upscaling );
+                if (selected < 0) break;
+                p->settings.upscaling = selected;
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_UPSCALING_SHARPNESS:
+            if (action == UI_ACTION_RESET) p->settings.upscaling_sharpness = 2;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                struct ui_row items[LAUNCHER_SHARPNESS_COUNT] = {0};
+                int selected;
+
+                for (i = 0; i < LAUNCHER_SHARPNESS_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s", launcher_sharpness_labels[i] );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_SHARPNESS_COUNT, p->settings.upscaling_sharpness );
+                if (selected < 0) break;
+                p->settings.upscaling_sharpness = selected;
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+
 #ifdef WINE_NX_LSFG
         case ROW_LSFG:
         case ROW_LSFG_PERFORMANCE:
@@ -2745,7 +2797,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
     SET_CONTROLS, SET_STEAMGRIDDB,
     SET_UPDATE, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
@@ -3172,6 +3224,7 @@ static void settings_menu( struct launcher *l )
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
             [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_CONTROLS] = SET_SECTION_DEFAULTS,
+            [SET_SWKBD] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
@@ -3210,7 +3263,7 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_VERBOSE].value, sizeof(rows[0].value), "%s", on_off[!!l->options->verbose] );
         rows[SET_VERBOSE].kind = UI_ROW_SWITCH;
         rows[SET_VERBOSE].on = !!l->options->verbose;
-        rows[SET_VERBOSE].help = "Wine's traces go to wine-nx-runtime.log for every program without its own setting.";
+        rows[SET_VERBOSE].help = "Wine's traces go to autorun_runtime.log for every program without its own setting.";
         snprintf( rows[SET_PROFILE].label, sizeof(rows[0].label), "Profiler" );
         snprintf( rows[SET_PROFILE].value, sizeof(rows[0].value), "%s", on_off[!!l->options->profile] );
         rows[SET_PROFILE].kind = UI_ROW_SWITCH;
@@ -3278,6 +3331,12 @@ static void settings_menu( struct launcher *l )
             rows[SET_SWAP_REMOVE].help = "Delete only Autorun's prototype swap files. Games and settings are untouched.";
         }
 #endif
+        snprintf( rows[SET_SWKBD].label, sizeof(rows[0].label), "On-screen keyboard" );
+        snprintf( rows[SET_SWKBD].value, sizeof(rows[0].value), "%s", on_off[!!l->options->swkbd_auto] );
+        rows[SET_SWKBD].kind = UI_ROW_SWITCH;
+        rows[SET_SWKBD].on = !!l->options->swkbd_auto;
+        rows[SET_SWKBD].help = "Opens by itself when a text field takes focus. Off leaves it to Minus + the "
+                               "right stick click, which opens it in any program.";
         snprintf( rows[SET_CREDITS].label, sizeof(rows[0].label), "Credits" );
         rows[SET_CREDITS].kind = UI_ROW_ACTION;
         rows[SET_CREDITS].help = "People and projects behind Autorun.";
@@ -3387,6 +3446,7 @@ static void settings_menu( struct launcher *l )
             break;
 #endif
 
+        case SET_SWKBD: l->options->swkbd_auto = !l->options->swkbd_auto; break;
         case SET_CREDITS:
             credits_screen( l );
             ui_start_screen( ui );
@@ -3693,6 +3753,26 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
             }
         }
     }
+}
+
+/* A program started from the file browser and left out of the library: a
+ * setup, a patch, a tool. It runs with the settings a new game would have,
+ * or its own if it already has a file of them. */
+static int run_once( struct launcher *l, char *target, size_t size )
+{
+    struct program program;
+    char path[512];
+    int index;
+
+    if (!file_browser_pick( l, path, sizeof(path) )) return 0;
+    launcher_log( "[LAUNCHER] Run once: %s", path );
+    if ((index = find_program( l, path )) >= 0) return start_program( l, &l->programs[index], target, size );
+    if (!describe_program( l, &program, path ))
+    {
+        ui_message( &l->ui, "Run a program once", "Autorun cannot run this executable." );
+        return 0;
+    }
+    return start_program( l, &program, target, size );
 }
 
 static int add_game( struct launcher *l )
@@ -4042,11 +4122,16 @@ static int run_library( struct launcher *l, char *target, size_t size )
                 break;
             case UI_PLUS:
             {
-                static const char *const items[] = { "Add game", "Exit Autorun" };
-                int chosen = ui_menu( ui, "Autorun", items, 2, 0 );
+                static const char *const items[] = { "Add game", "Run a program once", "Exit Autorun" };
+                int chosen = ui_menu( ui, "Autorun", items, 3, 0 );
 
                 ui_start_screen( ui );
                 if (chosen == 1)
+                {
+                    if (run_once( l, target, size )) return 1;
+                    ui_start_screen( ui );
+                }
+                else if (chosen == 2)
                 {
                     if (ui_confirm( ui, "Exit Autorun", "Close Autorun and go back to the Homebrew Menu?",
                                     "Exit" )) return 0;

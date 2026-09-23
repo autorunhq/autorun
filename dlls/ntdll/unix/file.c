@@ -6927,6 +6927,7 @@ static NTSTATUS cancel_async_file_read( HANDLE handle, IO_STATUS_BLOCK *io )
 extern unsigned long long horizon_interrupt_time(void);
 unsigned int wine_nx_file_reads;
 unsigned long long wine_nx_file_read_100ns;
+unsigned long long wine_nx_file_read_bytes;
 #endif
 
 /******************************************************************************
@@ -7131,6 +7132,7 @@ err:
             __atomic_add_fetch( &wine_nx_file_reads, 1, __ATOMIC_RELAXED );
             __atomic_add_fetch( &wine_nx_file_read_100ns, horizon_interrupt_time() - wine_nx_read_start,
                                 __ATOMIC_RELAXED );
+            __atomic_add_fetch( &wine_nx_file_read_bytes, (unsigned long long)total, __ATOMIC_RELAXED );
             if (&wine_nx_runtime_trace && &wine_nx_runtime_verbose && wine_nx_runtime_verbose &&
                 __atomic_fetch_add( &read_traces, 1, __ATOMIC_RELAXED ) < 256)
             {

@@ -16,6 +16,8 @@ int padIsConnected(PadState *pad) { (void)pad; return mock_connected; }
 HidAnalogStickState padGetStickPos(PadState *pad, int index) { (void)pad; return mock_sticks[index]; }
 u64 padGetButtons(PadState *pad) { (void)pad; return mock_buttons; }
 u64 armGetSystemTick(void) { return mock_tick; }
+static int mock_keyboard;
+int wine_nx_osk_visible( void ) { return mock_keyboard; }
 
 int main(void)
 {
@@ -76,6 +78,13 @@ int main(void)
         assert(state.connected && state.state.Gamepad.wButtons == XINPUT_GAMEPAD_A);
         assert(state.state.Gamepad.bRightTrigger == 255 && state.state.Gamepad.sThumbLX == 123);
         assert(wine_nx_xinput_last_poll == mock_tick);
+        /* The floating keyboard has the controller while it is up: still
+         * there, nothing held. */
+        mock_keyboard = 1;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(state.connected && !state.state.Gamepad.wButtons && !state.state.Gamepad.bRightTrigger &&
+               !state.state.Gamepad.sThumbLX);
+        mock_keyboard = 0;
         wine_nx_xinput_unix_funcs[nx_xinput_set_state](&vibration);
         assert(vibration.connected);
         state.index = 1;
@@ -84,6 +93,6 @@ int main(void)
         assert(!state.connected);
     }
 
-    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer and layout passed" );
+    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer, layout and the floating keyboard passed" );
     return 0;
 }
