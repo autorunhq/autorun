@@ -35,6 +35,12 @@
 #include "std_stream_lines.h"
 #include "thread_profile.h"
 #include "dxvk_releases.h"
+#ifdef WINE_NX_SWAP_POC
+#include "swap_file.h"
+#include "horizon_swap.h"
+static struct swap_file game_swap;
+static int game_swap_open;
+#endif
 #ifdef WINE_NX_FEX
 #include "fex_jit.h"
 int wine_nx_fex_active;
@@ -77,7 +83,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_DIR  RUNTIME_DIR "/config"
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
-#ifdef WINE_NX_FEX
+#ifdef WINE_NX_SWAP_POC
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2615"
+#elif defined(WINE_NX_FEX)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
@@ -1340,6 +1348,10 @@ static void runtime_report_interpreter(void)
             horizon_memory_pool_stats( pool_stats, sizeof(pool_stats) );
             log_line( "%s", pool_stats );
             wine_nx_thread_report();
+#ifdef WINE_NX_SWAP_POC
+            horizon_swap_report();
+            horizon_swap_native_report();
+#endif
         }
         return;
     }
@@ -3153,6 +3165,13 @@ static int return_to_launcher( void )
 #endif
     socketExit();
     stop_log_flusher();
+#ifdef WINE_NX_SWAP_POC
+    if (game_swap_open)
+    {
+        horizon_swap_report();
+        horizon_swap_configure( NULL );
+    }
+#endif
     {
         /* Wine's code mappings outlive its threads; the loader must not find them. */
         extern void horizon_release_code_mappings( unsigned int *released, unsigned int *failed )
@@ -3169,6 +3188,13 @@ static int return_to_launcher( void )
      * pages the loader itself lent out before this program started. */
     release_lent_memory();
     clear_heap_attributes();
+#ifdef WINE_NX_SWAP_POC
+    if (game_swap_open)
+    {
+        swap_file_close( &game_swap );
+        game_swap_open = 0;
+    }
+#endif
     {
         int mine = 0, left = memory_left_behind_ex( 1, &mine );
 
@@ -3377,6 +3403,10 @@ int main( int argc, char **argv )
     int low_window_available;
     USHORT target_machine;
     int sd_cache = wine_nx_sd_cache_install();  /* before any file on the card is opened */
+
+#ifdef WINE_NX_SWAP_POC
+    if (wine_nx_fex_exception_attach()) return 1;
+#endif
 
     log_main_thread = pthread_self();
     log_main_thread_set = 1;
@@ -3772,6 +3802,29 @@ int main( int argc, char **argv )
         {
             log_line( "[FAIL] AMD64 requires the 39-bit forwarder; current address space %p-%p", start, end );
             park_forever();
+        }
+    }
+#endif
+#ifdef WINE_NX_SWAP_POC
+    {
+        struct launcher_kv kv;
+        if (launcher_kv_load( &kv, RUNTIME_DIR "/launcher.txt" ) &&
+            launcher_kv_get_int( &kv, "swap-in-game", 0 ))
+        {
+            unsigned int size = launcher_kv_get_int( &kv, "swap-poc-mb", 0 );
+            u64 bits = 0;
+            svcGetInfo( &bits, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0 );
+            if (bits < (UINT64_C(1) << 36) || swap_file_open( &game_swap, RUNTIME_DIR "/swap-poc", size ))
+            {
+                log_line( "[SWAP-GAME] startup failed: validate the SD files using the 39-bit forwarder (errno=%d fs=0x%x)",
+                          errno, game_swap.store.fs_error );
+                return return_to_launcher();
+            }
+            struct horizon_swap_storage storage = { &game_swap, swap_file_save, swap_file_load,
+                                                    swap_file_discard, game_swap.store.size };
+            horizon_swap_configure( &storage );
+            game_swap_open = 1;
+            log_line( "[SWAP-GAME] enabled capacity=%uMiB reserve=128MiB", size );
         }
     }
 #endif

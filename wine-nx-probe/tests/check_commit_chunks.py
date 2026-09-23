@@ -37,18 +37,24 @@ typedef int BOOL;
 #define TRUE 1
 #define FALSE 0
 #define min(a,b) ((a) < (b) ? (a) : (b))
+#define max(a,b) ((a) > (b) ? (a) : (b))
 #define horizon_trace(...) ((void)0)
+#define HORIZON_POOL_PAGE 4096
+#define HORIZON_POOL_ARENA ((size_t)2 * 1048576)
 
 enum horizon_section_state { SECTION_NONE, SECTION_ALIASED, SECTION_HOLE, SECTION_ANCHOR, SECTION_NATIVE };
+struct horizon_backing { struct { int detached; } swap; int swap_excluded; };
+static struct horizon_backing backing;
 struct horizon_mapping
 {
     void *addr;
     size_t size;
     int prot;
-    void *backing;        /* any non-null value stands for mapped memory */
+    struct horizon_backing *backing;
     void *section;
     unsigned char section_state;
     void *reservation;    /* set while the range is only reserved */
+    int swap_managed, swap_excluded;
 };
 
 #define MAPS 64
@@ -77,8 +83,8 @@ static struct horizon_mapping *find_overlap_mapping( void *addr, size_t size )
 static struct horizon_mapping *add_map( char *addr, size_t size, int prot, void *reservation )
 {
     assert( map_count < MAPS );
-    maps[map_count] = (struct horizon_mapping){ addr, size, prot, reservation ? NULL : (void *)1,
-                                                NULL, SECTION_NONE, reservation };
+    maps[map_count] = (struct horizon_mapping){ .addr = addr, .size = size, .prot = prot,
+        .backing = reservation ? NULL : &backing, .reservation = reservation };
     return &maps[map_count++];
 }
 
@@ -130,10 +136,35 @@ static int protect_code_mapping( struct horizon_mapping *m, int prot )
 static int protect_section_range( struct horizon_mapping *m, char *start, size_t size, int prot )
 { (void)m; (void)start; (void)size; (void)prot; abort(); }
 static int protect_reservation_mapping( struct horizon_mapping *m, char *start, size_t size, int prot )
-{ (void)m; (void)start; (void)size; (void)prot; abort(); }
+{
+    assert( start == m->addr && size == m->size );
+    m->prot = prot;
+    return 0;
+}
+#ifdef WINE_NX_SWAP_POC
+static int swap_active;
+static int horizon_swap_enabled(void) { return swap_active; }
+static int swap_restore_locked( struct horizon_backing *b ) { (void)b; abort(); }
+#endif
+
+static size_t anonymous_max, anonymous_bytes, allocation_limit = SIZE_MAX, rollback_size;
+static unsigned int anonymous_maps, fail_after;
+static int map_backing_at( void *addr, size_t size, int prot, int fd, off_t offset, int flags, int map_errno )
+{
+    (void)addr; (void)prot; (void)fd; (void)offset; (void)flags; (void)map_errno;
+    if (fail_after && anonymous_maps == fail_after) { errno = EIO; return -1; }
+    if (size > allocation_limit) { errno = ENOMEM; return -1; }
+    anonymous_max = max( anonymous_max, size );
+    anonymous_bytes += size;
+    anonymous_maps++;
+    return 0;
+}
+static int unmap_range_locked( void *addr, size_t size )
+{ (void)addr; rollback_size = size; return 0; }
 '''
 
 fixture += function('static int protect_range_locked(')
+fixture += function('static int map_anonymous_backings(')
 
 fixture += r'''
 #define RW (PROT_READ | PROT_WRITE)
@@ -148,6 +179,14 @@ static int reserved_at( char *addr )
 {
     struct horizon_mapping *m = find_overlap_mapping( addr, 1 );
     return m && m->reservation != NULL;
+}
+
+static void anonymous_chunks( int prot, int flags, size_t expected )
+{
+    anonymous_max = anonymous_bytes = anonymous_maps = 0;
+    assert( !map_anonymous_backings( (void *)0x60000000, 16 * 1048576, prot, flags, EINVAL ) );
+    assert( anonymous_max == expected && anonymous_bytes == 16 * 1048576 );
+    if (allocation_limit == SIZE_MAX) assert( anonymous_maps == 16 * 1048576 / expected );
 }
 
 int main(void)
@@ -199,8 +238,38 @@ int main(void)
     assert( !protect_range_locked( base + 0x35000, 0x1000, PROT_NONE ) );
     assert( !maps_made && reserved_at( base + 0x35000 ) );
 
+#ifdef WINE_NX_SWAP_POC
+    swap_active = 1;
+    anonymous_chunks( RW, MAP_PRIVATE, HORIZON_POOL_ARENA );
+    /* Executable and shared allocations cannot be paged out. */
+    anonymous_chunks( RW | PROT_EXEC, MAP_PRIVATE, 16 * 1048576 );
+    anonymous_chunks( PROT_READ | PROT_EXEC, MAP_PRIVATE, 16 * 1048576 );
+    anonymous_chunks( RW, MAP_SHARED, 16 * 1048576 );
+    for (unsigned int kind = 0; kind < 4; kind++)
+    {
+        int prot = kind == 2 ? RW | PROT_EXEC : RW;
+        struct horizon_mapping *m;
+        map_count = maps_made = 0;
+        m = add_map( base, 16 * 1048576, PROT_NONE, (void *)1 );
+        m->swap_managed = kind != 0;
+        m->swap_excluded = kind == 1;
+        assert( !protect_range_locked( base, 16 * 1048576, prot ) );
+        if (kind == 3) assert( !maps_made && reserved_at( base ) && prot_at( base ) == RW );
+        else assert( maps_made == 1 && last_map_size == 16 * 1048576 && prot_at( base ) == prot );
+    }
+    swap_active = 0;
+#endif
+    anonymous_chunks( RW, MAP_PRIVATE, 16 * 1048576 );
+    anonymous_chunks( RW | PROT_EXEC, MAP_PRIVATE, 16 * 1048576 );
+    allocation_limit = 4 * 1048576;
+    anonymous_chunks( RW | PROT_EXEC, MAP_PRIVATE, allocation_limit );
+    fail_after = 1;
+    anonymous_maps = rollback_size = 0;
+    assert( map_anonymous_backings( base, 16 * 1048576, RW | PROT_EXEC, MAP_PRIVATE, EINVAL ) == -1 );
+    assert( errno == EIO && rollback_size == allocation_limit );
+
     puts( "Commit chunks: one mapping a chunk, uncommitted pages inaccessible, "
-          "small reservations in one piece and no commit for PROT_NONE passed" );
+          "pageable limits, native allocation sizes and rollback passed" );
     return 0;
 }
 '''
@@ -209,7 +278,8 @@ with tempfile.TemporaryDirectory() as tmp:
     c = Path(tmp) / 'commit_chunks.c'
     c.write_text(fixture)
     exe = Path(tmp) / 'commit_chunks'
-    subprocess.run(['cc', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    '-I' + str(root / 'dlls/ntdll/unix'), str(c), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+    for defines in ([], ['-DWINE_NX_SWAP_POC']):
+        subprocess.run(['cc', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer', *defines,
+                        '-I' + str(root / 'dlls/ntdll/unix'), str(c), '-o', str(exe)], check=True)
+        subprocess.run([str(exe)], check=True)

@@ -103,11 +103,7 @@ static inline void *horizon_pages_alloc( struct horizon_page_pool *pool, size_t 
     return NULL;
 }
 
-/* Any size, for memory that may become the source of an alias: arena pages
- * when they fit, otherwise whole blocks of its own. Only a failure to get
- * those falls back to pages the general heap shares with everything else,
- * counted apart because an alias then unmaps whatever shares their block. */
-static inline void *horizon_pages_alloc_any( struct horizon_page_pool *pool, size_t size )
+static inline void *horizon_pages_alloc_dedicated( struct horizon_page_pool *pool, size_t size )
 {
     void *ptr;
 
@@ -117,7 +113,15 @@ static inline void *horizon_pages_alloc_any( struct horizon_page_pool *pool, siz
     ptr = aligned_alloc( HORIZON_POOL_ARENA,
                          ((size + HORIZON_POOL_ARENA - 1) / HORIZON_POOL_ARENA) * HORIZON_POOL_ARENA );
     if (ptr) pool->blocks++;
-    else if ((ptr = aligned_alloc( HORIZON_POOL_PAGE, size ))) pool->shared++;
+    return ptr;
+}
+
+/* The legacy fallback may share a kernel block with unrelated heap allocations. */
+static inline void *horizon_pages_alloc_any( struct horizon_page_pool *pool, size_t size )
+{
+    void *ptr = horizon_pages_alloc_dedicated( pool, size );
+    if (!ptr && size && !(size % HORIZON_POOL_PAGE) && (ptr = aligned_alloc( HORIZON_POOL_PAGE, size )))
+        pool->shared++;
     return ptr;
 }
 
@@ -152,5 +156,22 @@ static inline int horizon_pages_free( struct horizon_page_pool *pool, void *ptr,
         }
     }
     return 0;
+}
+
+static inline size_t horizon_pages_trim( struct horizon_page_pool *pool )
+{
+    unsigned int i;
+    size_t freed = 0;
+    for (i = 0; i < HORIZON_POOL_ARENAS; i++)
+    {
+        struct horizon_page_arena *arena = &pool->arenas[i];
+        if (!arena->memory || arena->free_pages != HORIZON_POOL_PAGES) continue;
+        free( arena->memory );
+        memset( arena, 0, sizeof(*arena) );
+        pool->active_arenas--;
+        pool->reclaims++;
+        freed += HORIZON_POOL_ARENA;
+    }
+    return freed;
 }
 #endif

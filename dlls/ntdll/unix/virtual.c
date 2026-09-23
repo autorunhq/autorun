@@ -37,6 +37,9 @@
 #include <sys/stat.h>
 #ifdef __SWITCH__
 # include "horizon_mman.h"
+# ifdef WINE_NX_SWAP_POC
+#  include "horizon_swap.h"
+# endif
 #else
 # include <sys/mman.h>
 #endif
@@ -122,15 +125,23 @@ static inline char *horizon_strchrnul( const char *str, int ch )
 #define strchrnul horizon_strchrnul
 static inline int horizon_mlock( const void *addr, size_t len )
 {
+#ifdef WINE_NX_SWAP_POC
+    return horizon_swap_lock( addr, len );
+#else
     (void)addr;
     (void)len;
     return 0;
+#endif
 }
 static inline int horizon_munlock( const void *addr, size_t len )
 {
+#ifdef WINE_NX_SWAP_POC
+    return horizon_swap_unlock( addr, len );
+#else
     (void)addr;
     (void)len;
     return 0;
+#endif
 }
 #define mlock   horizon_mlock
 #define munlock horizon_munlock
@@ -5073,6 +5084,10 @@ TEB *virtual_alloc_first_teb(void)
 
     NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, is_win64 ? limit_2g - 1 : 0, &total,
                              MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+    horizon_swap_exclude( teb_block, total );
+    horizon_swap_exclude( user_shared_data, page_size );
+#endif
     teb_block_pos = 30;
     ptr = (char *)teb_block + 30 * block_size;
     data_size = 2 * block_size;
@@ -5131,6 +5146,9 @@ NTSTATUS virtual_alloc_teb( TEB **ret_teb )
             }
             teb_block = ptr;
             teb_block_pos = 32;
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+            horizon_swap_exclude( teb_block, total );
+#endif
         }
         ptr = ((char *)teb_block + --teb_block_pos * block_size);
 #ifdef __SWITCH__
@@ -5529,6 +5547,9 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
 #endif
     if (status != STATUS_SUCCESS) goto done;
 
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+    horizon_swap_exclude( view->base, view->size );
+#endif
 #ifdef VALGRIND_STACK_REGISTER
     VALGRIND_STACK_REGISTER( view->base, (char *)view->base + view->size );
 #endif
@@ -6555,6 +6576,15 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         set_arm64ec_range( base, size );
     }
 
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+    if (!status && (protect & PAGE_GUARD)) horizon_swap_exclude( view->base, view->size );
+    if (!status && (type & (MEM_RESERVE | MEM_COMMIT)) && !(type & MEM_WRITE_WATCH) && is_view_valloc( view ) &&
+        !(view->protect & (VPROT_SYSTEM | VPROT_WRITEWATCH | VPROT_GUARD)) &&
+        !(protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) &&
+        !(attributes & MEM_EXTENDED_PARAMETER_EC_CODE))
+        horizon_swap_track( base, size );
+#endif
+
     if (!status)
     {
         VIRTUAL_DEBUG_DUMP_VIEW( view );
@@ -7011,6 +7041,11 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
     else status = STATUS_INVALID_PARAMETER;
 
     if (!status) VIRTUAL_DEBUG_DUMP_VIEW( view );
+
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+    if (!status && (new_prot & PAGE_GUARD)) horizon_swap_exclude( view->base, view->size );
+    else if (!status && (new_prot & (PAGE_NOCACHE | PAGE_WRITECOMBINE))) horizon_swap_exclude( base, size );
+#endif
 
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
 

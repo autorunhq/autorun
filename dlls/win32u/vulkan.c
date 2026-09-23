@@ -38,6 +38,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
 
+#ifdef WINE_NX_SWAP_POC
+#include "../ntdll/unix/horizon_swap.h"
+#endif
+
 static PFN_vkGetDeviceProcAddr p_vkGetDeviceProcAddr;
 static PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
 static PFN_vkCreateInstance p_vkCreateInstance;
@@ -1430,6 +1434,14 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         }
     }
 
+#ifdef WINE_NX_SWAP_POC
+    size_t reclaim_budget = SIZE_MAX;
+    BOOL reclaim_host_memory = !import_win32 && !pointer_info && !mapping && !native_shared_request;
+    do
+    {
+        /* Let the driver trim its BO cache before reclaiming guest pages. */
+        if (reclaim_host_memory) horizon_swap_native_begin();
+#endif
     set_transient_client_handle(instance, (uintptr_t)&memory->obj.obj);
 #if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
     if (native_shared_request)
@@ -1438,6 +1450,12 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
     else
 #endif
         res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory );
+#ifdef WINE_NX_SWAP_POC
+        if (reclaim_host_memory) horizon_swap_native_end();
+    } while (res == VK_ERROR_OUT_OF_HOST_MEMORY && reclaim_host_memory &&
+             horizon_swap_native_reclaim( alloc_info->allocationSize, &reclaim_budget ));
+    if (res == VK_ERROR_OUT_OF_HOST_MEMORY) horizon_swap_native_failed( alloc_info->allocationSize );
+#endif
     if (res) goto failed;
 
     if (export_info)
@@ -1515,9 +1533,14 @@ failed:
     WARN( "Failed to allocate memory, res %d\n", res );
 #ifdef __SWITCH__
     if (nx_memory_log_failure())
+    {
         nx_vk_trace( "[NXVK] vkAllocateMemory of %llu bytes of memory type %u failed: %d%s",
                      (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, res,
                      mapping ? " (with an imported host mapping)" : "" );
+#ifdef WINE_NX_SWAP_POC
+        horizon_swap_native_report();
+#endif
+    }
 #endif
     if (host_device_memory) device->p_vkFreeMemory( device->host.device, host_device_memory, NULL );
     if (mapping)

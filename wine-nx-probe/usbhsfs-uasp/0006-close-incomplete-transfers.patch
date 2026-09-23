@@ -1,0 +1,77 @@
+diff --git a/source/usbhsfs_request.c b/source/usbhsfs_request.c
+index 3ccb1c2..5cc0e09 100644
+--- a/source/usbhsfs_request.c
++++ b/source/usbhsfs_request.c
+@@ -12,6 +12,7 @@
+ /* Function prototypes. */
+ 
+ static Result __usbHsEpSubmitRequest(UsbHsClientEpSession *usb_ep_session, void *buf, u32 size, u32 timeout_ms, u32 *xfer_size);
++extern void usbHsFsRequestTransferError(u32 endpoint, Result rc) __attribute__((weak));
+ 
+ void *usbHsFsRequestAllocateXferBuffer(void)
+ {
+@@ -374,6 +375,7 @@ end:
+ Result usbHsFsRequestEndpointDataXfer(UsbHsClientEpSession *usb_ep_session, void *buf, u32 size, u32 *xfer_size)
+ {
+     Result rc = 0;
++    bool pending = false;
+ 
+     Event *xfer_event = NULL;
+     u32 xfer_id = 0;
+@@ -409,10 +411,9 @@ Result usbHsFsRequestEndpointDataXfer(UsbHsClientEpSession *usb_ep_session, void
+         goto end;
+     }
+ 
+-    /* Wait until USB data transfer is complete. */
+-    /* TODO: find a way to properly cancel an async transfer. If left unhandled, this may trigger a fatal error within the usb sysmodule. */
++    pending = true;
+     rc = eventWait(xfer_event, USB_POSTBUFFER_TIMEOUT);
+-    if (R_SUCCEEDED(rc) || R_VALUE(rc) == KERNELRESULT(TimedOut)) eventClear(xfer_event);
++    if (R_SUCCEEDED(rc)) eventClear(xfer_event);
+ 
+     if (R_FAILED(rc))
+     {
+@@ -428,13 +429,20 @@ Result usbHsFsRequestEndpointDataXfer(UsbHsClientEpSession *usb_ep_session, void
+         goto end;
+     }
+ 
+-    if (report_count < 1)
++    if (report_count != 1 || report.xferId != xfer_id || report.id != 0)
+     {
+         USBHSFS_LOG_MSG("usbHsEpGetXferReport returned an invalid report count value! (%u).", report_count);
+         rc = MAKERESULT(Module_Libnx, LibnxError_BadInput);
+         goto end;
+     }
+ 
++    pending = false;
++    if (report.transferredSize > size)
++    {
++        rc = MAKERESULT(Module_Libnx, LibnxError_BadUsbCommsRead);
++        goto end;
++    }
++
+     /* Save transferred data size. */
+     *xfer_size = report.transferredSize;
+ 
+@@ -442,6 +450,13 @@ Result usbHsFsRequestEndpointDataXfer(UsbHsClientEpSession *usb_ep_session, void
+     rc = report.res;
+ 
+ end:
++    if (pending)
++    {
++        u32 endpoint = usb_ep_session->desc.bEndpointAddress;
++        /* Close before the transfer buffer can be reused. */
++        usbHsEpClose(usb_ep_session);
++        if (usbHsFsRequestTransferError) usbHsFsRequestTransferError(endpoint, rc);
++    }
+     return rc;
+ }
+ 
+@@ -463,6 +478,7 @@ Result usbHsFsRequestPostBuffer(UsbHsClientIfSession *usb_if_session, UsbHsClien
+ #endif
+ 
+     rc = usbHsFsRequestEndpointDataXfer(usb_ep_session, buf, size, xfer_size);
++    if (!serviceIsActive(&usb_ep_session->s)) goto end;
+     if (R_FAILED(rc))
+     {
+         USBHSFS_LOG_MSG("usbHsFsRequestEndpointDataXfer failed! (0x%X) (interface %d, endpoint 0x%02X).", rc, usb_if_session->ID, ep_addr);

@@ -808,6 +808,27 @@ target_compile_options(wine-nx-runtime PRIVATE
 target_include_directories(wine-nx-runtime PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES})
 
 target_sources(wine-nx-runtime PRIVATE source/horizon_virtmem.c source/low_window.c)
+
+option(WINE_NX_SWAP_POC "Build experimental SD-backed guest memory paging" OFF)
+if(WINE_NX_SWAP_POC)
+    if(NOT WINE_NX_FEX)
+        message(FATAL_ERROR "WINE_NX_SWAP_POC requires the per-thread FEX exception entry")
+    endif()
+    target_sources(wine-nx-runtime PRIVATE source/swap_store.c source/swap_file.c source/swap_native.c
+        source/swap_pager.c source/swap_poc.c source/launcher_swap.c)
+    target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_SWAP_POC)
+    foreach(target wine-horizon-real wine-virtual-real wine-system-real wine-win32u-real)
+        target_compile_definitions(${target} PRIVATE WINE_NX_SWAP_POC)
+    endforeach()
+    foreach(symbol threadCreate threadClose svcSendSyncRequest svcSendSyncRequestWithUserBuffer
+            svcReplyAndReceive svcReplyAndReceiveWithUserBuffer svcSendAsyncRequestWithUserBuffer
+            svcCreateTransferMemory nvioctlNvmap_Alloc nvMapCreate svcSetMemoryAttribute svcMapMemory
+            svcMapDeviceAddressSpace svcMapDeviceAddressSpaceByForce svcMapDeviceAddressSpaceAligned
+            svcWaitForAddress svcSignalToAddress svcArbitrateLock svcArbitrateUnlock
+            svcWaitProcessWideKeyAtomic svcSignalProcessWideKey _malloc_r _calloc_r _realloc_r _memalign_r)
+        target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=${symbol}")
+    endforeach()
+endif()
 target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
     -Wl,--wrap=svcSetThreadCoreMask
     -Wl,--wrap=virtmemFindAslr -Wl,--wrap=virtmemFindCodeMemory
@@ -908,7 +929,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_ui.c source/launcher_update.c source/steamgriddb.c source/dxvk_releases.c PROPERTIES
+set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_ui.c source/launcher_update.c source/launcher_swap.c source/steamgriddb.c source/dxvk_releases.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)

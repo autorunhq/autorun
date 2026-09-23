@@ -1,0 +1,7 @@
+#ifndef WINE_NX_LAUNCHER_SWAP_H
+#define WINE_NX_LAUNCHER_SWAP_H
+
+#include "launcher_ui.h"
+void launcher_swap_test( struct ui *ui, const char *directory, unsigned int megabytes );
+
+#endif

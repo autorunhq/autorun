@@ -66,6 +66,9 @@
 #include "horizon_keyboard.h"
 #include "horizon_mouse.h"
 #include "horizon_free_range.h"
+#ifdef WINE_NX_SWAP_POC
+#include "horizon_swap.h"
+#endif
 
 #include <errno.h>
 #include <dirent.h>
@@ -287,7 +290,11 @@ static void horizon_resume_exception( ThreadExceptionDump *ctx ) __attribute__((
 
 static void horizon_resume_exception( ThreadExceptionDump *ctx )
 {
+#ifdef WINE_NX_SWAP_POC
+    if (wine_nx_fex_continue_context && ((const unsigned int *)ctx)[3] == 0xfec0)
+#else
     if (horizon_fex_exception( ctx ))
+#endif
     {
         CONTEXT context;
         horizon_exception_context( ctx, &context );
@@ -3376,6 +3383,10 @@ struct horizon_backing
     int fd;
     off_t file_offset;
     BOOL write_back;
+#ifdef WINE_NX_SWAP_POC
+    struct horizon_swap_entry swap;
+    unsigned char swap_private, swap_managed, swap_excluded;
+#endif
 };
 
 /* What a mapping of a section with no file is (horizon_memfile.h). */
@@ -3400,6 +3411,9 @@ struct horizon_mapping
     void *anchor_source;              /* SECTION_ANCHOR: the pages it was mapped from */
     size_t section_offset;
     unsigned char section_state;
+#ifdef WINE_NX_SWAP_POC
+    unsigned char swap_unmapped, swap_managed, swap_excluded;
+#endif
     struct rb_entry entry;
 };
 
@@ -3441,6 +3455,20 @@ static struct horizon_mapping mapping_slots[8192];
 static struct horizon_object_pool backing_pool = { backing_slots, NULL, sizeof(backing_slots[0]), 4096, 0 };
 static struct horizon_object_pool mapping_pool = { mapping_slots, NULL, sizeof(mapping_slots[0]), 8192, 0 };
 static struct horizon_page_pool backing_pages;
+#ifdef WINE_NX_SWAP_POC
+#include "horizon_swap_index.h"
+static struct horizon_swap_storage swap_storage;
+static int swap_active;
+static uintptr_t swap_cursor;
+static struct horizon_swap_pin *swap_pins, *swap_locks;
+static struct horizon_swap_index swap_index;
+static unsigned long long swap_stored_bytes, swap_out_bytes, swap_in_bytes, swap_errors;
+static unsigned long long swap_out_ticks, swap_in_ticks, swap_max_restore_ticks;
+static int swap_last_error;
+static size_t swap_reclaim_locked( size_t size );
+static int swap_restore_locked( struct horizon_backing *backing );
+static int swap_resident_locked( const void *addr, size_t size );
+#endif
 /* Views of sections with no file (horizon_mmap_section), under mapping_mutex. */
 static unsigned long long section_view_maps, section_anchor_bytes;
 static unsigned int section_anchors, section_failures;
@@ -15574,6 +15602,11 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
 
 __thread int horizon_suspend_pending;
 
+#ifdef WINE_NX_SWAP_POC
+extern int wine_nx_swap_fault( uint64_t address, uint32_t esr ) __attribute__((weak));
+static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr );
+#endif
+
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -15582,6 +15615,16 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
     char buf[512];
 
 #if defined(__aarch64__)
+#ifdef WINE_NX_SWAP_POC
+    if (((const unsigned int *)ctx)[3] == 0xfec0 && horizon_swap_fault( ctx->far.x, ctx->esr ))
+        horizon_resume_exception( ctx );
+    if (wine_nx_swap_fault && wine_nx_fex_continue_context && wine_nx_swap_fault( ctx->far.x, ctx->esr ))
+    {
+        CONTEXT context;
+        horizon_exception_context( ctx, &context );
+        wine_nx_fex_continue_context( &context );
+    }
+#endif
     if (horizon_redirect_user_shared_data( ctx )) horizon_resume_exception( ctx );
     /* A translated RET returned natively into a block Box64 marked as possibly
      * changed, onto an undefined instruction: resume after the mark or at the
@@ -16074,7 +16117,7 @@ static void free_backing( struct horizon_backing *backing, BOOL write_back )
      * of their own: reading them back would fault, and handing them to another
      * allocation would leave that allocation faulting on a write until the
      * alias goes. Leak them instead; the trace says an unmap was missed. */
-    aliased = alias_source_range_live( backing->heap_addr, backing->size );
+    aliased = backing->heap_addr && alias_source_range_live( backing->heap_addr, backing->size );
     if (aliased)
     {
         horizon_trace( "[HMAP] backing %p size=0x%lx freed while still an alias source",
@@ -16086,6 +16129,13 @@ static void free_backing( struct horizon_backing *backing, BOOL write_back )
         write_fd_at( backing->fd, backing->heap_addr, backing->size, backing->file_offset );
     if (backing->code_reservation) remove_reservation( backing->code_reservation );
     if (backing->fd != -1) close( backing->fd );
+#ifdef WINE_NX_SWAP_POC
+    if (backing->swap.token)
+    {
+        swap_storage.discard( swap_storage.context, backing->swap.token, backing->size );
+        __atomic_sub_fetch( &swap_stored_bytes, backing->size, __ATOMIC_RELAXED );
+    }
+#endif
     if (!aliased && !horizon_pages_free( &backing_pages, backing->heap_addr, backing->size ))
         free( backing->heap_addr );
     horizon_object_free( &backing_pool, backing );
@@ -16124,6 +16174,13 @@ static struct horizon_mapping *alloc_mapping( void *addr, size_t size, struct ho
     mapping->prot = get_effective_horizon_prot( prot );
     mapping->backing = backing;
     mapping->reservation = reservation;
+#ifdef WINE_NX_SWAP_POC
+    if (backing)
+    {
+        mapping->swap_managed = backing->swap_managed;
+        mapping->swap_excluded = backing->swap_excluded;
+    }
+#endif
     if (backing) backing->refs++;
     return mapping;
 }
@@ -16289,6 +16346,389 @@ static int unmap_code_memory_range( void *addr, void *source, size_t size )
     return 0;
 }
 
+#ifdef WINE_NX_SWAP_POC
+static void swap_free_memory( void *context, void *memory )
+{
+    struct horizon_backing *backing = context;
+    if (!horizon_pages_free( &backing_pages, memory, backing->size )) free( memory );
+}
+
+static void *swap_alloc_memory( void *context, size_t size )
+{
+    void *memory = horizon_pages_alloc_dedicated( &backing_pages, size );
+    (void)context;
+    while (!memory && swap_reclaim_locked( size )) memory = horizon_pages_alloc_dedicated( &backing_pages, size );
+    return memory;
+}
+
+static int swap_map_memory( void *context, void *memory );
+
+static int swap_unmap_memory( void *context, void *memory )
+{
+    struct horizon_backing *backing = context;
+    struct horizon_mapping *first = find_overlap_mapping( backing->code_addr, backing->size );
+    struct rb_entry *entry;
+    int changed = 0;
+    for (entry = first ? &first->entry : NULL; entry; entry = rb_next( entry ))
+    {
+        struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
+        void *source = (char *)memory + mapping->source_offset;
+        Result rc;
+        if ((char *)mapping->addr >= (char *)backing->code_addr + backing->size) break;
+        if (mapping->backing != backing) continue;
+        rc = svcUnmapProcessCodeMemory( envGetOwnProcessHandle(), (u64)mapping->addr,
+                                       (u64)source, mapping->size );
+        if (R_FAILED(rc))
+        {
+            if (changed && swap_map_memory( backing, memory ))
+            {
+                backing->swap.detached = 1;
+                return -1;
+            }
+            errno = EBUSY;
+            return -1;
+        }
+        note_alias_source( source, mapping->addr, mapping->size, FALSE );
+        mapping->swap_unmapped = 1;
+        changed = 1;
+    }
+    return 0;
+}
+
+static int swap_map_memory( void *context, void *memory )
+{
+    struct horizon_backing *backing = context;
+    struct horizon_mapping *first = find_overlap_mapping( backing->code_addr, backing->size );
+    struct rb_entry *entry;
+    for (entry = first ? &first->entry : NULL; entry; entry = rb_next( entry ))
+    {
+        struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
+        void *source = (char *)memory + mapping->source_offset;
+        Result rc;
+        if ((char *)mapping->addr >= (char *)backing->code_addr + backing->size) break;
+        if (mapping->backing != backing || !mapping->swap_unmapped) continue;
+        if (mapping->swap_unmapped == 1)
+        {
+            rc = svcMapProcessCodeMemory( envGetOwnProcessHandle(), (u64)mapping->addr,
+                                         (u64)source, mapping->size );
+            if (R_FAILED(rc)) { errno = ENOMEM; return -1; }
+            note_alias_source( source, mapping->addr, mapping->size, TRUE );
+            mapping->swap_unmapped = 2;
+        }
+        rc = svcSetProcessMemoryPermission( envGetOwnProcessHandle(), (u64)mapping->addr,
+                                            mapping->size, get_horizon_perm( mapping->prot ) );
+        if (R_FAILED(rc)) { errno = EIO; return -1; }
+        mapping->swap_unmapped = 0;
+    }
+    return 0;
+}
+
+static const struct horizon_swap_ops swap_ops =
+{
+    swap_unmap_memory, swap_map_memory, swap_alloc_memory, swap_free_memory
+};
+
+void horizon_swap_configure( const struct horizon_swap_storage *storage )
+{
+    if (storage)
+    {
+        swap_storage = *storage;
+        __atomic_store_n( &swap_active, 1, __ATOMIC_RELEASE );
+    }
+    else __atomic_store_n( &swap_active, 0, __ATOMIC_RELEASE );
+}
+
+int horizon_swap_may_contain( const void *addr, size_t size )
+{
+    return __atomic_load_n( &swap_active, __ATOMIC_ACQUIRE ) &&
+           swap_index_contains( &swap_index, (uintptr_t)addr, size );
+}
+
+int horizon_swap_enabled(void)
+{
+    return __atomic_load_n( &swap_active, __ATOMIC_ACQUIRE );
+}
+
+static int swap_overlaps( const struct horizon_swap_pin *pin, uintptr_t start, size_t size )
+{
+    return (uintptr_t)pin->addr < start + size && start < (uintptr_t)pin->addr + pin->size;
+}
+
+static int swap_pinned_locked( void *addr, size_t size )
+{
+    struct horizon_swap_pin *pin;
+    for (pin = swap_pins; pin; pin = pin->next)
+        if (swap_overlaps( pin, (uintptr_t)addr, size )) return 1;
+    for (pin = swap_locks; pin; pin = pin->next)
+        if (swap_overlaps( pin, (uintptr_t)addr, size )) return 1;
+    return 0;
+}
+
+static size_t swap_reclaim_locked( size_t size )
+{
+    struct horizon_mapping *first;
+    struct rb_entry *entry;
+    size_t freed = 0;
+    unsigned int pass;
+    uintptr_t begin = swap_cursor;
+    if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return 0;
+    for (pass = 0; pass < 2 && freed < size; pass++)
+    {
+        first = pass || !begin ? NULL : find_overlap_mapping( (void *)begin, (UINT64_C(1) << 39) - begin );
+        entry = pass || !begin ? rb_head( mappings.root ) : first ? &first->entry : NULL;
+        for (; entry && freed < size; entry = rb_next( entry ))
+        {
+            struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
+            struct horizon_backing *backing = mapping->backing;
+            unsigned long long tick;
+            if (pass && (uintptr_t)mapping->addr >= begin) break;
+            swap_cursor = (uintptr_t)mapping->addr + mapping->size;
+            if (!mapping->swap_managed || !backing || mapping->swap_excluded ||
+                (mapping->prot & PROT_EXEC) || backing->swap_excluded || !backing->heap_addr ||
+                !backing->swap_private || backing->swap.detached || backing->swap.token ||
+                swap_pinned_locked( backing->code_addr, backing->size )) continue;
+            if (backing->size > swap_storage.capacity - __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED ))
+                continue;
+            tick = armGetSystemTick();
+            if (horizon_swap_out( &backing->swap, &backing->heap_addr, backing->size,
+                                  &swap_ops, backing, &swap_storage ))
+            {
+                if (errno == EBUSY) continue; /* Kernel IPC/device locks are authoritative. */
+                __atomic_add_fetch( &swap_errors, 1, __ATOMIC_RELAXED );
+                __atomic_store_n( &swap_last_error, errno, __ATOMIC_RELAXED );
+                goto done;
+            }
+            __atomic_add_fetch( &swap_out_ticks, armGetSystemTick() - tick, __ATOMIC_RELAXED );
+            freed += backing->size;
+            __atomic_add_fetch( &swap_stored_bytes, backing->size, __ATOMIC_RELAXED );
+            __atomic_add_fetch( &swap_out_bytes, backing->size, __ATOMIC_RELAXED );
+        }
+    }
+done:
+    if (freed) horizon_pages_trim( &backing_pages );
+    return freed;
+}
+
+static void swap_pressure_locked( size_t size )
+{
+    unsigned long long total, used, target = size + 128 * UINT64_C(1048576);
+    if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return;
+    horizon_get_memory_info( &total, &used );
+    if (total - used < target) swap_reclaim_locked( min( target - (total - used), 16 * UINT64_C(1048576) ) );
+}
+
+size_t horizon_swap_reclaim( size_t size )
+{
+    size_t freed;
+    if (!horizon_swap_enabled() || pthread_mutex_trylock( &mapping_mutex )) return 0;
+    size = min( size, 2 * UINT64_C(1048576) );
+    freed = horizon_pages_trim( &backing_pages );
+    if (freed < size) freed += swap_reclaim_locked( size - freed );
+    pthread_mutex_unlock( &mapping_mutex );
+    return freed;
+}
+
+static int swap_restore_locked( struct horizon_backing *backing )
+{
+    unsigned int token = backing->swap.token;
+    unsigned long long tick, elapsed, longest;
+    if (!backing->swap.detached) return 0;
+    tick = armGetSystemTick();
+    if (horizon_swap_in( &backing->swap, &backing->heap_addr, backing->size,
+                         &swap_ops, backing, &swap_storage ))
+    {
+        __atomic_add_fetch( &swap_errors, 1, __ATOMIC_RELAXED );
+        __atomic_store_n( &swap_last_error, errno, __ATOMIC_RELAXED );
+        return -1;
+    }
+    elapsed = armGetSystemTick() - tick;
+    __atomic_add_fetch( &swap_in_ticks, elapsed, __ATOMIC_RELAXED );
+    longest = __atomic_load_n( &swap_max_restore_ticks, __ATOMIC_RELAXED );
+    if (elapsed > longest) __atomic_store_n( &swap_max_restore_ticks, elapsed, __ATOMIC_RELAXED );
+    if (token)
+    {
+        __atomic_sub_fetch( &swap_stored_bytes, backing->size, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &swap_in_bytes, backing->size, __ATOMIC_RELAXED );
+    }
+    return 0;
+}
+
+void horizon_swap_track( void *addr, size_t size )
+{
+    char *cursor = addr, *end = cursor + size;
+    struct horizon_mapping *mapping;
+    if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return;
+    pthread_mutex_lock( &mapping_mutex );
+    while (cursor < end && (mapping = find_overlap_mapping( cursor, end - cursor )))
+    {
+        if (mapping->addr >= addr && (char *)mapping->addr + mapping->size <= end &&
+            !mapping->section && !mapping->swap_excluded && !(mapping->prot & PROT_EXEC) &&
+            (mapping->reservation || (mapping->backing && mapping->backing->swap_private &&
+                                     !mapping->backing->swap_excluded)))
+        {
+            if (swap_index_update( &swap_index, (uintptr_t)mapping->addr, mapping->size, 1 )) break;
+            mapping->swap_managed = 1;
+            if (mapping->backing) mapping->backing->swap_managed = 1;
+        }
+        cursor = (char *)mapping->addr + mapping->size;
+    }
+    pthread_mutex_unlock( &mapping_mutex );
+}
+
+int horizon_swap_exclude( const void *addr, size_t size )
+{
+    const char *cursor = addr, *end;
+    struct horizon_mapping *mapping;
+    int ret = 0;
+    if (size > UINTPTR_MAX - (uintptr_t)addr) { errno = EINVAL; return -1; }
+    end = cursor + size;
+    pthread_mutex_lock( &mapping_mutex );
+    while (cursor < end && (mapping = find_overlap_mapping( (void *)cursor, end - cursor )))
+    {
+        mapping->swap_excluded = 1;
+        if (mapping->backing)
+        {
+            mapping->backing->swap_excluded = 1;
+            if (swap_restore_locked( mapping->backing )) { ret = -1; break; }
+        }
+        cursor = (char *)mapping->addr + mapping->size;
+    }
+    if (!ret && horizon_swap_enabled()) ret = swap_resident_locked( addr, size );
+    if (!ret) swap_index_update( &swap_index, (uintptr_t)addr, size, 0 );
+    pthread_mutex_unlock( &mapping_mutex );
+    return ret;
+}
+
+int horizon_swap_pin_begin( struct horizon_swap_pin *pin, const void *addr, size_t size )
+{
+    int ret;
+    memset( pin, 0, sizeof(*pin) );
+    if (!horizon_swap_may_contain( addr, size )) return 0;
+    if (size > UINTPTR_MAX - (uintptr_t)addr) { errno = EINVAL; return -1; }
+    pthread_mutex_lock( &mapping_mutex );
+    pin->addr = addr;
+    pin->size = size;
+    pin->next = swap_pins;
+    swap_pins = pin;
+    ret = swap_resident_locked( addr, size );
+    if (ret) { swap_pins = pin->next; pin->size = 0; }
+    pthread_mutex_unlock( &mapping_mutex );
+    return ret;
+}
+
+void horizon_swap_pin_end( struct horizon_swap_pin *pin )
+{
+    struct horizon_swap_pin **link;
+    if (!pin->size) return;
+    pthread_mutex_lock( &mapping_mutex );
+    for (link = &swap_pins; *link != pin; link = &(*link)->next) {}
+    *link = pin->next;
+    pin->size = 0;
+    pthread_mutex_unlock( &mapping_mutex );
+}
+
+int horizon_swap_lock( const void *addr, size_t size )
+{
+    struct horizon_swap_pin *pin, **link;
+    uintptr_t start = (uintptr_t)addr, end;
+    if (!horizon_swap_may_contain( addr, size )) return 0;
+    if (size > UINTPTR_MAX - start) { errno = EINVAL; return -1; }
+    end = start + size;
+    if (!(pin = malloc( sizeof(*pin) ))) { errno = ENOMEM; return -1; }
+    if (horizon_swap_pin_begin( pin, addr, size )) { free( pin ); return -1; }
+    pthread_mutex_lock( &mapping_mutex );
+    for (link = &swap_pins; *link != pin; link = &(*link)->next) {}
+    *link = pin->next;
+    for (link = &swap_locks; *link; )
+    {
+        struct horizon_swap_pin *old = *link;
+        if ((uintptr_t)old->addr <= end && start <= (uintptr_t)old->addr + old->size)
+        {
+            start = min( start, (uintptr_t)old->addr );
+            end = max( end, (uintptr_t)old->addr + old->size );
+            *link = old->next;
+            free( old );
+            link = &swap_locks;
+        }
+        else link = &old->next;
+    }
+    pin->addr = (void *)start;
+    pin->size = end - start;
+    pin->next = swap_locks;
+    swap_locks = pin;
+    pthread_mutex_unlock( &mapping_mutex );
+    return 0;
+}
+
+static int swap_unlock_locked( const void *addr, size_t size )
+{
+    struct horizon_swap_pin **link, *right = NULL;
+    uintptr_t start = (uintptr_t)addr, end = start + size;
+    for (link = &swap_locks; *link; link = &(*link)->next)
+        if ((uintptr_t)(*link)->addr < start && end < (uintptr_t)(*link)->addr + (*link)->size)
+        {
+            if (!(right = malloc( sizeof(*right) )))
+            { errno = ENOMEM; return -1; }
+            break;
+        }
+    for (link = &swap_locks; *link; )
+    {
+        struct horizon_swap_pin *pin = *link;
+        uintptr_t a = (uintptr_t)pin->addr, b = a + pin->size;
+        if (a >= end || b <= start) { link = &pin->next; continue; }
+        if (a < start)
+        {
+            pin->size = start - a;
+            if (b > end)
+            {
+                *right = (struct horizon_swap_pin){ (void *)end, b - end, pin->next };
+                pin->next = right;
+                right = NULL;
+            }
+            link = &pin->next;
+        }
+        else if (b > end) { pin->addr = (void *)end; pin->size = b - end; link = &pin->next; }
+        else { *link = pin->next; free( pin ); }
+    }
+    free( right );
+    return 0;
+}
+
+int horizon_swap_unlock( const void *addr, size_t size )
+{
+    int ret;
+    if (!horizon_swap_may_contain( addr, size )) return 0;
+    if (size > UINTPTR_MAX - (uintptr_t)addr) { errno = EINVAL; return -1; }
+    pthread_mutex_lock( &mapping_mutex );
+    ret = swap_unlock_locked( addr, size );
+    pthread_mutex_unlock( &mapping_mutex );
+    return ret;
+}
+
+void horizon_swap_report(void)
+{
+    char line[256];
+    if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return;
+    snprintf( line, sizeof(line), "[SWAP-GAME] stored_kb=%llu out_kb=%llu in_kb=%llu out_ms=%llu restore_ms=%llu max_restore_ms=%llu failures=%llu errno=%d",
+              __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED ) >> 10,
+              __atomic_load_n( &swap_out_bytes, __ATOMIC_RELAXED ) >> 10,
+              __atomic_load_n( &swap_in_bytes, __ATOMIC_RELAXED ) >> 10,
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_out_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_in_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_max_restore_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              __atomic_load_n( &swap_errors, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_last_error, __ATOMIC_RELAXED ) );
+    wine_nx_runtime_trace( line );
+}
+
+void horizon_swap_get_memory_info( unsigned long long *total, unsigned long long *available )
+{
+    unsigned long long used = __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED );
+    *total = horizon_swap_enabled() ? swap_storage.capacity : 0;
+    *available = *total > used ? *total - used : 0;
+}
+#endif
+
 static struct horizon_backing *create_backing_locked( size_t size, int prot, int fd, off_t offset, int flags )
 {
     struct horizon_backing *backing;
@@ -16303,7 +16743,15 @@ static struct horizon_backing *create_backing_locked( size_t size, int prot, int
 
     backing->fd = -1;
     backing->size = size;
-    backing->heap_addr = horizon_pages_alloc_any( &backing_pages, size );
+#ifdef WINE_NX_SWAP_POC
+    swap_pressure_locked( size );
+    if (horizon_swap_enabled()) backing->heap_addr = swap_alloc_memory( backing, size );
+    else
+#endif
+        backing->heap_addr = horizon_pages_alloc_any( &backing_pages, size );
+#ifdef WINE_NX_SWAP_POC
+    backing->swap_private = fd == -1 && (flags & MAP_PRIVATE) && !(prot & PROT_EXEC);
+#endif
     if (!backing->heap_addr)
     {
         horizon_object_free( &backing_pool, backing );
@@ -16453,6 +16901,16 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
         list_add_mapping( mapping );
         goto failed;
     }
+#ifdef WINE_NX_SWAP_POC
+    if (left) { left->swap_managed = mapping->swap_managed; left->swap_excluded = mapping->swap_excluded; }
+    if (right) { right->swap_managed = mapping->swap_managed; right->swap_excluded = mapping->swap_excluded; }
+    if (map_range)
+    {
+        struct horizon_mapping *mapped = find_overlap_mapping( start, size );
+        mapped->swap_managed = mapped->backing->swap_managed = mapping->swap_managed;
+        mapped->swap_excluded = mapped->backing->swap_excluded = mapping->swap_excluded;
+    }
+#endif
     if (left) list_add_mapping( left );
     if (right) list_add_mapping( right );
     remove_reservation( mapping->reservation );
@@ -16520,6 +16978,12 @@ static int protect_reservation_mapping( struct horizon_mapping *mapping, char *s
         !(right = reservation_mapping_piece( end, mapping_end - end, mapping->prot )))
         goto failed;
 
+#ifdef WINE_NX_SWAP_POC
+    if (left) { left->swap_managed = mapping->swap_managed; left->swap_excluded = mapping->swap_excluded; }
+    if (right) { right->swap_managed = mapping->swap_managed; right->swap_excluded = mapping->swap_excluded; }
+    middle->swap_managed = mapping->swap_managed;
+    middle->swap_excluded = mapping->swap_excluded;
+#endif
     list_remove_mapping( mapping );
     if (left) list_add_mapping( left );
     list_add_mapping( middle );
@@ -16555,7 +17019,8 @@ static int split_backing_mapping( struct horizon_mapping *mapping, char *start, 
     char *mapping_end = mapping_start + mapping->size;
     char *end = start + size;
     size_t offset = start - mapping_start;
-    void *source = (char *)mapping->backing->heap_addr + mapping->source_offset + offset;
+    void *source = mapping->backing->heap_addr ?
+                   (char *)mapping->backing->heap_addr + mapping->source_offset + offset : NULL;
     struct horizon_mapping *left = NULL;
     struct horizon_mapping *right = NULL;
 
@@ -16576,7 +17041,13 @@ static int split_backing_mapping( struct horizon_mapping *mapping, char *start, 
         return -1;
     }
 
+#ifdef WINE_NX_SWAP_POC
+    if (left) left->swap_unmapped = mapping->swap_unmapped;
+    if (right) right->swap_unmapped = mapping->swap_unmapped;
+    if (mapping->swap_unmapped != 1 && unmap_code_memory_range( start, source, size ))
+#else
     if (unmap_code_memory_range( start, source, size ))
+#endif
     {
         if (left)
         {
@@ -16629,6 +17100,11 @@ static struct horizon_mapping *split_backing_mapping_metadata( struct horizon_ma
                                  NULL, mapping->prot )))
         goto failed;
 
+#ifdef WINE_NX_SWAP_POC
+    if (left) left->swap_unmapped = mapping->swap_unmapped;
+    if (right) right->swap_unmapped = mapping->swap_unmapped;
+    middle->swap_unmapped = mapping->swap_unmapped;
+#endif
     list_remove_mapping( mapping );
     if (left) list_add_mapping( left );
     if (right) list_add_mapping( right );
@@ -16697,6 +17173,9 @@ void horizon_release_code_mappings( unsigned int *released, unsigned int *failed
         struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
         void *source;
 
+#ifdef WINE_NX_SWAP_POC
+        if (mapping->swap_unmapped == 1) continue;
+#endif
         if (mapping->backing && mapping->backing->heap_addr)
             source = (char *)mapping->backing->heap_addr + mapping->source_offset;
         else if (mapping->anchor_source) source = mapping->anchor_source;  /* a section's anchor */
@@ -17221,6 +17700,13 @@ static int unmap_range_locked( void *addr, size_t size )
     char *end = start + size;
     struct horizon_mapping *mapping;
 
+#ifdef WINE_NX_SWAP_POC
+    struct horizon_swap_pin *pin;
+    for (pin = swap_pins; pin; pin = pin->next)
+        if (swap_overlaps( pin, (uintptr_t)addr, size )) { errno = EBUSY; return -1; }
+    if (swap_unlock_locked( addr, size )) return -1;
+#endif
+
     while ((mapping = find_overlap_mapping( start, end - start )))
     {
         char *mapping_start = mapping->addr;
@@ -17256,6 +17742,10 @@ static int map_anonymous_backings( void *addr, size_t size, int prot, int flags,
     while (cursor < end)
     {
         size_t chunk = min( (size_t)(end - cursor), HORIZON_POOL_ARENA * 8 );
+#ifdef WINE_NX_SWAP_POC
+        if (horizon_swap_enabled() && (flags & MAP_PRIVATE) && !(prot & PROT_EXEC))
+            chunk = min( chunk, HORIZON_POOL_ARENA );
+#endif
 
         while (map_backing_at( cursor, chunk, prot, -1, 0, flags, map_errno ))
         {
@@ -17314,6 +17804,15 @@ static int protect_range_locked( void *addr, size_t size, int prot )
         }
         else if (mapping->reservation)
         {
+#ifdef WINE_NX_SWAP_POC
+            if (mapping->swap_managed && !mapping->swap_excluded && !(prot & PROT_EXEC) &&
+                protect_size >= HORIZON_POOL_ARENA)
+            {
+                if (protect_reservation_mapping( mapping, start, protect_size, prot )) return -1;
+                start = protect_end;
+                continue;
+            }
+#endif
             if (mapping->prot != PROT_NONE)
             {
                 if (mapping->prot != prot &&
@@ -17339,6 +17838,15 @@ static int protect_range_locked( void *addr, size_t size, int prot )
 
                 if (chunk_start < mapping_start) chunk_start = mapping_start;
                 if (chunk_end > mapping_end || chunk_end < protect_end) chunk_end = mapping_end;
+#ifdef WINE_NX_SWAP_POC
+                if (mapping->swap_managed && !mapping->swap_excluded && !(prot & PROT_EXEC) &&
+                    (size_t)(chunk_end - chunk_start) > HORIZON_POOL_ARENA)
+                {
+                    chunk_end = chunk_start + HORIZON_POOL_ARENA;
+                    protect_end = min( protect_end, chunk_end );
+                    protect_size = protect_end - start;
+                }
+#endif
 
                 horizon_trace( "[HMAP] commit reservation=%p/0x%lx range=%p/0x%lx chunk=%p/0x%lx prot=0x%x",
                                mapping->addr, (unsigned long)mapping->size, start,
@@ -17357,6 +17865,20 @@ static int protect_range_locked( void *addr, size_t size, int prot )
         }
         else
         {
+#ifdef WINE_NX_SWAP_POC
+            if (mapping->backing->swap.detached)
+            {
+                if (prot == PROT_NONE)
+                {
+                    if (!(mapping = split_backing_mapping_metadata( mapping, start, protect_size ))) return -1;
+                    mapping->prot = PROT_NONE;
+                    start = protect_end;
+                    continue;
+                }
+                if (swap_restore_locked( mapping->backing )) return -1;
+            }
+            if (prot & PROT_EXEC) mapping->backing->swap_excluded = 1;
+#endif
             if (!(mapping = split_backing_mapping_metadata( mapping, start, protect_size ))) return -1;
             if (protect_code_mapping( mapping, prot )) return -1;
         }
@@ -17437,11 +17959,57 @@ static int add_lazy_mapping_locked( void *start, size_t size, int prot )
     return 0;
 }
 
+#ifdef WINE_NX_SWAP_POC
+static int swap_resident_locked( const void *addr, size_t size )
+{
+    char *cursor = (char *)addr, *end = cursor + size;
+    struct horizon_mapping *mapping;
+    while (cursor < end && (mapping = find_overlap_mapping( cursor, end - cursor )))
+    {
+        char *next = (char *)mapping->addr + mapping->size;
+        if (mapping->backing && swap_restore_locked( mapping->backing )) return -1;
+        if (mapping->reservation && mapping->swap_managed && mapping->prot != PROT_NONE)
+        {
+            char *start = max( cursor, (char *)mapping->addr );
+            char *chunk = (char *)((uintptr_t)start & ~(HORIZON_LAZY_MAPPING_CHUNK - 1));
+            char *stop = min( next, chunk + HORIZON_LAZY_MAPPING_CHUNK );
+            chunk = max( chunk, (char *)mapping->addr );
+            if (replace_reservation_mapping( mapping, chunk, stop - chunk, mapping->prot, TRUE )) return -1;
+            next = stop;
+        }
+        cursor = next;
+    }
+    return 0;
+}
+
+static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr )
+{
+    unsigned int ec = esr >> 26;
+    struct horizon_mapping *mapping;
+    int saved_errno = errno, needed;
+    BOOL handled = FALSE;
+    if ((ec != 0x24 && ec != 0x25) || (esr & (1u << 10)) ||
+        (((esr & 0x3f) & ~3u) != 0x04 && ((esr & 0x3f) & ~3u) != 0x0c) ||
+        !horizon_swap_may_contain( (void *)(uintptr_t)address, 1 )) return FALSE;
+    needed = (esr & 0x40) ? PROT_WRITE : PROT_READ;
+    pthread_mutex_lock( &mapping_mutex );
+    mapping = find_overlap_mapping( (void *)(uintptr_t)address, 1 );
+    if (mapping && mapping->swap_managed && (mapping->prot & needed) && mapping->backing)
+    {
+        /* Another faulting thread may already have restored this backing. */
+        handled = !swap_restore_locked( mapping->backing );
+    }
+    pthread_mutex_unlock( &mapping_mutex );
+    errno = saved_errno;
+    return handled;
+}
+#endif
+
 static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int esr )
 {
     static unsigned int failures;
     unsigned int exception_class = esr >> 26;
-    int needed;
+    int needed, saved_errno = errno;
     struct horizon_mapping *mapping;
     char *chunk_start, *chunk_end, *mapping_start, *mapping_end;
     BOOL handled = FALSE;
@@ -17459,6 +18027,10 @@ static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int 
     if (!mapping->reservation)
     {
         handled = mapping->backing != NULL;
+#ifdef WINE_NX_SWAP_POC
+        if (handled && mapping->backing->swap.detached)
+            handled = !swap_restore_locked( mapping->backing );
+#endif
         goto done;
     }
     if (mapping->prot == PROT_NONE) goto done;
@@ -17489,6 +18061,7 @@ static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int 
 
 done:
     pthread_mutex_unlock( &mapping_mutex );
+    if (handled) errno = saved_errno;
     return handled;
 }
 

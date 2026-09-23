@@ -97,9 +97,17 @@ int main(void)
         j++;
         assert(pool.arenas[i].free_pages == HORIZON_POOL_PAGES);
         for (unsigned int page = 0; page < HORIZON_POOL_PAGES; page++) assert(!pool.arenas[i].used[page]);
-        free(pool.arenas[i].memory);
     }
     assert(j == HORIZON_POOL_RETAIN_EMPTY);
+    whole[0] = horizon_pages_alloc(&pool, HORIZON_POOL_PAGE);
+    assert(whole[0]);
+    memset(whole[0], 0xa5, HORIZON_POOL_PAGE);
+    assert(horizon_pages_trim(&pool) == (HORIZON_POOL_RETAIN_EMPTY - 1) * HORIZON_POOL_ARENA);
+    assert(pool.active_arenas == 1);
+    for (i = 0; i < HORIZON_POOL_PAGE; i++) assert(((unsigned char *)whole[0])[i] == 0xa5);
+    assert(horizon_pages_free(&pool, whole[0], HORIZON_POOL_PAGE));
+    assert(horizon_pages_trim(&pool) == HORIZON_POOL_ARENA);
+    assert(!pool.active_arenas);
     puts("Mapping pools: descriptor fallback, bounded idle arenas, reclamation, alignment and 20000 fragmented allocation cycles passed");
     return 0;
 }
