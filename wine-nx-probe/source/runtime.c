@@ -84,7 +84,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2618"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2621"
 #elif defined(WINE_NX_FEX)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
 #elif defined(WINE_NX_AMD64)
@@ -1740,30 +1740,35 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
     char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "";
-    int dxvk_path = launcher_dxvk_version_directory( main_image_info.Machine, runtime_dxvk_version,
-                                                     dxvk_dir, sizeof(dxvk_dir) );
+    struct dxvk_version dxvk = {0}, vkd3d = {0};
+
+    if (runtime_dxvk)
+    {
+        dxvk_resolve_version( RUNTIME_DIR, main_image_info.Machine, runtime_dxvk_version, &dxvk );
+        vkd3d_resolve_version( RUNTIME_DIR, main_image_info.Machine, runtime_vkd3d_version, &vkd3d );
+    }
 
     if (!target_to_dos_path( target, dos_path, dos_path_size )) return NULL;
     fex_environment_size = runtime_fex_environment( target, fex_environment, sizeof(fex_environment) );
     dos_dirname( dos_path, current_dir, sizeof(current_dir) );
     snprintf( nt_path, sizeof(nt_path), "\\??\\%s", dos_path );
-    if (runtime_dxvk &&
-        launcher_vkd3d_version_directory( main_image_info.Machine, runtime_vkd3d_version,
-                                          vkd3d_dir, sizeof(vkd3d_dir) ) &&
-        vkd3d_release_installed( RUNTIME_DIR, main_image_info.Machine, runtime_vkd3d_version ))
+    if (vkd3d.installed &&
+        launcher_vkd3d_version_directory( main_image_info.Machine, vkd3d.bundled ? "" : vkd3d.version,
+                                          vkd3d_dir, sizeof(vkd3d_dir) ))
     {
         snprintf( vkd3d_path, sizeof(vkd3d_path), "C:\\%s;", vkd3d_dir );
         log_line( "[VKD3D] payload C:\\%s; application-local DLLs take priority", vkd3d_dir );
     }
     /* Keep native DXVK DLLs separate for each guest architecture. */
-    if (runtime_dxvk && dxvk_path &&
-        dxvk_release_installed( RUNTIME_DIR, main_image_info.Machine, runtime_dxvk_version ))
+    if (dxvk.installed &&
+        launcher_dxvk_version_directory( main_image_info.Machine, dxvk.bundled ? "" : dxvk.version,
+                                         dxvk_dir, sizeof(dxvk_dir) ))
     {
         snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
-        if (runtime_dxvk_version[0])
+        if (dxvk.version[0])
             log_line( "[DXVK] %s payload C:\\%s (version %s); application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir,
-                      runtime_dxvk_version );
+                      dxvk.version );
         else
             log_line( "[DXVK] %s bundled payload C:\\%s; application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir );

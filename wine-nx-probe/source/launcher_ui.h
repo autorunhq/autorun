@@ -251,10 +251,9 @@ struct ui_list
 {
     int selection, top;
     int started;
-    /* How far the rows have slid, eased toward top * ROW_HEIGHT so the list
-     * scrolls under the highlight instead of jumping a row at a time. */
-    float scroll;
-    int started_scroll;
+    float scroll, scroll_from;
+    int scroll_target, started_scroll;
+    Uint32 scroll_since;
     /* ui_settings_run: whether the sections or the rows have the focus, and
      * whether the row in focus is being changed rather than moved between. */
     int in_rows;
@@ -290,5 +289,7 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
                                 const struct ui_row *rows, int count, int can_reset, int *group );
 int ui_settings_dropdown( struct ui *ui, const struct ui_list *anchor,
                           const struct ui_row *rows, int count, int selection );
+int ui_settings_dropdown_live( struct ui *ui, const struct ui_list *anchor, const struct ui_row *rows,
+                               int selection, int (*update)( void *data, int *selection ), void *data );
 
 #endif

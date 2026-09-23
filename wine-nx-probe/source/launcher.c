@@ -43,6 +43,7 @@
 #include "launcher_settings.h"
 #include "launcher_ui.h"
 #include "launcher_update.h"
+#include "launcher_graphics.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
@@ -153,6 +154,7 @@ struct launcher
     struct wine_nx_launcher_options *options;
     struct ui ui;
     struct launcher_update *update;
+    struct launcher_graphics *graphics;
 
     struct program programs[LAUNCHER_MAX_ENTRIES];
     int program_count;
@@ -689,7 +691,13 @@ static void save_program_settings( struct launcher *l, struct program *p )
 
 static void enable_program_dxvk( struct launcher *l, struct program *p )
 {
+    struct dxvk_version dxvk, vkd3d;
+
     if (!l->options->dxvk_on_add || !launcher_dxvk_directory( p->machine )) return;
+    dxvk_resolve_version( l->options->runtime_dir, p->machine, p->settings.dxvk_version, &dxvk );
+    vkd3d_resolve_version( l->options->runtime_dir, p->machine, p->settings.vkd3d_version, &vkd3d );
+    if (dxvk.installed) strcpy( p->settings.dxvk_version, dxvk.version );
+    if (vkd3d.installed) strcpy( p->settings.vkd3d_version, vkd3d.version );
     p->settings.dxvk = 1;
     save_program_settings( l, p );
 }
@@ -1146,21 +1154,19 @@ static void draw_library( struct launcher *l )
 {
     /* A does what is in focus: with the header in focus it is that, not the game
      * the selection is remembered on. */
-    struct ui_hint hints[] = { { UI_ZL, NULL }, { UI_ZR, "Page" },
-                              { UI_A, "Play" }, { UI_Y, "Options" }, { UI_PLUS, "Menu" } };
+    struct ui_hint hints[] = { { UI_A, "Play" }, { UI_Y, "Options" }, { UI_PLUS, "Menu" } };
     /* With nothing to act on, only the menu means anything. */
     static const struct ui_hint empty_hints[] = { { UI_PLUS, "Menu" } };
     struct ui *ui = &l->ui;
     struct grid g;
-    int shown, i, first_hint;
+    int shown, i;
 
-    if (l->zone == ZONE_HEADER) hints[2].label = "Select";
+    if (l->zone == ZONE_HEADER) hints[0].label = "Select";
 
     draw_backdrop( l, l->visible_count ? l->visible[l->selection] : -1 );
     ui_fill( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 0, 0, 0, 120 } );
     grid_layout( l, &g );
     shown = g.columns * g.rows;
-    first_hint = l->visible_count > shown ? 0 : 2;
 
     draw_shell( l, 0 );
     for (i = g.first; i < l->visible_count && i < g.first + shown; i++)
@@ -1201,7 +1207,7 @@ static void draw_library( struct launcher *l )
         ui_text( ui, ui->small, SHELL_MARGIN, HOME_HINT_Y - TTF_FontHeight( ui->small ) / 2, page, ui->dim );
     }
     if (l->visible_count)
-        ui_hints_right( ui, hints + first_hint, sizeof(hints) / sizeof(hints[0]) - first_hint,
+        ui_hints_right( ui, hints, sizeof(hints) / sizeof(hints[0]),
                         ui->width - SHELL_MARGIN, HOME_HINT_Y );
     else ui_hints_right( ui, empty_hints, 1, ui->width - SHELL_MARGIN, HOME_HINT_Y );
     ui_fade( ui );
@@ -1831,6 +1837,22 @@ static int address_space_fits( struct launcher *l, struct program *p )
            (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
 }
 
+static int prepare_program_graphics( struct launcher *l, struct program *p )
+{
+    char dxvk[32], vkd3d[32];
+
+    strcpy( dxvk, p->settings.dxvk_version );
+    strcpy( vkd3d, p->settings.vkd3d_version );
+    if (!launcher_graphics_ensure( l->graphics, p->machine, dxvk, vkd3d )) return 0;
+    if (strcmp( dxvk, p->settings.dxvk_version ) || strcmp( vkd3d, p->settings.vkd3d_version ))
+    {
+        strcpy( p->settings.dxvk_version, dxvk );
+        strcpy( p->settings.vkd3d_version, vkd3d );
+        save_program_settings( l, p );
+    }
+    return 1;
+}
+
 static int start_program( struct launcher *l, struct program *p, char *target, size_t size )
 {
     struct ui *ui = &l->ui;
@@ -1849,6 +1871,7 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
                     : "This game requires the Atmosphere low-address patch. Restart with the patched loader and Mesosphere." );
         return 0;
     }
+    if (p->settings.dxvk && !prepare_program_graphics( l, p )) return 0;
     p->missing = 0;
     p->launched_order = l->catalog.next_order++;
     save_library( l );
@@ -1875,155 +1898,6 @@ static void edit_text( const char *header, char *value, size_t size )
 
     if (!launcher_platform_prompt( header, value, edited, size < sizeof(edited) ? size : sizeof(edited) )) return;
     snprintf( value, size, "%s", edited );
-}
-
-struct dxvk_progress_ui
-{
-    struct ui *ui;
-    const struct dxvk_release *release;
-    enum dxvk_progress_stage stage;
-    const char *name;
-    Uint32 last_draw;
-    int started;
-};
-
-static void dxvk_install_progress( void *opaque, enum dxvk_progress_stage stage,
-                                   unsigned long long current, unsigned long long total )
-{
-    struct dxvk_progress_ui *progress = opaque;
-    const char *status;
-    char title[96];
-    Uint32 now = SDL_GetTicks();
-
-    if (stage == DXVK_PROGRESS_DOWNLOAD && !total) total = progress->release->size;
-    if (progress->started && stage == progress->stage && now - progress->last_draw < 40 &&
-        (!total || current < total)) return;
-    switch (stage)
-    {
-    case DXVK_PROGRESS_DOWNLOAD: status = "Downloading from GitHub..."; break;
-    case DXVK_PROGRESS_VERIFY: status = "Verifying download..."; current = total = 0; break;
-    default: status = "Installing x86 and x64 files..."; current = total = 0; break;
-    }
-    snprintf( title, sizeof(title), "Installing %s %s", progress->name, progress->release->version );
-    ui_progress_update( progress->ui, title, status, current, total );
-    progress->stage = stage;
-    progress->last_draw = now;
-    progress->started = 1;
-}
-
-static int graphics_release_menu( struct launcher *l, struct program *p, const struct ui_list *anchor, int vkd3d )
-{
-    static struct dxvk_release releases[DXVK_MAX_RELEASES];
-    static struct ui_row rows[DXVK_MAX_RELEASES + 1];
-    int refresh = 0;
-    const char *name = vkd3d ? "VKD3D" : "DXVK";
-    char *version = vkd3d ? p->settings.vkd3d_version : p->settings.dxvk_version;
-    enum dxvk_result (*catalog)( const char *, struct dxvk_release *, int, int *, int, int * ) =
-        vkd3d ? vkd3d_release_catalog : dxvk_release_catalog;
-    enum dxvk_result (*install)( const char *, const struct dxvk_release *, dxvk_progress_callback, void * ) =
-        vkd3d ? vkd3d_install_release : dxvk_install_release;
-    int (*installed_release)( const char *, unsigned short, const char * ) =
-        vkd3d ? vkd3d_release_installed : dxvk_release_installed;
-    int (*root_release)( const char *, unsigned short, char *, size_t ) =
-        vkd3d ? vkd3d_root_version : dxvk_root_version;
-
-    for (;;)
-    {
-        enum dxvk_result result;
-        char root_version[32] = "", message[320];
-        int ids[DXVK_MAX_RELEASES + 1];
-        int release_count = 0, count = 0, cached = 0, latest = -1, current = -1, chosen, i;
-
-        snprintf( message, sizeof(message), "%s %s releases...", refresh ? "Refreshing" : "Loading", name );
-        ui_toast( &l->ui, message, 15000 );
-        ui_present( &l->ui );
-        result = catalog( l->options->runtime_dir, releases, DXVK_MAX_RELEASES,
-                                       &release_count, refresh, &cached );
-        ui_toast( &l->ui, "", 0 );
-        refresh = 0;
-        if (result != DXVK_OK)
-        {
-            ui_message( &l->ui, name, dxvk_result_message( result ) );
-            return 0;
-        }
-        root_release( l->options->runtime_dir, p->machine, root_version, sizeof(root_version) );
-        memset( rows, 0, sizeof(rows) );
-        for (i = 0; i < release_count; i++)
-        {
-            int installed = installed_release( l->options->runtime_dir, p->machine, releases[i].version ) ||
-                            (root_version[0] && !strcmp( root_version, releases[i].version ) &&
-                             installed_release( l->options->runtime_dir, p->machine, "" ));
-            int index;
-
-            if (!vkd3d && !launcher_dxvk_version_selectable( releases[i].version )) continue;
-            index = count++;
-            ids[index] = i;
-            if (latest < 0 && !releases[i].prerelease) latest = i;
-            if ((version[0] && !strcmp( version, releases[i].version )) ||
-                (!version[0] && root_version[0] && !strcmp( root_version, releases[i].version )))
-                current = index;
-            snprintf( rows[index].label, sizeof(rows[index].label), "%s", releases[i].version );
-            if (installed)
-                snprintf( rows[index].value, sizeof(rows[index].value), "%s%s",
-                          i == latest ? "Latest / " : "", "Installed" );
-            else if (i == latest)
-                snprintf( rows[index].value, sizeof(rows[index].value), "Latest" );
-            else if (releases[i].prerelease)
-                snprintf( rows[index].value, sizeof(rows[index].value), "Pre-release" );
-            rows[index].download = !installed;
-        }
-        if (latest >= 0 && current < 0)
-            for (i = 0; i < count; i++)
-                if (ids[i] == latest) { current = i; break; }
-        ids[count] = -1;
-        snprintf( rows[count].label, sizeof(rows[count].label), "Refresh releases" );
-        snprintf( rows[count].value, sizeof(rows[count].value), "%s", cached ? "Cached" : "Up to date" );
-        count++;
-        chosen = ui_settings_dropdown( &l->ui, anchor, rows, count, current >= 0 ? current : 0 );
-        if (chosen < 0) return 0;
-        i = ids[chosen];
-        if (i < 0)
-        {
-            refresh = 1;
-            continue;
-        }
-        if (rows[chosen].download)
-        {
-            struct dxvk_progress_ui progress;
-
-            if (releases[i].size)
-                snprintf( message, sizeof(message),
-                          "Download %s %s (%.1f MiB) from the official GitHub release and install its x86 and x64 DLLs?",
-                          name, releases[i].version, releases[i].size / 1048576.0 );
-            else
-                snprintf( message, sizeof(message),
-                          "Download %s %s from the official GitHub release and install its x86 and x64 DLLs?",
-                          name, releases[i].version );
-            if (!ui_confirm( &l->ui, name, message, "Download" )) continue;
-            memset( &progress, 0, sizeof(progress) );
-            progress.ui = &l->ui;
-            progress.name = name;
-            progress.release = releases + i;
-            ui_progress_begin( &l->ui );
-            result = install( l->options->runtime_dir, releases + i,
-                                           dxvk_install_progress, &progress );
-            ui_progress_end( &l->ui );
-            if (result != DXVK_OK)
-            {
-                ui_message( &l->ui, name, dxvk_result_message( result ) );
-                continue;
-            }
-        }
-        if (root_version[0] && !strcmp( root_version, releases[i].version ) &&
-            installed_release( l->options->runtime_dir, p->machine, "" ))
-            version[0] = 0;
-        else memcpy( version, releases[i].version, strlen( releases[i].version ) + 1 );
-        p->settings.dxvk = 1;
-        save_program_settings( l, p );
-        snprintf( message, sizeof(message), "%s %s selected", name, releases[i].version );
-        ui_toast( &l->ui, message, 1800 );
-        return 1;
-    }
 }
 
 static int box64_configured_count( const struct launcher_kv *kv, int advanced )
@@ -2325,14 +2199,11 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
     {
         const char *base = file_name( p->path );
         int in_library = find_program( l, p->path ) >= 0;
-        int x86 = p->machine == 0x014c, x64 = p->machine == 0x8664, dxvk_beside, dxvk_installed;
-        int vkd3d_installed = vkd3d_release_installed( l->options->runtime_dir, p->machine,
-                                                     p->settings.vkd3d_version );
+        int x86 = p->machine == 0x014c, x64 = p->machine == 0x8664, dxvk_beside;
+        struct dxvk_version dxvk, vkd3d;
 #ifdef WINE_NX_LSFG
         int lsfg_installed;
 #endif
-        const char *dxvk_dir = launcher_dxvk_directory( p->machine );
-        char dxvk_root[32] = "", vkd3d_root[32] = "";
         enum ui_action action;
         struct ui_row *row;
 
@@ -2353,10 +2224,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 dxvk_beside |= file_exists( path );
             }
         }
-        dxvk_installed = dxvk_dir && dxvk_release_installed( l->options->runtime_dir, p->machine,
-                                                             p->settings.dxvk_version );
-        dxvk_root_version( l->options->runtime_dir, p->machine, dxvk_root, sizeof(dxvk_root) );
-        vkd3d_root_version( l->options->runtime_dir, p->machine, vkd3d_root, sizeof(vkd3d_root) );
+        dxvk_resolve_version( l->options->runtime_dir, p->machine, p->settings.dxvk_version, &dxvk );
+        vkd3d_resolve_version( l->options->runtime_dir, p->machine, p->settings.vkd3d_version, &vkd3d );
 
         count = 0;
 #define ADD_ROW(i, section, text, help_text) \
@@ -2435,31 +2304,25 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                       "Wine uses its built-in renderer. DXVK + VKD3D uses Vulkan for Direct3D 9/10/11/12. "
                      "Graphics DLLs next to the game have priority." );
             row->adjustable = 1;
-            row->download = p->settings.dxvk && !dxvk_installed;
+            row->download = p->settings.dxvk && (!dxvk.installed || !vkd3d.installed);
             snprintf( row->value, sizeof(row->value), "%s%s%s",
                       p->settings.dxvk ? "DXVK + VKD3D" : "Wine",
-                      p->settings.dxvk && !dxvk_installed ? " (download required)" : "",
+                      row->download ? " (download required)" : "",
                       dxvk_beside ? " (app DLL first)" : "" );
 
             ADD_ROW( ROW_VKD3D_VERSION, SECTION_GRAPHICS, "VKD3D version",
                      "Choose an official VKD3D GitHub release." );
             row->kind = UI_ROW_DROPDOWN;
-            row->download = !vkd3d_installed;
-            if (p->settings.vkd3d_version[0])
-                snprintf( row->value, sizeof(row->value), "%s", p->settings.vkd3d_version );
-            else if (vkd3d_root[0])
-                snprintf( row->value, sizeof(row->value), "%s", vkd3d_root );
-            else snprintf( row->value, sizeof(row->value), "Latest" );
+            row->download = !vkd3d.installed;
+            snprintf( row->value, sizeof(row->value), "%s", vkd3d.version[0] ? vkd3d.version :
+                      vkd3d.installed ? "Bundled" : "Not installed" );
 
             ADD_ROW( ROW_DXVK_VERSION, SECTION_GRAPHICS, "DXVK version",
                      "Choose an official DXVK GitHub release." );
             row->kind = UI_ROW_DROPDOWN;
-            row->download = !dxvk_installed;
-            if (p->settings.dxvk_version[0])
-                snprintf( row->value, sizeof(row->value), "%s", p->settings.dxvk_version );
-            else if (dxvk_root[0])
-                snprintf( row->value, sizeof(row->value), "Latest (%s)", dxvk_root );
-            else snprintf( row->value, sizeof(row->value), "Latest" );
+            row->download = !dxvk.installed;
+            snprintf( row->value, sizeof(row->value), "%s", dxvk.version[0] ? dxvk.version :
+                      dxvk.installed ? "Bundled" : "Not installed" );
             ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "DXVK HUD",
                      "FPS shows only the frame rate. Compact shows the DirectX version, FPS and frame times. "
                      "Full also shows the DXVK version, GPU, video memory and shader compiler activity. "
@@ -2666,11 +2529,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         }
 
         case ROW_D3D9:
-            if (action != UI_ACTION_RESET && !p->settings.dxvk && !dxvk_installed)
-            {
-                graphics_release_menu( l, p, &list, 0 );
-                break;
-            }
+            if (action != UI_ACTION_RESET && !p->settings.dxvk && !prepare_program_graphics( l, p )) break;
             p->settings.dxvk = action == UI_ACTION_RESET ? 0 : !p->settings.dxvk;
             save_program_settings( l, p );
             break;
@@ -2736,7 +2595,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 save_program_settings( l, p );
             }
             else if (action == UI_ACTION_CHOOSE)
-                graphics_release_menu( l, p, &list, id == ROW_VKD3D_VERSION );
+            {
+                char *version = id == ROW_VKD3D_VERSION ? p->settings.vkd3d_version : p->settings.dxvk_version;
+                if (launcher_graphics_select( l->graphics, &list, p->machine, id == ROW_VKD3D_VERSION, version ))
+                {
+                    p->settings.dxvk = 1;
+                    save_program_settings( l, p );
+                }
+            }
             break;
 
         case ROW_DXVK_HUD:
@@ -3220,7 +3086,7 @@ static void credits_screen( struct launcher *l )
             if (input.button == UI_B || input.button == UI_PLUS || input.touch == UI_TOUCH_TAP ||
                 (finished && input.button == UI_A)) done = 1;
         if (done || !ui->running) break;
-        scroll = (now - started) * 0.052f;
+        scroll = (now - started) * 0.0744f;
         if (scroll >= distance)
         {
             scroll = distance;
@@ -3339,7 +3205,7 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_DXVK_ON_ADD].value, sizeof(rows[0].value), "%s", on_off[!!l->options->dxvk_on_add] );
         rows[SET_DXVK_ON_ADD].kind = UI_ROW_SWITCH;
         rows[SET_DXVK_ON_ADD].on = !!l->options->dxvk_on_add;
-        rows[SET_DXVK_ON_ADD].help = "New games use the bundled DXVK version until another version is selected.";
+        rows[SET_DXVK_ON_ADD].help = "New games use the latest installed DXVK and VKD3D versions.";
         snprintf( rows[SET_VERBOSE].label, sizeof(rows[0].label), "Verbose traces" );
         snprintf( rows[SET_VERBOSE].value, sizeof(rows[0].value), "%s", on_off[!!l->options->verbose] );
         rows[SET_VERBOSE].kind = UI_ROW_SWITCH;
@@ -4337,12 +4203,15 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     if (!autorun_install_finish( options->runtime_dir ))
         ui_toast( &l->ui, "The update recovery files could not be cleared.", 5000 );
     l->update = launcher_update_create( &l->ui, options->runtime_dir, options->schedule_restart );
+    l->graphics = launcher_graphics_create( &l->ui, options->runtime_dir );
     l->ui.background_tick = launcher_update_tick;
     l->ui.background_data = l->update;
     ret = run_library( l, target, target_size );
     l->ui.background_tick = NULL;
     launcher_update_destroy( l->update );
     l->update = NULL;
+    launcher_graphics_destroy( l->graphics );
+    l->graphics = NULL;
     for (i = 0, added = 0, missing = 0; i < l->program_count; i++)
     {
         added += l->programs[i].icon_state == ICON_READY;

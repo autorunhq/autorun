@@ -7,7 +7,6 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
-#include <time.h>
 
 #include <curl/curl.h>
 #include <switch.h>
@@ -21,7 +20,6 @@ extern void wine_nx_runtime_trace( const char *message );
 
 #define DXVK_API_BODY_MAX (24u * 1024u * 1024u)
 #define DXVK_ARCHIVE_MAX  (128u * 1024u * 1024u)
-#define DXVK_CACHE_SECONDS (24 * 60 * 60)
 struct release_backend
 {
     const char *id, *repo, *prefix, *asset, *extension;
@@ -91,10 +89,9 @@ static int receive_progress( void *opaque, curl_off_t total, curl_off_t current,
 
     (void)upload_total;
     (void)upload_current;
-    progress->callback( progress->opaque, DXVK_PROGRESS_DOWNLOAD,
+    return progress->callback( progress->opaque, DXVK_PROGRESS_DOWNLOAD,
                         current > 0 ? (unsigned long long)current : 0,
                         total > 0 ? (unsigned long long)total : 0 );
-    return 0;
 }
 
 static enum dxvk_result http_get( const char *url, size_t limit, struct buffer *body,
@@ -144,12 +141,15 @@ static enum dxvk_result http_get( const char *url, size_t limit, struct buffer *
     curl_slist_free_all( headers );
     curl_easy_cleanup( curl );
     if (code == CURLE_OK && status >= 200 && status < 300) return DXVK_OK;
-    snprintf( diagnostic, sizeof(diagnostic), "[Graphics] request failed: curl=%d (%s), http=%ld, errno=%d",
-              (int)code, error[0] ? error : curl_easy_strerror( code ), status, errno );
-    wine_nx_runtime_trace( diagnostic );
+    if (code != CURLE_ABORTED_BY_CALLBACK)
+    {
+        snprintf( diagnostic, sizeof(diagnostic), "[Graphics] request failed: curl=%d (%s), http=%ld, errno=%d",
+                  (int)code, error[0] ? error : curl_easy_strerror( code ), status, errno );
+        wine_nx_runtime_trace( diagnostic );
+    }
     free( body->data );
     memset( body, 0, sizeof(*body) );
-    return status == 404 ? DXVK_NOT_FOUND : DXVK_NETWORK_ERROR;
+    return code == CURLE_ABORTED_BY_CALLBACK ? DXVK_CANCELLED : status == 404 ? DXVK_NOT_FOUND : DXVK_NETWORK_ERROR;
 }
 
 static const char *json_field( const char *object, const char *end, const char *name )
@@ -416,18 +416,13 @@ static int split_field( char **cursor, char **value )
 }
 
 static int load_catalog( const struct release_backend *backend, const char *runtime_dir, struct dxvk_release *releases, int max_releases,
-                         int *count, int *fresh )
+                         int *count )
 {
     char folder[768], path[800], line[1024];
-    struct stat st;
     FILE *file;
     int n = 0;
-    time_t now = time( NULL );
-
-    *fresh = 0;
-    if (!cache_path( backend, runtime_dir, folder, sizeof(folder), path, sizeof(path) ) || stat( path, &st ) ||
+    if (!cache_path( backend, runtime_dir, folder, sizeof(folder), path, sizeof(path) ) ||
         !(file = fopen( path, "rb" ))) return 0;
-    if (now >= st.st_mtime && now - st.st_mtime < DXVK_CACHE_SECONDS) *fresh = 1;
     while (n < max_releases && fgets( line, sizeof(line), file ))
     {
         struct dxvk_release release;
@@ -455,19 +450,15 @@ static int load_catalog( const struct release_backend *backend, const char *runt
 }
 
 static enum dxvk_result backend_release_catalog( const struct release_backend *backend, const char *runtime_dir, struct dxvk_release *releases,
-                                       int max_releases, int *count, int refresh, int *cached )
+                                       int max_releases, int *count, int cache_only,
+                                       dxvk_progress_callback progress, void *opaque )
 {
-    struct dxvk_release old[DXVK_MAX_RELEASES];
-    int old_count = 0, fresh = 0, total = 0, page;
+    int total = 0, page;
 
     if (!runtime_dir || !releases || max_releases <= 0 || !count) return DXVK_INVALID_RESPONSE;
     if (max_releases > DXVK_MAX_RELEASES) max_releases = DXVK_MAX_RELEASES;
-    if (load_catalog( backend, runtime_dir, releases, max_releases, count, &fresh ) && fresh && !refresh)
-    {
-        if (cached) *cached = 1;
-        return DXVK_OK;
-    }
-    load_catalog( backend, runtime_dir, old, DXVK_MAX_RELEASES, &old_count, &fresh );
+    *count = 0;
+    if (cache_only) return load_catalog( backend, runtime_dir, releases, max_releases, count ) ? DXVK_OK : DXVK_NOT_FOUND;
     for (page = 1; total < max_releases; page++)
     {
         char url[160];
@@ -477,17 +468,7 @@ static enum dxvk_result backend_release_catalog( const struct release_backend *b
 
         snprintf( url, sizeof(url),
                   "https://api.github.com/repos/%s/releases?per_page=100&page=%d", backend->repo, page );
-        if ((result = http_get( url, DXVK_API_BODY_MAX, &body, NULL, NULL )) != DXVK_OK)
-        {
-            if (old_count)
-            {
-                memcpy( releases, old, old_count * sizeof(*old) );
-                *count = old_count;
-                if (cached) *cached = 1;
-                return DXVK_OK;
-            }
-            return result;
-        }
+        if ((result = http_get( url, DXVK_API_BODY_MAX, &body, progress, opaque )) != DXVK_OK) return result;
         added = parse_release_page( backend, body.data, body.size, releases + total, max_releases - total, &seen );
         free( body.data );
         if (added < 0) return DXVK_INVALID_RESPONSE;
@@ -496,7 +477,6 @@ static enum dxvk_result backend_release_catalog( const struct release_backend *b
     }
     if (!total) return DXVK_NOT_FOUND;
     *count = total;
-    if (cached) *cached = 0;
     save_catalog( backend, runtime_dir, releases, total );
     return DXVK_OK;
 }
@@ -770,9 +750,11 @@ static enum dxvk_result backend_install_release( const struct release_backend *b
     remove_tree( x32_new );
     remove_tree( x64_new );
     if (!make_directory( x32_new ) || !make_directory( x64_new )) return DXVK_IO_ERROR;
-    if (progress) progress( opaque, DXVK_PROGRESS_DOWNLOAD, 0, release->size );
+    if (progress && progress( opaque, DXVK_PROGRESS_DOWNLOAD, 0, release->size ))
+    { result = DXVK_CANCELLED; goto failed; }
     if ((result = http_get( release->url, DXVK_ARCHIVE_MAX, &body, progress, opaque )) != DXVK_OK) goto failed;
-    if (progress) progress( opaque, DXVK_PROGRESS_VERIFY, body.size, body.size );
+    if (progress && progress( opaque, DXVK_PROGRESS_VERIFY, body.size, body.size ))
+    { result = DXVK_CANCELLED; goto free_failed; }
     if (body.size < 4 || (strcmp( backend->extension, "zst" ) ?
         (body.data[0] != 0x1f || body.data[1] != 0x8b) : memcmp( body.data, "\x28\xb5\x2f\xfd", 4 )))
     { result = DXVK_INVALID_ARCHIVE; goto free_failed; }
@@ -780,7 +762,8 @@ static enum dxvk_result backend_install_release( const struct release_backend *b
     if (!write_atomic( archive_path, body.data, body.size )) { result = DXVK_IO_ERROR; goto free_failed; }
     free( body.data );
     memset( &body, 0, sizeof(body) );
-    if (progress) progress( opaque, DXVK_PROGRESS_INSTALL, 0, 0 );
+    if (progress && progress( opaque, DXVK_PROGRESS_INSTALL, 0, 0 ))
+    { result = DXVK_CANCELLED; goto failed; }
     if (!extract_archive( backend, archive_path, x32_new, x64_new, &x32_files, &x64_files ) ||
         !x32_files || !x64_files || !validate_payload( backend, x32_new, 0x014c, release->version ) ||
         !validate_payload( backend, x64_new, 0x8664, release->version )) { result = DXVK_INVALID_ARCHIVE; goto failed; }
@@ -818,8 +801,10 @@ static int payload_path( const struct release_backend *backend, const char *runt
 static int backend_release_installed( const struct release_backend *backend, const char *runtime_dir, unsigned short machine, const char *version )
 {
     char path[896];
+    struct stat st;
 
-    return payload_path( backend, runtime_dir, machine, version, path, sizeof(path) ) && validate_payload( backend, path, machine, version );
+    return payload_path( backend, runtime_dir, machine, version, path, sizeof(path) ) &&
+           !stat( path, &st ) && S_ISDIR( st.st_mode ) && validate_payload( backend, path, machine, version );
 }
 
 static int manifest_version( const char *path, const char *name, char *version, size_t size )
@@ -858,15 +843,101 @@ done:
 
 static int backend_root_version( const struct release_backend *backend, const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
-    char root[896], path[920];
+    char root[896], path[920], found[32];
 
-    if (!version || !size || !payload_path( backend, runtime_dir, machine, "", root, sizeof(root) ) ||
-        (size_t)snprintf( path, sizeof(path), "%s/%s-manifest.json", root, backend->id ) >= sizeof(path)) return 0;
+    if (!version || !size) return 0;
     version[0] = 0;
-    if (manifest_version( path, NULL, version, size )) return 1;
-    if (!validate_payload( backend, root, machine, "" ) ||
-        (size_t)snprintf( path, sizeof(path), "%s/build-manifest.json", runtime_dir ) >= sizeof(path)) return 0;
-    return manifest_version( path, backend->id, version, size );
+    if (!payload_path( backend, runtime_dir, machine, "", root, sizeof(root) ) ||
+        (size_t)snprintf( path, sizeof(path), "%s/%s-manifest.json", root, backend->id ) >= sizeof(path)) return 0;
+    if (!manifest_version( path, NULL, found, sizeof(found) ))
+    {
+        if (!validate_payload( backend, root, machine, "" ) ||
+            (size_t)snprintf( path, sizeof(path), "%s/build-manifest.json", runtime_dir ) >= sizeof(path) ||
+            !manifest_version( path, backend->id, found, sizeof(found) )) return 0;
+    }
+    if (strlen( found ) >= size) return 0;
+    strcpy( version, found );
+    return 1;
+}
+
+static int stable_version( const char *version )
+{
+    const unsigned char *p = (const unsigned char *)version;
+
+    if (!launcher_dxvk_version_valid( version )) return 0;
+    for (;;)
+    {
+        if (!isdigit( *p )) return 0;
+        while (isdigit( *p )) p++;
+        if (*p != '.') break;
+        p++;
+    }
+    return !*p || (isalpha( *p ) && !p[1]);
+}
+
+static int compare_versions( const char *a, const char *b )
+{
+    while (*a || *b)
+    {
+        if (isdigit( (unsigned char)*a ) || isdigit( (unsigned char)*b ))
+        {
+            char *end_a, *end_b;
+            unsigned long va = strtoul( a, &end_a, 10 ), vb = strtoul( b, &end_b, 10 );
+
+            if (va != vb) return va > vb ? 1 : -1;
+            a = end_a;
+            b = end_b;
+        }
+        else if (*a == '.' || *b == '.')
+        {
+            if (*a == '.') a++;
+            if (*b == '.') b++;
+        }
+        else return strcasecmp( a, b );
+    }
+    return 0;
+}
+
+static void backend_resolve_version( const struct release_backend *backend, const char *runtime_dir,
+                                    unsigned short machine, const char *requested, struct dxvk_version *selected )
+{
+    char root[896], path[920], bundled[32] = "";
+    struct dirent *entry;
+    DIR *directory;
+
+    memset( selected, 0, sizeof(*selected) );
+    if (!payload_path( backend, runtime_dir, machine, "", root, sizeof(root) )) return;
+    if (requested && requested[0])
+    {
+        snprintf( selected->version, sizeof(selected->version), "%s", requested );
+        if (!launcher_dxvk_version_valid( requested )) return;
+        if (backend_release_installed( backend, runtime_dir, machine, requested ))
+        {
+            selected->installed = 1;
+            return;
+        }
+        backend_root_version( backend, runtime_dir, machine, bundled, sizeof(bundled) );
+        if (strcmp( bundled, requested )) return;
+    }
+    if (backend_release_installed( backend, runtime_dir, machine, "" ))
+    {
+        selected->installed = selected->bundled = 1;
+        backend_root_version( backend, runtime_dir, machine, selected->version, sizeof(selected->version) );
+    }
+    if (requested && requested[0]) return;
+    if ((size_t)snprintf( path, sizeof(path), "%s/versions", root ) >= sizeof(path) ||
+        !(directory = opendir( path ))) return;
+    while ((entry = readdir( directory )))
+    {
+        if (!stable_version( entry->d_name ) ||
+            (backend == &dxvk_backend && !launcher_dxvk_version_selectable( entry->d_name )) ||
+            (selected->version[0] && compare_versions( entry->d_name, selected->version ) <= 0) ||
+            !backend_release_installed( backend, runtime_dir, machine, entry->d_name )) continue;
+        strcpy( selected->version, entry->d_name );
+        selected->installed = 1;
+        selected->bundled = 0;
+    }
+    closedir( directory );
 }
 
 const char *dxvk_result_message( enum dxvk_result result )
@@ -880,14 +951,16 @@ const char *dxvk_result_message( enum dxvk_result result )
     case DXVK_INVALID_ARCHIVE: return "The downloaded archive is invalid.";
     case DXVK_HASH_MISMATCH: return "The downloaded archive failed SHA-256 verification.";
     case DXVK_IO_ERROR: return "The release could not be written to the SD card.";
+    case DXVK_CANCELLED: return "Download cancelled.";
     }
     return "Installation failed.";
 }
 
 enum dxvk_result dxvk_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
-                                        int max_releases, int *count, int refresh, int *cached )
+                                        int max_releases, int *count, int cache_only,
+                                        dxvk_progress_callback progress, void *opaque )
 {
-    return backend_release_catalog( &dxvk_backend, runtime_dir, releases, max_releases, count, refresh, cached );
+    return backend_release_catalog( &dxvk_backend, runtime_dir, releases, max_releases, count, cache_only, progress, opaque );
 }
 
 enum dxvk_result dxvk_install_release( const char *runtime_dir, const struct dxvk_release *release,
@@ -906,10 +979,17 @@ int dxvk_root_version( const char *runtime_dir, unsigned short machine, char *ve
     return backend_root_version( &dxvk_backend, runtime_dir, machine, version, size );
 }
 
-enum dxvk_result vkd3d_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
-                                        int max_releases, int *count, int refresh, int *cached )
+void dxvk_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+                           struct dxvk_version *selected )
 {
-    return backend_release_catalog( &vkd3d_backend, runtime_dir, releases, max_releases, count, refresh, cached );
+    backend_resolve_version( &dxvk_backend, runtime_dir, machine, requested, selected );
+}
+
+enum dxvk_result vkd3d_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
+                                        int max_releases, int *count, int cache_only,
+                                        dxvk_progress_callback progress, void *opaque )
+{
+    return backend_release_catalog( &vkd3d_backend, runtime_dir, releases, max_releases, count, cache_only, progress, opaque );
 }
 
 enum dxvk_result vkd3d_install_release( const char *runtime_dir, const struct dxvk_release *release,
@@ -926,4 +1006,10 @@ int vkd3d_release_installed( const char *runtime_dir, unsigned short machine, co
 int vkd3d_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
     return backend_root_version( &vkd3d_backend, runtime_dir, machine, version, size );
+}
+
+void vkd3d_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+                            struct dxvk_version *selected )
+{
+    backend_resolve_version( &vkd3d_backend, runtime_dir, machine, requested, selected );
 }

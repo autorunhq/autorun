@@ -88,25 +88,80 @@ void wine_nx_runtime_trace( const char *msg )
     printf( "%s\n", msg );
 }
 
-enum dxvk_result dxvk_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
-                                       int max_releases, int *count, int refresh, int *cached )
+static char graphics_installed[2][32];
+static void graphics_resolve( int vkd3d, const char *requested, struct dxvk_version *selected );
+
+static enum dxvk_result graphics_catalog( int vkd3d, struct dxvk_release *releases, int max_releases,
+                                          int *count, int cache_only, dxvk_progress_callback progress, void *opaque )
 {
-    (void)runtime_dir; (void)releases; (void)max_releases; (void)refresh; (void)cached;
+    const char *mode = getenv( "LAUNCHER_TEST_GRAPHICS" );
+    const char *versions[] = { vkd3d ? "3.1-rc1" : "4.0-rc1", vkd3d ? "3.0b" : "3.1.1",
+                               vkd3d ? "2.14.1" : "2.7.1", "1.0", "0.9" };
+    int i;
+
     *count = 0;
-    return DXVK_NOT_FOUND;
+    if (!mode || (cache_only && !strcmp( mode, "fresh" ))) return DXVK_NOT_FOUND;
+    if (!cache_only)
+    {
+        Uint32 until = SDL_GetTicks() + 3000;
+        fprintf( stderr, "graphics catalog %d started\n", vkd3d );
+        while (SDL_GetTicks() < until)
+        {
+            if (progress && progress( opaque, DXVK_PROGRESS_DOWNLOAD, 0, 0 )) return DXVK_CANCELLED;
+            SDL_Delay( 10 );
+        }
+        if (!strcmp( mode, "offline" )) return DXVK_NETWORK_ERROR;
+        fprintf( stderr, "graphics catalog %d finished\n", vkd3d );
+    }
+    for (i = cache_only ? (!strcmp( mode, "stale" ) ? 2 : 1) : 0; i < 5 && *count < max_releases; i++)
+    {
+        struct dxvk_release *release = releases + (*count)++;
+        memset( release, 0, sizeof(*release) );
+        strcpy( release->version, versions[i] );
+        release->prerelease = !i;
+        release->size = 10 * 1024 * 1024;
+    }
+    return DXVK_OK;
+}
+
+enum dxvk_result dxvk_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
+                                       int max_releases, int *count, int cache_only,
+                                       dxvk_progress_callback progress, void *opaque )
+{
+    (void)runtime_dir;
+    return graphics_catalog( 0, releases, max_releases, count, cache_only, progress, opaque );
+}
+
+static enum dxvk_result graphics_install( int vkd3d, const struct dxvk_release *release,
+                                          dxvk_progress_callback progress, void *opaque )
+{
+    int i;
+
+    if (!getenv( "LAUNCHER_TEST_GRAPHICS" )) return DXVK_IO_ERROR;
+    fprintf( stderr, "graphics install %d %s\n", vkd3d, release->version );
+    for (i = 0; i <= 100; i++)
+    {
+        if (progress && progress( opaque, DXVK_PROGRESS_DOWNLOAD, release->size * i / 100, release->size ))
+            return DXVK_CANCELLED;
+        SDL_Delay( 25 );
+    }
+    strcpy( graphics_installed[vkd3d], release->version );
+    return DXVK_OK;
 }
 
 enum dxvk_result dxvk_install_release( const char *runtime_dir, const struct dxvk_release *release,
                                        dxvk_progress_callback progress, void *opaque )
 {
-    (void)runtime_dir; (void)release; (void)progress; (void)opaque;
-    return DXVK_IO_ERROR;
+    (void)runtime_dir;
+    return graphics_install( 0, release, progress, opaque );
 }
 
 int dxvk_release_installed( const char *runtime_dir, unsigned short machine, const char *version )
 {
-    (void)runtime_dir; (void)machine; (void)version;
-    return 0;
+    struct dxvk_version selected;
+    (void)runtime_dir; (void)machine;
+    graphics_resolve( 0, version, &selected );
+    return version[0] && selected.installed;
 }
 
 int dxvk_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
@@ -123,25 +178,57 @@ const char *dxvk_result_message( enum dxvk_result result )
 }
 
 enum dxvk_result vkd3d_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
-                                       int max_releases, int *count, int refresh, int *cached )
+                                       int max_releases, int *count, int cache_only,
+                                       dxvk_progress_callback progress, void *opaque )
 {
-    return dxvk_release_catalog( runtime_dir, releases, max_releases, count, refresh, cached );
+    (void)runtime_dir;
+    return graphics_catalog( 1, releases, max_releases, count, cache_only, progress, opaque );
 }
 
 enum dxvk_result vkd3d_install_release( const char *runtime_dir, const struct dxvk_release *release,
                                        dxvk_progress_callback progress, void *opaque )
 {
-    return dxvk_install_release( runtime_dir, release, progress, opaque );
+    (void)runtime_dir;
+    return graphics_install( 1, release, progress, opaque );
 }
 
 int vkd3d_release_installed( const char *runtime_dir, unsigned short machine, const char *version )
 {
-    return dxvk_release_installed( runtime_dir, machine, version );
+    struct dxvk_version selected;
+    (void)runtime_dir; (void)machine;
+    graphics_resolve( 1, version, &selected );
+    return version[0] && selected.installed;
 }
 
 int vkd3d_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
     return dxvk_root_version( runtime_dir, machine, version, size );
+}
+
+static void graphics_resolve( int vkd3d, const char *requested, struct dxvk_version *selected )
+{
+    const char *mode = getenv( "LAUNCHER_TEST_GRAPHICS" );
+    const char *version = graphics_installed[vkd3d];
+
+    memset( selected, 0, sizeof(*selected) );
+    if (!version[0] && mode && strcmp( mode, "fresh" ) && strcmp( mode, "stale" ))
+        version = vkd3d ? "3.0b" : "3.1.1";
+    strcpy( selected->version, requested[0] ? requested : version );
+    selected->installed = version[0] && !strcmp( version, selected->version );
+}
+
+void dxvk_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+                           struct dxvk_version *selected )
+{
+    (void)runtime_dir; (void)machine;
+    graphics_resolve( 0, requested, selected );
+}
+
+void vkd3d_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+                            struct dxvk_version *selected )
+{
+    (void)runtime_dir; (void)machine;
+    graphics_resolve( 1, requested, selected );
 }
 
 static int machine_of( const char *path, unsigned short *machine )

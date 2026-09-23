@@ -182,7 +182,7 @@ struct launcher_settings
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     int dxvk;         /* architecture-specific DXVK payload */
     char vkd3d_version[32];
-    char dxvk_version[32]; /* empty: the bundled latest release */
+    char dxvk_version[32]; /* empty: newest installed release */
     int dxvk_hud;
     int frame_limit;
     int vsync;
