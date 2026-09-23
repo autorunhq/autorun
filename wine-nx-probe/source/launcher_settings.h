@@ -178,6 +178,7 @@ struct launcher_settings
     int profile;      /* the sampling profiler */
     int fast_sync;
     int fex;
+    int four_cores;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     int dxvk;         /* architecture-specific DXVK payload */
     char vkd3d_version[32];
@@ -343,6 +344,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->profile = launcher_setting_state( kv, "profile" );
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = launcher_kv_get( kv, "cpu", value, sizeof(value) ) && !strcasecmp( value, "fex" );
+    settings->four_cores = launcher_setting_state( kv, "four-cores" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
     {
@@ -396,6 +398,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "profile", states[settings->profile + 1] ) &&
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? "fex" : NULL ) &&
+           launcher_kv_set( kv, "four-cores", settings->four_cores ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&

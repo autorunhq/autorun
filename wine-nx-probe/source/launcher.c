@@ -1676,7 +1676,7 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
-    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU,
+    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2486,6 +2486,15 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
         }
 #endif
+        ADD_ROW( ROW_FOUR_CORES, SECTION_GENERAL, "4-core support",
+                 l->options->four_cores_available
+                 ? "Moves graphics workers to core 3. Game threads stay on cores 0-2."
+                 : "Requires an updated Autorun forwarder. Reinstall it and restart Autorun." );
+        row->kind = UI_ROW_SWITCH;
+        row->disabled = !l->options->four_cores_available && !p->settings.four_cores;
+        row->on = p->settings.four_cores;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
+
         ADD_ROW( ROW_SYNC, SECTION_GENERAL, "Synchronization",
                  "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
         row->kind = UI_ROW_VALUE;
@@ -2800,6 +2809,12 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
         }
 #endif
+        case ROW_FOUR_CORES:
+            if (action == UI_ACTION_RESET || p->settings.four_cores) p->settings.four_cores = 0;
+            else if (l->options->four_cores_available) p->settings.four_cores = 1;
+            save_program_settings( l, p );
+            break;
+
         case ROW_SYNC:
         {
             struct ui_row items[2] = {0};

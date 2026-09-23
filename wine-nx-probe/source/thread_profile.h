@@ -7,6 +7,22 @@
 #define WINE_NX_THREAD_PROFILE_H
 
 #include <stdint.h>
+#include <string.h>
+
+int wine_nx_four_cores_available( void );
+void wine_nx_thread_configure_cores( int enabled );
+void wine_nx_thread_set_name( unsigned int tid, const char *name );
+void wine_nx_thread_set_affinity( unsigned int tid, unsigned int mask );
+
+static inline int nx_thread_graphics_worker( const char *name )
+{
+    return !strcmp( name, "dxvk-cs" ) || !strcmp( name, "wined3d_cs" ) || !strcmp( name, "vkd3d_queue" );
+}
+
+static inline int nx_thread_helper_available( uint64_t cores, uint64_t priorities )
+{
+    return !!(cores & 8) && !!(priorities & (UINT64_C(1) << 63));
+}
 
 /* Called by a thread as it starts and ends; kind is 'w' for Wine threads and
  * 's' for server connection threads (tid is then their client's). teb is a

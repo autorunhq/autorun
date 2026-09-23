@@ -70,7 +70,17 @@ static void test_settings( const char *dir )
 
     load_text( &kv, "" );
     launcher_settings_read( &kv, &settings );
-    assert( !settings.fast_sync && !settings.fex );
+    assert( !settings.fast_sync && !settings.fex && !settings.four_cores );
+    load_text( &kv, "four-cores=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.four_cores && launcher_settings_write( &kv, &settings ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.four_cores );
+    settings.four_cores = 0;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "four-cores=" ) );
+    load_text( &kv, "four-cores=unknown\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.four_cores );
     load_text( &kv, "cpu=fex\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.fex );

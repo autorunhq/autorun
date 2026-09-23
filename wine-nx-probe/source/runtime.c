@@ -430,6 +430,7 @@ int wine_nx_runtime_verbose;
 static int runtime_profile;
 static int runtime_dxvk;
 static int runtime_fex;
+static int runtime_four_cores;
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
 static char runtime_dxvk_version[32];
@@ -3575,6 +3576,7 @@ int main( int argc, char **argv )
 #endif
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
+            .four_cores_available = wine_nx_four_cores_available(),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .title_id = runtime_title_id(),
@@ -3650,6 +3652,7 @@ int main( int argc, char **argv )
         runtime_dxvk = 0;
         runtime_dxvk_hud = 0;
         runtime_fex = 0;
+        runtime_four_cores = 0;
         horizon_fast_sync_enabled = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
@@ -3666,6 +3669,7 @@ int main( int argc, char **argv )
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
             runtime_fex = settings.fex;
+            runtime_four_cores = settings.four_cores;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
@@ -3711,6 +3715,7 @@ int main( int argc, char **argv )
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon direct waits" : "Standard" );
+    wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 MB in all"
                                       : "no sdmc device; reads are not cached" );
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );

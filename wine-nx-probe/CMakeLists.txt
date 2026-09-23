@@ -809,6 +809,7 @@ target_include_directories(wine-nx-runtime PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES}
 
 target_sources(wine-nx-runtime PRIVATE source/horizon_virtmem.c source/low_window.c)
 target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
+    -Wl,--wrap=svcSetThreadCoreMask
     -Wl,--wrap=virtmemFindAslr -Wl,--wrap=virtmemFindCodeMemory
     -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation)
 

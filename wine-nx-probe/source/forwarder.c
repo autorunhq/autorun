@@ -654,10 +654,10 @@ static int npdm_patch_capability( u8 *npdm, u32 offset, u32 size, u32 bits, u32 
     return 0;
 }
 
-/* Three cores, priorities 28 to 59: what a forwarder is allowed to hand on. */
+/* Core 3's time-sliced workers need priority 63. */
 static u32 npdm_kernel_flags( void )
 {
-    const u32 descriptor = (((2u << 8) | 0u) << 6 | 28u) << 6 | 59u;
+    const u32 descriptor = (((3u << 8) | 0u) << 6 | 28u) << 6 | 63u;
 
     return descriptor << 4;
 }

@@ -39,6 +39,7 @@ struct wine_nx_launcher_options
     /* The forwarder's host address-space width, or 0 if unavailable. */
     int address_space_bits;
     int low_window;
+    int four_cores_available;
     /* This forwarder, and the ones beside it. A game that needs an address space
      * this forwarder was not made with is started by asking the console for the
      * forwarder that was: list_titles writes how many it found, launch_title

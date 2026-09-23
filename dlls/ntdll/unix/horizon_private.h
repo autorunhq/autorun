@@ -23,6 +23,8 @@ extern unsigned int horizon_get_processor_count(void);
 extern void wine_nx_thread_register( char kind, unsigned int tid, void *teb ) __attribute__((weak));
 extern void wine_nx_thread_unregister( void ) __attribute__((weak));
 extern void wine_nx_thread_affinity_fixed( void ) __attribute__((weak));
+extern void wine_nx_thread_set_name( unsigned int tid, const char *name ) __attribute__((weak));
+extern void wine_nx_thread_set_affinity( unsigned int tid, unsigned int mask ) __attribute__((weak));
 extern __thread int horizon_suspend_pending;
 extern void horizon_wait_suspend_arm64ec(void);
 extern void horizon_get_memory_info( unsigned long long *total, unsigned long long *used );

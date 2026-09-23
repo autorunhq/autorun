@@ -320,7 +320,7 @@ static void check_exefs_npdm( const u8 *data, int address_space, u64 tid )
     {
         const u8 *kac[2] = { (const u8 *)aci0 + aci0->kac_offset, (const u8 *)acid + acid->kac_offset };
         u32 sizes[2] = { aci0->kac_size, acid->kac_size };
-        int found = 0, k;
+        int found = 0, cores = 0, k;
 
         for (k = 0; k < 2; k++)
             for (i = 0; i < sizes[k]; i += 4)
@@ -328,11 +328,17 @@ static void check_exefs_npdm( const u8 *data, int address_space, u64 tid )
                 u32 capability;
 
                 memcpy( &capability, kac[k] + i, 4 );
+                if ((capability & 15) == 7)
+                {
+                    assert( capability == 0x030073f7 );
+                    cores++;
+                }
                 if ((capability & 0x1FFFF) != 0xFFFF) continue;
                 assert( capability == (BIT( 19 ) | 0xFFFF) );
                 found++;
             }
         assert( found == 2 );
+        assert( cores == 2 );
     }
 }
 
@@ -473,7 +479,14 @@ int main( int argc, char **argv )
     free( control );
     free( meta );
 
+    request.address_space = WINE_NX_SPACE_39BIT;
+    other = wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_39BIT );
+    assert( !wine_nx_forwarder_install( &request, &step ) );
+    program = read_nca( 7, &program_size );
+    check_exefs_npdm( program, WINE_NX_SPACE_39BIT, other );
+    free( program );
+
     puts( "forwarder: title ids, program exefs and romfs, the address space and ForceDebug in the NPDM, the "
-          "control romfs and the NACP it inherits, and taking the old entry away before writing passed" );
+          "four-core permissions, control romfs and the NACP it inherits, and taking the old entry away before writing passed" );
     return 0;
 }

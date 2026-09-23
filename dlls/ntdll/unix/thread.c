@@ -2174,7 +2174,18 @@ BOOL get_thread_times(int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time, LA
 
 static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
 {
-#ifdef linux
+#ifdef __SWITCH__
+    THREAD_BASIC_INFORMATION info;
+    char text[32];
+    int len;
+
+    if (!wine_nx_thread_set_name ||
+        NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL ) ||
+        info.ClientId.UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess) return;
+    len = ntdll_wcstoumbs( name->Buffer, name->Length / sizeof(WCHAR), text, sizeof(text) - 1, FALSE );
+    text[len] = 0;
+    wine_nx_thread_set_name( HandleToULong( info.ClientId.UniqueThread ), text );
+#elif defined(linux)
     unsigned int status;
     char path[64], nameA[64];
     int unix_pid = -1, unix_tid = -1, len, fd;

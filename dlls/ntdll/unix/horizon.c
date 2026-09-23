@@ -3645,6 +3645,7 @@ ULONG_PTR horizon_get_system_affinity_mask(void)
     if (cached_affinity_mask) return cached_affinity_mask;
 
     rc = svcGetInfo( &mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 );
+    mask &= 0x7; /* Core 3 is reserved for the runtime's graphics workers. */
     if (R_FAILED(rc) || !mask)
     {
         WARN( "svcGetInfo(InfoType_CoreMask) failed %#x, falling back to applet cores.\n", rc );
@@ -3723,7 +3724,6 @@ void horizon_pin_current_thread( ULONG_PTR requested_mask )
         index = InterlockedIncrement( &next_core_index ) - 1;
         mask = nth_core_mask( system_mask, index % count );
     }
-    else if (wine_nx_thread_affinity_fixed) wine_nx_thread_affinity_fixed();
 
     preferred = lowest_set_core( mask );
     rc = svcSetThreadCoreMask( CUR_THREAD_HANDLE, preferred, (u32)mask );
@@ -3734,6 +3734,7 @@ void horizon_pin_current_thread( ULONG_PTR requested_mask )
         return;
     }
     TRACE( "pinned current thread to preferred %u, mask %#lx.\n", preferred, (unsigned long)mask );
+    if ((requested_mask & system_mask) && wine_nx_thread_affinity_fixed) wine_nx_thread_affinity_fixed();
     /* Its server connection thread follows it (horizon_server_follow_client). */
     if ((pipe = horizon_pipe_from_fd( ntdll_get_thread_data()->request_fd )))
         __atomic_store_n( &pipe->client_cores, (unsigned int)mask, __ATOMIC_RELAXED );
@@ -11045,6 +11046,7 @@ static int horizon_server_handle_set_thread_info( struct horizon_server_connecti
     const struct horizon_set_thread_info_request *request = (const void *)message;
     struct horizon_server_object *object;
     unsigned int status;
+    unsigned int affinity_tid = 0, affinity_mask = 0;
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((object = horizon_server_get_thread_locked( request->handle, &status )))
@@ -11055,7 +11057,12 @@ static int horizon_server_handle_set_thread_info( struct horizon_server_connecti
         {
             unsigned long long affinity = request->affinity & horizon_get_system_affinity_mask();
 
-            if (affinity) thread->affinity = affinity;
+            if (affinity)
+            {
+                thread->affinity = affinity;
+                affinity_tid = thread->tid;
+                affinity_mask = affinity;
+            }
             else status = HORIZON_STATUS_INVALID_PARAMETER;
         }
         if (!status)
@@ -11068,6 +11075,7 @@ static int horizon_server_handle_set_thread_info( struct horizon_server_connecti
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (affinity_tid && wine_nx_thread_set_affinity) wine_nx_thread_set_affinity( affinity_tid, affinity_mask );
     return horizon_server_write_status( connection->reply_fd, status );
 }
 

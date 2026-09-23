@@ -43,7 +43,7 @@ static Result restoreMainThreadAffinity(void) {
     if (R_FAILED(rc))
         return rc;
 
-    return svcSetThreadCoreMask(CUR_THREAD_HANDLE, -1, core_mask);
+    return svcSetThreadCoreMask(CUR_THREAD_HANDLE, -1, core_mask & 7);
 }
 
 static void fix_nro_path(char* path) {

@@ -54,6 +54,10 @@ struct nx_prof_thread
     int parked;     /* stopped at a quit point, waiting to hear whether to end */
     s32 core;       /* as the thread saw itself when it registered */
     int fixed;      /* the program chose its cores */
+    int helper;
+    char name[32];
+    s32 app_core, app_priority;
+    u64 app_mask;
     uint64_t teb;
     uint64_t last_ticks, balance_ticks;
 };
@@ -62,6 +66,7 @@ struct nx_prof_thread
 extern void horizon_follow_thread_cores( void *teb, unsigned int mask ) __attribute__((weak));
 static __thread int affinity_fixed;
 int wine_nx_balance_enabled = 1;
+static int four_cores_enabled;
 
 struct nx_prof_row
 {
@@ -69,6 +74,7 @@ struct nx_prof_row
     unsigned int tid, permille;
     char kind;
     s32 core;
+    char name[32];
     uint64_t teb;
 };
 
@@ -93,6 +99,108 @@ static int profiling;
 /* The runtime's image: __start__ is an absolute 0, so the base comes from the
  * kernel's view of the code mapping. */
 static uintptr_t runtime_base, runtime_end;
+
+extern Result __real_svcSetThreadCoreMask( Handle handle, s32 core, u32 mask );
+
+/* libnx gives new pthreads every permitted core. Only graphics opt into core 3. */
+Result __wrap_svcSetThreadCoreMask( Handle handle, s32 core, u32 mask )
+{
+    if (core == 3) core = -1;
+    return __real_svcSetThreadCoreMask( handle, core, mask & ~8u );
+}
+
+int wine_nx_four_cores_available( void )
+{
+    u64 cores, priorities;
+
+    return R_SUCCEEDED( svcGetInfo( &cores, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 ) ) &&
+           R_SUCCEEDED( svcGetInfo( &priorities, InfoType_PriorityMask, CUR_PROCESS_HANDLE, 0 ) ) &&
+           nx_thread_helper_available( cores, priorities );
+}
+
+void wine_nx_thread_configure_cores( int enabled )
+{
+    four_cores_enabled = enabled && wine_nx_four_cores_available();
+    wine_nx_runtime_trace( four_cores_enabled ? "[CORES] graphics workers may use core 3 at priority 63" :
+                           enabled ? "[CORES] core 3 unavailable; reinstall the Autorun forwarder and restart" :
+                                     "[CORES] application cores 0-2" );
+}
+
+static int offload_thread_locked( struct nx_prof_thread *thread )
+{
+    if (!four_cores_enabled || thread->fixed || thread->helper) return 0;
+    if (R_FAILED( svcGetThreadCoreMask( &thread->app_core, &thread->app_mask, thread->handle ) ) ||
+        R_FAILED( svcGetThreadPriority( &thread->app_priority, thread->handle ) )) return -1;
+    if (R_FAILED( __real_svcSetThreadCoreMask( thread->handle, 3, 8 ) )) return -1;
+    if (R_FAILED( svcSetThreadPriority( thread->handle, 63 ) ))
+    {
+        svcSetThreadCoreMask( thread->handle, thread->app_core, thread->app_mask );
+        return -1;
+    }
+    thread->helper = 1;
+    return 1;
+}
+
+static int restore_thread_locked( struct nx_prof_thread *thread, s32 core, u32 mask )
+{
+    if (thread->helper && R_FAILED( svcSetThreadPriority( thread->handle, thread->app_priority ) )) return 0;
+    if (R_FAILED( svcSetThreadCoreMask( thread->handle, core, mask ) ))
+    {
+        if (thread->helper) svcSetThreadPriority( thread->handle, 63 );
+        return 0;
+    }
+    thread->helper = 0;
+    return 1;
+}
+
+void wine_nx_thread_set_name( unsigned int tid, const char *name )
+{
+    char line[128] = "";
+    unsigned int i;
+
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+        int moved;
+
+        if (!thread->handle || thread->kind != 'w' || thread->tid != tid) continue;
+        snprintf( thread->name, sizeof(thread->name), "%s", name );
+        if (nx_thread_graphics_worker( name ))
+        {
+            if ((moved = offload_thread_locked( thread )))
+                snprintf( line, sizeof(line), "[CORES] %u %s: %s", tid, name,
+                          moved > 0 ? "core 3, priority 63" : "could not offload graphics worker" );
+        }
+        else if (thread->helper) restore_thread_locked( thread, thread->app_core, thread->app_mask );
+        break;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    if (line[0]) wine_nx_runtime_trace( line );
+}
+
+void wine_nx_thread_set_affinity( unsigned int tid, unsigned int mask )
+{
+    unsigned int i;
+
+    mask &= 7;
+    if (!mask) return;
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+
+        if (!thread->handle || thread->kind != 'w' || thread->tid != tid) continue;
+        if (restore_thread_locked( thread, __builtin_ctz( mask ), mask ))
+        {
+            thread->fixed = 1;
+            if (thread->teb && &horizon_follow_thread_cores)
+                horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );
+        }
+        break;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
 
 static uint64_t thread_ticks( Handle handle )
 {
@@ -128,6 +236,7 @@ void wine_nx_thread_register( char kind, unsigned int tid, void *teb )
     if (i < NX_PROF_MAX_THREADS) slot = i;
     if (slot < NX_PROF_MAX_THREADS)
     {
+        memset( &registry[slot], 0, sizeof(registry[slot]) );
         registry[slot].handle = handle;
         registry[slot].tid = tid;
         registry[slot].kind = kind;
@@ -135,6 +244,11 @@ void wine_nx_thread_register( char kind, unsigned int tid, void *teb )
         registry[slot].teb = (uintptr_t)teb;
         registry[slot].fixed = affinity_fixed;
         registry[slot].last_ticks = registry[slot].balance_ticks = thread_ticks( handle );
+        if (kind == 'c')
+        {
+            snprintf( registry[slot].name, sizeof(registry[slot].name), "compositor" );
+            offload_thread_locked( &registry[slot] );
+        }
     }
     pthread_mutex_unlock( &registry_mutex );
 }
@@ -693,6 +807,7 @@ void wine_nx_thread_report( void )
         row.handle = thread->handle;
         row.tid = thread->tid;
         row.kind = thread->kind;
+        memcpy( row.name, thread->name, sizeof(row.name) );
         row.teb = thread->teb;
         row.permille = nx_prof_permille( ticks, thread->last_ticks, interval );
         if (R_FAILED( svcGetThreadCoreMask( &row.core, &mask, thread->handle ) )) row.core = thread->core;
@@ -707,7 +822,8 @@ void wine_nx_thread_report( void )
     /* tid, w (Wine) or s (server connection), @core, share of that core. */
     len = appendf( line, 0, "[THREADS] %u threads use %u.%02u cores:", count, total / 1000, total % 1000 / 10 );
     for (i = 0; i < count && i < 12 && rows[i].permille >= 5; i++)
-        len = appendf( line, len, " %u%c@%d %u.%u%%", rows[i].tid, rows[i].kind, (int)rows[i].core,
+        len = appendf( line, len, " %u%c%s%s@%d %u.%u%%", rows[i].tid, rows[i].kind,
+                       rows[i].name[0] ? ":" : "", rows[i].name, (int)rows[i].core,
                        rows[i].permille / 10, rows[i].permille % 10 );
     wine_nx_runtime_trace( line );
     server_report();
@@ -763,6 +879,7 @@ void wine_nx_thread_balance( void )
     last = now;
     if (!wine_nx_balance_enabled || R_FAILED( svcGetInfo( &process_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 ) ))
         return;
+    process_mask &= 7;
     for (i = 0; i < 64 && cores < NX_BALANCE_MAX_CORES; i++)
         if (process_mask & (1ull << i)) core_ids[cores++] = i;
 
@@ -781,7 +898,7 @@ void wine_nx_thread_balance( void )
         struct nx_prof_thread *thread = &registry[i];
         s32 core;
 
-        if (!thread->handle || thread->kind != 'w') continue;
+        if (!thread->handle || thread->kind != 'w' || thread->helper) continue;
         balance[count].load = loads[i];
         balance[count].fixed = thread->fixed;
         balance[count].core = -1;
