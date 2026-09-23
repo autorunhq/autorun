@@ -564,7 +564,7 @@ UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void
     UINT dpi = NtUserGetSystemDpiForProcess( NULL );
     DEVMODEW current = mode;
 
-    dm->add_gpu( "Wine NX GPU", &pci_id, NULL, param );
+    dm->add_gpu( "Tegra X1 GM20B", &pci_id, NULL, param );
     dm->add_source( "Default", source_flags, dpi, param );
     dm->add_monitor( &monitor, param );
     current.dmFields |= DM_POSITION;
