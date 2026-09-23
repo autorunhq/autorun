@@ -134,7 +134,7 @@ int wine_nx_low_window_probe( void (*report)( const char * ) )
     if (!low_window)
     {
         virtmemUnlock();
-        report( "[LOWVA] stock layout; fixed-low Win32 titles use the 32-bit forwarder" );
+        report( "[LOWVA] stock layout; fixed-low Win32 titles require the Atmosphere low-address patch" );
         return 0;
     }
     if (!reserved || !check_native_layout() || !check_guest_window())
@@ -150,6 +150,6 @@ int wine_nx_low_window_probe( void (*report)( const char * ) )
     if (execute_message[0]) report( execute_message );
     if (alias_message[0]) report( alias_message );
     report( passed ? "[LOWVA] PASS: low window reserved for Wine; native allocations above 4 GiB" :
-                     "[LOWVA] FAIL: using the 32-bit forwarder for fixed-low Win32 titles" );
+                     "[LOWVA] FAIL: fixed-low Win32 titles cannot start in this process" );
     return passed;
 }

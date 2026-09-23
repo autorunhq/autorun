@@ -113,13 +113,6 @@ static void test_settings( const char *dir )
     launcher_settings_read( &kv, &settings );
     assert( settings.verbose == 1 && settings.profile == 0 && settings.framebuffer == 1 && settings.dxvk == 1 );
     assert( settings.hidden == 0 && !settings.title[0] );  /* only 1 or on hides */
-    assert( settings.address_space == -1 );                /* absent: read it from the program */
-    load_text( &kv, "address-space=32\n" );
-    launcher_settings_read( &kv, &settings );
-    assert( settings.address_space == 1 );
-    load_text( &kv, "address-space=Any\n" );
-    launcher_settings_read( &kv, &settings );
-    assert( settings.address_space == 0 );
 
     load_text( &kv, "d3d=wine\nd3d9=dxvk\n" );
     launcher_settings_read( &kv, &settings );
@@ -168,7 +161,7 @@ static void test_settings( const char *dir )
     snprintf( path, sizeof(path), "%s/game.wine-nx.txt", dir );
     load_text( &kv, "# written by hand\n" );
     memset( &settings, 0, sizeof(settings) );
-    settings.own_controls = settings.address_space = -1;
+    settings.own_controls = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     strcpy( settings.title, "Need for Speed" );
     settings.hidden = 1;
@@ -186,7 +179,7 @@ static void test_settings( const char *dir )
 
     /* Back to the global settings: only the comment stays; without it the file goes. */
     memset( &settings, 0, sizeof(settings) );
-    settings.verbose = settings.profile = settings.framebuffer = settings.own_controls = settings.address_space = -1;
+    settings.verbose = settings.profile = settings.framebuffer = settings.own_controls = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     assert( launcher_settings_write( &kv, &settings ) && !strcmp( kv.text, "# written by hand\n" ) );
     assert( launcher_kv_save( &kv, path ) && !access( path, F_OK ) );

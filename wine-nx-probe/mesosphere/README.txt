@@ -4,7 +4,7 @@ Base: Atmosphere 1.11.2, 5388824be146a89619e8d641acd64599cf1c5f62.
 Only 39-bit processes with program ID 0548EABB35576000 receive the new layout.
 That is Autorun's generation-2 main forwarder for
 sdmc:/switch/wine/wine-nx-runtime.nro, without additional arguments.
-Other titles and the 32-bit forwarder keep their normal layout.
+Other titles keep their normal layout.
 
 The 39-bit forwarder, native heap, stacks and TLS stay above 4 GiB. The low
 window starts at 0x00200000 and is reserved for Win32 guest mappings. A
@@ -26,10 +26,10 @@ it up. Keep a known-working boot entry and SD-card access for recovery.
 
 With the console powered off, copy atmosphere/mesosphere.bin and
 atmosphere/kips/autorun-loader.kip from the archive to the SD card. Reinstall
-the main 39-bit forwarder from Autorun's System settings. Keep the 32-bit
-forwarder for consoles without the patch. The runtime checks executable
-mapping at 0x00400000 before using the low window.
+the 39-bit forwarder from Autorun's System settings. The runtime checks
+executable mapping at 0x00400000 before using the low window.
 
 Rollback: power off, remove only this patch's mesosphere.bin and
 autorun-loader.kip (restore prior overrides if any), then boot normally.
-The new NRO also works without the patch. Games and settings are untouched.
+Games requiring fixed low addresses cannot launch without the patch.
+Games and settings are untouched.

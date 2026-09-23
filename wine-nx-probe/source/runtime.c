@@ -84,7 +84,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2615"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2617"
 #elif defined(WINE_NX_FEX)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
 #elif defined(WINE_NX_AMD64)
@@ -3254,44 +3254,6 @@ static int runtime_address_space_bits( void )
     return 39;
 }
 
-/* The applications installed beside this one. The forwarders a user made for
- * Wine-NX are among them, which is how a game can be sent to the one with the
- * address space it needs. */
-static int launcher_titles( struct wine_nx_launcher_title *titles, int max )
-{
-    NsApplicationRecord *records = calloc( max, sizeof(*records) );
-    NsApplicationControlData *control = calloc( 1, sizeof(*control) );
-    s32 found = 0;
-    int written = 0;
-
-    if (records && control && R_SUCCEEDED( nsInitialize() ))
-    {
-        if (R_SUCCEEDED( nsListApplicationRecord( records, max, 0, &found ) ))
-        {
-            for (s32 i = 0; i < found && written < max; i++)
-            {
-                NacpLanguageEntry *entry = NULL;
-                u64 size = 0;
-
-                titles[written].id = records[i].application_id;
-                /* Its name when the console has one, its id when it does not. */
-                snprintf( titles[written].name, sizeof(titles[written].name), "%016llX",
-                          (unsigned long long)records[i].application_id );
-                if (R_SUCCEEDED( nsGetApplicationControlData( NsApplicationControlSource_Storage,
-                                                              records[i].application_id, control,
-                                                              sizeof(*control), &size ) ) &&
-                    R_SUCCEEDED( nacpGetLanguageEntry( &control->nacp, &entry ) ) && entry && entry->name[0])
-                    snprintf( titles[written].name, sizeof(titles[written].name), "%s", entry->name );
-                written++;
-            }
-        }
-        nsExit();
-    }
-    free( records );
-    free( control );
-    return written;
-}
-
 /* Which system memory the console booted from. Atmosphere answers through a
  * configuration item of its own; without it there is no way to tell, and the
  * caller says so rather than guessing. */
@@ -3309,74 +3271,33 @@ static int runtime_on_emummc( void )
     return result;
 }
 
-/* Build a forwarder that starts this NRO in the address space bits asks for,
- * and install it, so a game that needs the low 4 GB has somewhere to go. */
 /* What the forwarder installer has to say, as it says it. */
 static void log_line_plain( const char *line )
 {
     log_line( "%s", line );
 }
 
-static unsigned int launcher_install_forwarder( int bits, const char *name, unsigned long long *id,
-                                                const char **step )
+static unsigned int launcher_install_forwarder( const char **step )
 {
     struct wine_nx_forwarder request =
     {
         .nro_path = own_nro,
         .args = NULL,
-        .name = name,
+        .name = "Autorun",
         .author = "ticoverse.com",
-        .address_space = bits == 32 ? WINE_NX_SPACE_32BIT_NO_ALIAS : WINE_NX_SPACE_39BIT,
-        .icon = bits == 32 ? wine_nx_icon_32bit : wine_nx_icon_any,
-        .icon_size = bits == 32 ? wine_nx_icon_32bit_size : wine_nx_icon_any_size,
+        .icon = wine_nx_icon_any,
+        .icon_size = wine_nx_icon_any_size,
     };
     unsigned int rc;
 
     wine_nx_forwarder_report = log_line_plain;
-    if (id) *id = wine_nx_forwarder_title_id( own_nro, NULL, request.address_space );
     rc = wine_nx_forwarder_install( &request, step );
-    log_line( "[LAUNCHER] %d-bit forwarder %016llx: rc=0x%x%s%s", bits,
-              id ? *id : 0ull, rc, rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
+    log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
+              wine_nx_forwarder_title_id( own_nro, NULL ), rc,
+              rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
 }
 
-/* Whether an application is still installed. The records alone answer it, so
- * this does not ask the console for every application's name as the listing
- * above does. */
-static int launcher_title_installed( unsigned long long id )
-{
-    NsApplicationRecord *records;
-    const int page = 64;
-    s32 offset = 0, found = 0;
-    int installed = 0;
-
-    if (!id) return 0;
-    if (!(records = calloc( page, sizeof(*records) ))) return 0;
-    if (R_SUCCEEDED( nsInitialize() ))
-    {
-        do
-        {
-            if (R_FAILED( nsListApplicationRecord( records, page, offset, &found ) )) break;
-            for (s32 i = 0; i < found && !installed; i++)
-                if (records[i].application_id == id) installed = 1;
-            offset += found;
-        } while (found == page && !installed);
-        nsExit();
-    }
-    free( records );
-    return installed;
-}
-
-/* Asks the console to close this application and open that one. */
-static int launcher_launch_title( unsigned long long id )
-{
-    Result rc = appletRequestLaunchApplication( id, NULL );
-
-    if (R_FAILED( rc )) log_line( "[LAUNCHER] could not start %016llx: rc=0x%x", id, (unsigned)rc );
-    return R_SUCCEEDED( rc );
-}
-
-/* This forwarder's own application id, to tell it from the others in the list. */
 static unsigned long long runtime_title_id( void )
 {
     u64 id = 0;
@@ -3399,7 +3320,7 @@ int main( int argc, char **argv )
     unsigned int status;
     unsigned int ldr_status = STATUS_INVALID_IMAGE_FORMAT;
     unsigned int attach_status = STATUS_INVALID_IMAGE_FORMAT;
-    int autorun, handed_over = 0;
+    int autorun;
     int low_window_available;
     USHORT target_machine;
     int sd_cache = wine_nx_sd_cache_install();  /* before any file on the card is opened */
@@ -3566,26 +3487,11 @@ int main( int argc, char **argv )
         wine_nx_usb_wait();
     }
 #endif
-    /* A launcher in another forwarder sent this game here, because it needs the
-     * address space this forwarder was made with and that one was not. It is
-     * ours to start once: the file goes before the game does, so a game that
-     * cannot start does not meet the same handoff on the way back. */
-    {
-        char handoff[512];
-
-        if (read_first_line( RUNTIME_DIR "/run-next.txt", handoff, sizeof(handoff) ) && handoff[0])
-        {
-            remove( RUNTIME_DIR "/run-next.txt" );
-            snprintf( target, sizeof(target), "%s", handoff );
-            autorun = handed_over = 1;
-            log_line( "[LAUNCHER] started here by another forwarder: %s", target );
-        }
-    }
-    if (handed_over || (argc > 1 && argv[1] && argv[1][0]))
+    if (argc > 1 && argv[1] && argv[1][0])
     {
         const char *name;
 
-        if (!handed_over) snprintf( target, sizeof(target), "%s", argv[1] );
+        snprintf( target, sizeof(target), "%s", argv[1] );
         name = strrchr( target, '/' );
         /* The one thing the screen is told, before the game has it. */
         wine_nx_console_quiet = 0;
@@ -3597,7 +3503,6 @@ int main( int argc, char **argv )
         struct wine_nx_launcher_options options =
         {
             .runtime_dir = RUNTIME_DIR,
-            .nro_path = own_nro,
             .emummc = runtime_on_emummc(),
             .build = WINE_NX_RUNTIME_BUILD,
             .machine_of = launcher_machine,
@@ -3609,10 +3514,6 @@ int main( int argc, char **argv )
             .four_cores_available = wine_nx_four_cores_available(),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
-            .title_id = runtime_title_id(),
-            .list_titles = launcher_titles,
-            .launch_title = launcher_launch_title,
-            .title_installed = launcher_title_installed,
             .install_forwarder = launcher_install_forwarder,
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
 #ifdef WINE_NX_MESA_SWITCH

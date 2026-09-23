@@ -36,7 +36,7 @@ struct launcher_catalog
 enum launcher_address_space
 {
     LAUNCHER_ADDRESS_ANY,   /* runs wherever it is put */
-    LAUNCHER_ADDRESS_LOW,   /* needs the low 4 GB: a 32-bit forwarder */
+    LAUNCHER_ADDRESS_LOW,   /* requires the verified low-address window */
     LAUNCHER_ADDRESS_UNKNOWN  /* the program could not be read */
 };
 

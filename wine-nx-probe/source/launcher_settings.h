@@ -194,9 +194,6 @@ struct launcher_settings
      * setting existed means; 0 Autorun's keys alone, the file kept for when it
      * is turned on again. */
     int own_controls;
-    /* What the program needs of the address space (launcher_catalog.h):
-     * -1 read it from the program itself, 0 any, 1 the low 4 GB. */
-    int address_space;
 };
 
 enum { LAUNCHER_FRAME_LIMIT_COUNT = 8, LAUNCHER_HUD_COUNT = 4 };
@@ -376,12 +373,6 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     if (launcher_kv_get( kv, "lsfg-flow", value, sizeof(value) ))
         for (int i = 0; i < 3; i++)
             if (!strcasecmp( value, launcher_lsfg_flow_values[i] )) settings->lsfg_flow = i;
-    settings->address_space = -1;
-    if (launcher_kv_get( kv, "address-space", value, sizeof(value) ))
-    {
-        if (!strcasecmp( value, "32-bit" ) || !strcmp( value, "32" )) settings->address_space = 1;
-        else if (!strcasecmp( value, "any" )) settings->address_space = 0;
-    }
 }
 
 /* Store settings, leaving out what matches the global settings. */
@@ -413,9 +404,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "lsfg-performance", settings->lsfg_performance ? NULL : "0" ) &&
            launcher_kv_set( kv, "lsfg-flow", settings->lsfg_flow == 1 ? NULL :
                             launcher_lsfg_flow_values[settings->lsfg_flow] ) &&
-           launcher_kv_set( kv, "own-controls", states[settings->own_controls + 1] ) &&
-           launcher_kv_set( kv, "address-space", settings->address_space < 0 ? NULL :
-                                                 settings->address_space ? "32-bit" : "any" );
+           launcher_kv_set( kv, "own-controls", states[settings->own_controls + 1] );
 }
 
 #endif

@@ -158,8 +158,6 @@ const unsigned char *wine_nx_hbl_main;
 size_t wine_nx_hbl_main_size;
 const unsigned char *wine_nx_hbl_npdm;
 size_t wine_nx_hbl_npdm_size;
-const unsigned char *wine_nx_icon_32bit;
-size_t wine_nx_icon_32bit_size;
 const unsigned char *wine_nx_icon_any;
 size_t wine_nx_icon_any_size;
 
@@ -287,7 +285,7 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
-static void check_exefs_npdm( const u8 *data, int address_space, u64 tid )
+static void check_exefs_npdm( const u8 *data, u64 tid )
 {
     const struct nca_header *header = nca_of( data );
     u64 start = (u64)header->fs_table[0].media_start_offset * 0x200;
@@ -310,7 +308,7 @@ static void check_exefs_npdm( const u8 *data, int address_space, u64 tid )
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
     /* The three bits that decide where the program's address space begins. */
-    assert( ((meta->flags >> 1) & 7) == address_space );
+    assert( ((meta->flags >> 1) & 7) == 3 );
     aci0 = (const struct npdm_aci0 *)((const u8 *)meta + meta->aci0_offset);
     acid = (const struct npdm_acid *)((const u8 *)meta + meta->acid_offset);
     assert( !memcmp( &aci0->magic, "ACI0", 4 ) && !memcmp( &acid->magic, "ACID", 4 ) );
@@ -402,11 +400,11 @@ int main( int argc, char **argv )
 {
     static const char nro_path[] = "sdmc:/switch/wine/wine-nx-runtime.nro";
     struct wine_nx_forwarder request;
-    char nro_file[512];
+    char nro_file[512], title_key[256];
     const char *step = NULL;
     size_t program_size, control_size, meta_size;
     u8 *program, *control, *meta;
-    u64 tid, other;
+    u64 tid, plain_hash[SHA256_HASH_SIZE / sizeof(u64)], plain_tid;
 
     if (argc < 4)
     {
@@ -414,7 +412,7 @@ int main( int argc, char **argv )
         return 2;
     }
     wine_nx_hbl_npdm = load_file( argv[1], &wine_nx_hbl_npdm_size );
-    wine_nx_icon_32bit = load_file( argv[2], &wine_nx_icon_32bit_size );
+    wine_nx_icon_any = load_file( argv[2], &wine_nx_icon_any_size );
     wine_nx_hbl_main_size = 4096;
     wine_nx_hbl_main = calloc( 1, wine_nx_hbl_main_size );
     snprintf( shim_out_dir, sizeof(shim_out_dir), "%s", argv[3] );
@@ -423,67 +421,53 @@ int main( int argc, char **argv )
     snprintf( nro_file, sizeof(nro_file), "%s/fake.nro", argv[3] );
     write_fake_nro( nro_file, "autorun-nro-nacp" );
 
-    tid = wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_32BIT_NO_ALIAS );
+    tid = wine_nx_forwarder_title_id( nro_file, NULL );
     assert( (tid >> 56) == 0x05 );
     assert( !(tid & 0xFFF) );
-    assert( tid == wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_32BIT_NO_ALIAS ) );
-    assert( tid != wine_nx_forwarder_title_id( nro_path, NULL, WINE_NX_SPACE_32BIT_NO_ALIAS ) );
-    /* The two a user can make are two entries: one must not replace the other. */
-    assert( tid != wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_36BIT ) );
-    assert( tid != wine_nx_forwarder_title_id( nro_file, NULL, -1 ) );
-    /* And where it was before it asked for the space without the alias region. */
-    assert( tid != wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_32BIT ) );
+    assert( tid == wine_nx_forwarder_title_id( nro_file, NULL ) );
+    assert( tid != wine_nx_forwarder_title_id( nro_file, "argument" ) );
+    snprintf( title_key, sizeof(title_key), "%s%s\naddress-space=3\nautorun-forwarder=2", nro_path, nro_path );
+    sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
+    assert( wine_nx_forwarder_title_id( nro_path, NULL ) ==
+            (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
+    forwarder_hash( nro_file, NULL, 0, plain_hash );
+    plain_tid = 0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull);
+    assert( tid != plain_tid );
 
     memset( &request, 0, sizeof(request) );
     request.nro_path = nro_file;
-    request.name = "Autorun 32-bit";
+    request.name = "Autorun";
     request.author = "ticoverse.com";
-    request.address_space = WINE_NX_SPACE_32BIT_NO_ALIAS;
-    request.icon = wine_nx_icon_32bit;
-    request.icon_size = wine_nx_icon_32bit_size;
+    request.icon = wine_nx_icon_any;
+    request.icon_size = wine_nx_icon_any_size;
 
     assert( !wine_nx_forwarder_install( &request, &step ) );
     assert( !step );
     assert( registered == 3 );
     /* Its own entry's contents were taken away, and before anything was written. */
     assert( deleted_entity == tid && !deleted_after_write );
-    /* This entry, the generation before it and the entry it had in the plain
-     * 32-bit space, all ours; never the id without the address space, which is
-     * sphaira's and the user's. */
-    assert( deleted_completely_count == 3 && deleted_completely[2] == tid );
-    assert( deleted_completely[1] == wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_32BIT ) );
+    assert( deleted_completely_count == 2 && deleted_completely[1] == tid );
     for (int i = 0; i < deleted_completely_count; i++)
-        assert( deleted_completely[i] != wine_nx_forwarder_title_id( nro_file, NULL, -1 ) );
+        assert( deleted_completely[i] != plain_tid );
     assert( deleted_completely[0] != tid );
 
     program = read_nca( 1, &program_size );
     control = read_nca( 2, &control_size );
     meta = read_nca( 3, &meta_size );
     check_program( program, program_size, nro_file );
-    check_exefs_npdm( program, WINE_NX_SPACE_32BIT_NO_ALIAS, tid );
-    check_control( control, control_size, "Autorun 32-bit", "ticoverse.com", "autorun-nro-nacp", tid );
+    check_exefs_npdm( program, tid );
+    check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     assert( nca_of( meta )->content_type == NCA_CONTENT_META );
     assert( nca_of( meta )->fs_header[0].fs_type == NCA_FS_PFS0 );
     assert( nca_of( meta )->size == meta_size );
 
-    /* And the default space, which is the only thing that differs. */
-    request.address_space = WINE_NX_SPACE_36BIT;
-    request.name = "Autorun";
-    /* Its own entry: the same NRO in another address space is another thing. */
-    assert( (other = wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_36BIT )) != tid );
-    assert( !wine_nx_forwarder_install( &request, &step ) );
-    free( program );
-    program = read_nca( 4, &program_size );
-    check_exefs_npdm( program, WINE_NX_SPACE_36BIT, other );
     free( program );
     free( control );
     free( meta );
 
-    request.address_space = WINE_NX_SPACE_39BIT;
-    other = wine_nx_forwarder_title_id( nro_file, NULL, WINE_NX_SPACE_39BIT );
     assert( !wine_nx_forwarder_install( &request, &step ) );
-    program = read_nca( 7, &program_size );
-    check_exefs_npdm( program, WINE_NX_SPACE_39BIT, other );
+    program = read_nca( 4, &program_size );
+    check_exefs_npdm( program, tid );
     free( program );
 
     puts( "forwarder: title ids, program exefs and romfs, the address space and ForceDebug in the NPDM, the "

@@ -43,7 +43,7 @@ if [ -n "$npdm" ]; then
         -fsanitize=address,undefined -fno-omit-frame-pointer \
         -I "$probe/tests" -I "$build/switch-shim" \
         "$probe/tests/forwarder_build.c" -o "$build/forwarder_build"
-    "$build/forwarder_build" "$npdm" "$probe/assets/autorun-32.jpg" "$build/ncas"
+    "$build/forwarder_build" "$npdm" "$probe/assets/autorun.jpg" "$build/ncas"
 else
     echo "forwarder: skipped, no hbl-main.npdm in any build directory"
 fi

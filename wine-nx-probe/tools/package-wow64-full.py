@@ -175,9 +175,8 @@ both work, and the collection may keep a folder of its own around them. Put
 sims2-setup.exe's folder beside the packs, or beside the folder holding them.
 
 The game is the newest expansion's executable, TSBin\\Sims2EP9.exe. It has no
-relocations and is linked for 0x400000, so it needs a 32-bit forwarder, and
-even then it only starts when nothing else has taken that address: a run that
-says "[IMAGE] this program cannot be moved" wants trying again.
+relocations and is linked for 0x400000, so it requires the 39-bit Autorun
+forwarder and the Atmosphere low-address patch.
 
 The game's own movies -- the intro, the EA logo, what plays on a television --
 are .movie files in Maxis' own format, which the game reads itself: they need no

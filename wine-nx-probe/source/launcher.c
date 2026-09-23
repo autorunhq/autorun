@@ -997,7 +997,7 @@ struct grid
 };
 
 static void draw_shell( struct launcher *l, int home );
-static void draw_footprint( struct launcher *l, int with_address_space );
+static void draw_footprint( struct launcher *l );
 static void draw_backdrop( struct launcher *l, int current );
 static void draw_cover( struct ui *ui, const struct program *p, SDL_Rect rect, int radius, int brightness,
                         int alpha );
@@ -1369,15 +1369,11 @@ static void draw_shell( struct launcher *l, int home )
     draw_symbol( l, SYMBOL_SETTINGS, right, SHELL_Y,
                  l->zone == ZONE_HEADER && l->header_focus == SHELL_SETTINGS ? 255 : 190 );
     l->shell_hits[SHELL_SETTINGS] = (SDL_Rect){ right - SHELL_GAP / 2, 0, width + SHELL_GAP, UI_HEADER_HEIGHT };
-    if (home) draw_footprint( l, 1 );
+    if (home) draw_footprint( l );
 }
 
-/* The mark, and beside it the address space when it is the low one -- which is
- * the only one worth saying, because it is the only one that changes what can
- * be started. It belongs on the home screen, where there is room for it and
- * nothing else to read; the settings show the mark alone, and the library is
- * covers, where one more thing in the corner is one too many. */
-static void draw_footprint( struct launcher *l, int with_address_space )
+/* Launcher mark on Home and settings screens. */
+static void draw_footprint( struct launcher *l )
 {
     struct ui *ui = &l->ui;
     const int line = HOME_HINT_Y - 12;
@@ -1393,17 +1389,13 @@ static void draw_footprint( struct launcher *l, int with_address_space )
         rect.x = x;
         rect.y = line - height / 2;
         SDL_RenderCopy( ui->renderer, l->logo, NULL, &rect );
-        x += rect.w + 12;
     }
-    if (!with_address_space || l->options->address_space_bits != 32) return;
-    ui_text( ui, ui->small, x, line - TTF_FontHeight( ui->small ) / 2,
-             "Running 32-bit address space", ui->dim );
 }
 
 /* What the settings screens ask for through the ui. */
 static void footer_mark( void *data )
 {
-    draw_footprint( data, 0 );
+    draw_footprint( data );
 }
 
 static SDL_Rect cover_crop( const struct program *p, int width, int height )
@@ -1680,52 +1672,46 @@ enum program_row
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
-    ROW_ADDRESS, ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
+    ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
 static void save_look( struct launcher *l );
 
-/* What making one costs, in the fewest words that still say it, and this
- * console's own answer to the question it raises. */
-static int confirm_forwarder( struct launcher *l, int bits )
+static int confirm_forwarder( struct launcher *l )
 {
     struct ui *ui = &l->ui;
     char message[320];
 
     snprintf( message, sizeof(message),
-              "A %d-bit forwarder is installed as an application. Consoles have been banned for homebrew "
+              "A forwarder is installed as an application. Consoles have been banned for homebrew "
               "in that list.\n\nUse emuMMC only. %s",
-              bits,
               l->options->emummc > 0 ? "This console is on emuMMC." :
               l->options->emummc == 0 ? "This console is NOT on emuMMC." :
               "Atmosphere did not say which this console is on." );
     return ui_confirm( ui, "Install forwarder", message, "Install" );
 }
 
-/* Build it, say where it went wrong if it did, and name it as the 32-bit one. */
-static int install_forwarder( struct launcher *l, int bits, unsigned long long *id )
+static void make_forwarder( struct launcher *l )
 {
-    static const char *const names[] = { "Autorun 32-bit", "Autorun" };
-    const char *name = names[bits == 32 ? 0 : 1];
     struct ui *ui = &l->ui;
     const char *step = NULL;
-    char message[256], value[32];
+    char message[256];
     unsigned int rc;
 
-    if (!l->options->install_forwarder) return 0;
-    if (!confirm_forwarder( l, bits )) { ui_start_screen( ui ); return 0; }
+    if (!l->options->install_forwarder) return;
+    if (!confirm_forwarder( l )) { ui_start_screen( ui ); return; }
 
     /* One frame saying what is happening: building the three parts and writing
      * them takes a moment, and nothing is drawn while it does. */
     ui_start_screen( ui );
     ui_background( ui );
-    ui_header_back( ui, "Install forwarder", name );
+    ui_header_back( ui, "Install forwarder", "Autorun" );
     ui_text_centered( ui, ui->large, ui->width / 2, ui->height / 2 - 30, "Installing...", ui->value );
     ui_present( ui );
 
-    rc = l->options->install_forwarder( bits, name, id, &step );
+    rc = l->options->install_forwarder( &step );
     ui_start_screen( ui );
     if (rc)
     {
@@ -1733,28 +1719,9 @@ static int install_forwarder( struct launcher *l, int bits, unsigned long long *
                   step ? step : "working", rc );
         ui_message( ui, "Could not install", message );
         ui_start_screen( ui );
-        return 0;
+        return;
     }
-    if (bits == 32)
-    {
-        snprintf( value, sizeof(value), "%016llX", id ? *id : 0ull );
-        launcher_kv_set( &l->look, "forwarder-32bit", value );
-        launcher_kv_set( &l->look, "forwarder-32bit-name", name );
-        save_look( l );
-    }
-    return 1;
-}
-
-/* Settings: one of the two, made on the spot. */
-static void make_forwarder( struct launcher *l, int bits )
-{
-    struct ui *ui = &l->ui;
-    unsigned long long id = 0;
-    char message[192];
-
-    if (!install_forwarder( l, bits, &id )) return;
-    snprintf( message, sizeof(message), "%s is on the home menu.", bits == 32 ? "Autorun 32-bit" : "Autorun" );
-    ui_message( ui, "Installed", message );
+    ui_message( ui, "Installed", "Autorun is on the home menu." );
     ui_start_screen( ui );
 }
 
@@ -1851,40 +1818,10 @@ static int next_state( int state, int direction )
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
 }
 
-/* What the program needs of the address space: what it was told, or what the
- * program itself says when it was told nothing. */
-static enum launcher_address_space program_address_space( struct program *p )
-{
-    if (p->settings.address_space >= 0)
-        return p->settings.address_space ? LAUNCHER_ADDRESS_LOW : LAUNCHER_ADDRESS_ANY;
-    return launcher_program_address_space( p->path );
-}
-
-/* Whether this process can run it at all. Nothing here can widen or narrow the
- * address space: Horizon fixed it when the forwarder started this process. */
 static int address_space_fits( struct launcher *l, struct program *p )
 {
-    return !l->options->address_space_bits || l->options->address_space_bits == 32 ||
-           (l->options->low_window && p->settings.address_space != 1) ||
-           program_address_space( p ) != LAUNCHER_ADDRESS_LOW;
-}
-
-/* The forwarder named under Settings, and whether the console still has it.
- * name comes back as what it was called when it was named. */
-static unsigned long long chosen_forwarder( struct launcher *l, char *name, size_t size, int *installed )
-{
-    char value[64] = "";
-    unsigned long long id;
-
-    if (name && size) name[0] = 0;
-    if (installed) *installed = 0;
-    if (!launcher_kv_get( &l->look, "forwarder-32bit", value, sizeof(value) ) || !value[0]) return 0;
-    if (!(id = strtoull( value, NULL, 16 ))) return 0;
-    if (name && size && (!launcher_kv_get( &l->look, "forwarder-32bit-name", name, size ) || !name[0]))
-        snprintf( name, size, "%s", value );
-    /* Without the console to ask, take it on trust rather than refuse. */
-    if (installed) *installed = !l->options->title_installed || l->options->title_installed( id );
-    return id;
+    return l->options->address_space_bits == 39 &&
+           (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
 }
 
 static int start_program( struct launcher *l, struct program *p, char *target, size_t size )
@@ -1900,50 +1837,9 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     }
     if (!address_space_fits( l, p ))
     {
-        char message[320], name[128] = "";
-        int installed = 0;
-        unsigned long long id = chosen_forwarder( l, name, sizeof(name), &installed );
-
-        /* Named, still installed, and the console will open it: nothing to ask
-         * about -- the game goes there. */
-        if (!id || !installed || !l->options->launch_title)
-        {
-            snprintf( message, sizeof(message),
-                      "%s%s needs the low 4 GB of memory. Autorun is running with %d bits, which begins "
-                      "above it.\n\nA 32-bit forwarder starts Autorun where the game fits.",
-                      id && !installed ? "The 32-bit forwarder is gone. " : "", p->title,
-                      l->options->address_space_bits );
-            if (!l->options->install_forwarder || !l->options->launch_title)
-            {
-                ui_message( ui, "32-bit forwarder needed", message );
-                return 0;
-            }
-            if (!ui_confirm( ui, "32-bit forwarder needed", message, "Install now" ))
-            {
-                ui_start_screen( ui );
-                return 0;
-            }
-            if (!install_forwarder( l, 32, &id )) return 0;
-            installed = 1;
-        }
-        /* The game goes on the card before the forwarder is asked for, because
-         * once the console takes the request nothing here runs again. */
-        runtime_file( l, "run-next.txt", path, sizeof(path) );
-        if (!write_line( path, p->path ))
-        {
-            ui_toast( ui, "Could not write run-next.txt", 2500 );
-            return 0;
-        }
-        p->launched_order = l->catalog.next_order++;
-        save_library( l );
-        if (l->options->launch_title( id ))
-        {
-            ui_toast( ui, "Opening the 32-bit forwarder...", 4000 );
-            return 0;
-        }
-        remove( path );
-        snprintf( message, sizeof(message), "The console refused to open %s.", name[0] ? name : "the forwarder" );
-        ui_message( ui, "Could not open it", message );
+        ui_message( ui, "Address space unavailable", l->options->address_space_bits != 39
+                    ? "Start Autorun from its 39-bit forwarder. You can install it in Settings > System."
+                    : "This game requires the Atmosphere low-address patch. Restart with the patched loader and Mesosphere." );
         return 0;
     }
     p->missing = 0;
@@ -2393,6 +2289,7 @@ static void fex_options_menu( struct launcher *l, struct program *p )
 enum program_section
 {
     SECTION_GENERAL,
+    SECTION_EMULATION,
     SECTION_GRAPHICS,
 #ifdef WINE_NX_LSFG
     SECTION_FRAME_GENERATION,
@@ -2403,7 +2300,7 @@ enum program_section
 
 static int program_menu( struct launcher *l, struct program *p, char *target, size_t size )
 {
-    static const char *const sections[] = { "General", "Graphics",
+    static const char *const sections[] = { "General", "Emulation", "Graphics",
 #ifdef WINE_NX_LSFG
                                             "Frame Generation",
 #endif
@@ -2485,12 +2382,12 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 #ifdef WINE_NX_FEX
         if (x86 || x64)
         {
-            ADD_ROW( ROW_CPU, SECTION_GENERAL, "CPU translator", "Translator used to run this program." );
+            ADD_ROW( ROW_CPU, SECTION_EMULATION, "CPU translator", "Translator used to run this program." );
             row->kind = UI_ROW_DROPDOWN;
             snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
         }
 #endif
-        ADD_ROW( ROW_FOUR_CORES, SECTION_GENERAL, "4-core support",
+        ADD_ROW( ROW_FOUR_CORES, SECTION_EMULATION, "4-core support",
                  l->options->four_cores_available
                  ? "Moves graphics workers to core 3. Game threads stay on cores 0-2."
                  : "Requires an updated Autorun forwarder. Reinstall it and restart Autorun." );
@@ -2499,9 +2396,9 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         row->on = p->settings.four_cores;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
-        ADD_ROW( ROW_SYNC, SECTION_GENERAL, "Synchronization",
+        ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
                  "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
-        row->kind = UI_ROW_VALUE;
+        row->kind = UI_ROW_DROPDOWN;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
 
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
@@ -2621,21 +2518,6 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 #endif
 
         {
-            enum launcher_address_space needs = launcher_program_address_space( p->path );
-
-            ADD_ROW( ROW_ADDRESS, SECTION_GRAPHICS, "Address space",
-                     "Fixed-address Win32 games need the low window or the 32-bit forwarder. "
-                     "Autorun checks the low window before starting them in a 39-bit process." );
-            row->adjustable = 1;
-            if (p->settings.address_space >= 0)
-                snprintf( row->value, sizeof(row->value), "%s",
-                          p->settings.address_space ? "32-bit" : "Any" );
-            else snprintf( row->value, sizeof(row->value), "Auto (%s)",
-                           needs == LAUNCHER_ADDRESS_LOW ? "32-bit" :
-                           needs == LAUNCHER_ADDRESS_ANY ? "any" : "unread" );
-        }
-
-        {
             int has_own = launcher_keys_path( p->path, path, sizeof(path) ) && file_exists( path );
             /* Not set means its own when it has any, which is what a card
              * written before this setting existed means. */
@@ -2658,14 +2540,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
         if ((x86 || x64) && !p->settings.fex)
         {
-            ADD_ROW( ROW_BOX64, SECTION_DIAGNOSTICS, "Box64 options",
+            ADD_ROW( ROW_BOX64, SECTION_EMULATION, "Box64 options",
                      "Per-game performance and compatibility flags for the Box64 translator." );
             launcher_sibling_path( p->path, ".box64.txt", path, sizeof(path) );
             box64_options_status( path, row->value, sizeof(row->value) );
         }
         else if ((x86 || x64) && p->settings.fex)
         {
-            ADD_ROW( ROW_FEX, SECTION_DIAGNOSTICS, "FEX options",
+            ADD_ROW( ROW_FEX, SECTION_EMULATION, "FEX options",
                      "Per-game performance and compatibility flags for the FEX translator." );
             if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ))
                 fex_options_status( path, row->value, sizeof(row->value) );
@@ -2908,13 +2790,6 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
 #endif
 
-        case ROW_ADDRESS:
-            /* Auto, then what the two answers are, so either can be forced. */
-            p->settings.address_space = action == UI_ACTION_RESET ? -1 :
-                                        next_state( p->settings.address_space, action == UI_ACTION_LEFT ? -1 : 1 );
-            save_program_settings( l, p );
-            break;
-
         case ROW_OWN_CONTROLS:
         {
             int has_own = launcher_keys_path( p->path, path, sizeof(path) ) && file_exists( path );
@@ -2999,62 +2874,12 @@ enum settings_row
 {
     SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
     SET_CONTROLS, SET_STEAMGRIDDB,
-    SET_UPDATE, SET_REOPEN, SET_FORWARDER, SET_MAKE_32BIT, SET_MAKE_MAIN,
+    SET_UPDATE, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE, SET_SWAP_GAME, SET_SWAP_TEST, SET_SWAP_REMOVE,
 #endif
     SET_CREDITS, SETTINGS_ROWS
 };
-
-/* Which forwarder to send a game to when this one cannot run it. The console
- * lists what is installed; the user picks the one they made with a 32-bit
- * address space, since only they know which that is. */
-static void choose_forwarder( struct launcher *l )
-{
-    struct wine_nx_launcher_title *titles;
-    struct ui_row *rows;
-    struct ui_list list = {0};
-    char value[64];
-    int count, i, chosen;
-
-    if (!l->options->list_titles) return;
-    titles = calloc( LAUNCHER_MAX_TITLES, sizeof(*titles) );
-    rows = calloc( LAUNCHER_MAX_TITLES + 1, sizeof(*rows) );
-    if (!titles || !rows) { free( titles ); free( rows ); return; }
-
-    count = l->options->list_titles( titles, LAUNCHER_MAX_TITLES );
-    /* The first row clears the choice; this forwarder is not offered, as sending
-     * a game to the address space it was refused in would only refuse it again. */
-    snprintf( rows[0].label, sizeof(rows[0].label), "None" );
-    snprintf( rows[0].value, sizeof(rows[0].value), "%s", "Do not offer another forwarder" );
-    for (i = 0; i < count; i++)
-    {
-        struct ui_row *row = &rows[i + 1];
-
-        snprintf( row->label, sizeof(row->label), "%s", titles[i].name );
-        snprintf( row->value, sizeof(row->value), "%016llX", titles[i].id );
-        row->disabled = titles[i].id == l->options->title_id;
-        if (row->disabled) snprintf( row->value, sizeof(row->value), "%s", "This forwarder" );
-    }
-    if (ui_list_run( &l->ui, &list, "32-bit forwarder", "Installed applications", rows, count + 1, 1 ) ==
-        UI_ACTION_CHOOSE)
-    {
-        chosen = list.selection;
-        if (!chosen || titles[chosen - 1].id == l->options->title_id)
-        {
-            launcher_kv_set( &l->look, "forwarder-32bit", NULL );
-            launcher_kv_set( &l->look, "forwarder-32bit-name", NULL );
-        }
-        else
-        {
-            snprintf( value, sizeof(value), "%016llX", titles[chosen - 1].id );
-            launcher_kv_set( &l->look, "forwarder-32bit", value );
-            launcher_kv_set( &l->look, "forwarder-32bit-name", titles[chosen - 1].name );
-        }
-    }
-    free( titles );
-    free( rows );
-}
 
 static void save_look( struct launcher *l )
 {
@@ -3116,7 +2941,7 @@ static const struct { const char *name, *value, *help; } credits[] =
       "https://github.com/Ibnuard/winebox64_nx\nA proof of concept running x86-64 Wine under Box64 on Horizon; "
       "reference for Autorun's Box64 and libnx integration." },
     { "sphaira", "ITotalJustice, NaGaa95",
-      "https://github.com/NaGaa95/sphaira\nForwarders that start Autorun with a 32-bit address space." },
+      "https://github.com/NaGaa95/sphaira\nHome menu forwarder builder." },
 };
 #define CREDIT_COUNT (sizeof(credits) / sizeof(credits[0]))
 
@@ -3426,7 +3251,6 @@ static void settings_menu( struct launcher *l )
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
-            [SET_FORWARDER] = SET_SECTION_SYSTEM, [SET_MAKE_32BIT] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
             [SET_SWAP_SIZE] = SET_SECTION_SYSTEM, [SET_SWAP_TEST] = SET_SECTION_SYSTEM,
@@ -3497,36 +3321,11 @@ static void settings_menu( struct launcher *l )
         rows[SET_REOPEN].on = !!l->options->reopen_launcher;
         rows[SET_REOPEN].help = "Autorun starts itself again instead of closing to the HOME menu. "
                                 "A forwarder made by sphaira cannot do it and stops the console.";
-        snprintf( rows[SET_FORWARDER].label, sizeof(rows[0].label), "32-bit forwarder" );
-        {
-            char name[128];
-            int installed;
-
-            if (!chosen_forwarder( l, name, sizeof(name), &installed ))
-                snprintf( rows[SET_FORWARDER].value, sizeof(rows[0].value), "Not set" );
-            else
-                snprintf( rows[SET_FORWARDER].value, sizeof(rows[0].value), "%s%s", name,
-                          installed ? "" : " (gone)" );
-        }
-        rows[SET_FORWARDER].help = "The forwarder made with a 32-bit address space, for games that need the low "
-                                   "4 GB. A game that needs it is offered to that forwarder, which the console "
-                                   "opens in this one's place and which starts the game by itself.";
-        rows[SET_FORWARDER].adjustable = 0;
-        rows[SET_FORWARDER].disabled = !l->options->list_titles || !l->options->launch_title;
-        snprintf( rows[SET_MAKE_32BIT].label, sizeof(rows[0].label), "Make a 32-bit forwarder" );
-        snprintf( rows[SET_MAKE_32BIT].value, sizeof(rows[0].value), "%s",
-                  l->options->install_forwarder ? "Autorun 32-bit" : "Unavailable" );
-        rows[SET_MAKE_32BIT].help = "For games linked for a fixed address in the low 4 GB, which only run with "
-                                    "32 bits. Named above as soon as it is made, and games that need it are "
-                                    "sent to it. Only on an emuMMC: an installed entry is what the console "
-                                    "reports online.";
-        rows[SET_MAKE_32BIT].adjustable = 0;
-        rows[SET_MAKE_32BIT].disabled = !l->options->install_forwarder;
         snprintf( rows[SET_MAKE_MAIN].label, sizeof(rows[0].label), "Make an Autorun forwarder" );
         snprintf( rows[SET_MAKE_MAIN].value, sizeof(rows[0].value), "%s",
                   l->options->install_forwarder ? "Autorun" : "Unavailable" );
-        rows[SET_MAKE_MAIN].help = "Autorun itself on the home menu with the 39-bit address space required "
-                                   "by AMD64 programs. Only on an emuMMC.";
+        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games also "
+                                   "require the Atmosphere low-address patch. Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
 #ifdef WINE_NX_SWAP_POC
@@ -3603,14 +3402,8 @@ static void settings_menu( struct launcher *l )
                 launcher_kv_set( &l->look, "steamgriddb-key", key[0] ? key : NULL );
             break;
         }
-        case SET_FORWARDER:
-            if (action == UI_ACTION_CHOOSE) choose_forwarder( l );
-            break;
-        case SET_MAKE_32BIT:
-            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 32 );
-            break;
         case SET_MAKE_MAIN:
-            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 39 );
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l );
             break;
 
 #ifdef WINE_NX_SWAP_POC

@@ -34,32 +34,30 @@ enum launcher_address_space { LAUNCHER_ADDRESS_LOW, LAUNCHER_ADDRESS_ANY };
 static enum launcher_address_space detected;
 struct options { int address_space_bits, low_window; };
 struct launcher { struct options *options; };
-struct program { struct { int address_space; } settings; const char *path; };
+struct program { const char *path; };
 static enum launcher_address_space launcher_program_address_space(const char *path)
 { (void)path; return detected; }
 '''
-fixture += function('static enum launcher_address_space program_address_space(')
 fixture += function('static int address_space_fits(')
 fixture += r'''
 int main(void)
 {
     struct options o = {39, 0};
     struct launcher l = {&o};
-    struct program p = {{-1}, "fixed.exe"};
+    struct program p = {"fixed.exe"};
     detected = LAUNCHER_ADDRESS_LOW;
     assert(!address_space_fits(&l, &p));
     o.low_window = 1;
     assert(address_space_fits(&l, &p));
-    p.settings.address_space = 1;
-    assert(!address_space_fits(&l, &p));
     o.address_space_bits = 32;
-    assert(address_space_fits(&l, &p));
+    assert(!address_space_fits(&l, &p));
+    o.address_space_bits = 0;
+    assert(!address_space_fits(&l, &p));
     o.address_space_bits = 39;
     o.low_window = 0;
-    p.settings.address_space = -1;
     detected = LAUNCHER_ADDRESS_ANY;
     assert(address_space_fits(&l, &p));
-    puts("Low window: verified forwarder ID, capability gating and explicit 32-bit fallback passed");
+    puts("Low window: verified forwarder ID and 39-bit capability gating passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='autorun-low-window-routing-') as directory:
