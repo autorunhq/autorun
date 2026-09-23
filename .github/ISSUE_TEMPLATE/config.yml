@@ -1,0 +1,15 @@
+# GitHub's "New issue" page for Autorun. Support, game reports and ideas live on
+# the forum, where the people who can answer them are, so each of these opens
+# the matching Autorun category there. A blank issue is still available below
+# them for anything that really does belong in this tracker.
+blank_issues_enabled: true
+contact_links:
+  - name: "Using a new version?"
+    url: "https://forum.ticoverse.com/category/22/releases"
+    about: "New Autorun builds, changelogs and download links. Anything a release changed belongs in its thread."
+  - name: "Game-specific issue or feedback?"
+    url: "https://forum.ticoverse.com/category/21/game-discussion"
+    about: "Which games run, the settings that help and where they still stop. Share your results."
+  - name: "Help or suggestions?"
+    url: "https://forum.ticoverse.com/category/23/help-suggestions"
+    about: "Need help or have an idea? Ask there, and attach the log from the game you ran."
