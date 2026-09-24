@@ -30,6 +30,8 @@ struct wine_nx_launcher_options
     int address_space_bits;
     int low_window;
     int four_cores_available;
+    int own_forwarder;
+    int reboot_requested;
     int (*schedule_restart)(void);
     /* Install the 39-bit forwarder; returns 0 or the failing Result and step. */
     unsigned int (*install_forwarder)( const char **step );

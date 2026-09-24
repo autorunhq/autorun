@@ -51,8 +51,11 @@ fi
 
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$probe/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
+    -DLTC_NOTHING -DLTC_SHA256 -DLTC_NO_TEST -DARGTYPE=4 -I "$root/libs/tomcrypt/src/headers" \
     "$probe/tests/launcher_host.c" "$probe/source/launcher.c" "$probe/source/launcher_catalog.c" "$probe/source/launcher_ui.c" \
     "$probe/source/launcher_graphics.c" \
+    "$probe/source/launcher_setup.c" "$probe/source/setup_boot.c" \
+    "$root/libs/tomcrypt/src/hashes/sha2/sha256.c" \
     "$probe/source/steamgriddb.c" \
     "$probe/source/launcher_svg.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lcurl -o "$build/launcher_host"

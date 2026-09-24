@@ -25,6 +25,7 @@
 #include <png.h>
 
 #include "launcher.h"
+#include "launcher_settings.h"
 #include "launcher_catalog.h"
 #include "launcher_ui.h"
 #include "launcher_update.h"
@@ -485,7 +486,17 @@ int main( int argc, char **argv )
         if (line[0] && line[0] != '#') snprintf( script[script_count++], sizeof(script[0]), "%s", line );
     }
     fclose( file );
+    if (argc > 3 && !strcmp( argv[3], "--setup-fixture" )) options.own_forwarder = 1;
+    else
+    {
+        struct launcher_kv look;
+        const char *path = "sdmc:/switch/wine/launcher.txt";
+        assert( launcher_kv_load( &look, path ) );
+        assert( launcher_kv_set( &look, "setup-offered", "1" ) );
+        assert( launcher_kv_save( &look, path ) );
+    }
     if (argc > 3 && !strcmp( argv[3], "--carousel-fixture" )) carousel_fixture();
+    else if (argc > 3 && !strcmp( argv[3], "--setup-fixture" )) {}
     else if (argc > 3) snprintf( target, sizeof(target), "%s", argv[3] );
 
     ui_present_hook = on_frame;

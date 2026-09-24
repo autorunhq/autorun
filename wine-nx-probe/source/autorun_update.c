@@ -16,7 +16,7 @@
 #define RELEASE_API "https://api.github.com/repos/danfromtico/autorun/releases/latest"
 #define DOWNLOAD_PREFIX "https://github.com/danfromtico/autorun/releases/download/"
 #define METADATA_MAX (1024u * 1024u)
-#define ARCHIVE_MAX (512u * 1024u * 1024u)
+#define ARCHIVE_MAX (1024u * 1024u * 1024u)
 
 struct memory_buffer
 {

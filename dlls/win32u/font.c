@@ -52,6 +52,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <switch/services/pl.h>
+#include "../ntdll/unix/horizon_runtime_paths.h"
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(font);
@@ -6852,10 +6853,10 @@ static void load_file_system_fonts(void)
 #endif
 
 #ifdef __SWITCH__
-    load_switch_directory_fonts( "sdmc:/switch/wine/drive_c/windows/fonts",
+    load_switch_directory_fonts( WINE_NX_RUNTIME_WINDOWS "/fonts",
                                  "\\??\\C:\\windows\\fonts\\", 0 );
-    load_switch_directory_fonts( "sdmc:/switch/wine/share/wine/fonts",
-                                 "\\??\\Z:\\switch\\wine\\share\\wine\\fonts\\",
+    load_switch_directory_fonts( WINE_NX_RUNTIME_ROOT "/share/wine/fonts",
+                                 WINE_NX_RUNTIME_DOS_ROOT "\\share\\wine\\fonts\\",
                                  ADDFONT_EXTERNAL_FONT );
 #else
     /* Windows directory */

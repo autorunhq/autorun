@@ -22,6 +22,7 @@
 #include "wine/server.h"
 #include "unix_private.h"
 #include "horizon_private.h"
+#include "horizon_runtime_paths.h"
 #include "launcher.h"
 #include "low_window.h"
 #include "autorun_install.h"
@@ -72,7 +73,7 @@ u32 __nx_exception_ignoredebug = 1;
 
 #define WINE_ROOT "sdmc:/switch/wine"
 #define WINE_DRIVE_C WINE_ROOT "/drive_c"
-#define WINE_SYSTEM_DIR WINE_DRIVE_C "/windows/system32"
+#define WINE_SYSTEM_DIR WINE_NX_RUNTIME_SYSTEM32
 /* The profile shell32 resolves: it ignores %USERPROFILE% and builds every
  * CSIDL_Type_User folder as ProfilesDirectory + GetUserNameW(), which this
  * Wine answers "steamuser" (dlls/advapi32/advapi.c). A profile under any
@@ -2509,7 +2510,7 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
     status = wine_nx_loader_prepare_wow64( &native, &initialize, runtime_fex );
     log_line( "[WOW64] native DLLs status=%08x", status );
     if (status) return status;
-    status = map_pe_image( WINE_DRIVE_C "/windows/syswow64/ntdll.dll", (void **)&guest, &size );
+    status = map_pe_image( WINE_NX_RUNTIME_SYSWOW64 "/ntdll.dll", (void **)&guest, &size );
     if (status) return status;
     /* ntdll cannot relocate itself (cf. load_wow64_ntdll); the main image is
      * relocated by the x86 loader because it is the PEB's ImageBaseAddress. */
@@ -3347,8 +3348,8 @@ static void release_thread_local_pages( void )
  * version. The mark is kept with the registry it wrote to, so a card whose
  * registry was reset runs it again. */
 #define COMPONENTS_VERSION 1
-#define COMPONENTS_SETUP   RUNTIME_DIR "/drive_c/windows/autorun-setup.exe"
-#define COMPONENTS_DONE    RUNTIME_DIR "/registry/components-1.done"
+#define COMPONENTS_SETUP   WINE_NX_RUNTIME_WINDOWS "/autorun-setup.exe"
+#define COMPONENTS_DONE    WINE_NX_RUNTIME_ROOT "/registry/components-1.done"
 static int runtime_components_run;
 
 /* The exit code the program gave NtTerminateProcess (dlls/ntdll/unix/process.c);
@@ -3371,7 +3372,7 @@ static void run_components_first( char *target, size_t size )
                   "%s goes first", name ? name + 1 : target );
         return;
     }
-    if (!write_line( RUNTIME_DIR "/run-next.txt", target ))
+    if (!write_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target ))
     {
         log_line( "[SETUP] could not write run-next.txt; the components setup waits for the next program" );
         return;
@@ -3551,7 +3552,7 @@ static int return_to_launcher( void )
     }
     /* A program waiting in run-next.txt (after the components setup) is started
      * by the runtime started again, whether or not the launcher would be. */
-    if (!still_lent && (runtime_reopen_launcher || !access( RUNTIME_DIR "/run-next.txt", F_OK )) &&
+    if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
         envHasNextLoad() && own_nro[0] && R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
     {
         log_step( "starting this program again for the launcher" );
@@ -3603,7 +3604,7 @@ static unsigned int launcher_install_forwarder( const char **step )
 {
     struct wine_nx_forwarder request =
     {
-        .nro_path = own_nro,
+        .nro_path = RUNTIME_DIR "/wine-nx-runtime.nro",
         .args = NULL,
         .name = "Autorun",
         .author = "ticoverse.com",
@@ -3615,7 +3616,7 @@ static unsigned int launcher_install_forwarder( const char **step )
     wine_nx_forwarder_report = log_line_plain;
     rc = wine_nx_forwarder_install( &request, step );
     log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
-              wine_nx_forwarder_title_id( own_nro, NULL ), rc,
+              wine_nx_forwarder_title_id( request.nro_path, NULL ), rc,
               rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
 }
@@ -3654,7 +3655,7 @@ int main( int argc, char **argv )
     log_main_thread = pthread_self();
     log_main_thread_set = 1;
     if (argc > 0 && argv[0] && strstr( argv[0], ".nro" )) snprintf( own_nro, sizeof(own_nro), "%s", argv[0] );
-    else snprintf( own_nro, sizeof(own_nro), "%s", RUNTIME_DIR "/wine-nx-runtime.nro" );
+    else snprintf( own_nro, sizeof(own_nro), "%s", WINE_NX_RUNTIME_NRO );
     /* Before the console, whose framebuffer is lent to the graphics driver:
      * what is lent now is the loader's, and everything after it is ours. */
     note_loader_lent_memory();
@@ -3665,8 +3666,8 @@ int main( int argc, char **argv )
     mkdir( "sdmc:/switch", 0777 );
     mkdir( RUNTIME_DIR, 0777 );
     mkdir( WINE_DRIVE_C, 0777 );
-    mkdir( WINE_DRIVE_C "/windows", 0777 );
-    mkdir( WINE_DRIVE_C "/windows/temp", 0777 );
+    mkdir( WINE_NX_RUNTIME_WINDOWS, 0777 );
+    mkdir( WINE_NX_RUNTIME_WINDOWS "/temp", 0777 );
     mkdir( WINE_SYSTEM_DIR, 0777 );
     mkdir( WINE_DRIVE_C "/ProgramData", 0777 );
     mkdir( WINE_DRIVE_C "/users", 0777 );
@@ -3812,9 +3813,9 @@ int main( int argc, char **argv )
         wine_nx_usb_wait();
     }
 #endif
-    if (read_first_line( RUNTIME_DIR "/run-next.txt", target, sizeof(target) ) && target[0])
+    if (read_first_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target, sizeof(target) ) && target[0])
     {
-        remove( RUNTIME_DIR "/run-next.txt" );
+        remove( WINE_NX_RUNTIME_ROOT "/run-next.txt" );
         autorun = resumed_program = 1;
         log_line( "[SETUP] resuming %s", target );
     }
@@ -3843,6 +3844,7 @@ int main( int argc, char **argv )
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
             .four_cores_available = wine_nx_four_cores_available(),
+            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
@@ -3897,6 +3899,17 @@ int main( int argc, char **argv )
         if (!chosen)
         {
             log_line( "[LAUNCHER] closed without starting a program" );
+            if (options.reboot_requested)
+            {
+                Result rc = bpcInitialize();
+                if (R_SUCCEEDED( rc ))
+                {
+                    fflush( NULL );
+                    rc = bpcRebootSystem();
+                    bpcExit();
+                }
+                log_line( "[SETUP] Console restart returned 0x%x; restart from the HOME menu if needed", rc );
+            }
             consoleExit( NULL );
             leave_cleanly();
             return 0;

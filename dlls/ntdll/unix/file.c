@@ -49,6 +49,7 @@
 #ifdef __SWITCH__
 # include <sys/iosupport.h>
 # include <sys/statvfs.h>
+# include "horizon_runtime_paths.h"
 #endif
 #ifdef HAVE_SYS_SYSCALL_H
 # include <sys/syscall.h>
@@ -4198,7 +4199,7 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
         const char *drive_root = NULL;
         char usb_root[] = "ums0:";
 
-        if (prefix[0] == 'c') drive_root = "sdmc:/switch/wine/drive_c";
+        if (prefix[0] == 'c') drive_root = WINE_NX_RUNTIME_DRIVE_C;
         else if (prefix[0] == 'z') drive_root = "sdmc:";
         else if (prefix[0] >= 'd' && prefix[0] <= 'h')
         {

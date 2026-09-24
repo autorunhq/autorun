@@ -43,6 +43,7 @@
 #include "launcher_settings.h"
 #include "launcher_ui.h"
 #include "launcher_update.h"
+#include "launcher_setup.h"
 #include "launcher_graphics.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
@@ -1693,6 +1694,19 @@ enum program_row
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
 static void save_look( struct launcher *l );
 
+static void quick_setup( struct launcher *l )
+{
+    int result = launcher_setup_run( &l->ui, l->options );
+    launcher_kv_set( &l->look, "setup-offered", "1" );
+    if (result) launcher_kv_set( &l->look, "setup-complete", "1" );
+    save_look( l );
+    if (result == 2)
+    {
+        l->options->reboot_requested = 1;
+        l->ui.running = 0;
+    }
+}
+
 static int confirm_forwarder( struct launcher *l )
 {
     struct ui *ui = &l->ui;
@@ -2799,7 +2813,7 @@ enum settings_row
 {
     SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
     SET_CONTROLS, SET_STEAMGRIDDB,
-    SET_UPDATE, SET_REOPEN, SET_MAKE_MAIN,
+    SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE, SET_SWAP_GAME, SET_SWAP_TEST, SET_SWAP_REMOVE,
 #endif
@@ -3228,6 +3242,7 @@ static void settings_menu( struct launcher *l )
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
+            [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
             [SET_SWAP_SIZE] = SET_SECTION_SYSTEM, [SET_SWAP_TEST] = SET_SECTION_SYSTEM,
@@ -3292,6 +3307,10 @@ static void settings_menu( struct launcher *l )
         rows[SET_UPDATE].adjustable = 0;
         rows[SET_UPDATE].disabled = !l->update;
         rows[SET_UPDATE].help = "Official Autorun releases, changelog and installation. Games and settings are preserved.";
+        snprintf( rows[SET_SETUP].label, sizeof(rows[0].label), "Quick setup" );
+        rows[SET_SETUP].kind = UI_ROW_ACTION;
+        rows[SET_SETUP].adjustable = 0;
+        rows[SET_SETUP].help = "Install the Autorun forwarder and set up a separate patched Hekate boot entry.";
         snprintf( rows[SET_REOPEN].label, sizeof(rows[0].label), "Return here when a program ends" );
         snprintf( rows[SET_REOPEN].value, sizeof(rows[0].value), "%s", on_off[!!l->options->reopen_launcher] );
         rows[SET_REOPEN].kind = UI_ROW_SWITCH;
@@ -3368,6 +3387,9 @@ static void settings_menu( struct launcher *l )
         case SET_UPDATE:
             if (action == UI_ACTION_CHOOSE) launcher_update_open( l->update );
             ui_start_screen( ui );
+            break;
+        case SET_SETUP:
+            if (action == UI_ACTION_CHOOSE) quick_setup( l );
             break;
         case SET_CONTROLS:
             if (action != UI_ACTION_CHOOSE) break;
@@ -4291,7 +4313,8 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     l->graphics = launcher_graphics_create( &l->ui, options->runtime_dir );
     l->ui.background_tick = launcher_update_tick;
     l->ui.background_data = l->update;
-    ret = run_library( l, target, target_size );
+    if (options->install_forwarder && !launcher_kv_get_int( &l->look, "setup-offered", 0 )) quick_setup( l );
+    ret = l->ui.running ? run_library( l, target, target_size ) : 0;
     l->ui.background_tick = NULL;
     launcher_update_destroy( l->update );
     l->update = NULL;

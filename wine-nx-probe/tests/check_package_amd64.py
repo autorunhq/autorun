@@ -2,6 +2,7 @@
 """Exercise the AMD64 package dependency closure without running packaging."""
 import ast
 import functools
+import hashlib
 import json
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -14,7 +15,7 @@ from zipfile import ZipFile
 
 root = Path(__file__).resolve().parents[2]
 package = root / 'wine-nx-probe/tools/package-amd64.py'
-selected = {'module_name', 'apiset', 'import_host', 'coff_blocks', 'imports', 'forwarders',
+selected = {'stage_file', 'module_name', 'apiset', 'import_host', 'coff_blocks', 'imports', 'forwarders',
             'stage_closure', 'validate_external_imports'}
 tree = ast.parse(package.read_text(), filename=str(package))
 game_runtime = next(ast.literal_eval(node.value) for node in tree.body
@@ -36,7 +37,7 @@ helpers = ast.Module(body=[node for node in tree.body
                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in selected],
                      type_ignores=[])
 ast.fix_missing_locations(helpers)
-namespace = {'functools': functools, 're': re}
+namespace = {'functools': functools, 're': re, 'hashlib': hashlib}
 exec(compile(helpers, str(package), 'exec'), namespace)
 assert selected <= namespace.keys()
 
@@ -139,6 +140,7 @@ class Fixture:
 
     def install(self):
         namespace['stage'] = self.stage
+        namespace['source_hashes'] = {}
         namespace['built'] = self.built
         namespace['inspect'] = self.inspect
         namespace['shutil'] = SimpleNamespace(copy2=self.copy2)
@@ -245,6 +247,9 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-package-amd64-') as temp:
     assert not any(name.startswith(('api-ms-', 'ext-ms-')) for name in built_names), built_names
     assert not any(name.startswith('krnl386') for name in built_names), built_names
     assert {name for _, name, _ in fixture.copies} == expected, fixture.copies
+    assert namespace['source_hashes'] == {
+        'drive_c/windows/system32/' + name: hashlib.sha256(name.encode()).hexdigest() for name in expected
+    }
 
 with tempfile.TemporaryDirectory(prefix='wine-nx-package-amd64-arch-') as temp:
     fixture = Fixture(temp)

@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #ifdef __SWITCH__
 # include "horizon_mman.h"
+# include "horizon_runtime_paths.h"
 #else
 # include <sys/mman.h>
 #endif
@@ -540,6 +541,9 @@ static void set_home_dir(void)
 
 static void set_config_dir(void)
 {
+#ifdef __SWITCH__
+    config_dir = strdup( WINE_NX_RUNTIME_ROOT );
+#else
     char *p, *dir;
     const char *prefix = getenv( "WINEPREFIX" );
 
@@ -556,15 +560,16 @@ static void set_config_dir(void)
         if (home_dir[0] != '/') fatal_error( "the home directory %s is not an absolute path\n", home_dir );
         config_dir = build_path( home_dir, ".wine" );
     }
+#endif
 }
 
 static void init_paths(void)
 {
 #ifdef __SWITCH__
-    ntdll_dir = "/switch/wine/lib/wine/aarch64-unix";
-    dll_dir = "/switch/wine/lib/wine";
+    ntdll_dir = WINE_NX_RUNTIME_ROOT "/lib/wine/aarch64-unix";
+    dll_dir = WINE_NX_RUNTIME_ROOT "/lib/wine";
     bin_dir = BINDIR;
-    data_dir = DATADIR "/wine";
+    data_dir = WINE_NX_RUNTIME_ROOT "/share/wine";
     wineloader = build_path( ntdll_dir, "wine" );
 #else
     Dl_info info;

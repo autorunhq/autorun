@@ -2209,7 +2209,8 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
             deferred = -1;
             continue;
         }
-        settled = scroll_list( ui, list, shown, visible, SET_ROW_H, SDL_GetTicks() );
+        settled = scroll_list( ui, list, deferred >= 0 && shown < list->top + visible ?
+                               list->top + visible : shown, visible, SET_ROW_H, SDL_GetTicks() );
         scroll = (int)lroundf( list->scroll );
         row = rows + index[list->selection];
 

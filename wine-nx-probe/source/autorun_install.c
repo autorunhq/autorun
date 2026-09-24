@@ -19,7 +19,7 @@
 #endif
 
 #define INSTALL_MAX_FILES 4096
-#define INSTALL_MAX_SIZE (2ull * 1024 * 1024 * 1024)
+#define INSTALL_MAX_SIZE (4ull * 1024 * 1024 * 1024)
 #define INSTALL_FILE_LIMIT (512ull * 1024 * 1024)
 #define INSTALL_MAGIC 0x31555241
 #define INSTALL_NRO "wine-nx-runtime.nro"
@@ -90,7 +90,6 @@ static int managed( const char *path )
     unsigned int i;
     const char *ext;
     char suffix[12];
-
     if (!plain_path( path )) return 0;
     if (!strcasecmp( path, INSTALL_NRO ) || !strcasecmp( path, "build-manifest.json" )) return 1;
     if (!(ext = strrchr( path, '.' )) || strlen( ext ) > 8) return 0;

@@ -22,6 +22,7 @@ probe = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--pe', type=Path, default=probe / 'build-wine-amd64-pe')
 parser.add_argument('--build', type=Path, default=probe / 'build-switch-amd64')
+parser.add_argument('--output', type=Path, help='Archive output path (defaults to the build directory)')
 parser.add_argument('--jobs', type=int, default=8)
 parser.add_argument('--no-build', action='store_true', help='Package existing DLLs without invoking make')
 parser.add_argument('--vulkan', action='store_true', help='Include Vulkan DLLs for a mesa-switch runtime')
@@ -76,10 +77,16 @@ if args.vulkan:
     mesa_revision = mesa_revision_path.read_text().strip()
     if not re.fullmatch(r'[0-9a-f]{40}', mesa_revision):
         parser.error('Invalid or dirty mesa-switch source revision')
-staging = tempfile.TemporaryDirectory(prefix='amd64-package-', dir=build)
+staging = tempfile.TemporaryDirectory(prefix='amd64-package-')
 stage_root = Path(staging.name)
 stage = stage_root / 'switch/wine'
 prebuilt = set()
+source_hashes = {}
+
+
+def stage_file(source, destination):
+    source_hashes[destination.relative_to(stage).as_posix()] = hashlib.sha256(source.read_bytes()).hexdigest()
+    shutil.copy2(source, destination)
 
 
 def run(command):
@@ -187,7 +194,7 @@ def stage_closure(seeds, arch, directory):
                 raise ValueError(f'Not i386: {path}')
             if arch == 'aarch64' and 'IMAGE_FILE_MACHINE_ARM64' not in info and 'IMAGE_FILE_MACHINE_AMD64' not in info:
                 raise ValueError(f'Not ARM64/ARM64EC: {path}')
-            shutil.copy2(path, destination / name)
+            stage_file(path, destination / name)
             copied.add(name)
             pending.extend(imports(path))
         unseen = symbols - required.setdefault(name, set())
@@ -271,7 +278,7 @@ native = stage_closure(native_seeds, 'aarch64', 'system32')
 if args.fex:
     destination = stage / 'drive_c/windows/system32'
     for name in FEX_DLLS:
-        shutil.copy2(args.fex / name, destination / name)
+        stage_file(args.fex / name, destination / name)
     validate_external_imports([destination / name for name in FEX_DLLS],
                               {name: destination / name for name in native})
     native.update(FEX_DLLS)
@@ -293,14 +300,14 @@ if args.dxvk:
     destination = drive / 'dxvk64'
     destination.mkdir()
     for path in dxvk_paths:
-        shutil.copy2(path, destination / path.name)
-    shutil.copy2(args.dxvk / 'dxvk-manifest.json', destination / 'dxvk-manifest.json')
+        stage_file(path, destination / path.name)
+    stage_file(args.dxvk / 'dxvk-manifest.json', destination / 'dxvk-manifest.json')
 if args.vkd3d:
     destination = drive / 'vkd3d64'
     destination.mkdir()
     for path in vkd3d_paths:
-        shutil.copy2(path, destination / path.name)
-    shutil.copy2(args.vkd3d / 'vkd3d-manifest.json', destination / 'vkd3d-manifest.json')
+        stage_file(path, destination / path.name)
+    stage_file(args.vkd3d / 'vkd3d-manifest.json', destination / 'vkd3d-manifest.json')
 for name in ('fonts', 'nls'):
     destination = stage / 'share/wine' / name
     destination.mkdir(parents=True, exist_ok=True)
@@ -309,33 +316,32 @@ for name in ('fonts', 'nls'):
     if not resources:
         raise ValueError(f'Missing Wine {name} resources')
     for path in resources:
-        shutil.copy2(path, destination / path.name)
+        stage_file(path, destination / path.name)
         if name == 'fonts':
             (drive / 'windows/fonts').mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, drive / 'windows/fonts' / path.name)
-shutil.copy2(nro, stage / 'wine-nx-runtime.nro')
+            stage_file(path, drive / 'windows/fonts' / path.name)
+stage_file(nro, stage / 'wine-nx-runtime.nro')
 licenses = stage / 'licenses'
 licenses.mkdir()
 if args.fex:
-    shutil.copy2(args.fex / 'fex-manifest.json', stage / 'fex-manifest.json')
     for name in fex_manifest['licenses']:
-        shutil.copy2(args.fex / 'licenses' / name, licenses / name)
+        stage_file(args.fex / 'licenses' / name, licenses / name)
 if lsfg_revision:
-    shutil.copy2(probe / 'vendor/lsfg-vk/LICENSE.md', licenses / 'LSFG-VK-GPL-3.0.txt')
+    stage_file(probe / 'vendor/lsfg-vk/LICENSE.md', licenses / 'LSFG-VK-GPL-3.0.txt')
     (stage / 'lsfg').mkdir()
 for source, name in ((probe.parent / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (probe / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
                      (probe.parent / 'dlls/winebox64ec/LICENSE.FEX', 'FEX-MIT.txt')):
-    shutil.copy2(source, licenses / name)
+    stage_file(source, licenses / name)
 if args.dxvk:
     for name in dxvk_manifest['licenses']:
-        shutil.copy2(args.dxvk / 'licenses' / name, licenses / name)
+        stage_file(args.dxvk / 'licenses' / name, licenses / name)
     modules = {path.name: path for path in (drive / 'windows/system32').iterdir()}
     modules.update({path.name: path for path in dxvk_paths})
     validate_external_imports(dxvk_paths, modules)
 if args.vkd3d:
     for name in vkd3d_manifest['licenses']:
-        shutil.copy2(args.vkd3d / 'licenses' / name, licenses / name)
+        stage_file(args.vkd3d / 'licenses' / name, licenses / name)
     modules.update({path.name: path for path in vkd3d_paths})
     validate_external_imports(vkd3d_paths, modules)
 
@@ -375,20 +381,29 @@ manifest = {
              'revision': lsfg_revision,
              'patch_sha256': hashlib.sha256((probe / 'lsfg/horizon.patch').read_bytes()).hexdigest()}
             if lsfg_revision else None,
-    'files': {str(path.relative_to(stage)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
+    'files': {path.relative_to(stage).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
 }
+for name, digest in source_hashes.items():
+    if manifest['files'][name] != digest:
+        raise ValueError(f'Staged file differs from its build output: {name}')
 (stage / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 archive = build / ('wine-nx-amd64-box64-mesa-dxvk-vkd3d.zip' if args.vkd3d else
                    'wine-nx-amd64-box64-mesa-dxvk.zip' if args.dxvk else
                    'wine-nx-amd64-box64-mesa-vulkan.zip' if args.vulkan else 'wine-nx-amd64-box64.zip')
 if args.fex:
     archive = archive.with_name(archive.name.replace('-box64', '-box64-fex'))
+if args.output:
+    archive = args.output.resolve()
+archive.parent.mkdir(parents=True, exist_ok=True)
 with ZipFile(archive, 'w', ZIP_DEFLATED) as output:
     for path in sorted(stage.rglob('*')):
         if path.is_file() and path.suffix != '.log':
             output.write(path, path.relative_to(stage_root))
 with ZipFile(archive) as output:
-    if output.testzip() is not None:
-        raise ValueError('Archive integrity check failed')
+    expected = {**manifest['files'], 'build-manifest.json':
+                hashlib.sha256((stage / 'build-manifest.json').read_bytes()).hexdigest()}
+    for name, digest in expected.items():
+        if hashlib.sha256(output.read('switch/wine/' + name)).hexdigest() != digest:
+            raise ValueError(f'Archive integrity check failed: {name}')
 print(archive)
 staging.cleanup()

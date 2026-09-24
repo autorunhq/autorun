@@ -7,7 +7,8 @@
 /* The runtime's folder: system.reg and user.reg are in its registry/, the
  * classes the payload ships in config/. The host test uses a scratch folder. */
 #ifndef HORIZON_REGISTRY_DIR
-#define HORIZON_REGISTRY_DIR "sdmc:/switch/wine/"
+#include "horizon_runtime_paths.h"
+#define HORIZON_REGISTRY_DIR WINE_NX_RUNTIME_ROOT "/"
 #endif
 #include "horizon_registry_paths.h"
 

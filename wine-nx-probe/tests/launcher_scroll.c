@@ -1,4 +1,9 @@
 #include <assert.h>
+#include <SDL.h>
+
+static Uint32 text_ticks;
+static Uint32 test_ticks(void) { return text_ticks; }
+#define SDL_GetTicks test_ticks
 
 #include "../source/launcher_ui.c"
 
@@ -41,6 +46,26 @@ static void test_text_clip( const char *font_path )
     SDL_RenderSetClipRect( ui.renderer, NULL );
     ui_text_fit( &ui, ui.normal, 10, 20, 160, text, (SDL_Color){255, 255, 255, 255}, 1 );
     assert( !SDL_RenderIsClipEnabled( ui.renderer ) );
+    {
+        const char *name = "A runtime name wider than its menu";
+        size_t size = surface->h * surface->pitch;
+        void *first = malloc( size );
+        assert( first && ui_text_width( &ui, ui.normal, name ) > 160 );
+        for (int selected = 0; selected <= 1; selected++)
+            for (int frame = 0; frame < 2; frame++)
+            {
+                text_ticks = frame ? 1900 : 0;
+                ui.scrolling_text = 0;
+                SDL_SetRenderDrawColor( ui.renderer, 0, 0, 0, 255 );
+                SDL_RenderClear( ui.renderer );
+                ui_text_fit( &ui, ui.normal, 10, 20, 160, name, (SDL_Color){255, 255, 255, 255}, selected );
+                SDL_RenderPresent( ui.renderer );
+                assert( ui.scrolling_text == selected );
+                if (!frame) memcpy( first, surface->pixels, size );
+                else assert( !!memcmp( first, surface->pixels, size ) == selected );
+            }
+        free( first );
+    }
     ui_quit( &ui );
     SDL_FreeSurface( surface );
 }
@@ -103,6 +128,12 @@ int main( int argc, char **argv )
     assert( scroll_list( &ui, &list, 8, 5, 100, 2000 ) );
     assert( list.top == 1 && list.scroll == 100 );
 
+    list = (struct ui_list){ .selection = 4, .top = 2 };
+    assert( scroll_list( &ui, &list, 7, 5, 100, 2100 ) );
+    assert( list.top == 2 && list.scroll == 200 );
+    assert( LIST_TOP + (list.selection + 1) * SET_ROW_H - list.scroll - 6 + 3 * 48 + 16 <= 720 - 58 );
+    assert( scroll_list( &ui, &list, 5, 5, 100, 2200 ) && list.scroll == 0 );
+
     list = (struct ui_list){ .selection = 7, .top = 4 };
     assert( scroll_list( &ui, &list, 20, 5, 100, 3000 ) );
     list.selection = 5;
@@ -126,6 +157,6 @@ int main( int argc, char **argv )
     assert( scroll_list( &ui, &list, 20, 2, 48, 4032 ) && list.top == 4 );
     assert( argc == 2 );
     test_text_clip( argv[1] );
-    puts( "launcher scrolling: timing, bounds, lookahead, retargeting, hit positions and clipping passed" );
+    puts( "launcher scrolling: timing, bounds, lookahead, retargeting, hit positions, clipping and selected runtime names passed" );
     return 0;
 }
