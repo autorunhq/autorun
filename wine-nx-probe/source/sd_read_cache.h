@@ -147,6 +147,9 @@ struct sd_cache_file
     void *key;         /* libnx's per-open file data */
     char *path;
     int writable;
+    int append;        /* opened with O_APPEND: every write lands at the end */
+    int shared;        /* the path was open more than once at some point */
+    unsigned int direct_writes;  /* writes that went straight to the card */
     int cacheable;
     unsigned int window;     /* the size of the last fill, 0 before the first */
     long long fill_end;      /* where the last fill ended: a miss there reads on in order */

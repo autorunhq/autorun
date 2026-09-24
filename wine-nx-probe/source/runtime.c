@@ -75,7 +75,7 @@ u32 __nx_exception_ignoredebug = 1;
 #ifdef WINE_NX_AMD64
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
-#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-223"
+#define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-254"
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
@@ -94,6 +94,7 @@ extern const char *wine_nx_loader_last_open_path(void);
 extern NTSTATUS wine_nx_loader_last_open_status(void);
 extern const char *wine_nx_loader_last_export_diag(void);
 extern int wine_nx_sd_cache_install(void);
+extern void wine_nx_sd_cache_flush(void);
 #ifdef WINE_NX_USB_STORAGE
 extern int wine_nx_usb_list( struct wine_nx_launcher_usb_volume *volumes, int max );
 #endif
@@ -239,6 +240,9 @@ static void *log_flusher( void *arg )
         pthread_mutex_lock( &log_mutex );
         fflush( log_file );
         pthread_mutex_unlock( &log_mutex );
+        /* Writes held back from the card, the log's own among them: they
+         * reach it as soon as they did when every write went straight out. */
+        wine_nx_sd_cache_flush();
     }
     return NULL;
 }
@@ -1266,6 +1270,10 @@ static void runtime_report_interpreter(void)
         extern unsigned int wine_nx_audio_underruns __attribute__((weak));
         extern unsigned int wine_nx_sd_reads, wine_nx_sd_hits;
         extern unsigned long long wine_nx_sd_read_ns, wine_nx_sd_bytes;
+        extern unsigned int wine_nx_sd_writes, wine_nx_sd_writes_held;
+        extern unsigned long long wine_nx_sd_write_ns;
+        extern unsigned int wine_nx_sd_stats, wine_nx_sd_stat_hits, wine_nx_sd_flush_jump, wine_nx_sd_flush_path,
+                            wine_nx_sd_flush_end, wine_nx_sd_flush_close, wine_nx_sd_flush_timer;
         extern unsigned long long wine_nx_file_read_bytes __attribute__((weak));
         extern unsigned int wine_nx_sd_cache_mb( void );
         extern unsigned int wine_nx_gl_swaps __attribute__((weak)), wine_nx_gl_calls __attribute__((weak));
@@ -1432,6 +1440,7 @@ static void runtime_report_interpreter(void)
          * bytes again, which the request counts alone cannot. cache_mb is what
          * the cache holds, which follows the heap the game leaves free. */
         log_line( "[PROGRESS] %llus reads=%u read_ms=%llu read_mb=%llu sd_reads=%u sd_ms=%llu sd_mb=%llu "
+                  "sd_writes=%u sd_write_ms=%llu writes_held=%u sd_stats=%u stat_hits=%u flushes=%u/%u/%u/%u/%u "
                   "cache_hits=%u cache_mb=%u syscalls=%u "
                   "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s",
                   (unsigned long long)(armTicksToNs( now - start ) / 1000000000ull), reads, read_ms,
@@ -1440,6 +1449,13 @@ static void runtime_report_interpreter(void)
                   __atomic_load_n( &wine_nx_sd_reads, __ATOMIC_RELAXED ),
                   __atomic_load_n( &wine_nx_sd_read_ns, __ATOMIC_RELAXED ) / 1000000,
                   __atomic_load_n( &wine_nx_sd_bytes, __ATOMIC_RELAXED ) >> 20,
+                  __atomic_load_n( &wine_nx_sd_writes, __ATOMIC_RELAXED ),
+                  __atomic_load_n( &wine_nx_sd_write_ns, __ATOMIC_RELAXED ) / 1000000,
+                  __atomic_load_n( &wine_nx_sd_writes_held, __ATOMIC_RELAXED ),
+                  __atomic_load_n( &wine_nx_sd_stats, __ATOMIC_RELAXED ),
+                  __atomic_load_n( &wine_nx_sd_stat_hits, __ATOMIC_RELAXED ),
+                  wine_nx_sd_flush_jump, wine_nx_sd_flush_path, wine_nx_sd_flush_end,
+                  wine_nx_sd_flush_close, wine_nx_sd_flush_timer,
                   __atomic_load_n( &wine_nx_sd_hits, __ATOMIC_RELAXED ), wine_nx_sd_cache_mb(), syscalls, frames,
                   (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, native, gl, audio );
         {
@@ -3009,6 +3025,7 @@ static int leave_cleanly( void )
 {
     int left = memory_left_behind( 0 ), after;
 
+    wine_nx_sd_cache_flush();
     /* Services opened for the whole run hold heap pages of their own: the
      * sockets take a transfer memory at start-up and nothing ever gave it back.
      * Close them and say what each one returns, so the one that matters shows. */
