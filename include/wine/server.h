@@ -26,7 +26,6 @@
 #include <winbase.h>
 #include <winternl.h>
 #include <wine/server_protocol.h>
-#include <wine/debug.h>
 
 /* client communication functions */
 
@@ -48,13 +47,20 @@ struct __server_request_info
     unsigned int          data_count; /* count of request data pointers */
     void                 *reply_data; /* reply data pointer */
     struct __server_iovec data[__SERVER_MAX_DATA];  /* request variable size data */
-    const char *name;
+#ifdef __SWITCH__
+    const char           *name;
+#endif
 };
 
-NTSYSAPI void CDECL wine_server_send_fd( int fd );
 NTSYSAPI unsigned int CDECL wine_server_call( void *req_ptr );
 NTSYSAPI NTSTATUS CDECL wine_server_fd_to_handle( int fd, unsigned int access, unsigned int attributes, HANDLE *handle );
 NTSYSAPI NTSTATUS CDECL wine_server_handle_to_fd( HANDLE handle, unsigned int access, int *unix_fd, unsigned int *options );
+
+#if defined(__WINESRC__) && defined(WINE_UNIX_LIB)
+NTSYSAPI void wine_server_send_fd( int fd );
+NTSYSAPI unsigned int wine_server_alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
+                                                           data_size_t *ret_len );
+#endif
 
 /* do a server call and set the last error code */
 static inline unsigned int wine_server_call_err( void *req_ptr )
@@ -150,15 +156,21 @@ static inline struct rectangle wine_server_rectangle( RECT rect )
 
 /* macros for server requests */
 
+#ifdef __SWITCH__
+#define WINE_SERVER_REQUEST_NAME(req,type) (req).name = #type
+#else
+#define WINE_SERVER_REQUEST_NAME(req,type)
+#endif
+
 #define SERVER_START_REQ(type) \
     do { \
         struct __server_request_info __req; \
         struct type##_request * const req = &__req.u.req.type##_request; \
         const struct type##_reply * const reply = &__req.u.reply.type##_reply; \
         memset( &__req.u.req, 0, sizeof(__req.u.req) ); \
-        __req.name = #type; \
         __req.u.req.request_header.req = REQ_##type; \
         __req.data_count = 0; \
+        WINE_SERVER_REQUEST_NAME(__req,type); \
         (void)reply; \
         do
 

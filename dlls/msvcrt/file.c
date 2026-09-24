@@ -574,16 +574,21 @@ static void msvcrt_free_fd(int fd)
   release_ioinfo(fdinfo);
 }
 
-static void msvcrt_set_fd(ioinfo *fdinfo, HANDLE hand, int flag)
+static void msvcrt_set_fdinfo(ioinfo *fdinfo, HANDLE hand, int flag)
 {
   fdinfo->handle = hand;
-  fdinfo->wxflag = WX_OPEN | (flag & (WX_DONTINHERIT | WX_APPEND | WX_TEXT | WX_PIPE | WX_TTY));
+  fdinfo->wxflag = WX_OPEN | flag;
   fdinfo->lookahead[0] = '\n';
   fdinfo->lookahead[1] = '\n';
   fdinfo->lookahead[2] = '\n';
   ioinfo_set_unicode(fdinfo, FALSE);
   ioinfo_set_textmode(fdinfo, TEXTMODE_ANSI);
+}
 
+static void msvcrt_set_fd(ioinfo *fdinfo, HANDLE hand, int flag)
+{
+  flag &= ~(WX_ATEOF | WX_READNL);
+  msvcrt_set_fdinfo(fdinfo, hand, flag);
   if (hand != MSVCRT_NO_CONSOLE)
   {
     switch (fdinfo-MSVCRT___pioinfo[0])
@@ -743,7 +748,7 @@ void msvcrt_init_io(void)
       {
         fdinfo = get_ioinfo_alloc_fd(i);
         if(fdinfo != &MSVCRT___badioinfo)
-            msvcrt_set_fd(fdinfo, *handle_ptr, *wxflag_ptr);
+            msvcrt_set_fdinfo(fdinfo, *handle_ptr, *wxflag_ptr | (i < 3 ? WX_TEXT : 0));
         release_ioinfo(fdinfo);
       }
 
@@ -751,62 +756,34 @@ void msvcrt_init_io(void)
     }
   }
 
-  fdinfo = get_ioinfo_alloc_fd(STDIN_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
+  for (i = 0; i < 3; ++i)
+  {
+    static const DWORD std_handle[3] = { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE };
+    DWORD flags = WX_OPEN | WX_TEXT, type;
+    HANDLE h;
 
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
+    fdinfo = get_ioinfo_alloc_fd(i);
+    if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE)
+    {
+        h = GetStdHandle(std_handle[i]);
+        type = GetFileType(h);
+        if (type == FILE_TYPE_UNKNOWN)
+        {
+            h = MSVCRT_NO_CONSOLE;
+            flags |= WX_TTY;
+        }
+        else if ((type & 0xf) == FILE_TYPE_CHAR)
+        {
+            flags |= WX_TTY;
+        }
+        else if ((type & 0xf) == FILE_TYPE_PIPE)
+        {
+            flags |= WX_PIPE;
+        }
+        msvcrt_set_fdinfo(fdinfo, h, flags);
     }
-
-    msvcrt_set_fd(fdinfo, h, flags);
+    release_ioinfo(fdinfo);
   }
-  release_ioinfo(fdinfo);
-
-  fdinfo = get_ioinfo_alloc_fd(STDOUT_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
-
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
-    }
-
-    msvcrt_set_fd(fdinfo, h, flags);
-  }
-  release_ioinfo(fdinfo);
-
-  fdinfo = get_ioinfo_alloc_fd(STDERR_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
-
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
-    }
-
-    msvcrt_set_fd(fdinfo, h, flags);
-  }
-  release_ioinfo(fdinfo);
 
   TRACE(":handles (%p)(%p)(%p)\n", get_ioinfo_nolock(STDIN_FILENO)->handle,
         get_ioinfo_nolock(STDOUT_FILENO)->handle,
@@ -856,30 +833,25 @@ static int msvcrt_flush_buffer(FILE* file)
 /*********************************************************************
  *		_isatty (MSVCRT.@)
  */
-#if defined(__x86_64__) && !defined(__arm64ec__)
 int CDECL MSVCRT__isatty(int fd)
 {
     TRACE(":fd (%d)\n",fd);
 
     return get_ioinfo_nolock(fd)->wxflag & WX_TTY;
 }
+#if defined(__x86_64__) && !defined(__arm64ec__)
 __ASM_GLOBAL_FUNC( _isatty,
-        "sub $0x30,%rsp\n\t"
-        __ASM_SEH(".seh_stackalloc 0x30\n\t")
-        __ASM_SEH(".seh_endprologue\n\t")
+        "jmp " __ASM_NAME("MSVCRT__isatty") "\n\t"
+        /* These instructions are needed for Ruby runtime to find internal pioinfo address. */
         "lea MSVCRT___pioinfo(%rip),%rdx\n\t"
-        "nop;nop;nop;nop;nop;nop;nop;nop;nop\n\t"
-        "add $0x30,%rsp\n\t"
-        "jmp " __ASM_NAME( "MSVCRT__isatty" ) )
+        "addq $0,%rsp\n\t"
+        "ret" )
 #else
 int CDECL _isatty(int fd)
 {
-    TRACE(":fd (%d)\n",fd);
-
-    return get_ioinfo_nolock(fd)->wxflag & WX_TTY;
+    return MSVCRT__isatty(fd);
 }
 #endif
-
 
 /* INTERNAL: Allocate stdio file buffer */
 static BOOL msvcrt_alloc_buffer(FILE* file)
@@ -1136,7 +1108,10 @@ int CDECL _commit(int fd)
     TRACE(":fd (%d) handle (%p)\n", fd, info->handle);
 
     if (info->handle == INVALID_HANDLE_VALUE)
+    {
+        *_errno() = EBADF;
         ret = -1;
+    }
     else if (!FlushFileBuffers(info->handle))
     {
         if (GetLastError() == ERROR_INVALID_HANDLE)
@@ -2501,7 +2476,7 @@ int CDECL _wsopen_dispatch( const wchar_t* path, int oflags, int shflags, int pm
   sa.lpSecurityDescriptor = NULL;
   sa.bInheritHandle       = !(oflags & _O_NOINHERIT);
 
-  if ((oflags & (_O_WTEXT | _O_U16TEXT | _O_U8TEXT))
+  if (!(oflags & _O_BINARY) && (oflags & (_O_WTEXT | _O_U16TEXT | _O_U8TEXT))
           && (creation==OPEN_ALWAYS || creation==OPEN_EXISTING)
           && !(access&GENERIC_READ))
   {
@@ -2521,7 +2496,7 @@ int CDECL _wsopen_dispatch( const wchar_t* path, int oflags, int shflags, int pm
     return *_errno();
   }
 
-  if (oflags & (_O_WTEXT | _O_U16TEXT | _O_U8TEXT))
+  if (!(oflags & _O_BINARY) && oflags & (_O_WTEXT | _O_U16TEXT | _O_U8TEXT))
   {
       LARGE_INTEGER size = {{0}};
 
@@ -2577,13 +2552,16 @@ int CDECL _wsopen_dispatch( const wchar_t* path, int oflags, int shflags, int pm
   if (*fd == -1)
       return *_errno();
 
-  if (oflags & _O_WTEXT)
-      ioinfo_set_unicode(get_ioinfo_nolock(*fd), TRUE);
+  if (!(oflags & _O_BINARY))
+  {
+      if (oflags & _O_WTEXT)
+          ioinfo_set_unicode(get_ioinfo_nolock(*fd), TRUE);
 
-  if (oflags & _O_U16TEXT)
-      ioinfo_set_textmode(get_ioinfo_nolock(*fd), TEXTMODE_UTF16LE);
-  else if (oflags & _O_U8TEXT)
-      ioinfo_set_textmode(get_ioinfo_nolock(*fd), TEXTMODE_UTF8);
+      if (oflags & _O_U16TEXT)
+          ioinfo_set_textmode(get_ioinfo_nolock(*fd), TEXTMODE_UTF16LE);
+      else if (oflags & _O_U8TEXT)
+          ioinfo_set_textmode(get_ioinfo_nolock(*fd), TEXTMODE_UTF8);
+  }
 
   TRACE(":fd (%d) handle (%p)\n", *fd, hand);
   return 0;
@@ -4166,14 +4144,12 @@ size_t CDECL fwrite(const void *ptr, size_t size, size_t nmemb, FILE* file)
 size_t CDECL _fwrite_nolock(const void *ptr, size_t size, size_t nmemb, FILE* file)
 {
     size_t wrcnt=size * nmemb;
-    BOOL no_buffer = FALSE;
-    int written = 0;
+    int written = 0, bufsize = 1;
     if (size == 0)
         return 0;
 
-    if(!(file->_flag & (MSVCRT__NOBUF | _IOMYBUF | MSVCRT__USERBUF)))
-        no_buffer = !msvcrt_alloc_buffer(file);
-    no_buffer = no_buffer || (file->_flag & MSVCRT__NOBUF);
+    if ((file->_flag & (MSVCRT__NOBUF | _IOMYBUF | MSVCRT__USERBUF)) || msvcrt_alloc_buffer(file))
+        bufsize = file->_bufsiz;
 
     while(wrcnt) {
         if(file->_cnt < 0) {
@@ -4188,20 +4164,9 @@ size_t CDECL _fwrite_nolock(const void *ptr, size_t size, size_t nmemb, FILE* fi
             written += pcnt;
             wrcnt -= pcnt;
             ptr = (const char*)ptr + pcnt;
-        } else if(no_buffer
-                || ((file->_flag & (_IOMYBUF | MSVCRT__USERBUF)) && wrcnt >= file->_bufsiz)
-                || (!(file->_flag & (_IOMYBUF | MSVCRT__USERBUF)) && wrcnt >= MSVCRT_INTERNAL_BUFSIZ)) {
+        } else if(wrcnt >= bufsize) {
             size_t pcnt;
-            int bufsiz;
-
-            if(no_buffer)
-                bufsiz = 1;
-            else if(!(file->_flag & (_IOMYBUF | MSVCRT__USERBUF)))
-                bufsiz = MSVCRT_INTERNAL_BUFSIZ;
-            else
-                bufsiz = file->_bufsiz;
-
-            pcnt = (wrcnt / bufsiz) * bufsiz;
+            pcnt = (wrcnt / bufsize) * bufsize;
 
             if(msvcrt_flush_buffer(file) == EOF)
                 break;
@@ -5564,6 +5529,14 @@ int CDECL vwprintf(const wchar_t *format, va_list valist)
 }
 
 /*********************************************************************
+ *              _vwprintf_l (MSVCRT.@)
+ */
+int CDECL _vwprintf_l(const wchar_t *format, _locale_t locale, va_list valist)
+{
+    return _vfwprintf_l(stdout, format, locale, valist);
+}
+
+/*********************************************************************
  *		vwprintf_s (MSVCRT.@)
  */
 int CDECL vwprintf_s(const wchar_t *format, va_list valist)
@@ -5867,6 +5840,19 @@ int WINAPIV wprintf(const wchar_t *format, ...)
     int res;
     va_start(valist, format);
     res = vwprintf(format, valist);
+    va_end(valist);
+    return res;
+}
+
+/*********************************************************************
+ *              _wprintf_l (MSVCRT.@)
+ */
+int WINAPIV _wprintf_l(const wchar_t *format, _locale_t locale, ...)
+{
+    va_list valist;
+    int res;
+    va_start(valist, locale);
+    res = _vwprintf_l(format, locale, valist);
     va_end(valist);
     return res;
 }

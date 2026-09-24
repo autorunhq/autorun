@@ -75,8 +75,6 @@ static UINT wave_format_tag_from_codec_id( enum AVCodecID id )
 
 static void wave_format_ex_init( const AVCodecParameters *params, WAVEFORMATEX *format, UINT32 format_size, WORD format_tag )
 {
-    const char *sgi;
-
     memset( format, 0, format_size );
     format->cbSize = format_size - sizeof(*format);
     format->wFormatTag = format_tag;
@@ -88,13 +86,6 @@ static void wave_format_ex_init( const AVCodecParameters *params, WAVEFORMATEX *
     format->nSamplesPerSec = params->sample_rate;
     format->wBitsPerSample = av_get_bits_per_sample( params->codec_id );
     if (!format->wBitsPerSample) format->wBitsPerSample = params->bits_per_coded_sample;
-    if (!format->wBitsPerSample && (params->codec_id == AV_CODEC_ID_OPUS || params->codec_id == AV_CODEC_ID_VORBIS)
-            && (sgi = getenv("SteamGameId")) && (!strcmp(sgi, "287700") || !strcmp(sgi, "543900")))
-    {
-        /* Metal Gear Solid V: The Phantom Pain uses wBitsPerSample as a divisor in an integer division,
-         * so it must be non-zero, but is zero for transcoded audio. */
-        format->wBitsPerSample = 16;
-    }
     if (!(format->nBlockAlign = params->block_align)) format->nBlockAlign = format->wBitsPerSample * format->nChannels / 8;
     if (!(format->nAvgBytesPerSec = params->bit_rate / 8)) format->nAvgBytesPerSec = format->nSamplesPerSec * format->nBlockAlign;
 }
@@ -193,18 +184,10 @@ static NTSTATUS audio_format_from_codec_params( const AVCodecParameters *params,
 #endif
 
     format_tag = wave_format_tag_from_codec_id( params->codec_id );
-    if (params->codec_id == AV_CODEC_ID_OPUS) format_tag = WAVE_FORMAT_OPUS;
-    /* Big-endian PCM in native Windows is given the usual WAVE_FORMAT_PCM tag. */
-    else if (params->codec_id == AV_CODEC_ID_PCM_S16BE) format_tag = WAVE_FORMAT_PCM;
-
-    if (format_tag == WAVE_FORMAT_EXTENSIBLE || format_tag >> 16 || (channels > 2 && channel_mask != 0) ||
-        params->codec_id == AV_CODEC_ID_VORBIS)
+    if (format_tag == WAVE_FORMAT_EXTENSIBLE || format_tag >> 16 || (channels > 2 && channel_mask != 0))
     {
         GUID subtype = MFAudioFormat_Base;
-
-        if (params->codec_id == AV_CODEC_ID_VORBIS) subtype = MFAudioFormat_Vorbis;
-        else subtype.Data1 = format_tag;
-
+        subtype.Data1 = format_tag;
         wave_format_size += sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
         return wave_format_extensible_from_codec_params( params, format, format_size, wave_format_size,
                                                          &subtype, channel_mask );
@@ -258,8 +241,6 @@ static void mf_video_format_init( const AVCodecParameters *params, MFVIDEOFORMAT
         if (params->codec_id == AV_CODEC_ID_MPEG1VIDEO) format->guidFormat = MEDIASUBTYPE_MPEG1Payload;
         else if (params->codec_id == AV_CODEC_ID_H264) format->guidFormat.Data1 = MFVideoFormat_H264.Data1;
         else if (params->codec_id == AV_CODEC_ID_VP9) format->guidFormat.Data1 = MFVideoFormat_VP90.Data1;
-        else if (params->codec_id == AV_CODEC_ID_AV1) format->guidFormat.Data1 = MFVideoFormat_AV1.Data1;
-        else if (params->codec_id == AV_CODEC_ID_HEVC) format->guidFormat.Data1 = MFVideoFormat_HEVC.Data1;
         else if (params->codec_tag) format->guidFormat.Data1 = params->codec_tag;
         else format->guidFormat.Data1 = video_format_tag_from_codec_id( params->codec_id );
     }

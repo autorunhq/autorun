@@ -30,7 +30,6 @@
 #include <dlfcn.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
@@ -49,7 +48,6 @@ static void *libodbc;
 static SQLRETURN (*pSQLAllocHandle)(SQLSMALLINT,SQLHANDLE,SQLHANDLE*);
 static SQLRETURN (*pSQLAllocHandleStd)(SQLSMALLINT,SQLHANDLE,SQLHANDLE*);
 static SQLRETURN (*pSQLBindCol)(SQLHSTMT,SQLUSMALLINT,SQLSMALLINT,SQLPOINTER,SQLLEN,SQLLEN*);
-static SQLRETURN (*pSQLBindParam)(SQLHSTMT,SQLUSMALLINT,SQLSMALLINT,SQLSMALLINT,SQLULEN,SQLSMALLINT,SQLPOINTER,SQLLEN*);
 static SQLRETURN (*pSQLBindParameter)(SQLHSTMT,SQLUSMALLINT,SQLSMALLINT,SQLSMALLINT,SQLSMALLINT,SQLULEN,SQLSMALLINT, SQLPOINTER,SQLLEN,SQLLEN*);
 static SQLRETURN (*pSQLBrowseConnect)(SQLHDBC,SQLCHAR*,SQLSMALLINT,SQLCHAR*,SQLSMALLINT,SQLSMALLINT*);
 static SQLRETURN (*pSQLBrowseConnectW)(SQLHDBC,SQLWCHAR*,SQLSMALLINT,SQLWCHAR*,SQLSMALLINT,SQLSMALLINT*);
@@ -181,7 +179,6 @@ static NTSTATUS load_odbc(void)
     LOAD_FUNC( SQLAllocHandle );
     LOAD_FUNC( SQLAllocHandleStd );
     LOAD_FUNC( SQLBindCol );
-    LOAD_FUNC( SQLBindParam );
     LOAD_FUNC( SQLBindParameter );
     LOAD_FUNC( SQLBrowseConnect );
     LOAD_FUNC( SQLBrowseConnectW );
@@ -517,7 +514,7 @@ static void get_drivers( struct drivers *drivers )
         {
             info_max_size = info_size;
             if (!(info = realloc( info, info_max_size ))) goto error;
-            status = NtEnumerateValueKey( key, idx, KeyValueFullInformation, info, info_max_size, &info_size );
+            status = NtEnumerateValueKey( key, idx, KeyValueBasicInformation, info, info_max_size, &info_size );
         }
 
         if (status == STATUS_NO_MORE_ENTRIES)
@@ -569,7 +566,7 @@ static WCHAR *get_driver_filename( const WCHAR *name )
         WCHAR buffer[1024];
         KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
 
-        if (wcscmp( name, drivers.names[i] )) continue;
+        if (wcsicmp( name, drivers.names[i] )) continue;
         if ((key_driver = open_key( key_odbcinst, drivers.names[i], wcslen(drivers.names[i]) * sizeof(WCHAR) )))
         {
             if (query_value( key_driver, driverW, sizeof(driverW), info, sizeof(buffer) ) && info->Type == REG_SZ &&
@@ -637,6 +634,7 @@ static void replicate_odbc_to_registry( BOOL is_user, SQLHENV env )
         KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
 
         dir = SQL_FETCH_NEXT;
+        if (!filename) continue;
         if (!query_value( key_sources, dsn, len_dsn * sizeof(WCHAR), info, sizeof(buffer) ) && desc[0])
         {
             set_value( key_sources, dsn, len_dsn * sizeof(WCHAR), REG_SZ, (const BYTE *)desc,

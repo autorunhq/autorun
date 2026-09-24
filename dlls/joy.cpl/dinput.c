@@ -252,7 +252,7 @@ static BOOL CALLBACK enum_devices( const DIDEVICEINSTANCEW *instance, void *cont
     if (SUCCEEDED(hr)) hr = IDirectInputDevice8_SetDataFormat( entry->device, &c_dfDIJoystick2 );
     if (SUCCEEDED(hr)) hr = IDirectInputDevice8_SetCooperativeLevel( entry->device, GetAncestor( dialog_hwnd, GA_ROOT ),
                                                                      DISCL_BACKGROUND | DISCL_EXCLUSIVE );
-    if (SUCCEEDED(hr)) hr = IDirectInputDevice8_SetProperty( entry->device, DIPROP_AUTOCENTER, &ac_prop.diph );
+    if (SUCCEEDED(hr)) IDirectInputDevice8_SetProperty( entry->device, DIPROP_AUTOCENTER, &ac_prop.diph );
 
     if (SUCCEEDED(hr)) list_add_tail( &devices, &entry->entry );
     else
@@ -503,9 +503,9 @@ void paint_povs_view( HWND hwnd, UINT32 count, UINT32 *povs )
     OffsetRect( &rect, rect.right - rect.left + 5, 0 );
     draw_pov_view( hdc, rect, povs[1] );
     OffsetRect( &rect, rect.left - rect.right - 5, rect.bottom - rect.top + 5 );
-    draw_pov_view( hdc, rect, povs[1] );
-    OffsetRect( &rect, rect.right - rect.left + 5, 0 );
     draw_pov_view( hdc, rect, povs[2] );
+    OffsetRect( &rect, rect.right - rect.left + 5, 0 );
+    draw_pov_view( hdc, rect, povs[3] );
 
     EndPaint( hwnd, &paint );
 }

@@ -3066,7 +3066,7 @@ static void test_create_texture2d(void)
         {DXGI_FORMAT_R8G8B8A8_SNORM,          1, D3D11_BIND_RENDER_TARGET,    0, TRUE,  FALSE},
         {DXGI_FORMAT_R8G8B8A8_SINT,           1, D3D11_BIND_RENDER_TARGET,    0, TRUE,  FALSE},
         {DXGI_FORMAT_R8G8B8A8_UNORM,          1, D3D11_BIND_RENDER_TARGET,    D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-                FALSE, TRUE},
+                FALSE, FALSE},
         {DXGI_FORMAT_D24_UNORM_S8_UINT,       1, D3D11_BIND_SHADER_RESOURCE,  0, FALSE, TRUE},
         {DXGI_FORMAT_D24_UNORM_S8_UINT,       1, D3D11_BIND_RENDER_TARGET,    0, FALSE, FALSE},
         {DXGI_FORMAT_D32_FLOAT,               1, D3D11_BIND_SHADER_RESOURCE,  0, FALSE, TRUE},
@@ -14683,6 +14683,99 @@ static void test_update_subresource(void)
     release_test_context(&test_context);
 }
 
+static void test_discard(void)
+{
+    static const DWORD colors[] = {0x11111111, 0x22222222, 0x33333333, 0x44444444};
+    D3D11_SUBRESOURCE_DATA resource_data[ARRAY_SIZE(colors)];
+    DWORD data[ARRAY_SIZE(colors)][4 * 4];
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
+    D3D11_TEXTURE2D_DESC texture_desc;
+    ID3D11DeviceContext1 *context1;
+    ID3D11DeviceContext *context;
+    struct resource_readback rb;
+    ID3D11RenderTargetView *rtv;
+    ID3D11Texture2D *texture;
+    ID3D11Buffer *buffer;
+    ID3D11Device *device;
+    unsigned int i, j;
+    ULONG refcount;
+    DWORD color;
+    HRESULT hr;
+
+    if (!(device = create_device(NULL)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+    ID3D11Device_GetImmediateContext(device, &context);
+    hr = ID3D11DeviceContext_QueryInterface(context, &IID_ID3D11DeviceContext1, (void **)&context1);
+    if (FAILED(hr))
+    {
+        win_skip("ID3D11DeviceContext1 is not supported.\n");
+        ID3D11DeviceContext_Release(context);
+        ID3D11Device_Release(device);
+        return;
+    }
+
+    /* A buffer without a structure byte stride. */
+    buffer = create_buffer(device, D3D11_BIND_VERTEX_BUFFER, 256, NULL);
+    ID3D11DeviceContext1_DiscardResource(context1, (ID3D11Resource *)buffer);
+    ID3D11DeviceContext1_Flush(context1);
+    ID3D11Buffer_Release(buffer);
+
+    /* Discarding a view of one array layer leaves the other sub-resources
+     * intact. Sub-resource i is mip level i % 2 of array layer i / 2. */
+    for (i = 0; i < ARRAY_SIZE(colors); ++i)
+    {
+        for (j = 0; j < ARRAY_SIZE(data[i]); ++j)
+            data[i][j] = colors[i];
+        resource_data[i].pSysMem = data[i];
+        resource_data[i].SysMemPitch = (i & 1 ? 2 : 4) * sizeof(DWORD);
+        resource_data[i].SysMemSlicePitch = 0;
+    }
+    texture_desc.Width = 4;
+    texture_desc.Height = 4;
+    texture_desc.MipLevels = 2;
+    texture_desc.ArraySize = 2;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    texture_desc.CPUAccessFlags = 0;
+    texture_desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(device, &texture_desc, resource_data, &texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    rtv_desc.Format = texture_desc.Format;
+    rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    rtv_desc.Texture2DArray.MipSlice = 0;
+    rtv_desc.Texture2DArray.FirstArraySlice = 1;
+    rtv_desc.Texture2DArray.ArraySize = 1;
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)texture, &rtv_desc, &rtv);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID3D11DeviceContext1_DiscardView(context1, (ID3D11View *)rtv);
+
+    for (i = 0; i < ARRAY_SIZE(colors); ++i)
+    {
+        /* Sub-resource 2 is the discarded one; its contents are undefined. */
+        if (i == 2)
+            continue;
+        get_texture_readback(texture, i, &rb);
+        color = get_readback_color(&rb, 0, 0, 0);
+        ok(color == colors[i], "Got unexpected color 0x%08lx for sub-resource %u.\n", color, i);
+        release_resource_readback(&rb);
+    }
+
+    ID3D11RenderTargetView_Release(rtv);
+    ID3D11Texture2D_Release(texture);
+    ID3D11DeviceContext1_Release(context1);
+    ID3D11DeviceContext_Release(context);
+    refcount = ID3D11Device_Release(device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_copy_subresource_region(void)
 {
     ID3D11Texture2D *dst_texture, *src_texture;
@@ -15961,17 +16054,19 @@ static void test_swapchain_formats(const D3D_FEATURE_LEVEL feature_level)
 
 static void test_swapchain_views(void)
 {
+    ID3D11RenderTargetView *rtv_rgb, *rtv_srgb;
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
     struct d3d11_test_context test_context;
     D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
     ID3D11ShaderResourceView *srv;
     ID3D11DeviceContext *context;
-    ID3D11RenderTargetView *rtv;
     ID3D11Device *device;
     ULONG refcount;
     HRESULT hr;
 
     static const struct vec4 color = {0.2f, 0.3f, 0.5f, 1.0f};
+    static const RECT r1 = {15, 15, 16, 16};
+    static const RECT r2 = {5, 5, 6, 6};
 
     if (!init_test_context(&test_context, NULL))
         return;
@@ -15985,12 +16080,19 @@ static void test_swapchain_views(void)
     draw_color_quad(&test_context, &color);
     check_texture_color(test_context.backbuffer, 0xff7f4c33, 1);
 
-    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     rtv_desc.Texture2D.MipSlice = 0;
-    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer, &rtv_desc, &rtv);
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer,
+            &rtv_desc, &rtv_rgb);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &rtv, NULL);
+
+    rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)test_context.backbuffer,
+            &rtv_desc, &rtv_srgb);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID3D11DeviceContext_OMSetRenderTargets(context, 1, &rtv_srgb, NULL);
 
     refcount = get_refcount(test_context.backbuffer);
     ok(refcount == 1, "Got unexpected refcount %lu.\n", refcount);
@@ -16007,7 +16109,16 @@ static void test_swapchain_views(void)
     if (SUCCEEDED(hr))
         ID3D11ShaderResourceView_Release(srv);
 
-    ID3D11RenderTargetView_Release(rtv);
+    /* Clear with an RGB view, draw with sRGB view and make sure the clear color has no sRGB
+     * correction applied. */
+    ID3D11DeviceContext_ClearRenderTargetView(context, rtv_rgb, (const float *)&color);
+    set_viewport(context, 0.0f, 0.0f, 10.0f, 10.0f, 0.0f, 1.0f);
+    draw_color_quad(&test_context, &color);
+    check_texture_sub_resource_color(test_context.backbuffer, 0, &r1, 0xff7f4c33, 1);
+    check_texture_sub_resource_color(test_context.backbuffer, 0, &r2, 0xffbc957c, 1);
+
+    ID3D11RenderTargetView_Release(rtv_srgb);
+    ID3D11RenderTargetView_Release(rtv_rgb);
     release_test_context(&test_context);
 }
 
@@ -35222,7 +35333,7 @@ static void test_shared_resource(D3D_FEATURE_LEVEL feature_level)
                     || broken(hr == E_OUTOFMEMORY) /* software device before Win8 */,
                     "got %#lx.\n", hr);
         else
-            todo_wine ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
+            ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
         if (FAILED(hr))
             goto test_done;
 
@@ -36384,9 +36495,9 @@ static void test_nv12(void)
     static const float clear_values_float[4] = {100.0, 100.0, 100.0, 100.0};
 
     static const char cs_code[] =
-            "Texture2D<uint> luma : register(t0);\n"
-            "Texture2D<uint2> chroma : register(t1);\n"
-            "RWTexture2D<uint> check : register(u1);\n"
+            "Texture2D<float> luma : register(t0);\n"
+            "Texture2D<float2> chroma : register(t1);\n"
+            "RWTexture2D<float> check : register(u1);\n"
             "\n"
             "uint2 size;\n"
             "\n"
@@ -36428,23 +36539,23 @@ static void test_nv12(void)
     }
     tests[] =
     {
-        {640, 480, 10, 20, 4, 6},
-        {640, 480, 10, 20, 4, 7},
-        {640, 480, 10, 20, 5, 6},
-        {640, 480, 10, 20, 5, 7},
+        {20, 40, 10, 20, 4, 6},
+        {20, 40, 10, 20, 4, 7},
+        {20, 40, 10, 20, 5, 6},
+        {20, 40, 10, 20, 5, 7},
 
-        {640, 480, 10, 21, 4, 6},
-        {640, 480, 11, 20, 4, 6},
-        {640, 480, 11, 21, 4, 6},
+        {20, 40, 10, 21, 4, 6},
+        {20, 40, 11, 20, 4, 6},
+        {20, 40, 11, 21, 4, 6},
 
-        {640, 481, 10, 20, 4, 6},
-        {641, 480, 10, 20, 4, 6},
-        {641, 481, 10, 20, 4, 6},
-        {642, 480, 10, 20, 4, 6},
-        {642, 481, 10, 20, 4, 6},
-        {642, 482, 10, 20, 4, 6},
-        {644, 482, 10, 20, 4, 6},
-        {644, 484, 10, 20, 4, 6},
+        {20, 41, 10, 20, 4, 6},
+        {21, 40, 10, 20, 4, 6},
+        {21, 41, 10, 20, 4, 6},
+        {22, 40, 10, 20, 4, 6},
+        {22, 41, 10, 20, 4, 6},
+        {22, 42, 10, 20, 4, 6},
+        {24, 42, 10, 20, 4, 6},
+        {24, 44, 10, 20, 4, 6},
     };
 
     if (!init_test_context(&test_context, NULL))
@@ -36483,17 +36594,17 @@ static void test_nv12(void)
     for (test_idx = 0; test_idx < ARRAY_SIZE(tests); ++test_idx)
     {
         /* I need only two uints in the cbuffer, but the size must be a multiple of 16. */
-        ID3D11Texture2D *texture, *texture2, *check_texture, *staging_texture;
+        ID3D11Texture2D *texture, *texture2, *check_texture, *staging_texture, *staging_texture2;
         unsigned int i, j, image_size, broken_warp_pitch;
         D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {0};
         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {0};
         D3D11_SUBRESOURCE_DATA subresource_data = {0};
         D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {0};
+        D3D11_MAPPED_SUBRESOURCE map_desc, map_desc2;
         char *content, *content2, *copy_source;
         ID3D11UnorderedAccessView *check_uav;
         ID3D11RenderTargetView *rtv1, *rtv2;
         ID3D11ShaderResourceView *srvs[2];
-        D3D11_MAPPED_SUBRESOURCE map_desc;
         D3D11_TEXTURE2D_DESC desc = {0};
         struct resource_readback rb;
         uint32_t cbuffer_data[4];
@@ -36564,7 +36675,7 @@ static void test_nv12(void)
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
         desc.Height += height / 2;
-        desc.Format = DXGI_FORMAT_R8_UINT;
+        desc.Format = DXGI_FORMAT_R8_UNORM;
         desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
 
         hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &check_texture);
@@ -36581,7 +36692,7 @@ static void test_nv12(void)
         hr = ID3D11Device_CreateShaderResourceView(device, (ID3D11Resource *)texture, &srv_desc, &srvs[0]);
         ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
 
-        srv_desc.Format = DXGI_FORMAT_R8_UINT;
+        srv_desc.Format = DXGI_FORMAT_R8_UNORM;
         srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srv_desc.Texture2D.MostDetailedMip = 0;
         srv_desc.Texture2D.MipLevels = 1;
@@ -36589,12 +36700,12 @@ static void test_nv12(void)
         hr = ID3D11Device_CreateShaderResourceView(device, (ID3D11Resource *)texture, &srv_desc, &srvs[0]);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
-        srv_desc.Format = DXGI_FORMAT_R8G8_UINT;
+        srv_desc.Format = DXGI_FORMAT_R8G8_UNORM;
 
         hr = ID3D11Device_CreateShaderResourceView(device, (ID3D11Resource *)texture, &srv_desc, &srvs[1]);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
-        uav_desc.Format = DXGI_FORMAT_R8_UINT;
+        uav_desc.Format = DXGI_FORMAT_R8_UNORM;
         uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
         uav_desc.Texture2D.MipSlice = 0;
 
@@ -36716,13 +36827,15 @@ static void test_nv12(void)
         check_readback_data_u8_with_buffer(&rb, content, width, 0);
         release_resource_readback(&rb);
 
-        /* Staging upload, GPU blit, and staging download tests. */
+        /* Staging upload, GPU blit, staging download, and CPU blit tests. */
         desc.Height = height;
         desc.Format = DXGI_FORMAT_NV12;
         desc.BindFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
         desc.Usage = D3D11_USAGE_STAGING;
         hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging_texture);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging_texture2);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
         hr = ID3D11DeviceContext_Map(device_context, (ID3D11Resource *)staging_texture, 0,
@@ -36781,6 +36894,7 @@ static void test_nv12(void)
 
         ID3D11DeviceContext_CopyResource(device_context, (ID3D11Resource *)texture2, (ID3D11Resource *)staging_texture);
         ID3D11DeviceContext_CopyResource(device_context, (ID3D11Resource *)texture, (ID3D11Resource *)texture2);
+        ID3D11DeviceContext_CopyResource(device_context, (ID3D11Resource *)staging_texture2, (ID3D11Resource *)staging_texture);
 
         hr = ID3D11DeviceContext_Map(device_context, (ID3D11Resource *)staging_texture, 0,
                 D3D11_MAP_WRITE, 0, &map_desc);
@@ -36805,6 +36919,8 @@ static void test_nv12(void)
         ID3D11DeviceContext_CopyResource(device_context, (ID3D11Resource *)texture2, (ID3D11Resource *)staging_texture);
         ID3D11DeviceContext_CopySubresourceRegion(device_context, (ID3D11Resource *)texture, 0,
                 copy_x, copy_y, 0, (ID3D11Resource *)texture2, 0, &box);
+        ID3D11DeviceContext_CopySubresourceRegion(device_context, (ID3D11Resource *)staging_texture2, 0,
+                copy_x, copy_y, 0, (ID3D11Resource *)staging_texture, 0, &box);
 
         ID3D11DeviceContext_ClearUnorderedAccessViewUint(device_context, check_uav, clear_values);
         ID3D11DeviceContext_CSSetShader(device_context, cs, NULL, 0);
@@ -36822,13 +36938,22 @@ static void test_nv12(void)
         hr = ID3D11DeviceContext_Map(device_context, (ID3D11Resource *)staging_texture, 0,
                 D3D11_MAP_READ, 0, &map_desc);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = ID3D11DeviceContext_Map(device_context, (ID3D11Resource *)staging_texture2, 0,
+                D3D11_MAP_READ, 0, &map_desc2);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
         for (i = 0; i < height; ++i)
         {
             for (j = 0; j < width; ++j)
             {
+                /* GPU blit... */
                 uint8_t value = ((uint8_t *)map_desc.pData)[i * map_desc.RowPitch + j];
                 uint8_t expect = content2[i * width + j];
+                ok(value == expect, "Got Y %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
+                if (value != expect)
+                    goto fail_match;
+                /* ...and CPU blit. */
+                value = ((uint8_t *)map_desc2.pData)[i * map_desc2.RowPitch + j];
                 ok(value == expect, "Got Y %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
                 if (value != expect)
                     goto fail_match;
@@ -36839,13 +36964,26 @@ static void test_nv12(void)
         {
             for (j = 0; j < width / 2; ++j)
             {
+                /* GPU blit... */
                 uint8_t value = ((uint8_t *)map_desc.pData)[map_desc.RowPitch * (height + i) + j * 2];
                 uint8_t expect = content2[width * (height + i) + j * 2];
                 ok(value == expect, "Got U %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
                 if (value != expect)
                     goto fail_match;
+                /* ...and CPU blit. */
+                value = ((uint8_t *)map_desc2.pData)[map_desc2.RowPitch * (height + i) + j * 2];
+                ok(value == expect, "Got U %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
+                if (value != expect)
+                    goto fail_match;
+
+                /* Now the V, GPU blit... */
                 value = ((uint8_t *)map_desc.pData)[map_desc.RowPitch * (height + i) + j * 2 + 1];
                 expect = content2[width * (height + i) + j * 2 + 1];
+                ok(value == expect, "Got V %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
+                if (value != expect)
+                    goto fail_match;
+                /* ...and CPU blit. */
+                value = ((uint8_t *)map_desc.pData)[map_desc.RowPitch * (height + i) + j * 2 + 1];
                 ok(value == expect, "Got V %02x, expected %02x at (%u, %u).\n", value, expect, i, j);
                 if (value != expect)
                     goto fail_match;
@@ -36854,6 +36992,7 @@ static void test_nv12(void)
 
 fail_match:
         ID3D11DeviceContext_Unmap(device_context, (ID3D11Resource *)staging_texture, 0);
+        ID3D11DeviceContext_Unmap(device_context, (ID3D11Resource *)staging_texture2, 0);
 
         ID3D11RenderTargetView_Release(rtv2);
         ID3D11RenderTargetView_Release(rtv1);
@@ -36861,6 +37000,7 @@ fail_match:
         ID3D11UnorderedAccessView_Release(check_uav);
         ID3D11ShaderResourceView_Release(srvs[1]);
         ID3D11ShaderResourceView_Release(srvs[0]);
+        ID3D11Texture2D_Release(staging_texture2);
         ID3D11Texture2D_Release(staging_texture);
         ID3D11Texture2D_Release(check_texture);
         ID3D11Texture2D_Release(texture2);
@@ -36898,6 +37038,7 @@ static void test_h264_decoder(void)
     D3D11_VIDEO_DECODER_CONFIG config = {0};
     D3D11_TEXTURE2D_DESC texture_desc = {0};
     struct d3d11_test_context test_context;
+    D3D11_MAPPED_SUBRESOURCE map_desc;
     DXVA_Slice_H264_Short *h264_slice;
     ID3D11VideoContext *video_context;
     DXVA_PicParams_H264 *h264_params;
@@ -36915,6 +37056,7 @@ static void test_h264_decoder(void)
 
     DXVA_PicParams_H264 h264_params_template =
     {
+        /* 320x240, the actual size of the frame. */
         .wFrameWidthInMbsMinus1 = 19,
         .wFrameHeightInMbsMinus1 = 14,
         .num_ref_frames = 4,
@@ -36964,9 +37106,11 @@ static void test_h264_decoder(void)
             &IID_ID3D11VideoContext, (void **)&video_context);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
+    /* The video is 320x240, but we create 480x320 here. Native will happily
+     * just copy this into the top left area. */
     desc.Guid = DXVA_ModeH264_VLD_NoFGT;
-    desc.SampleWidth = 320;
-    desc.SampleHeight = 240;
+    desc.SampleWidth = 480;
+    desc.SampleHeight = 320;
     desc.OutputFormat = DXGI_FORMAT_NV12;
 
     hr = ID3D11VideoDevice_GetVideoDecoderConfigCount(video_device, &desc, &count);
@@ -37044,8 +37188,8 @@ static void test_h264_decoder(void)
     }
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
-    texture_desc.Width = 320;
-    texture_desc.Height = 240;
+    texture_desc.Width = 480;
+    texture_desc.Height = 320;
     texture_desc.MipLevels = 1;
     texture_desc.ArraySize = ARRAY_SIZE(output_views);
     texture_desc.Format = DXGI_FORMAT_NV12;
@@ -37056,8 +37200,28 @@ static void test_h264_decoder(void)
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     texture_desc.ArraySize = 1;
     texture_desc.BindFlags = 0;
+    texture_desc.Usage = D3D11_USAGE_STAGING;
+    texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
     hr = ID3D11Device_CreateTexture2D(test_context.device, &texture_desc, NULL, &readback_texture);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    /* Fill the output texture with initial data to test whether parts outside
+     * the image size are modified. */
+
+    hr = ID3D11DeviceContext_Map(test_context.immediate_context,
+            (ID3D11Resource *)readback_texture, 0, D3D11_MAP_WRITE, 0, &map_desc);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    /* Y plane */
+    for (unsigned int y = 0; y < texture_desc.Height; ++y)
+        memset((char *)map_desc.pData + y * map_desc.RowPitch, 123, texture_desc.Width);
+    /* UV plane */
+    for (unsigned int y = 0; y < texture_desc.Height / 2; ++y)
+        memset((char *)map_desc.pData + (texture_desc.Height + y) * map_desc.RowPitch, 45, texture_desc.Width);
+    ID3D11DeviceContext_Unmap(test_context.immediate_context, (ID3D11Resource *)readback_texture, 0);
+    ID3D11DeviceContext_CopySubresourceRegion(test_context.immediate_context,
+            (ID3D11Resource *)output_texture, 0, 0, 0, 0, (ID3D11Resource *)readback_texture, 0, NULL);
+    ID3D11DeviceContext_CopySubresourceRegion(test_context.immediate_context,
+            (ID3D11Resource *)output_texture, 1, 0, 0, 0, (ID3D11Resource *)readback_texture, 0, NULL);
 
     for (unsigned int i = 0; i < ARRAY_SIZE(output_views); ++i)
     {
@@ -37274,6 +37438,12 @@ static void test_h264_decoder(void)
     get_readback_nv12(&rb, 176, 136, &colour);
     ok(colour.y == 41 && colour.u == 240 && colour.v == 110,
             "Got (Y, U, V) values (%u, %u, %u).\n", colour.y, colour.u, colour.v);
+    /* Of course NVidia and AMD don't agree on what's done to areas outside of
+     * the picture. NVidia fills them with black; AMD leaves them alone. */
+    get_readback_nv12(&rb, 320, 240, &colour);
+    ok((colour.y == 16 && colour.u == 128 && colour.v == 128)
+            || (colour.y == 123 && colour.u == 45 && colour.v == 45),
+            "Got (Y, U, V) values (%u, %u, %u).\n", colour.y, colour.u, colour.v);
     release_resource_readback(&rb);
 
     ID3D11DeviceContext_CopySubresourceRegion(test_context.immediate_context,
@@ -37284,6 +37454,10 @@ static void test_h264_decoder(void)
             "Got (Y, U, V) values (%u, %u, %u).\n", colour.y, colour.u, colour.v);
     get_readback_nv12(&rb, 176, 136, &colour);
     ok(colour.y == 49 && colour.u == 109 && colour.v == 184,
+            "Got (Y, U, V) values (%u, %u, %u).\n", colour.y, colour.u, colour.v);
+    get_readback_nv12(&rb, 320, 240, &colour);
+    ok((colour.y == 16 && colour.u == 128 && colour.v == 128)
+            || (colour.y == 123 && colour.u == 45 && colour.v == 45),
             "Got (Y, U, V) values (%u, %u, %u).\n", colour.y, colour.u, colour.v);
     release_resource_readback(&rb);
 
@@ -37613,6 +37787,7 @@ START_TEST(d3d11)
     queue_test(test_initial_texture_data);
     queue_test(test_update_subresource);
     queue_test(test_copy_subresource_region);
+    queue_test(test_discard);
     queue_test(test_copy_subresource_region_1d);
     queue_test(test_copy_subresource_region_3d);
     queue_test(test_resource_map);

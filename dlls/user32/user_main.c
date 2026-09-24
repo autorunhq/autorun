@@ -19,7 +19,6 @@
  */
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "user_private.h"
 #include "controls.h"
 #include "imm.h"
@@ -190,14 +189,13 @@ static NTSTATUS WINAPI User32DragDropPost( void *args, ULONG size )
     return STATUS_SUCCESS;
 }
 
-C_ASSERT( NtUserCallCount <= 256 );
-
-static KERNEL_CALLBACK_PROC kernel_callback_table[256] =
+static KERNEL_CALLBACK_PROC kernel_callback_table[NtUserCallCount] =
 {
 #define USER32_CALLBACK_ENTRY(name) User32##name,
     ALL_USER32_CALLBACKS
 #undef USER32_CALLBACK_ENTRY
 };
+
 
 /***********************************************************************
  *           USER initialisation routine

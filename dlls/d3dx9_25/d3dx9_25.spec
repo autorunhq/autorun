@@ -20,7 +20,7 @@
 @ stdcall D3DXComputeBoundingSphere(ptr long long ptr ptr)
 @ stdcall D3DXComputeNormalMap(ptr ptr ptr long long float)
 @ stdcall D3DXComputeNormals(ptr ptr)
-@ stdcall D3DXComputeTangent(ptr long long long long ptr)
+@ stub D3DXComputeTangent(ptr long long long long ptr)
 @ stub D3DXComputeTangentFrame(ptr long)
 @ stdcall D3DXComputeTangentFrameEx(ptr long long long long long long long long long ptr float float float ptr ptr)
 @ stub D3DXConcatenateMeshes(ptr long long ptr ptr ptr ptr ptr)
@@ -163,7 +163,7 @@
 @ stub D3DXGetTargetDescByVersion
 @ stdcall D3DXGetVertexShaderProfile(ptr)
 @ stdcall D3DXIntersect(ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-@ stub D3DXIntersectSubset(ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall D3DXIntersectSubset(ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall D3DXIntersectTri(ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall D3DXLoadMeshFromXA(str long ptr ptr ptr ptr ptr ptr)
 @ stdcall D3DXLoadMeshFromXInMemory(ptr long long ptr ptr ptr ptr ptr ptr)

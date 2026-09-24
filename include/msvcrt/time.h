@@ -55,22 +55,15 @@ struct timespec
     __msvcrt_long tv_nsec;
 };
 
-#ifdef __i386__
-#define _daylight (*__p__daylight())
-#define _dstbias (*__p__dstbias())
-#define _timezone (*__p__timezone())
-#define _tzname (__p__tzname())
+#define _daylight (*__daylight())
+#define _dstbias (*__dstbias())
+#define _timezone (*__timezone())
+#define _tzname (__tzname())
 
-_ACRTIMP int *   __cdecl __p__daylight(void);
-_ACRTIMP __msvcrt_long *  __cdecl __p__dstbias(void);
-_ACRTIMP __msvcrt_long *  __cdecl __p__timezone(void);
-_ACRTIMP char ** __cdecl __p__tzname(void);
-#else
-extern int _daylight;
-extern __msvcrt_long _dstbias;
-extern __msvcrt_long _timezone;
-extern char *_tzname;
-#endif
+_ACRTIMP int *   __cdecl __daylight(void);
+_ACRTIMP __msvcrt_long *  __cdecl __dstbias(void);
+_ACRTIMP __msvcrt_long *  __cdecl __timezone(void);
+_ACRTIMP char ** __cdecl __tzname(void);
 
 #if _MSVCR_VER < 120 && defined(_USE_32BIT_TIME_T)
 #define _ctime32     ctime
@@ -106,6 +99,8 @@ _ACRTIMP struct tm*  __cdecl _localtime32(const __time32_t*);
 _ACRTIMP errno_t     __cdecl _localtime32_s(struct tm*, const __time32_t*);
 _ACRTIMP struct tm*  __cdecl _localtime64(const __time64_t*);
 _ACRTIMP errno_t     __cdecl _localtime64_s(struct tm*, const __time64_t*);
+_ACRTIMP __time32_t  __cdecl _mkgmtime32(struct tm*);
+_ACRTIMP __time64_t  __cdecl _mkgmtime64(struct tm*);
 _ACRTIMP __time32_t  __cdecl _mktime32(struct tm*);
 _ACRTIMP __time64_t  __cdecl _mktime64(struct tm*);
 _ACRTIMP size_t      __cdecl strftime(char*,size_t,const char*,const struct tm*);
@@ -118,8 +113,10 @@ static inline char* ctime(const time_t *t) { return _ctime64(t); }
 static inline errno_t ctime_s(char *res, size_t len, const __time64_t *t) { return _ctime64_s(res, len, t); }
 static inline double difftime(time_t t1, time_t t2) { return _difftime64(t1, t2); }
 static inline struct tm* gmtime(const time_t *t) { return _gmtime64(t); }
+static inline int gmtime_s(struct tm* res, const time_t *t) { return _gmtime64_s(res, t); }
 static inline struct tm* localtime(const time_t *t) { return _localtime64(t); }
 static inline errno_t localtime_s(struct tm *res, const time_t *t) { return _localtime64_s(res, t); }
+static inline time_t _mkgmtime(struct tm *tm) { return _mkgmtime64(tm); }
 static inline time_t mktime(struct tm *tm) { return _mktime64(tm); }
 static inline time_t time(time_t *t) { return _time64(t); }
 #elif defined(_UCRT)
@@ -127,11 +124,16 @@ static inline char* ctime(const time_t *t) { return _ctime32(t); }
 static inline errno_t ctime_s(char *res, size_t len, const __time32_t *t) { return _ctime32_s(res, len, t); }
 static inline double difftime(time_t t1, time_t t2) { return _difftime32(t1, t2); }
 static inline struct tm* gmtime(const time_t *t) { return _gmtime32(t); }
+static inline int gmtime_s(struct tm* res, const time_t *t) { return _gmtime32_s(res, t); }
 static inline struct tm* localtime(const time_t *t) { return _localtime32(t); }
 static inline errno_t localtime_s(struct tm *res, const time_t *t) { return _localtime32_s(res, t); }
+static inline time_t _mkgmtime(struct tm *tm) { return _mkgmtime32(tm); }
 static inline time_t mktime(struct tm *tm) { return _mktime32(tm); }
 static inline time_t time(time_t *t) { return _time32(t); }
 #endif
+
+#define CLK_TCK CLOCKS_PER_SEC
+_ACRTIMP void __cdecl tzset(void);
 
 #ifdef __cplusplus
 }

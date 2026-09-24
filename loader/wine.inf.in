@@ -66,14 +66,10 @@ AddReg=\
     LicenseInformation,\
     MCI,\
     Misc,\
-    NVIDIANGX, \
-    TTS, \
     OLE,\
     Printing,\
-    ProtonOverrides,\
     Services, \
     SessionMgr,\
-    SteamClient,\
     ThemeManager
 
 [DefaultInstall]
@@ -86,7 +82,6 @@ AddReg=\
 Needs=BaseInstall
 WineFakeDlls=FakeDllsWin32
 AddReg=\
-    Packages,\
     VCRuntime.ntx86,\
     VersionInfo
 
@@ -101,8 +96,6 @@ Needs=BaseInstall
 WineFakeDlls=FakeDllsWin64
 AddReg=\
     CurrentVersionWow64.ntamd64,\
-    Packages.ntamd64,\
-    SteamClient64, \
     VCRuntime.ntamd64,\
     VersionInfo
 
@@ -111,8 +104,6 @@ Needs=BaseInstall
 WineFakeDlls=FakeDllsWin64
 AddReg=\
     CurrentVersionWow64.ntarm64,\
-    Packages.ntarm64,\
-    SteamClient64, \
     VCRuntime.ntamd64,\
     VCRuntime.ntarm64,\
     VersionInfo
@@ -134,8 +125,6 @@ AddReg=\
 Needs=BaseWow64Install
 AddReg=\
     CurrentVersionWow64.ntx86,\
-    Packages.wow64,\
-    SteamClient64, \
     VCRuntime.ntamd64,\
     VCRuntime.ntx86
 
@@ -150,6 +139,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -170,6 +160,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -190,6 +181,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -210,6 +202,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -231,8 +224,6 @@ CurrentVersion="Software\Microsoft\Windows\CurrentVersion"
 CurrentVersionNT="Software\Microsoft\Windows NT\CurrentVersion"
 FontSubStr="Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"
 Control="System\CurrentControlSet\Control"
-FontsNT="Software\Microsoft\Windows NT\CurrentVersion\Fonts"
-Packages="Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\PackageRepository\Packages"
 
 [Classes]
 HKCR,.chm,,2,"chm.file"
@@ -313,7 +304,6 @@ HKCR,ftp\shell\open\command,,2,"""%11%\winebrowser.exe"" ""%1"""
 HKCR,http\shell\open\command,,2,"""%11%\winebrowser.exe"" ""%1"""
 HKCR,https\shell\open\command,,2,"""%11%\winebrowser.exe"" ""%1"""
 HKCR,mailto\shell\open\command,,2,"""%11%\winebrowser.exe"" ""%1"""
-HKCR,steam\shell\open\command,,,"""%16426%\Steam\Steam.exe"" -- ""%1"""
 
 [ContentIndex]
 HKLM,System\CurrentControlSet\Control\ContentIndex\Language\Neutral,"WBreakerClass",,"{369647e0-17b0-11ce-9950-00aa004bbb1f}"
@@ -339,11 +329,12 @@ HKLM,System\CurrentControlSet\Control\Class\{745a17a0-74d3-11d0-b6fe-00a0c90f57d
 [CurrentVersion]
 HKCU,%CurrentVersion%\Explorer\Advanced,,16
 HKCU,%CurrentVersion%\Explorer\FileExts,,16
+HKCU,%CurrentVersion%\ImmersiveShell,"TabletMode",0x10003,0
 HKCU,%CurrentVersion%\Run,,16
 HKCU,%CurrentVersionNT%\Winlogon,,16
 HKLM,%CurrentVersion%,"CommonFilesDir",,"%16427%"
 HKLM,%CurrentVersion%,"FirstInstallDateTime",1,21,81,7c,23
-HKLM,%CurrentVersion%,"ProductId",,"00330-50000-00000-AAOEM"
+HKLM,%CurrentVersion%,"ProductId",,"12345-oem-0000001-54321"
 HKLM,%CurrentVersion%,"ProgramFilesDir",,"%16422%"
 HKLM,%CurrentVersion%,"ProgramFilesPath",0x20000,"%%ProgramFiles%%"
 HKLM,%CurrentVersion%,"RegisteredOrganization",2,""
@@ -369,7 +360,7 @@ HKLM,%CurrentVersion%\Shell Extensions\Approved,,16
 HKLM,%CurrentVersion%\Time Zones,"SymbolicLinkValue",0x60000,"\Registry\Machine\%CurrentVersionNT%\Time Zones"
 HKLM,%CurrentVersion%\Uninstall,,16
 HKLM,%CurrentVersionNT%,"InstallDate",0x10003,1273299354
-HKLM,%CurrentVersionNT%,"ProductId",,"00330-50000-00000-AAOEM"
+HKLM,%CurrentVersionNT%,"ProductId",,"12345-oem-0000001-54321"
 HKLM,%CurrentVersionNT%,"RegisteredOrganization",2,""
 HKLM,%CurrentVersionNT%,"RegisteredOwner",2,""
 HKLM,%CurrentVersionNT%,"SystemRoot",,"%10%"
@@ -399,23 +390,20 @@ HKLM,%CurrentVersionNT%\Ports,,16
 HKLM,%CurrentVersionNT%\Print,,16
 HKLM,%CurrentVersionNT%\ProfileList,,16
 HKLM,%CurrentVersionNT%\Winlogon,"Shell",,"explorer.exe"
-;; App specific heap debug flags
-HKLM,%CurrentVersionNT%\Image File Execution Options\ChaosCode.exe,GlobalFlag,0x00040002,0x00000020
-HKLM,%CurrentVersionNT%\Image File Execution Options\Crysis2Remastered.exe,GlobalFlag,0x00040002,0x00000020
 
 [CurrentVersionWow64.ntamd64]
 HKLM,%CurrentVersion%,"ProgramFilesDir (x86)",,"%16426%"
 HKLM,%CurrentVersion%,"CommonFilesDir (x86)",,"%16428%"
-HKLM,Software\Microsoft\Wow64\x86,,,"wow64cpu.dll"
+HKLM,Software\Microsoft\Wow64\x86,,2,"wow64cpu.dll"
 
 [CurrentVersionWow64.ntarm64]
 HKLM,%CurrentVersion%,"ProgramFilesDir (x86)",,"%16426%"
 HKLM,%CurrentVersion%,"CommonFilesDir (x86)",,"%16428%"
 HKLM,%CurrentVersion%,"ProgramFilesDir (Arm)",,"C:\Program Files (Arm)"
 HKLM,%CurrentVersion%,"CommonFilesDir (Arm)",,"C:\Program Files (Arm)\Common Files"
-HKLM,Software\Microsoft\Wow64\amd64,,,"libarm64ecfex.dll"
+HKLM,Software\Microsoft\Wow64\amd64,,2,"xtajit64.dll"
 HKLM,Software\Microsoft\Wow64\arm,,2,"wowarmhw.dll"
-HKLM,Software\Microsoft\Wow64\x86,,,"libwow64fex.dll"
+HKLM,Software\Microsoft\Wow64\x86,,2,"xtajit.dll"
 
 [CurrentVersionWow64.ntx86]
 HKLM,%CurrentVersion%,"ProgramFilesDir (x86)",,"%16422%"
@@ -430,7 +418,6 @@ HKLM,%CurrentVersionNT%\AeDebug,"Debugger",2,"winedbg --auto %ld %ld"
 HKLM,%CurrentVersionNT%\AeDebug,"Auto",2,"1"
 HKCU,Software\Wine\Debug,"RelayExclude",2,"ntdll.RtlEnterCriticalSection;ntdll.RtlTryEnterCriticalSection;ntdll.RtlLeaveCriticalSection;kernel32.48;kernel32.49;kernel32.94;kernel32.95;kernel32.96;kernel32.97;kernel32.98;kernel32.TlsGetValue;kernel32.TlsSetValue;kernel32.FlsGetValue;kernel32.FlsSetValue;kernel32.SetLastError"
 HKCU,Software\Wine\Debug,"RelayFromExclude",2,"winex11.drv;winemac.drv;user32;gdi32;advapi32;kernel32"
-HKCU,Software\Wine\WineDbg,"ShowCrashDialog",0x00010003,0x00000000
 
 [DirectX]
 HKLM,Software\Microsoft\DirectX,"Version",,"4.09.00.0904"
@@ -537,30 +524,6 @@ HKLM,%FontSubStr%,"Times New Roman CYR,204",,"Times New Roman,204"
 HKLM,%FontSubStr%,"Times New Roman Greek,161",,"Times New Roman,161"
 HKLM,%FontSubStr%,"Times New Roman TUR,162",,"Times New Roman,162"
 HKLM,System\CurrentControlSet\Hardware Profiles\Current\Software\Fonts,"LogPixels",0x10003,0x00000060
-HKLM,%FontsNT%,"Arial (TrueType)",,"arial.ttf"
-HKLM,%FontsNT%,"Arial Bold (TrueType)",,"arialbd.ttf"
-HKLM,%FontsNT%,"Courier New (TrueType)",,"cour.ttf"
-HKLM,%FontsNT%,"Courier New Bold (TrueType)",,"courbd.ttf"
-HKLM,%FontsNT%,"Malgun Gothic (TrueType)",,"malgun.ttf"
-HKLM,%FontsNT%,"Marlett (TrueType)",,"marlett.ttf"
-HKLM,%FontsNT%,"Microsoft Sans Serif (TrueType)",,"micross.ttf"
-HKLM,%FontsNT%,"MS Gothic (TrueType)",,"msgothic.ttc"
-HKLM,%FontsNT%,"MS PGothic (TrueType)",,"msgothic.ttc"
-HKLM,%FontsNT%,"MS UI Gothic (TrueType)",,"msgothic.ttc"
-HKLM,%FontsNT%,"Microsoft YaHei (TrueType)",,"msyh.ttf"
-HKLM,%FontsNT%,"Nirmala UI (TrueType)",,"nirmala.ttf"
-HKLM,%FontsNT%,"SimSun (TrueType)",,"simsun.ttc"
-HKLM,%FontsNT%,"NSimSun (TrueType)",,"simsun.ttc"
-HKLM,%FontsNT%,"Symbol (TrueType)",,"symbol.ttf"
-HKLM,%FontsNT%,"Tahoma (TrueType)",,"tahoma.ttf"
-HKLM,%FontsNT%,"Tahoma Bold (TrueType)",,"tahomabd.ttf"
-HKLM,%FontsNT%,"Times New Roman (TrueType)",,"times.ttf"
-HKLM,%FontsNT%,"Webdings (TrueType)",,"webdings.ttf"
-HKLM,%FontsNT%,"Wingdings (TrueType)",,"wingdings.ttf"
-HKCU,Software\Wine\Fonts\Replacements,"Palatino Linotype",,"Times New Roman"
-HKCU,Software\Wine\Fonts\Replacements,"Verdana",,"Times New Roman"
-HKCU,Software\Wine\Fonts\Replacements,"Segoe UI Semibold",,"Times New Roman"
-HKCU,Software\Wine\Fonts\Replacements,"Segoe UI",,"Times New Roman"
 
 [MCI]
 HKLM,%Mci32Str%,"AVIVideo",,"mciavi32.dll"
@@ -657,6 +620,7 @@ HKLM,System\Select,"Default",0x10003,1
 HKLM,System\Select,"Failed",0x10003,0
 HKLM,System\Select,"LastKnownGood",0x10003,1
 HKCU,AppEvents\Schemes\Apps\Explorer\Navigating\.Current,,,""
+HKCU,Software\Classes,,16
 HKCU,Software\Microsoft\Protected Storage System Provider,,16
 ; Some apps requires at least four subkeys of Active Setup\Installed Components
 HKLM,SOFTWARE\Microsoft\Active Setup\Installed Components\{44BBA855-CC51-11CF-AAFA-00AA00B6015F},,2,"DirectDrawEx"
@@ -685,18 +649,6 @@ HKCU,Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserCho
 [OLE]
 HKLM,"Software\Microsoft\OLE","EnableDCOM",,"Y"
 HKLM,"Software\Microsoft\OLE","EnableRemoteConnect",,"N"
-
-[Packages]
-HKLM,"%Packages%\Microsoft.VCLibs.140.00_14.0.29231.0_x86__8wekyb3d8bbwe","Path",0x00020002,"%SystemRoot%\system32"
-
-[Packages.ntamd64]
-HKLM,"%Packages%\Microsoft.VCLibs.140.00_14.0.29231.0_x64__8wekyb3d8bbwe","Path",0x00020002,"%SystemRoot%\system32"
-
-[Packages.wow64]
-HKLM,"%Packages%\Microsoft.VCLibs.140.00_14.0.29231.0_x86__8wekyb3d8bbwe","Path",0x00020002,"%SystemRoot%\syswow64"
-
-[Packages.arm64]
-HKLM,"%Packages%\Microsoft.VCLibs.140.00_14.0.29231.0_arm64__8wekyb3d8bbwe","Path",0x00020002,"%SystemRoot%\system32"
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"
@@ -820,6 +772,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,,regasm.exe,-
 11,,servicemodelreg.exe,-
 11,,presentationfontcache.exe,-
+11,,wminet_utils.dll,-
 ; some programs are 64-bit only
 11,,conhost.exe,-
 11,,plugplay.exe,-
@@ -840,6 +793,9 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 16422,Internet Explorer,iexplore.exe
 16422,Windows Media Player,wmplayer.exe
 16422,Windows NT\Accessories,wordpad.exe
+16427,Microsoft Shared\Ink,inkobj.dll
+16427,Microsoft Shared\Ink,rtscom.dll
+16427,Microsoft Shared\Ink,tiptsf.dll
 16427,System\OLE DB,oledb32.dll
 16427,System\OLE DB,msdaps.dll
 16427,System\OLE DB,msdasql.dll
@@ -873,7 +829,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,,notepad.exe
 11,,winetest.exe,-
 ; themes
-10,resources\themes\light,light.msstyles
+10,resources\themes\aero,aero.msstyles
 ; skip .NET fake dlls in Wine Mono package
 11,,aspnet_regiis.exe,-
 11,,ngen.exe,-
@@ -884,6 +840,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,,regasm.exe,-
 11,,servicemodelreg.exe,-
 11,,presentationfontcache.exe,-
+11,,wminet_utils.dll,-
 ; registration order matters for these
 11,,msxml.dll
 11,,msxml2.dll
@@ -907,6 +864,8 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 16422,Windows Media Player,wmplayer.exe
 16422,Windows NT\Accessories,wordpad.exe
 16427,Microsoft Shared\TextConv,
+16427,Microsoft Shared\Ink,inkobj.dll
+16427,Microsoft Shared\Ink,tiptsf.dll
 16427,System\OLE DB,oledb32.dll
 16427,System\OLE DB,msdaps.dll
 16427,System\OLE DB,msdasql.dll
@@ -1022,6 +981,14 @@ ServiceType=32
 StartType=3
 ErrorControl=1
 
+[SamSsService]
+Description="Security Accounts Manager service"
+DisplayName="Security Accounts Manager"
+ServiceBinary="%11%\lsass.exe"
+ServiceType=32
+StartType=3
+ErrorControl=1
+
 [ScardSvrService]
 AddReg=ScardSvrServiceKeys
 DisplayName="Smart card server"
@@ -1061,7 +1028,7 @@ ErrorControl=1
 
 [ThemeManager]
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",2,"1"
-HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","DllName",2,"%10%\resources\themes\light\light.msstyles"
+HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","DllName",2,"%10%\resources\themes\aero\aero.msstyles"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ColorName",2,"Blue"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","SizeName",2,"NormalSize"
 
@@ -1158,6 +1125,7 @@ StartType=3
 ErrorControl=1
 
 [Services]
+HKLM,%CurrentVersion%\RunServices,"winemenubuilder",2,"%11%\winemenubuilder.exe -a -r"
 HKLM,"System\CurrentControlSet\Services\Dnscache\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\Application",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\System","Sources",0x10000,""
@@ -1175,18 +1143,16 @@ HKLM,%CurrentVersionNT%,"CurrentBuild",2,"19045"
 HKLM,%CurrentVersionNT%,"CurrentBuildNumber",2,"19045"
 HKLM,%CurrentVersionNT%,"UBR",0x10003,5796
 HKLM,%CurrentVersionNT%,"CurrentType",2,"Multiprocessor Free"
-HKLM,%CurrentVersionNT%,"DigitalProductId",2,00,00,00,00,00,00,00,00,00,00,00,\
+HKLM,%CurrentVersionNT%,"DigitalProductId",1,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
-HKLM,%CurrentVersionNT%,"DisplayVersion",2,"21H1"
 HKLM,%CurrentVersionNT%,"EditionId",2,"Professional"
 HKLM,%CurrentVersionNT%,"InstallationType",2,"Client"
 HKLM,%CurrentVersionNT%,"ProductName",2,"Windows 10 Pro"
-HKLM,%CurrentVersionNT%,"ReleaseId",,"2009"
 HKLM,%Control%\ProductOptions,"ProductType",2,"WinNT"
 HKLM,%Control%\Windows,"CSDVersion",0x10003,0
 HKLM,%Control%\Session Manager\Environment,"OS",2,"Windows_NT"
@@ -1389,151 +1355,3 @@ InfFiles  = 17
 NlsFiles  = 11
 SortFiles = 10,globalization\sorting
 WinmdFiles = 11,winmetadata
-
-[SteamClient]
-HKCU,Software\Valve\Steam,"SteamPath",,"%16422%\Steam"
-HKCU,Software\Valve\Steam,"SteamExe",,"%16422%\Steam\Steam.exe"
-HKCU,Software\Valve\Steam\ActiveProcess,"PID",0x10001,0x0000fffe
-HKCU,Software\Valve\Steam\ActiveProcess,"SteamClientDll",,"%16422%\Steam\steamclient.dll"
-HKCU,Software\Valve\Steam\ActiveProcess,"SteamPath",,"%16422%\Steam"
-
-[SteamClient64]
-HKCU,Software\Valve\Steam,"SteamPath",,"%16422%\Steam"
-HKCU,Software\Valve\Steam,"SteamExe",,"%16422%\Steam\Steam.exe"
-HKCU,Software\Valve\Steam\ActiveProcess,"PID",0x10001,0x0000fffe
-HKCU,Software\Valve\Steam\ActiveProcess,"SteamClientDll",,"%16426%\Steam\steamclient.dll"
-HKCU,Software\Valve\Steam\ActiveProcess,"SteamClientDll64",,"%16426%\Steam\steamclient64.dll"
-HKCU,Software\Valve\Steam\ActiveProcess,"SteamPath",,"%16426%\Steam"
-HKLM,Software\Wow6432Node\Valve\Steam,"InstallPath",,"%16422%\Steam"
-
-[NVIDIANGX]
-HKLM,Software\NVIDIA Corporation\Global\NGXCore,"FullPath",,"C:\Windows\System32"
-
-[TTS]
-HKLM,Software\Microsoft\Speech\Voices,"DefaultDefaultTokenId",,"HKEY_LOCAL_MACHINE\Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,,,"Proton Voice - English (United States) - libritts-r 3"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,"409",,"Proton Voice - English (United States) - libritts-r 3"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,"CLSID",,"{52808AE1-D977-4CD8-92D2-FEACB92FE276}"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,"LengthScale",,"1.4"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,"ModelPath",,"en_US-libritts_r-medium.onnx"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3,"SpeakerID",,"3"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Name",,"Proton Voice - libritts-r 3"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Language",,"409"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Gender",,"Male"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Age",,"Adult"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Vendor",,"Wine"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,,,"Proton Voice - English (United States) - libritts-r 14"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,"409",,"Proton Voice - English (United States) - libritts-r 14"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,"CLSID",,"{52808AE1-D977-4CD8-92D2-FEACB92FE276}"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,"LengthScale",,"1.4"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,"ModelPath",,"en_US-libritts_r-medium.onnx"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14,"SpeakerID",,"14"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Name",,"Proton Voice - libritts-r 14"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Language",,"409"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Gender",,"Female"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Age",,"Adult"
-HKLM,Software\Microsoft\Speech\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Vendor",,"Wine"
-HKLM,Software\Microsoft\Speech_OneCore\Voices,"DefaultDefaultTokenId",,"HKEY_LOCAL_MACHINE\Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,,,"Proton Voice - English (United States) - libritts-r 3"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,"409",,"Proton Voice - English (United States) - libritts-r 3"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,"CLSID",,"{52808AE1-D977-4CD8-92D2-FEACB92FE276}"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,"LengthScale",,"1.4"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,"ModelPath",,"en_US-libritts_r-medium.onnx"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3,"SpeakerID",,"3"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Name",,"Proton Voice - libritts-r 3"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Language",,"409"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Gender",,"Male"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Age",,"Adult"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_3\Attributes,"Vendor",,"Wine"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,,,"Proton Voice - English (United States) - libritts-r 14"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,"409",,"Proton Voice - English (United States) - libritts-r 14"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,"CLSID",,"{52808AE1-D977-4CD8-92D2-FEACB92FE276}"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,"LengthScale",,"1.4"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,"ModelPath",,"en_US-libritts_r-medium.onnx"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14,"SpeakerID",,"14"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Name",,"Proton Voice - libritts-r 14"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Language",,"409"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Gender",,"Female"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Age",,"Adult"
-HKLM,Software\Microsoft\Speech_OneCore\Voices\Tokens\ProtonTTS_libritts-r_14\Attributes,"Vendor",,"Wine"
-
-[ProtonOverrides]
-;;Likely want *80 and *90 too, but those require removing Wine's manifest files.
-HKCU,Software\Wine\DllOverrides,"atl100",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp100",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcr100",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vcomp100",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"atl110",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp110",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcr110",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vcomp110",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"atl120",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp120",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcr120",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vcomp120",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-conio-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-heap-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-locale-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-math-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-runtime-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-stdio-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"api-ms-win-crt-time-l1-1-0",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"atl140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"concrt140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp140_1",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp140_2",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp140_atomic_wait",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcp140_codecvt_ids",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"msvcr140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"ucrtbase",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vcomp140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vcruntime140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"vccorlib140",0x2,"native,builtin"
-HKCU,Software\Wine\DllOverrides,"atiadlxx",,"disabled"
-HKCU,Software\Wine\DllOverrides,"nvcuda",0x2,"disabled"
-HKCU,Software\Wine\DllOverrides,"vcruntime140_1",0x2,"native,builtin"
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.8,"4.8",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.7.2,"4.7.2",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.6.2,"4.6.2",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.5.2,"4.5.2",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.0,"4.0",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\4.0 Client Profile,"4.0 Client Profile",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\3.5,"3.5",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\.NET\3.5 Client Profile,"3.5 Client Profile",0x10001,1
-HKLM,Software\Wow6432Node\Valve\Steam\Apps\CommonRedist\XNA\4.0,"4.0",0x10001,1
-HKCU,Software\Wine\AppDefaults\ShadowOfWar.exe\DllOverrides,"amd_ags_x64",,"disabled"
-HKCU,Software\Wine\AppDefaults\TDUSC.exe\DllOverrides,"xinput1_3",,"native,builtin"
-HKCU,Software\Wine\AppDefaults\WRCG.exe\DllOverrides,"xinput1_3",,"native,builtin"
-;;App-specific overrides for atiadlxx.dll.
-HKCU,Software\Wine\AppDefaults\s2_sp64_ship.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\s2_mp64_ship.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\h1_sp64_ship.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\h1_mp64_ship.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\iw7_ship.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\BlackOps3.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\NFS16.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\ShadowOfWar.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\DIRT5.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\Paradox Launcher.exe\DllOverrides,,4,
-HKCU,Software\Wine\AppDefaults\gotg.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\RelicCardinal.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\msedgewebview2.exe,"Version",,"win7"
-HKCU,Software\Wine\AppDefaults\Imperiums.exe,"Version",,"win11"
-HKCU,Software\Wine\AppDefaults\Avengers.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\starwarssquadrons.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\GW2.Main_Win64_Retail.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\Spider-Man.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\RiftApart.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\ffxvi.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\ffxvi_demo.exe\DllOverrides,"atiadlxx",,"builtin"
-HKCU,Software\Wine\AppDefaults\rayne1.exe\DllOverrides,"d3d8",,"native"
-HKCU,Software\Wine\AppDefaults\rayne2.exe\DllOverrides,"d3d8",,"native"
-HKLM,Software\Wow6432Node\lucasarts entertainment company llc\Star Wars: Episode I Racer\v1.0,"Display Height",0x10001,480
-HKLM,Software\Wow6432Node\lucasarts entertainment company llc\Star Wars: Episode I Racer\v1.0,"Display Width",0x10001,640
-HKCU,Software\Wine\AppDefaults\RDR2.exe\DllOverrides,"vulkan-1",,"native"
-HKCU,Software\Wine\AppDefaults\ActOfWar.exe,"Version",,"winxp"
-HKLM,Software\Khronos\OpenXR\1,"ActiveRuntime",,"C:\openxr\wineopenxr64.json"
-;;Other app-specific overrides
-HKCU,Software\Wine\AppDefaults\Pentiment.exe\DllOverrides,"SpeechSynthesisWrapper",4,
-HKCU,Software\Wine\AppDefaults\Maine-Win64-Shipping.exe\DllOverrides,"SpeechSynthWrapper",4,

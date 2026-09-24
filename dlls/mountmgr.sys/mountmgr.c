@@ -564,26 +564,11 @@ static DWORD WINAPI run_loop_thread( void *arg )
     return MOUNTMGR_CALL( run_loop, &params );
 }
 
-static DWORD WINAPI registry_flush_thread( void *arg )
+static NTSTATUS WINAPI mountmgr_create( DEVICE_OBJECT *device, IRP *irp )
 {
-    UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\Registry" );
-    OBJECT_ATTRIBUTES attr;
-    HANDLE root;
-
-    InitializeObjectAttributes( &attr, &name, 0, 0, NULL );
-    if (NtOpenKeyEx( &root, MAXIMUM_ALLOWED, &attr, 0 ))
-    {
-        ERR( "Failed opening root registry key.\n" );
-        return 0;
-    }
-
-    for (;;)
-    {
-        Sleep( 30000 );
-        if (NtFlushKey( root )) ERR( "Failed flushing registry.\n" );
-    }
-
-    return 0;
+    irp->IoStatus.Status = STATUS_SUCCESS;
+    IoCompleteRequest( irp, IO_NO_INCREMENT );
+    return STATUS_SUCCESS;
 }
 
 /* main entry point for the mount point manager driver */
@@ -607,6 +592,7 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
     status = __wine_init_unix_call();
     if (status) return status;
 
+    driver->MajorFunction[IRP_MJ_CREATE] = mountmgr_create;
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = mountmgr_ioctl;
 
     if (!(status = IoCreateDevice( driver, 0, &device_mount_point_manager, 0, 0, FALSE, &device )))
@@ -624,11 +610,10 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
                           KEY_ALL_ACCESS, NULL, &devicemap_key, NULL ))
         RegCloseKey( devicemap_key );
 
-    status = IoCreateDriver( &driver_harddisk, harddisk_driver_entry );
+    status = IoCreateDriver( &driver_harddisk, disk_driver_entry );
 
     thread = CreateThread( NULL, 0, device_op_thread, NULL, 0, NULL );
     CloseHandle( CreateThread( NULL, 0, run_loop_thread, thread, 0, NULL ));
-    CloseHandle( CreateThread( NULL, 0, registry_flush_thread, thread, 0, NULL ));
 
 #ifdef _WIN64
     /* create a symlink so that the Wine port overrides key can be edited with 32-bit reg or regedit */

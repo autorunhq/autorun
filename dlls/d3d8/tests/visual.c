@@ -4148,12 +4148,12 @@ static void shadow_test(void)
     IDirect3D8 *d3d;
     ULONG refcount;
     D3DCAPS8 caps;
+    DWORD ps[3];
     HWND window;
     HRESULT hr;
-    DWORD ps;
     UINT i;
 
-    static const DWORD ps_code[] =
+    static const DWORD ps1_code[] =
     {
         0xffff0101,                                                             /* ps_1_1                       */
         0x00000051, 0xa00f0000, 0x3f800000, 0x00000000, 0x3f800000, 0x3f800000, /* def c0, 1.0, 0.0, 1.0, 1.0   */
@@ -4164,6 +4164,14 @@ static void shadow_test(void)
         0x00000004, 0x800f0000, 0xa0e40001, 0xb0e40001, 0xb0e40000,             /* mad r0, c1, t1, t0           */
         0x0000ffff,                                                             /* end                          */
     };
+
+    static const DWORD ps14_code[] =
+    {
+        0xffff0104,                                                             /* ps_1_4                       */
+        0x00000042, 0x800f0000, 0xb0e40000,                                     /* texld r0, t0                 */
+        0x0000ffff,                                                             /* end                          */
+    };
+
     static const struct
     {
         D3DFORMAT format;
@@ -4194,18 +4202,18 @@ static void shadow_test(void)
     };
     static const struct
     {
-        unsigned int x, y, color;
+        unsigned int x, y, color, ps1_color;
     }
     expected_colors[] =
     {
-        {400,  60, 0x00000000},
-        {560, 180, 0xffff00ff},
-        {560, 300, 0xffff00ff},
-        {400, 420, 0xffffffff},
-        {240, 420, 0xffffffff},
-        { 80, 300, 0x00000000},
-        { 80, 180, 0x00000000},
-        {240,  60, 0x00000000},
+        {400,  60, 0x00000000, 0x00000000},
+        {560, 180, 0xffffffff, 0xffff00ff},
+        {560, 300, 0xffffffff, 0xffff00ff},
+        {400, 420, 0xffffffff, 0xffffffff},
+        {240, 420, 0xffffffff, 0xffffffff},
+        { 80, 300, 0x00000000, 0x00000000},
+        { 80, 180, 0x00000000, 0x00000000},
+        {240,  60, 0x00000000, 0x00000000},
     };
 
     window = create_window();
@@ -4232,8 +4240,11 @@ static void shadow_test(void)
     hr = IDirect3DDevice8_CreateRenderTarget(device, 1024, 1024, D3DFMT_A8R8G8B8,
             D3DMULTISAMPLE_NONE, FALSE, &rt);
     ok(SUCCEEDED(hr), "CreateRenderTarget failed, hr %#lx.\n", hr);
-    hr = IDirect3DDevice8_CreatePixelShader(device, ps_code, &ps);
+    hr = IDirect3DDevice8_CreatePixelShader(device, ps1_code, &ps[0]);
     ok(SUCCEEDED(hr), "CreatePixelShader failed, hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_CreatePixelShader(device, ps14_code, &ps[1]);
+    ok(SUCCEEDED(hr), "CreatePixelShader failed, hr %#lx.\n", hr);
+    ps[2] = 0;
 
     hr = IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_TEX2
             | D3DFVF_TEXCOORDSIZE3(0) | D3DFVF_TEXCOORDSIZE4(1));
@@ -4314,44 +4325,48 @@ static void shadow_test(void)
         hr = IDirect3DDevice8_SetTexture(device, 1, (IDirect3DBaseTexture8 *)texture);
         ok(SUCCEEDED(hr), "SetTexture failed, hr %#lx.\n", hr);
 
-        hr = IDirect3DDevice8_SetPixelShader(device, ps);
-        ok(SUCCEEDED(hr), "SetPixelShader failed, hr %#lx.\n", hr);
+        for (unsigned int p = 0; p < 3; ++p)
+        {
+            winetest_push_context("ps %u", p);
 
-        /* Do the actual shadow mapping. */
-        hr = IDirect3DDevice8_BeginScene(device);
-        ok(SUCCEEDED(hr), "BeginScene failed, hr %#lx.\n", hr);
-        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, quad, sizeof(*quad));
-        ok(SUCCEEDED(hr), "DrawPrimitiveUP failed, hr %#lx.\n", hr);
-        hr = IDirect3DDevice8_EndScene(device);
-        ok(SUCCEEDED(hr), "EndScene failed, hr %#lx.\n", hr);
+            hr = IDirect3DDevice8_SetPixelShader(device, ps[p]);
+            ok(SUCCEEDED(hr), "SetPixelShader failed, hr %#lx.\n", hr);
+
+            /* Do the actual shadow mapping. */
+            hr = IDirect3DDevice8_BeginScene(device);
+            ok(SUCCEEDED(hr), "BeginScene failed, hr %#lx.\n", hr);
+            hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, quad, sizeof(*quad));
+            ok(SUCCEEDED(hr), "DrawPrimitiveUP failed, hr %#lx.\n", hr);
+            hr = IDirect3DDevice8_EndScene(device);
+            ok(SUCCEEDED(hr), "EndScene failed, hr %#lx.\n", hr);
+
+            get_surface_readback(original_rt, &rb);
+            for (j = 0; j < ARRAY_SIZE(expected_colors); ++j)
+            {
+                unsigned int color = get_readback_color(&rb, expected_colors[j].x, expected_colors[j].y);
+                unsigned int expect = (p == 0 ? expected_colors[j].ps1_color : expected_colors[j].color);
+
+                /* Geforce 7 on Windows returns 1.0 in alpha when the depth format is D24S8 or D24X8,
+                 * whereas other GPUs (all AMD, newer Nvidia) return the same value they return in .rgb.
+                 * Accept alpha mismatches as broken but make sure to check the color channels. */
+                todo_wine_if (p == 2) ok(color_match(color, expect, 0)
+                        || broken(color_match(color & 0x00ffffff, expect & 0x00ffffff, 0)),
+                        "Expected color 0x%08x at (%u, %u), got 0x%08x.\n",
+                        expect, expected_colors[j].x, expected_colors[j].y, color);
+            }
+            release_surface_readback(&rb);
+
+            winetest_pop_context();
+        }
 
         hr = IDirect3DDevice8_SetTexture(device, 0, NULL);
         ok(SUCCEEDED(hr), "SetTexture failed, hr %#lx.\n", hr);
         hr = IDirect3DDevice8_SetTexture(device, 1, NULL);
         ok(SUCCEEDED(hr), "SetTexture failed, hr %#lx.\n", hr);
         IDirect3DTexture8_Release(texture);
-
-        get_surface_readback(original_rt, &rb);
-        for (j = 0; j < ARRAY_SIZE(expected_colors); ++j)
-        {
-            unsigned int color = get_readback_color(&rb, expected_colors[j].x, expected_colors[j].y);
-            /* Geforce 7 on Windows returns 1.0 in alpha when the depth format is D24S8 or D24X8,
-             * whereas other GPUs (all AMD, newer Nvidia) return the same value they return in .rgb.
-             * Accept alpha mismatches as broken but make sure to check the color channels. */
-            ok(color_match(color, expected_colors[j].color, 0)
-                    || broken(color_match(color & 0x00ffffff, expected_colors[j].color & 0x00ffffff, 0)),
-                    "Expected color 0x%08x at (%u, %u) for format %s, got 0x%08x.\n",
-                    expected_colors[j].color, expected_colors[j].x, expected_colors[j].y,
-                    formats[i].name, color);
-        }
-        release_surface_readback(&rb);
-
-        hr = IDirect3DDevice8_Present(device, NULL, NULL, NULL, NULL);
-        ok(SUCCEEDED(hr), "Present failed, hr %#lx.\n", hr);
+        winetest_pop_context();
     }
 
-    hr = IDirect3DDevice8_DeletePixelShader(device, ps);
-    ok(SUCCEEDED(hr), "DeletePixelShader failed, hr %#lx.\n", hr);
     IDirect3DSurface8_Release(original_rt);
     IDirect3DSurface8_Release(rt);
     refcount = IDirect3DDevice8_Release(device);
@@ -12552,6 +12567,99 @@ static void test_lighting_matrices(void)
     release_test_context(&context);
 }
 
+static void test_generated_texcoords(void)
+{
+    struct d3d8_test_context context;
+    IDirect3DDevice8 *device;
+    unsigned int color;
+    HRESULT hr;
+    DWORD ps;
+
+    static const DWORD ps_code[] =
+    {
+        0xffff0101,                         /* ps_1_1      */
+        0x00000040, 0xb00f0000,             /* texcoord t0 */
+        0x00000001, 0x800f0000, 0xb0e40000, /* mov r0, t0  */
+        0x0000ffff
+    };
+
+    /* Shift a little to show that we're using camera space coordinates. */
+    static const D3DMATRIX transform =
+    {{{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.2f, 0.2f, 0.0f, 1.0f,
+    }}};
+
+    static const struct
+    {
+        struct vec3 position;
+        struct vec3 normal;
+    }
+    tri[] =
+    {
+        {{ 2.0f, -2.0f, 0.1f}, {0.8f, 0.0f, 0.7f}},
+        {{-2.0f, -2.0f, 0.1f}, {0.8f, 0.0f, 0.7f}},
+        {{ 0.0f,  2.0f, 0.1f}, {0.8f, 0.0f, 0.7f}},
+    };
+
+    static const struct
+    {
+        unsigned int tci;
+        unsigned int color;
+    }
+    tests[] =
+    {
+        {D3DTSS_TCI_CAMERASPACEPOSITION,            0x0000001a},
+        {D3DTSS_TCI_CAMERASPACENORMAL,              0x00cc00b2},
+        {D3DTSS_TCI_CAMERASPACEREFLECTIONVECTOR,    0x0000000f},
+    };
+
+    if (!init_test_context(&context))
+        return;
+    device = context.device;
+
+    hr = IDirect3DDevice8_CreatePixelShader(device, ps_code, &ps);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_SetPixelShader(device, ps);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, FALSE);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &transform);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &transform);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("TCI %#x", tests[i].tci);
+
+        hr = IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, tests[i].tci);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xffffffff, 0.0f, 0);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = IDirect3DDevice8_BeginScene(device);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 1, tri, sizeof(*tri));
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = IDirect3DDevice8_EndScene(device);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+        color = getPixelColor(device, 320, 240);
+        ok(color_match(color, tests[i].color, 1), "Got color %08x.\n", color);
+
+        winetest_pop_context();
+    }
+
+    release_test_context(&context);
+}
+
 START_TEST(visual)
 {
     D3DADAPTER_IDENTIFIER8 identifier;
@@ -12648,4 +12756,5 @@ START_TEST(visual)
     test_mipmap_upload();
     test_specular_shaders();
     test_lighting_matrices();
+    test_generated_texcoords();
 }

@@ -21,7 +21,6 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winsock2.h"
@@ -155,7 +154,9 @@ static const struct column col_diskdrive[] =
     { L"Model",         CIM_STRING },
     { L"PNPDeviceID",   CIM_STRING },
     { L"SerialNumber",  CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Signature",     CIM_UINT32 },
     { L"Size",          CIM_UINT64 },
+    { L"TotalHeads",    CIM_UINT32 },
 };
 static const struct column col_diskdrivetodiskpartition[] =
 {
@@ -735,7 +736,9 @@ struct record_diskdrive
     const WCHAR *model;
     const WCHAR *pnpdevice_id;
     const WCHAR *serialnumber;
+    UINT32       signature;
     UINT64       size;
+    UINT32       total_heads;
 };
 struct record_diskdrivetodiskpartition
 {
@@ -1926,7 +1929,7 @@ static UINT64 get_total_virtual_memory(void)
 
     status.dwLength = sizeof(status);
     if (!GlobalMemoryStatusEx( &status )) return 1024 * 1024 * 1024;
-    return status.ullTotalVirtual;
+    return status.ullTotalPageFile;
 }
 
 static UINT64 get_available_virtual_memory(void)
@@ -1935,7 +1938,7 @@ static UINT64 get_available_virtual_memory(void)
 
     status.dwLength = sizeof(status);
     if (!GlobalMemoryStatusEx( &status )) return 1024 * 1024 * 1024;
-    return status.ullAvailVirtual;
+    return status.ullAvailPageFile;
 }
 
 static WCHAR *get_computername(void)
@@ -2686,8 +2689,10 @@ static enum fill_status fill_diskdrive( struct table *table, const struct expr *
             rec->model         = L"Wine Disk Drive";
             rec->pnpdevice_id  = L"IDE\\Disk\\VEN_WINE";
             rec->serialnumber  = get_diskdrive_serialnumber( root[0] );
+            rec->signature     = 0;
             get_freespace( root, &size );
             rec->size          = size;
+            rec->total_heads   = 255;
             if (!match_row( table, row, cond, &status ))
             {
                 free_row_values( table, row );
@@ -2720,41 +2725,48 @@ static void free_associations( struct association *assoc, UINT count )
     free( assoc );
 }
 
+static WCHAR *get_ref( const struct view *view, UINT idx )
+{
+    WCHAR *ret;
+    VARIANT val;
+
+    if (get_propval( view, idx, L"__PATH", &val, NULL, NULL ) != S_OK) return NULL;
+    ret = wcsdup( V_BSTR(&val) );
+    VariantClear( &val );
+    return ret;
+}
+
 static struct association *get_diskdrivetodiskpartition_pairs( UINT *count )
 {
     struct association *ret = NULL;
     struct query *query, *query2 = NULL;
-    VARIANT val;
-    HRESULT hr;
     UINT i;
 
     if (!(query = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return NULL;
-    if ((hr = parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskDrive",
-                           &query->view, &query->mem )) != S_OK) goto done;
-    if ((hr = execute_view( query->view )) != S_OK) goto done;
+    if (parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskDrive",
+                     &query->view, &query->mem ) != S_OK) goto done;
+    if (execute_view( query->view ) != S_OK) goto done;
 
-    if (!(query2 = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return FALSE;
-    if ((hr = parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskPartition",
-                           &query2->view, &query2->mem )) != S_OK) goto done;
-    if ((hr = execute_view( query2->view )) != S_OK) goto done;
+    if (!(query2 = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return NULL;
+    if (parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskPartition",
+                     &query2->view, &query2->mem ) != S_OK) goto done;
+    if (execute_view( query2->view ) != S_OK) goto done;
 
     if (!(ret = calloc( query->view->result_count, sizeof(*ret) ))) goto done;
 
     for (i = 0; i < query->view->result_count; i++)
     {
-        if ((hr = get_propval( query->view, i, L"__PATH", &val, NULL, NULL )) != S_OK) goto done;
-        if (!(ret[i].ref = wcsdup( V_BSTR(&val) ))) goto done;
-        VariantClear( &val );
-
-        if ((hr = get_propval( query2->view, i, L"__PATH", &val, NULL, NULL )) != S_OK) goto done;
-        if (!(ret[i].ref2 = wcsdup( V_BSTR(&val) ))) goto done;
-        VariantClear( &val );
+        if (!(ret[i].ref = get_ref( query->view, i )) || !(ret[i].ref2 = get_ref( query2->view, i )))
+        {
+            free_associations( ret, i );
+            ret = NULL;
+            goto done;
+        }
     }
 
     *count = query->view->result_count;
 
 done:
-    if (!ret) free_associations( ret, query->view->result_count );
     free_query( query );
     free_query( query2 );
     return ret;
@@ -3039,39 +3051,35 @@ static struct association *get_logicaldisktopartition_pairs( UINT *count )
 {
     struct association *ret = NULL;
     struct query *query, *query2 = NULL;
-    VARIANT val;
-    HRESULT hr;
     UINT i;
 
     if (!(query = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return NULL;
-    if ((hr = parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskPartition",
-                           &query->view, &query->mem )) != S_OK) goto done;
-    if ((hr = execute_view( query->view )) != S_OK) goto done;
+    if (parse_query( WBEMPROX_NAMESPACE_CIMV2, L"SELECT * FROM Win32_DiskPartition",
+                     &query->view, &query->mem ) != S_OK) goto done;
+    if (execute_view( query->view ) != S_OK) goto done;
 
-    if (!(query2 = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return FALSE;
-    if ((hr = parse_query( WBEMPROX_NAMESPACE_CIMV2,
-                           L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=2 OR DriveType=3", &query2->view,
-                           &query2->mem )) != S_OK) goto done;
-    if ((hr = execute_view( query2->view )) != S_OK) goto done;
+    if (!(query2 = create_query( WBEMPROX_NAMESPACE_CIMV2 ))) return NULL;
+    if (parse_query( WBEMPROX_NAMESPACE_CIMV2,
+                     L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=2 OR DriveType=3", &query2->view,
+                     &query2->mem ) != S_OK) goto done;
+    if (execute_view( query2->view ) != S_OK) goto done;
 
     if (!(ret = calloc( query->view->result_count, sizeof(*ret) ))) goto done;
 
     /* assume fixed and removable disks are enumerated in the same order as partitions */
     for (i = 0; i < query->view->result_count; i++)
     {
-        if ((hr = get_propval( query->view, i, L"__PATH", &val, NULL, NULL )) != S_OK) goto done;
-        if (!(ret[i].ref = wcsdup( V_BSTR(&val) ))) goto done;
-        VariantClear( &val );
-
-        if ((hr = get_propval( query2->view, i, L"__PATH", &val, NULL, NULL )) != S_OK) goto done;
-        if (!(ret[i].ref2 = wcsdup( V_BSTR(&val) ))) goto done;
-        VariantClear( &val );
+        if (!(ret[i].ref = get_ref( query->view, i )) || !(ret[i].ref2 = get_ref( query2->view, i )))
+        {
+            free_associations( ret, i );
+            ret = NULL;
+            goto done;
+        }
     }
 
     *count = query->view->result_count;
 
 done:
-    if (!ret) free_associations( ret, query->view->result_count );
     free_query( query );
     free_query( query2 );
     return ret;
@@ -3360,20 +3368,34 @@ static struct array *get_ipaddress( IP_ADAPTER_UNICAST_ADDRESS_LH *list )
     }
     for (address = list; address; address = address->Next)
     {
+        if (address->Address.lpSockaddr->sa_family != AF_INET)
+            continue;
         buflen = ARRAY_SIZE( buf );
         if (WSAAddressToStringW( address->Address.lpSockaddr, address->Address.iSockaddrLength,
-                                 NULL, buf, &buflen) || !(ptr[i++] = wcsdup( buf )))
-        {
-            for (; i > 0; i--) free( ptr[i - 1] );
-            free( ptr );
-            free( ret );
-            return NULL;
-        }
+                                 NULL, buf, &buflen ) || !(ptr[i++] = wcsdup( buf )))
+            goto error;
     }
+
+    for (address = list; address; address = address->Next)
+    {
+        if (address->Address.lpSockaddr->sa_family != AF_INET6)
+            continue;
+        buflen = ARRAY_SIZE( buf );
+        if (WSAAddressToStringW( address->Address.lpSockaddr, address->Address.iSockaddrLength,
+                                 NULL, buf, &buflen ) || !(ptr[i++] = wcsdup( buf )))
+            goto error;
+    }
+
     ret->elem_size = sizeof(*ptr);
     ret->count     = count;
     ret->ptr       = ptr;
     return ret;
+
+error:
+    for (; i > 0; i--) free( ptr[i - 1] );
+    free( ptr );
+    free( ret );
+    return NULL;
 }
 static struct array *get_ipsubnet( IP_ADAPTER_UNICAST_ADDRESS_LH *list )
 {
@@ -3605,7 +3627,7 @@ static struct record_pnpentity *get_pnp_entities( UINT *count )
                                 if ((tmp = realloc( ret, nb_allocated * sizeof(*ret) ))) ret = tmp;
                                 else
                                 {
-                                    while (--i)
+                                    while (i--)
                                     {
                                         free( (void *)ret[i].caption );
                                         free( (void *)ret[i].class_guid );
@@ -3923,7 +3945,7 @@ static enum fill_status fill_cache_memory( struct table *table, const struct exp
         rec->level = i + 2;
         rec->max_cache_size = rec->installed_size;
         rec->number_of_blocks = rec->installed_size;
-        swprintf( str, sizeof(str), L"Cache Memory %u", idx );
+        swprintf( str, ARRAY_SIZE(str), L"Cache Memory %u", idx );
         rec->device_id = wcsdup( str );
         rec->status = L"OK";
         if (!match_row( table, idx, cond, &status ))
@@ -3966,7 +3988,7 @@ static enum fill_status fill_processor( struct table *table, const struct expr *
     }
 
     RtlGetNativeSystemInformation( SystemCpuInformation, &info, sizeof(info), NULL );
-    swprintf( version, sizeof(version), L"Model %u, Stepping %u",
+    swprintf( version, ARRAY_SIZE(version), L"Model %u, Stepping %u",
               HIBYTE(info.ProcessorRevision), LOBYTE(info.ProcessorRevision) );
 
     for (i = 0; i < num_packages; i++)
@@ -4662,15 +4684,23 @@ static struct display_adapter *get_display_adapters( UINT *count )
 
     while(SetupDiEnumDeviceInfo( devs, idx_devinfo++, &dev_info ))
     {
-        WCHAR *driver, *hw_ids;
+        WCHAR *driver, *instance_id;
         UINT key_len;
         WCHAR *key_path;
         HKEY key_instance;
+        DWORD size;
 
-        if (!(driver = get_string_devprop( devs, &dev_info, &DEVPKEY_Device_Driver ))) continue;
-        if (!(hw_ids = get_string_devprop( devs, &dev_info, &DEVPKEY_Device_HardwareIds )))
+        SetupDiGetDeviceInstanceIdW( devs, &dev_info, NULL, 0, &size );
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) continue;
+        if (!(instance_id = malloc( size * sizeof(*instance_id) ))) continue;
+        if (!SetupDiGetDeviceInstanceIdW( devs, &dev_info, instance_id, size, NULL ))
         {
-            free( driver );
+            free( instance_id );
+            continue;
+        }
+        if (!(driver = get_string_devprop( devs, &dev_info, &DEVPKEY_Device_Driver )))
+        {
+            free( instance_id );
             continue;
         }
 
@@ -4678,7 +4708,7 @@ static struct display_adapter *get_display_adapters( UINT *count )
         if (!(key_path = calloc( sizeof(WCHAR), key_len )))
         {
             free( driver );
-            free( hw_ids );
+            free( instance_id );
             continue;
         }
 
@@ -4687,7 +4717,7 @@ static struct display_adapter *get_display_adapters( UINT *count )
 
         if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, key_path, 0, KEY_QUERY_VALUE, &key_instance ))
         {
-            free( hw_ids );
+            free( instance_id );
             free( key_path );
             continue;
         }
@@ -4697,9 +4727,7 @@ static struct display_adapter *get_display_adapters( UINT *count )
         ret[i].driver_date = get_reg_value( key_instance, L"DriverDate" );
         ret[i].driver_desc = get_reg_value( key_instance, L"DriverDesc" );
         ret[i].driver_version = get_reg_value( key_instance, L"DriverVersion" );
-        /* DEVPKEY_Device_HardwareIds is actually an array of null-terminated
-           strings, so consumers will only see the first one. */
-        ret[i].pnpdevice_id = hw_ids;
+        ret[i].pnpdevice_id = instance_id;
         ret[i].dac_type = get_reg_value( key_instance, L"HardwareInformation.DacType" );
         ret[i].memory_size = get_reg_value_dword( key_instance, L"HardwareInformation.MemorySize" );
         if (++i >= nb_allocated)
@@ -4708,7 +4736,7 @@ static struct display_adapter *get_display_adapters( UINT *count )
             if ((tmp = realloc( ret, nb_allocated * sizeof(*ret) ))) ret = tmp;
             else
             {
-                while (--i)
+                while (i--)
                 {
                     free( ret[i].driver_date );
                     free( ret[i].driver_desc );
@@ -5053,6 +5081,7 @@ builtin_namespaces[WBEMPROX_NAMESPACE_LAST] =
 {
     {L"cimv2", cimv2_builtin_classes, ARRAY_SIZE(cimv2_builtin_classes)},
     {L"Microsoft\\Windows\\Storage", win_storage_builtin_classes, ARRAY_SIZE(win_storage_builtin_classes)},
+    {L"SecurityCenter2", NULL, 0},
     {L"StandardCimv2", NULL, 0},
     {L"wmi", wmi_builtin_classes, ARRAY_SIZE(wmi_builtin_classes)},
 };

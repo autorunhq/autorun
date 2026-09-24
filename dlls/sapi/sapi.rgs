@@ -32,7 +32,10 @@ HKLM
                 {
                     NoRemove Tokens
                     {
-                        Delete 'Wine Default Voice'
+                        NoRemove 'Wine Default Voice'
+                        {
+                            NoRemove Attributes
+                        }
                     }
                 }
             }

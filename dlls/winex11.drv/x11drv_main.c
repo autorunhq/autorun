@@ -42,12 +42,10 @@
 #endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 
 #include "x11drv.h"
 #include "winreg.h"
 #include "xcomposite.h"
-#include "xfixes.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "wine/list.h"
@@ -70,7 +68,6 @@ BOOL usexvidmode = TRUE;
 BOOL usexrandr = TRUE;
 BOOL usexcomposite = TRUE;
 BOOL use_egl = TRUE;
-BOOL use_xfixes = FALSE;
 BOOL use_take_focus = TRUE;
 BOOL use_primary_selection = FALSE;
 BOOL use_system_cursors = TRUE;
@@ -84,9 +81,8 @@ BOOL shape_layered_windows = TRUE;
 int copy_default_colors = 128;
 int alloc_system_colors = 256;
 int xrender_error_base = 0;
-int xfixes_event_base = 0;
 char *process_name = NULL;
-HANDLE steam_overlay_event;
+pthread_key_t x11drv_thread_data_key = 0;
 
 static x11drv_error_callback err_callback;   /* current callback for error */
 static Display *err_callback_display;        /* display callback is set for */
@@ -125,7 +121,6 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "WM_PROTOCOLS",
     "WM_DELETE_WINDOW",
     "WM_HINTS",
-    "WM_NAME",
     "WM_NORMAL_HINTS",
     "WM_STATE",
     "WM_TAKE_FOCUS",
@@ -138,11 +133,9 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "_NET_STARTUP_INFO_BEGIN",
     "_NET_STARTUP_INFO",
     "_NET_SUPPORTED",
-    "_NET_SUPPORTING_WM_CHECK",
     "_NET_SYSTEM_TRAY_OPCODE",
     "_NET_SYSTEM_TRAY_S0",
     "_NET_SYSTEM_TRAY_VISUAL",
-    "_NET_WM_BYPASS_COMPOSITOR",
     "_NET_WM_FULLSCREEN_MONITORS",
     "_NET_WM_ICON",
     "_NET_WM_MOVERESIZE",
@@ -151,7 +144,6 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "_NET_WM_PING",
     "_NET_WM_STATE",
     "_NET_WM_STATE_ABOVE",
-    "_NET_WM_STATE_BELOW",
     "_NET_WM_STATE_DEMANDS_ATTENTION",
     "_NET_WM_STATE_FULLSCREEN",
     "_NET_WM_STATE_MAXIMIZED_HORZ",
@@ -169,9 +161,6 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "_GTK_WORKAREAS_D0",
     "_XEMBED",
     "_XEMBED_INFO",
-    "_WINE_ALLOW_FLIP",
-    "_WINE_HWND_STYLE",
-    "_WINE_HWND_EXSTYLE",
     "XdndAware",
     "XdndEnter",
     "XdndPosition",
@@ -203,9 +192,7 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "text/plain",
     "text/rtf",
     "text/richtext",
-    "text/uri-list",
-    "GAMESCOPE_XALIA_OVERLAY",
-    "GAMESCOPE_DISPLAY_EDID_PATH",
+    "text/uri-list"
 };
 
 /***********************************************************************
@@ -440,7 +427,7 @@ static void setup_options(void)
 
     /* open the app-specific key */
 
-    appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    appname = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer;
     if ((p = wcsrchr( appname, '/' ))) appname = p + 1;
     if ((p = wcsrchr( appname, '\\' ))) appname = p + 1;
     len = lstrlenW( appname );
@@ -579,67 +566,6 @@ sym_not_found:
 }
 #endif /* defined(SONAME_LIBXCOMPOSITE) */
 
-#ifdef SONAME_LIBXFIXES
-
-#define MAKE_FUNCPTR(f) typeof(f) * p##f;
-MAKE_FUNCPTR(XFixesHideCursor)
-MAKE_FUNCPTR(XFixesQueryExtension)
-MAKE_FUNCPTR(XFixesQueryVersion)
-MAKE_FUNCPTR(XFixesCreateRegion)
-MAKE_FUNCPTR(XFixesCreateRegionFromGC)
-MAKE_FUNCPTR(XFixesSelectSelectionInput)
-MAKE_FUNCPTR(XFixesShowCursor)
-#undef MAKE_FUNCPTR
-
-static void x11drv_load_xfixes(void)
-{
-    int event, error, major = 3, minor = 0;
-    void *xfixes;
-
-    if (!(xfixes = dlopen(SONAME_LIBXFIXES, RTLD_NOW)))
-    {
-        WARN("Xfixes library %s not found, disabled.\n", SONAME_LIBXFIXES);
-        return;
-    }
-
-#define LOAD_FUNCPTR(f) \
-    if (!(p##f = dlsym(xfixes, #f)))                          \
-    {                                                         \
-        WARN("Xfixes function %s not found, disabled\n", #f); \
-        dlclose(xfixes);                                      \
-        return;                                               \
-    }
-    LOAD_FUNCPTR(XFixesHideCursor)
-    LOAD_FUNCPTR(XFixesQueryExtension)
-    LOAD_FUNCPTR(XFixesQueryVersion)
-    LOAD_FUNCPTR(XFixesCreateRegion)
-    LOAD_FUNCPTR(XFixesCreateRegionFromGC)
-    LOAD_FUNCPTR(XFixesSelectSelectionInput)
-    LOAD_FUNCPTR(XFixesShowCursor)
-#undef LOAD_FUNCPTR
-
-    if (!pXFixesQueryExtension(gdi_display, &event, &error))
-    {
-        WARN("Xfixes extension not found, disabled.\n");
-        dlclose(xfixes);
-        return;
-    }
-
-    if (!pXFixesQueryVersion(gdi_display, &major, &minor) ||
-        major < 2)
-    {
-        WARN("Xfixes version 2.0 not found, disabled.\n");
-        dlclose(xfixes);
-        return;
-    }
-
-    TRACE("Xfixes, error %d, event %d, version %d.%d found\n",
-          error, event, major, minor);
-    use_xfixes = TRUE;
-    xfixes_event_base = event;
-}
-#endif /* SONAME_LIBXFIXES */
-
 static void init_visuals( Display *display, int screen )
 {
     int count;
@@ -696,23 +622,10 @@ static void init_visuals( Display *display, int screen )
 /***********************************************************************
  *           X11DRV process initialisation routine
  */
-static NTSTATUS x11drv_init( void *arg )
+NTSTATUS __wine_unix_lib_init(void)
 {
     Display *display;
     void *libx11 = dlopen( SONAME_LIBX11, RTLD_NOW|RTLD_GLOBAL );
-    OBJECT_ATTRIBUTES attr;
-    WCHAR buffer[MAX_PATH];
-    char path[MAX_PATH];
-    UNICODE_STRING str;
-
-    RtlInitUnicodeString( &str, buffer );
-    InitializeObjectAttributes( &attr, &str, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, 0, NULL );
-
-    str.Length = sprintf( path, "\\Sessions\\%u\\BaseNamedObjects\\__wine_steamclient_GameOverlayActivated",
-                          (int)NtCurrentTeb()->Peb->SessionId );
-    ascii_to_unicode( buffer, path, str.Length + 1 );
-    str.Length *= sizeof(WCHAR);
-    NtCreateEvent( &steam_overlay_event, EVENT_ALL_ACCESS, &attr, NotificationEvent, FALSE );
 
     if (!libx11)
     {
@@ -737,6 +650,7 @@ static NTSTATUS x11drv_init( void *arg )
     gdi_display = display;
     old_error_handler = XSetErrorHandler( error_handler );
 
+    pthread_key_create( &x11drv_thread_data_key, NULL );
     init_pixmap_formats( display );
     init_visuals( display, DefaultScreen( display ));
     screen_bpp = pixmap_formats[default_visual.depth]->bits_per_pixel;
@@ -755,38 +669,17 @@ static NTSTATUS x11drv_init( void *arg )
     X11DRV_XF86VM_Init();
     /* initialize XRandR */
     X11DRV_XRandR_Init();
-#ifdef SONAME_LIBXFIXES
-    x11drv_load_xfixes();
-#endif
 #ifdef SONAME_LIBXCOMPOSITE
     X11DRV_XComposite_Init();
 #endif
     x11drv_xinput2_load();
 
-    XkbUseExtension( gdi_display, NULL, NULL );
-    X11DRV_InitKeyboard( gdi_display );
-    X11DRV_InitMouse( gdi_display );
+    x11drv_init_keyboard( gdi_display );
+    x11drv_init_mouse( gdi_display );
     if (use_xim) use_xim = xim_init( input_style );
 
     init_icm_profile();
     init_user_driver();
-
-    {
-        RECT rect = NtUserGetVirtualScreenRect( MDT_DEFAULT );
-
-        if (rect.bottom <= 800)
-        {
-            NONCLIENTMETRICSW ncm;
-
-            ncm.cbSize = sizeof(ncm);
-            if (NtUserSystemParametersInfo( SPI_GETNONCLIENTMETRICS, 0, &ncm, 0 ) && ncm.iCaptionHeight > 18)
-            {
-                TRACE( "Reducing iCaptionHeight from %d to 17.\n", ncm.iCaptionHeight );
-                ncm.iCaptionHeight = 17;
-                NtUserSystemParametersInfo( SPI_SETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-            }
-        }
-    }
     return STATUS_SUCCESS;
 }
 
@@ -803,12 +696,11 @@ void X11DRV_ThreadDetach(void)
         if (data->xim) XCloseIM( data->xim );
         if (data->font_set) XFreeFontSet( data->display, data->font_set );
         if (data->net_supported) XFree( data->net_supported );
-        if (data->window_manager) XFree( data->window_manager );
         XSync( gdi_display, False ); /* make sure XReparentWindow requests have completed before closing the thread display */
         XCloseDisplay( data->display );
         free( data );
         /* clear data in case we get re-entered from user32 before the thread is truly dead */
-        NtUserGetThreadInfo()->driver_data = 0;
+        pthread_setspecific( x11drv_thread_data_key, NULL );
     }
 }
 
@@ -866,14 +758,13 @@ struct x11drv_thread_data *x11drv_init_thread_data(void)
     if (TRACE_ON(synchronous)) XSynchronize( data->display, True );
 
     set_queue_display_fd( data->display );
-    NtUserGetThreadInfo()->driver_data = (UINT_PTR)data;
+    pthread_setspecific( x11drv_thread_data_key, data );
 
     XSelectInput( data->display, DefaultRootWindow( data->display ), PropertyChangeMask );
     if (use_xim) xim_thread_attach( data );
     x11drv_xinput2_init( data );
     net_supported_init( data );
     net_active_window_init( data );
-    net_supporting_wm_check_init( data );
 
     return data;
 }
@@ -914,17 +805,3 @@ BOOL X11DRV_SystemParametersInfo( UINT action, UINT int_param, void *ptr_param, 
     }
     return FALSE;  /* let user32 handle it */
 }
-
-const unixlib_entry_t __wine_unix_call_funcs[] =
-{
-    x11drv_init,
-};
-
-#ifdef _WIN64
-
-const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
-{
-    x11drv_init,
-};
-
-#endif /* _WIN64 */

@@ -18,6 +18,7 @@ SOURCES = \
 	amstream.idl \
 	amva.h \
 	amvideo.idl \
+	apisetcconv.h \
 	appcompatapi.h \
 	appmgmt.h \
 	appmodel.h \
@@ -66,6 +67,7 @@ SOURCES = \
 	bthsdpdef.h \
 	cderr.h \
 	cdosys.idl \
+	cfapi.h \
 	cfg.h \
 	cfgmgr32.h \
 	cguid.h \
@@ -88,8 +90,10 @@ SOURCES = \
 	commctrl.h \
 	commctrl.rh \
 	commdlg.h \
+	common.ver \
 	commoncontrols.idl \
 	compobj.h \
+	compressapi.h \
 	comsvcs.idl \
 	concurrencysal.h \
 	config.h.in \
@@ -105,6 +109,7 @@ SOURCES = \
 	cryptdlg.h \
 	cryptuiapi.h \
 	cryptxml.h \
+	ctffunc.idl \
 	ctfutb.idl \
 	ctxtcall.idl \
 	custcntl.h \
@@ -123,7 +128,7 @@ SOURCES = \
 	d3d.h \
 	d3d10.idl \
 	d3d10_1.idl \
-	d3d10_1shader.h \
+	d3d10_1shader.idl \
 	d3d10effect.idl \
 	d3d10misc.h \
 	d3d10sdklayers.idl \
@@ -341,6 +346,8 @@ SOURCES = \
 	fileapi.h \
 	filter.idl \
 	fltdefs.h \
+	fltuser.h \
+	fltuserstructures.h \
 	fontsub.h \
 	fusion.idl \
 	gameinput.idl \
@@ -403,6 +410,7 @@ SOURCES = \
 	inseng.idl \
 	inspectable.idl \
 	interactioncontext.h \
+	intsafe.h \
 	intshcut.h \
 	ioringapi.h \
 	ip2string.h \
@@ -500,6 +508,7 @@ SOURCES = \
 	msdasc.idl \
 	msdasql.h \
 	msdelta.h \
+	msdshape.h \
 	mshtmcid.h \
 	mshtmdid.h \
 	mshtmhst.idl \
@@ -514,12 +523,55 @@ SOURCES = \
 	msstkppg.h \
 	mstask.idl \
 	mstcpip.h \
+	msvcrt/__bit_reference \
+	msvcrt/__config \
+	msvcrt/__debug \
+	msvcrt/__errc \
+	msvcrt/__functional_03 \
+	msvcrt/__functional_base \
+	msvcrt/__functional_base_03 \
+	msvcrt/__hash_table \
+	msvcrt/__locale \
+	msvcrt/__mutex_base \
+	msvcrt/__node_handle \
+	msvcrt/__split_buffer \
+	msvcrt/__sso_allocator \
+	msvcrt/__std_stream \
+	msvcrt/__string \
+	msvcrt/__threading_support \
+	msvcrt/__tree \
+	msvcrt/__tuple \
+	msvcrt/__undef_macros \
+	msvcrt/algorithm \
+	msvcrt/any \
+	msvcrt/array \
 	msvcrt/assert.h \
+	msvcrt/atomic \
+	msvcrt/bit \
+	msvcrt/bitset \
+	msvcrt/cassert \
+	msvcrt/ccomplex \
+	msvcrt/cctype \
+	msvcrt/cerrno \
+	msvcrt/cfenv \
+	msvcrt/cfloat \
+	msvcrt/charconv \
+	msvcrt/chrono \
+	msvcrt/cinttypes \
+	msvcrt/ciso646 \
+	msvcrt/climits \
+	msvcrt/clocale \
+	msvcrt/cmath \
+	msvcrt/codecvt \
+	msvcrt/compare \
+	msvcrt/complex \
 	msvcrt/complex.h \
+	msvcrt/condition_variable \
 	msvcrt/conio.h \
 	msvcrt/corecrt.h \
 	msvcrt/corecrt_io.h \
 	msvcrt/corecrt_malloc.h \
+	msvcrt/corecrt_math_defines.h \
 	msvcrt/corecrt_startup.h \
 	msvcrt/corecrt_stdio_config.h \
 	msvcrt/corecrt_wctype.h \
@@ -532,50 +584,142 @@ SOURCES = \
 	msvcrt/corecrt_wtime.h \
 	msvcrt/crtdbg.h \
 	msvcrt/crtdefs.h \
+	msvcrt/csetjmp \
+	msvcrt/csignal \
+	msvcrt/cstdarg \
+	msvcrt/cstdbool \
+	msvcrt/cstddef \
+	msvcrt/cstdint \
+	msvcrt/cstdio \
+	msvcrt/cstdlib \
+	msvcrt/cstring \
+	msvcrt/ctgmath \
+	msvcrt/ctime \
 	msvcrt/ctype.h \
+	msvcrt/cwchar \
+	msvcrt/cwctype \
+	msvcrt/deque \
 	msvcrt/direct.h \
 	msvcrt/dirent.h \
 	msvcrt/dos.h \
 	msvcrt/eh.h \
 	msvcrt/errno.h \
+	msvcrt/exception \
+	msvcrt/experimental/__config \
+	msvcrt/experimental/__memory \
+	msvcrt/experimental/algorithm \
+	msvcrt/experimental/coroutine \
+	msvcrt/experimental/deque \
+	msvcrt/experimental/filesystem \
+	msvcrt/experimental/forward_list \
+	msvcrt/experimental/functional \
+	msvcrt/experimental/iterator \
+	msvcrt/experimental/list \
+	msvcrt/experimental/map \
+	msvcrt/experimental/memory_resource \
+	msvcrt/experimental/propagate_const \
+	msvcrt/experimental/regex \
+	msvcrt/experimental/set \
+	msvcrt/experimental/simd \
+	msvcrt/experimental/string \
+	msvcrt/experimental/type_traits \
+	msvcrt/experimental/unordered_map \
+	msvcrt/experimental/unordered_set \
+	msvcrt/experimental/utility \
+	msvcrt/experimental/vector \
 	msvcrt/fcntl.h \
 	msvcrt/fenv.h \
+	msvcrt/filesystem \
 	msvcrt/float.h \
+	msvcrt/forward_list \
 	msvcrt/fpieee.h \
+	msvcrt/fstream \
+	msvcrt/functional \
+	msvcrt/future \
+	msvcrt/initializer_list \
 	msvcrt/intrin.h \
 	msvcrt/inttypes.h \
 	msvcrt/io.h \
+	msvcrt/iomanip \
+	msvcrt/ios \
+	msvcrt/iosfwd \
+	msvcrt/iostream \
+	msvcrt/istream \
+	msvcrt/iterator \
+	msvcrt/limits \
 	msvcrt/limits.h \
+	msvcrt/list \
+	msvcrt/locale \
 	msvcrt/locale.h \
 	msvcrt/malloc.h \
+	msvcrt/map \
 	msvcrt/math.h \
 	msvcrt/mbctype.h \
 	msvcrt/mbstring.h \
+	msvcrt/memory \
 	msvcrt/memory.h \
+	msvcrt/mutex \
+	msvcrt/new \
+	msvcrt/new.h \
+	msvcrt/numeric \
+	msvcrt/optional \
+	msvcrt/ostream \
 	msvcrt/process.h \
+	msvcrt/queue \
+	msvcrt/random \
+	msvcrt/ratio \
+	msvcrt/regex \
+	msvcrt/scoped_allocator \
 	msvcrt/search.h \
+	msvcrt/set \
 	msvcrt/setjmp.h \
 	msvcrt/share.h \
+	msvcrt/shared_mutex \
 	msvcrt/signal.h \
+	msvcrt/span \
+	msvcrt/sstream \
+	msvcrt/stack \
 	msvcrt/stdarg.h \
 	msvcrt/stdbool.h \
 	msvcrt/stddef.h \
+	msvcrt/stdexcept \
 	msvcrt/stdint.h \
 	msvcrt/stdio.h \
 	msvcrt/stdlib.h \
+	msvcrt/streambuf \
+	msvcrt/string \
 	msvcrt/string.h \
+	msvcrt/string_view \
+	msvcrt/strstream \
 	msvcrt/sys/locking.h \
 	msvcrt/sys/stat.h \
 	msvcrt/sys/timeb.h \
 	msvcrt/sys/types.h \
 	msvcrt/sys/unistd.h \
 	msvcrt/sys/utime.h \
+	msvcrt/system_error \
+	msvcrt/thread \
 	msvcrt/time.h \
+	msvcrt/tuple \
+	msvcrt/type_traits \
+	msvcrt/typeindex \
+	msvcrt/typeinfo \
 	msvcrt/uchar.h \
 	msvcrt/unistd.h \
+	msvcrt/unordered_map \
+	msvcrt/unordered_set \
+	msvcrt/utility \
 	msvcrt/vadefs.h \
+	msvcrt/valarray \
+	msvcrt/variant \
+	msvcrt/vcruntime_exception.h \
+	msvcrt/vcruntime_new.h \
+	msvcrt/vcruntime_typeinfo.h \
+	msvcrt/vector \
+	msvcrt/version \
 	msvcrt/wchar.h \
 	msvcrt/wctype.h \
+	msvcrt/xlocinfo \
 	mswsock.h \
 	msxml.idl \
 	msxml2.idl \
@@ -590,6 +734,8 @@ SOURCES = \
 	natupnp.idl \
 	nb30.h \
 	ncrypt.h \
+	ndattrib.idl \
+	ndfapi.h \
 	ndrtypes.h \
 	netcfgx.idl \
 	netcon.idl \
@@ -620,6 +766,7 @@ SOURCES = \
 	ntsecpkg.h \
 	ntstatus.h \
 	ntuser.h \
+	ntverp.h.in \
 	oaidl.idl \
 	objbase.h \
 	objectarray.idl \
@@ -648,6 +795,7 @@ SOURCES = \
 	pathcch.h \
 	pdh.h \
 	pdhmsg.h \
+	peninputpanel.idl \
 	perflib.h \
 	perhist.idl \
 	physicalmonitorenumerationapi.h \
@@ -656,6 +804,7 @@ SOURCES = \
 	powersetting.h \
 	powrprof.h \
 	prntvpt.h \
+	processsnapshot.h \
 	processthreadsapi.h \
 	profinfo.h \
 	proofofpossessioncookieinfo.idl \
@@ -719,6 +868,7 @@ SOURCES = \
 	rstvw.idl \
 	rstxsc.idl \
 	rtlsupportapi.h \
+	rtscom.idl \
 	rtutils.h \
 	rtworkq.idl \
 	sal.h \
@@ -799,7 +949,7 @@ SOURCES = \
 	tlogstg.idl \
 	tmschema.h \
 	tom.idl \
-	tpcshrd.h \
+	tpcshrd.idl \
 	traffic.h \
 	transact.idl \
 	trnjoi.idl \
@@ -899,7 +1049,9 @@ SOURCES = \
 	windows.graphics.capture.idl \
 	windows.graphics.capture.interop.idl \
 	windows.graphics.directx.direct3d11.idl \
+	windows.graphics.directx.direct3d11.interop.idl \
 	windows.graphics.directx.idl \
+	windows.graphics.display.idl \
 	windows.graphics.effects.idl \
 	windows.graphics.holographic.idl \
 	windows.graphics.idl \
@@ -950,6 +1102,8 @@ SOURCES = \
 	windows.ui.idl \
 	windows.ui.input.idl \
 	windows.ui.notifications.idl \
+	windows.ui.text.core.idl \
+	windows.ui.text.idl \
 	windows.ui.viewmanagement.core.idl \
 	windows.ui.viewmanagement.idl \
 	windows.ui.windowmanagement.idl \
@@ -977,6 +1131,7 @@ SOURCES = \
 	wine/irpcss.idl \
 	wine/itss.idl \
 	wine/list.h \
+	wine/lsass.idl \
 	wine/mfinternal.idl \
 	wine/mmsystem16.h \
 	wine/mscvpdb.h \
@@ -998,7 +1153,6 @@ SOURCES = \
 	wine/wgl.h \
 	wine/winbase16.h \
 	wine/windef16.h \
-	wine/wine_common_ver.rc \
 	wine/winebth.h \
 	wine/wined3d.h \
 	wine/winedmo.h \
@@ -1030,6 +1184,7 @@ SOURCES = \
 	winsock.h \
 	winsock2.h \
 	winspool.h \
+	winsqlite/winsqlite3.h \
 	winstring.h \
 	winsvc.h \
 	winsxs.idl \
@@ -1079,6 +1234,7 @@ SOURCES = \
 	wspiapi.h \
 	wtsapi32.h \
 	wtypes.idl \
+	wtypesbase.idl \
 	wuapi.idl \
 	x3daudio.h \
 	xact.h \

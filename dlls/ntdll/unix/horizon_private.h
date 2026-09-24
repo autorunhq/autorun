@@ -17,6 +17,7 @@
 
 extern unsigned int horizon_set_process_machine( unsigned short machine );
 extern ULONG_PTR horizon_get_system_affinity_mask(void);
+extern ULONG_PTR horizon_get_current_thread_affinity(void);
 extern unsigned int horizon_get_processor_count(void);
 /* The runtime's thread profiler (wine-nx-probe/source/thread_profile.c); weak,
  * since the ntdll test executables link without the runtime. */

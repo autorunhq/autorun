@@ -24,7 +24,6 @@
 #include <sys/types.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "winternl.h"
 #include "wine/debug.h"
 #include "ntdll_misc.h"
@@ -35,7 +34,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(relay);
 WINE_DECLARE_DEBUG_CHANNEL(pid);
 WINE_DECLARE_DEBUG_CHANNEL(timestamp);
-WINE_DECLARE_DEBUG_CHANNEL(microsecs);
 
 struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
 
@@ -54,11 +52,13 @@ static struct __wine_debug_channel *debug_options;
 
 static inline struct debug_info *get_info(void)
 {
+    unsigned int offset;
 #ifdef _WIN64
-    return (struct debug_info *)((TEB32 *)((char *)NtCurrentTeb() + 0x2000) + 1);
+    offset = NtCurrentTeb()->WowTebOffset ? NtCurrentTeb()->WowTebOffset + page_size : 2 * page_size;
 #else
-    return (struct debug_info *)(NtCurrentTeb() + 1);
+    offset = page_size;
 #endif
+    return (struct debug_info *)((char *)NtCurrentTeb() + offset);
 }
 
 static void init_options(void)
@@ -149,14 +149,7 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
     /* only print header if we are at the beginning of the line */
     if (info->out_pos) return 0;
 
-    if (TRACE_ON(microsecs))
-    {
-        LARGE_INTEGER counter, frequency, microsecs;
-        NtQueryPerformanceCounter(&counter, &frequency);
-        microsecs.QuadPart = counter.QuadPart * 1000000 / frequency.QuadPart;
-        pos += sprintf( pos, "%3u.%06u:", (unsigned int)(microsecs.QuadPart / 1000000), (unsigned int)(microsecs.QuadPart % 1000000) );
-    }
-    else if (TRACE_ON(timestamp))
+    if (TRACE_ON(timestamp))
     {
         ULONG ticks = NtGetTickCount();
         pos += sprintf( pos, "%3lu.%03lu:", ticks / 1000, ticks % 1000 );
@@ -198,17 +191,6 @@ int __cdecl __wine_dbg_output( const char *str )
     }
     if (*str) ret += append_output( info, str, strlen( str ));
     return ret;
-}
-
-
-/***********************************************************************
- *		__wine_dbg_ftrace
- */
-unsigned int WINAPI __wine_dbg_ftrace( char *str, unsigned int len, unsigned int ctx )
-{
-    struct wine_dbg_ftrace_params params = { str, len, ctx };
-
-    return WINE_UNIX_CALL( unix_wine_dbg_ftrace, &params );
 }
 
 

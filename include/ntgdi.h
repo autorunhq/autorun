@@ -110,8 +110,6 @@ enum
 {
     NtGdiLPtoDP,
     NtGdiDPtoLP,
-    /* not compatible with Windows */
-    NtGdiLPtoDPRaw,
 };
 
 enum

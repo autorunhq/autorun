@@ -370,7 +370,7 @@ static void wine_nx_note_surface_hidden( HWND hwnd )
 static BOOL wine_nx_present_hwnd_surface( HWND hwnd, const RECT *screen_rect )
 {
     struct window_surface *surface, *driver_surface;
-    UINT raw_dpi = 0;
+    struct ratio raw_dpi = {0};
     BOOL ret = FALSE;
 
     if (!(surface = window_surface_get( hwnd ))) return FALSE;
@@ -532,9 +532,10 @@ static void wine_nx_surface_destroy( struct window_surface *surface )
 
 static const struct window_surface_funcs wine_nx_surface_funcs =
 {
-    wine_nx_surface_set_clip,
-    wine_nx_surface_flush,
-    wine_nx_surface_destroy,
+    .size = sizeof(struct wine_nx_surface),
+    .set_clip = wine_nx_surface_set_clip,
+    .flush = wine_nx_surface_flush,
+    .destroy = wine_nx_surface_destroy,
 };
 
 /**********************************************************************
@@ -891,7 +892,7 @@ BOOL wine_nx_drv_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surfa
     info->bmiHeader.biSizeImage   = get_dib_image_size( info );
     info->bmiHeader.biCompression = BI_RGB;
 
-    *surface = window_surface_create( sizeof(struct wine_nx_surface), &wine_nx_surface_funcs,
+    *surface = window_surface_create( &wine_nx_surface_funcs,
                                       hwnd, surface_rect, info, 0 );
     /* Made with the surface, the layer gets every flush of it. win32u fills a
      * new surface with white: a window that never paints with GDI, like a

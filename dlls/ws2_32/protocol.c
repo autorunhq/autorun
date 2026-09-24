@@ -148,25 +148,6 @@ static int dns_only_query( const char *node, const struct addrinfo *hints, struc
     return 0;
 }
 
-static BOOL eac_download_hack(void)
-{
-    static int eac_download_hack_enabled = -1;
-    char str[64];
-
-    if (eac_download_hack_enabled == -1)
-    {
-        if (GetEnvironmentVariableA("WINE_DISABLE_EAC_ALT_DOWNLOAD", str, sizeof(str)))
-            eac_download_hack_enabled = !!atoi(str);
-        else
-            eac_download_hack_enabled = GetEnvironmentVariableA("SteamGameId", str, sizeof(str))
-                                        && !strcmp(str, "626690");
-
-        if (eac_download_hack_enabled)
-            ERR("HACK: failing download-alt.easyanticheat.net resolution.\n");
-    }
-    return eac_download_hack_enabled;
-}
-
 /***********************************************************************
  *      getaddrinfo   (ws2_32.@)
  */
@@ -188,12 +169,6 @@ int WINAPI getaddrinfo( const char *node, const char *service,
 
     if (node)
     {
-        if (eac_download_hack() && !strcmp(node, "download-alt.easyanticheat.net"))
-        {
-            SetLastError(WSAHOST_NOT_FOUND);
-            return WSAHOST_NOT_FOUND;
-        }
-
         if (!node[0])
         {
             if (!(fqdn = get_fqdn())) return WSA_NOT_ENOUGH_MEMORY;
@@ -827,7 +802,7 @@ static int __cdecl compare_routes_by_metric_asc( const void *left, const void *r
  */
 static struct hostent *get_local_ips( char *hostname )
 {
-    int numroutes = 0, i, j, default_routes = 0;
+    int numroutes = 0, i, j, default_routes = 0, matched_routes = 0;
     IP_ADAPTER_INFO *adapters = NULL, *k;
     struct hostent *hostlist = NULL;
     MIB_IPFORWARDTABLE *routes = NULL;
@@ -901,10 +876,25 @@ static struct hostent *get_local_ips( char *hostname )
             char *ip = k->IpAddressList.IpAddress.String;
 
             if (route_addrs[i].interface == k->Index)
+            {
                 route_addrs[i].addr.s_addr = inet_addr(ip);
+                if (memcmp( &route_addrs[i].addr.s_addr, magic_loopback_addr, 4 )) ++matched_routes;
+            }
         }
     }
 
+    if (matched_routes)
+    {
+        for (i = 0; i < numroutes; ++i)
+        {
+            if (!memcmp( &route_addrs[i].addr.s_addr, magic_loopback_addr, 4 ))
+            {
+                --numroutes;
+                memmove( &route_addrs[i], &route_addrs[i + 1], sizeof(*route_addrs) * (numroutes - i) );
+                --i;
+            }
+        }
+    }
     /* Allocate a hostent and enough memory for all the IPs,
      * including the NULL at the end of the list.
      */
@@ -949,12 +939,6 @@ struct hostent * WINAPI gethostbyname( const char *name )
     if (!num_startup)
     {
         SetLastError( WSANOTINITIALISED );
-        return NULL;
-    }
-
-    if (eac_download_hack() && name && !strcmp(name, "download-alt.easyanticheat.net"))
-    {
-        SetLastError( WSAHOST_NOT_FOUND );
         return NULL;
     }
 
@@ -2364,6 +2348,18 @@ int WINAPI WSCInstallProvider( GUID *provider, const WCHAR *path,
     return 0;
 }
 
+/***********************************************************************
+ *      WSCInstallProvider64_32   (ws2_32.@)
+ */
+int WINAPI WSCInstallProvider64_32( GUID *provider, const WCHAR *path,
+                                    WSAPROTOCOL_INFOW *protocol_info, DWORD count, int *err )
+{
+    FIXME( "(%s, %s, %p, %lu, %p): stub !\n", debugstr_guid(provider),
+           debugstr_w(path), protocol_info, count, err );
+    *err = 0;
+    return 0;
+}
+
 
 /***********************************************************************
  *      WSCDeinstallProvider   (ws2_32.@)
@@ -2393,9 +2389,20 @@ int WINAPI WSCSetApplicationCategory( const WCHAR *path, DWORD len, const WCHAR 
  */
 int WINAPI WSCEnumProtocols( int *protocols, WSAPROTOCOL_INFOW *info, DWORD *len, int *err )
 {
-    int ret = WSAEnumProtocolsW( protocols, info, len );
+    int ret;
 
+    TRACE( "protocols %p, info %p, len %p, err %p.\n", protocols, info, len, err );
+
+    ret = WSAEnumProtocolsW( protocols, info, len );
     if (ret == SOCKET_ERROR) *err = WSAENOBUFS;
-
     return ret;
+}
+
+
+/***********************************************************************
+ *      WSCEnumProtocols32   (ws2_32.@)
+ */
+int WINAPI WSCEnumProtocols32( int *protocols, WSAPROTOCOL_INFOW *info, DWORD *len, int *err )
+{
+    return WSCEnumProtocols( protocols, info, len, err );
 }

@@ -40,7 +40,6 @@ struct _function_vtbl_t {
     function_code_t* (*get_code)(FunctionInstance*);
     void (*destructor)(FunctionInstance*);
     HRESULT (*gc_traverse)(struct gc_ctx*,enum gc_traverse_op,FunctionInstance*);
-    void (*cc_traverse)(FunctionInstance*,nsCycleCollectionTraversalCallback*);
 };
 
 typedef struct {
@@ -90,10 +89,6 @@ static HRESULT create_bind_function(script_ctx_t*,FunctionInstance*,jsval_t,unsi
 static HRESULT no_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, FunctionInstance *function)
 {
     return S_OK;
-}
-
-static void no_cc_traverse(FunctionInstance *function, nsCycleCollectionTraversalCallback *cb)
-{
 }
 
 static inline FunctionInstance *function_from_jsdisp(jsdisp_t *jsdisp)
@@ -192,35 +187,19 @@ static HRESULT Arguments_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op 
 
     if(arguments->buf) {
         for(i = 0; i < arguments->argc; i++) {
-            hres = gc_process_linked_val(gc_ctx, op, jsdisp, &arguments->buf[i]);
+            hres = gc_process_linked_val(gc_ctx, op, &arguments->buf[i]);
             if(FAILED(hres))
                 return hres;
         }
     }
 
     if(arguments->scope) {
-        hres = gc_process_linked_obj(gc_ctx, op, jsdisp, &arguments->scope->dispex, (void**)&arguments->scope);
+        hres = gc_process_linked_obj(gc_ctx, op, &arguments->scope->dispex, (void**)&arguments->scope);
         if(FAILED(hres))
             return hres;
     }
 
     return S_OK;
-}
-
-static void Arguments_cc_traverse(jsdisp_t *jsdisp, nsCycleCollectionTraversalCallback *cb)
-{
-    ArgumentsInstance *arguments = arguments_from_jsdisp(jsdisp);
-    note_edge_t note_edge = cc_api.note_edge;
-    unsigned i;
-
-    if(arguments->buf) {
-        for(i = 0; i < arguments->argc; i++)
-            if(is_object_instance(arguments->buf[i]))
-                note_edge(get_edge_obj(get_object(arguments->buf[i])), "buf", cb);
-    }
-
-    if(arguments->scope)
-        note_edge((IUnknown*)&arguments->scope->dispex.IWineJSDispatch_iface, "scope", cb);
 }
 
 static HRESULT Arguments_get_caller(script_ctx_t *ctx, jsdisp_t *jsthis, jsval_t *r)
@@ -264,8 +243,7 @@ static const builtin_info_t Arguments_info = {
     .prop_get    = Arguments_prop_get,
     .prop_put    = Arguments_prop_put,
     .fill_props  = Arguments_fill_props,
-    .gc_traverse = Arguments_gc_traverse,
-    .cc_traverse = Arguments_cc_traverse
+    .gc_traverse = Arguments_gc_traverse
 };
 
 static const builtin_info_t Arguments_ES5_info = {
@@ -276,8 +254,7 @@ static const builtin_info_t Arguments_ES5_info = {
     .prop_get    = Arguments_prop_get,
     .prop_put    = Arguments_prop_put,
     .fill_props  = Arguments_fill_props,
-    .gc_traverse = Arguments_gc_traverse,
-    .cc_traverse = Arguments_cc_traverse
+    .gc_traverse = Arguments_gc_traverse
 };
 
 HRESULT setup_arguments_object(script_ctx_t *ctx, call_frame_t *frame)
@@ -701,12 +678,6 @@ static HRESULT Function_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op o
     return function->vtbl->gc_traverse(gc_ctx, op, function);
 }
 
-static void Function_cc_traverse(jsdisp_t *dispex, nsCycleCollectionTraversalCallback *cb)
-{
-    FunctionInstance *function = function_from_jsdisp(dispex);
-    return function->vtbl->cc_traverse(function, cb);
-}
-
 static const builtin_prop_t Function_props[] = {
     {L"apply",               Function_apply,                 PROPF_METHOD|2},
     {L"arguments",           NULL, PROPF_HTML,               Function_get_arguments},
@@ -723,8 +694,7 @@ static const builtin_info_t Function_info = {
     .props_cnt   = ARRAY_SIZE(Function_props),
     .props       = Function_props,
     .destructor  = Function_destructor,
-    .gc_traverse = Function_gc_traverse,
-    .cc_traverse = Function_cc_traverse
+    .gc_traverse = Function_gc_traverse
 };
 
 static const builtin_prop_t FunctionInst_props[] = {
@@ -739,8 +709,7 @@ static const builtin_info_t FunctionInst_info = {
     .props_cnt   = ARRAY_SIZE(FunctionInst_props),
     .props       = FunctionInst_props,
     .destructor  = Function_destructor,
-    .gc_traverse = Function_gc_traverse,
-    .cc_traverse = Function_cc_traverse
+    .gc_traverse = Function_gc_traverse
 };
 
 static HRESULT create_function(script_ctx_t *ctx, const builtin_info_t *builtin_info, const function_vtbl_t *vtbl, size_t size,
@@ -802,8 +771,7 @@ static const function_vtbl_t NativeFunctionVtbl = {
     NativeFunction_toString,
     NativeFunction_get_code,
     NativeFunction_destructor,
-    no_gc_traverse,
-    no_cc_traverse
+    no_gc_traverse
 };
 
 HRESULT create_builtin_function(script_ctx_t *ctx, builtin_invoke_t value_proc, const WCHAR *name,
@@ -875,7 +843,7 @@ static HRESULT InterpretedFunction_get_prototype(script_ctx_t *ctx, jsdisp_t *js
     if(FAILED(hres))
         return hres;
 
-    hres = jsdisp_define_data_property(jsthis, L"prototype", PROPF_WRITABLE, jsval_obj(prototype));
+    hres = jsdisp_replace_builtin_property(jsthis, L"prototype", jsval_obj(prototype));
     if(SUCCEEDED(hres))
         hres = set_constructor_prop(ctx, jsthis, prototype);
     if(FAILED(hres)) {
@@ -889,7 +857,7 @@ static HRESULT InterpretedFunction_get_prototype(script_ctx_t *ctx, jsdisp_t *js
 
 static HRESULT InterpretedFunction_set_prototype(script_ctx_t *ctx, jsdisp_t *jsthis, jsval_t value)
 {
-    return jsdisp_define_data_property(jsthis, L"prototype", PROPF_WRITABLE, value);
+    return jsdisp_replace_builtin_property(jsthis, L"prototype", value);
 }
 
 static const builtin_prop_t InterpretedFunction_props[] = {
@@ -905,8 +873,7 @@ static const builtin_info_t InterpretedFunction_info = {
     .props_cnt   = ARRAY_SIZE(InterpretedFunction_props),
     .props       = InterpretedFunction_props,
     .destructor  = Function_destructor,
-    .gc_traverse = Function_gc_traverse,
-    .cc_traverse = Function_cc_traverse
+    .gc_traverse = Function_gc_traverse
 };
 
 static HRESULT InterpretedFunction_call(script_ctx_t *ctx, FunctionInstance *func, jsval_t vthis, unsigned flags,
@@ -975,15 +942,7 @@ static HRESULT InterpretedFunction_gc_traverse(struct gc_ctx *gc_ctx, enum gc_tr
 
     if(!function->scope_chain)
         return S_OK;
-    return gc_process_linked_obj(gc_ctx, op, &function->function.dispex, &function->scope_chain->dispex,
-                                 (void**)&function->scope_chain);
-}
-
-static void InterpretedFunction_cc_traverse(FunctionInstance *func, nsCycleCollectionTraversalCallback *cb)
-{
-    InterpretedFunction *function = (InterpretedFunction*)func;
-    if(function->scope_chain)
-        cc_api.note_edge((IUnknown*)&function->scope_chain->dispex.IWineJSDispatch_iface, "scope_chain", cb);
+    return gc_process_linked_obj(gc_ctx, op, &function->scope_chain->dispex, (void**)&function->scope_chain);
 }
 
 static const function_vtbl_t InterpretedFunctionVtbl = {
@@ -991,8 +950,7 @@ static const function_vtbl_t InterpretedFunctionVtbl = {
     InterpretedFunction_toString,
     InterpretedFunction_get_code,
     InterpretedFunction_destructor,
-    InterpretedFunction_gc_traverse,
-    InterpretedFunction_cc_traverse
+    InterpretedFunction_gc_traverse
 };
 
 HRESULT create_source_function(script_ctx_t *ctx, bytecode_t *code, function_code_t *func_code,
@@ -1031,8 +989,7 @@ static const builtin_info_t HostFunction_info = {
     .destructor  = Function_destructor,
     .props_cnt   = ARRAY_SIZE(HostFunction_props),
     .props       = HostFunction_props,
-    .gc_traverse = Function_gc_traverse,
-    .cc_traverse = Function_cc_traverse
+    .gc_traverse = Function_gc_traverse
 };
 
 static HRESULT HostFunction_call(script_ctx_t *ctx, FunctionInstance *func, jsval_t vthis, unsigned flags,
@@ -1115,7 +1072,6 @@ static const function_vtbl_t HostFunctionVtbl = {
     HostFunction_get_code,
     HostFunction_destructor,
     no_gc_traverse,
-    no_cc_traverse
 };
 
 HRESULT create_host_function(script_ctx_t *ctx, const struct property_info *desc, DWORD flags, jsdisp_t **ret)
@@ -1161,7 +1117,6 @@ static const builtin_info_t HostConstructor_info = {
     .props         = HostFunction_props,
     .get_host_disp = HostConstructor_get_host_disp,
     .gc_traverse   = Function_gc_traverse,
-    .cc_traverse   = Function_cc_traverse,
     .lookup_prop   = HostConstructor_lookup_prop,
 };
 
@@ -1240,7 +1195,6 @@ static const function_vtbl_t HostConstructorVtbl = {
     HostConstructor_get_code,
     HostConstructor_destructor,
     no_gc_traverse,
-    no_cc_traverse
 };
 
 HRESULT init_host_constructor(script_ctx_t *ctx, IWineJSDispatchHost *host_constr, const WCHAR *method_name, IWineJSDispatch **ret)
@@ -1281,8 +1235,7 @@ static const builtin_info_t BindFunction_info = {
     .props_cnt   = ARRAY_SIZE(BindFunction_props),
     .props       = BindFunction_props,
     .destructor  = Function_destructor,
-    .gc_traverse = Function_gc_traverse,
-    .cc_traverse = Function_cc_traverse
+    .gc_traverse = Function_gc_traverse
 };
 
 static HRESULT BindFunction_call(script_ctx_t *ctx, FunctionInstance *func, jsval_t vthis, unsigned flags,
@@ -1345,33 +1298,16 @@ static HRESULT BindFunction_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_
     unsigned i;
 
     for(i = 0; i < function->argc; i++) {
-        hres = gc_process_linked_val(gc_ctx, op, &function->function.dispex, &function->args[i]);
+        hres = gc_process_linked_val(gc_ctx, op, &function->args[i]);
         if(FAILED(hres))
             return hres;
     }
 
-    hres = gc_process_linked_obj(gc_ctx, op, &function->function.dispex, &function->target->dispex, (void**)&function->target);
+    hres = gc_process_linked_obj(gc_ctx, op, &function->target->dispex, (void**)&function->target);
     if(FAILED(hres))
         return hres;
 
-    return gc_process_linked_val(gc_ctx, op, &function->function.dispex, &function->this);
-}
-
-static void BindFunction_cc_traverse(FunctionInstance *func, nsCycleCollectionTraversalCallback *cb)
-{
-    BindFunction *function = (BindFunction*)func;
-    note_edge_t note_edge = cc_api.note_edge;
-    unsigned i;
-
-    for(i = 0; i < function->argc; i++)
-        if(is_object_instance(function->args[i]))
-            note_edge(get_edge_obj(get_object(function->args[i])), "arg", cb);
-
-    if(function->target)
-        note_edge(jsdisp_get_edge_obj(&function->target->dispex), "target", cb);
-
-    if(is_object_instance(function->this))
-        note_edge(get_edge_obj(get_object(function->this)), "this", cb);
+    return gc_process_linked_val(gc_ctx, op, &function->this);
 }
 
 static const function_vtbl_t BindFunctionVtbl = {
@@ -1379,8 +1315,7 @@ static const function_vtbl_t BindFunctionVtbl = {
     BindFunction_toString,
     BindFunction_get_code,
     BindFunction_destructor,
-    BindFunction_gc_traverse,
-    BindFunction_cc_traverse
+    BindFunction_gc_traverse
 };
 
 static HRESULT create_bind_function(script_ctx_t *ctx, FunctionInstance *target, jsval_t bound_this, unsigned argc,

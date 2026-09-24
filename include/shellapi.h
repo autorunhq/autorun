@@ -521,6 +521,13 @@ typedef struct tagNC_ADDRESS
    BYTE                     PrefixLength;
 } NC_ADDRESS, *PNC_ADDRESS;
 
+#if defined(_MSC_VER) || defined(__MINGW32__)
+# define WC_NETADDRESS       L"msctls_netaddress"
+#else
+static const WCHAR WC_NETADDRESS[] = { 'm','s','c','t','l','s','_',
+  'n','e','t','a','d','d','r','e','s','s',0 };
+#endif
+
 #define NCM_GETADDRESS      (WM_USER+1)
 #define NCM_SETALLOWTYPE    (WM_USER+2)
 #define NCM_GETALLOWTYPE    (WM_USER+3)
@@ -696,6 +703,9 @@ WINSHELLAPI HINSTANCE   WINAPI FindExecutableA(LPCSTR,LPCSTR,LPSTR);
 WINSHELLAPI HINSTANCE   WINAPI FindExecutableW(LPCWSTR,LPCWSTR,LPWSTR);
 #define                        FindExecutable WINELIB_NAME_AW(FindExecutable)
 WINSHELLAPI BOOL        WINAPI InitNetworkAddressControl(void);
+WINSHELLAPI BOOL        WINAPI IsLFNDriveA(LPCSTR);
+WINSHELLAPI BOOL        WINAPI IsLFNDriveW(LPCWSTR);
+#define                        IsLFNDrive WINELIB_NAME_AW(IsLFNDrive)
 WINSHELLAPI BOOL        WINAPI ShellAboutA(HWND,LPCSTR,LPCSTR,HICON);
 WINSHELLAPI BOOL        WINAPI ShellAboutW(HWND,LPCWSTR,LPCWSTR,HICON);
 #define                        ShellAbout WINELIB_NAME_AW(ShellAbout)
@@ -708,6 +718,7 @@ WINSHELLAPI DWORD       WINAPI DoEnvironmentSubstW(LPWSTR, UINT);
 WINSHELLAPI HRESULT     WINAPI SHEnumerateUnreadMailAccountsA(HKEY,DWORD,LPSTR,INT);
 WINSHELLAPI HRESULT     WINAPI SHEnumerateUnreadMailAccountsW(HKEY,DWORD,LPWSTR,INT);
 #define                        SHEnumerateUnreadMailAccounts WINELIB_NAME_AW(SHEnumerateUnreadMailAccounts)
+WINSHELLAPI HRESULT     WINAPI SHEvaluateSystemCommandTemplate(PCWSTR, PWSTR*, PWSTR*, PWSTR*);
 WINSHELLAPI HRESULT     WINAPI SHGetPropertyStoreForWindow(HWND,REFIID,void **);
 
 #ifdef __cplusplus

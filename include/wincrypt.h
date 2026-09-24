@@ -219,9 +219,12 @@ typedef struct _CRYPT_KEY_PROV_INFO {
 } CRYPT_KEY_PROV_INFO, *PCRYPT_KEY_PROV_INFO;
 
 typedef struct _CERT_KEY_CONTEXT {
-    DWORD      cbSize;
-    HCRYPTPROV hCryptProv;
-    DWORD      dwKeySpec;
+    DWORD cbSize;
+    union {
+        HCRYPTPROV        hCryptProv;
+        NCRYPT_KEY_HANDLE hNCryptKey;
+    } DUMMYUNIONNAME;
+    DWORD dwKeySpec;
 } CERT_KEY_CONTEXT, *PCERT_KEY_CONTEXT;
 
 typedef struct _CERT_PUBLIC_KEY_INFO {
@@ -1071,8 +1074,8 @@ typedef struct _CERT_CHAIN_POLICY_STATUS {
 #define CERT_CHAIN_POLICY_IGNORE_INVALID_BASIC_CONSTRAINTS_FLAG 0x00000008
 
 #define CERT_CHAIN_POLICY_IGNORE_ALL_NOT_TIME_VALID_FLAGS ( \
- CERT_CHAIN_POLICY_IGNORE_NOT_TIME_VALID_FLAG \
- CERT_CHAIN_POLICY_IGNORE_CTL_NOT_TIME_VALID_FLAG \
+ CERT_CHAIN_POLICY_IGNORE_NOT_TIME_VALID_FLAG             | \
+ CERT_CHAIN_POLICY_IGNORE_CTL_NOT_TIME_VALID_FLAG         | \
  CERT_CHAIN_POLICY_IGNORE_NOT_TIME_NESTED_FLAG )
 
 #define CERT_CHAIN_POLICY_ALLOW_UNKNOWN_CA_FLAG                 0x00000010
@@ -1086,9 +1089,9 @@ typedef struct _CERT_CHAIN_POLICY_STATUS {
 #define CERT_CHAIN_POLICY_IGNORE_ROOT_REV_UNKNOWN_FLAG          0x00000800
 
 #define CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS ( \
- CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG \
- CERT_CHAIN_POLICY_IGNORE_CTL_SIGNER_REV_UNKNOWN_FLAG \
- CERT_CHAIN_POLICY_IGNORE_CA_REV_UNKNOWN_FLAG \
+ CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG         | \
+ CERT_CHAIN_POLICY_IGNORE_CTL_SIGNER_REV_UNKNOWN_FLAG  | \
+ CERT_CHAIN_POLICY_IGNORE_CA_REV_UNKNOWN_FLAG          | \
  CERT_CHAIN_POLICY_IGNORE_ROOT_REV_UNKNOWN_FLAG )
 
 #define CERT_CHAIN_POLICY_IGNORE_PEER_TRUST_FLAG                 0x00001000
@@ -1942,6 +1945,7 @@ static const WCHAR MS_ENH_RSA_AES_PROV_XP_W[] = { 'M','i','c','r','o','s','o','f
 /* Key Specs*/
 #define AT_KEYEXCHANGE          1
 #define AT_SIGNATURE            2
+#define CERT_NCRYPT_KEY_SPEC    0xffffffff
 
 /* Provider Types */
 #define PROV_RSA_FULL             1
@@ -2594,7 +2598,9 @@ static const WCHAR CERT_PHYSICAL_STORE_AUTH_ROOT_NAME[] =
 #define CERT_ROOT_PROGRAM_CERT_POLICIES_PROP_ID    83
 #define CERT_ROOT_PROGRAM_NAME_CONSTRAINTS_PROP_ID 84
 
-#define CERT_FIRST_RESERVED_PROP_ID                85
+#define CERT_SIGN_HASH_CNG_ALG_PROP_ID             89
+
+#define CERT_FIRST_RESERVED_PROP_ID                130
 #define CERT_LAST_RESERVED_PROP_ID                 0x00007fff
 #define CERT_FIRST_USER_PROP_ID                    0x00008000
 #define CERT_LAST_USER_PROP_ID                     0x0000ffff
@@ -2868,7 +2874,7 @@ typedef struct _CTL_FIND_SUBJECT_PARA
 #define szOID_PKCS_8                        "1.2.840.113549.1.8"
 #define szOID_PKCS_9                        "1.2.840.113549.1.9"
 #define szOID_PKCS_10                       "1.2.840.113549.1.10"
-#define szOID_PKCS_11                       "1.2.840.113549.1.12"
+#define szOID_PKCS_12                       "1.2.840.113549.1.12"
 #define szOID_RSA_RSA                       "1.2.840.113549.1.1.1"
 #define CERT_RSA_PUBLIC_KEY_OBJID           szOID_RSA_RSA
 #define CERT_DEFAULT_OID_PUBLIC_KEY_SIGN    szOID_RSA_RSA
@@ -3497,7 +3503,8 @@ typedef struct _CERT_CHAIN_ENGINE_CONFIG
     DWORD       MaximumCachedCertificates;
     DWORD       CycleDetectionModulus;
     HCERTSTORE  hExclusiveRoot;
-    HCERTSTORE  hExclusiveRootTrustedPeople;
+    HCERTSTORE  hExclusiveTrustedPeople;
+    DWORD       dwExclusiveFlags;
 } CERT_CHAIN_ENGINE_CONFIG, *PCERT_CHAIN_ENGINE_CONFIG;
 
 /* message-related definitions */
@@ -4704,6 +4711,11 @@ BOOL WINAPI CryptRetrieveObjectByUrlW(LPCWSTR pszURL, LPCSTR pszObjectOid,
 HRESULT WINAPI FindCertsByIssuer(PCERT_CHAIN pCertChains, DWORD *pcbCertChains,
  DWORD *pcCertChains, BYTE* pbEncodedIssuerName, DWORD cbEncodedIssuerName,
  LPCWSTR pwszPurpose, DWORD dwKeySpec);
+
+#define CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK  0x00070000
+#define CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG  0x00010000
+#define CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG 0x00020000
+#define CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG   0x00040000
 
 #ifdef __cplusplus
 }

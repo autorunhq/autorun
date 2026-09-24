@@ -28,12 +28,12 @@
 #include "ole2.h"
 #include "dispex.h"
 #include "activscp.h"
+#include "jsdisp.h"
 
 #include "resource.h"
 
 #include "wine/list.h"
 #include "wine/rbtree.h"
-#include "jsdisp.h"
 
 typedef struct _jsval_t jsval_t;
 typedef struct _jsstr_t jsstr_t;
@@ -60,7 +60,6 @@ heap_pool_t *heap_pool_mark(heap_pool_t*);
 
 typedef struct jsdisp_t jsdisp_t;
 
-extern struct jshost_cc_api cc_api;
 extern HINSTANCE jscript_hinstance ;
 HRESULT get_dispatch_typeinfo(ITypeInfo**);
 
@@ -165,8 +164,8 @@ HRESULT create_named_item_script_obj(script_ctx_t*,named_item_t*);
 named_item_t *lookup_named_item(script_ctx_t*,const WCHAR*,unsigned);
 void release_named_item(named_item_t*);
 HRESULT gc_run(script_ctx_t*);
-HRESULT gc_process_linked_obj(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,jsdisp_t*,void**);
-HRESULT gc_process_linked_val(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,jsval_t*);
+HRESULT gc_process_linked_obj(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,void**);
+HRESULT gc_process_linked_val(struct gc_ctx*,enum gc_traverse_op,jsval_t*);
 
 typedef struct {
     const WCHAR *name;
@@ -192,7 +191,6 @@ typedef struct {
     HRESULT (*fill_props)(jsdisp_t*);
     HRESULT (*to_string)(jsdisp_t*,jsstr_t**);
     HRESULT (*gc_traverse)(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*);
-    void (*cc_traverse)(jsdisp_t*,nsCycleCollectionTraversalCallback*);
 } builtin_info_t;
 
 struct jsdisp_t {
@@ -247,7 +245,6 @@ HRESULT init_dispex_from_constr(jsdisp_t*,script_ctx_t*,const builtin_info_t*,js
 HRESULT init_host_object(script_ctx_t*,IWineJSDispatchHost*,IWineJSDispatch*,UINT32,IWineJSDispatch**);
 HRESULT init_host_constructor(script_ctx_t*,IWineJSDispatchHost*,const WCHAR*,IWineJSDispatch**);
 HRESULT fill_globals(script_ctx_t*,IWineJSDispatchHost*);
-void init_cc_api(IWineJSDispatchHost*);
 
 HRESULT disp_call(script_ctx_t*,IDispatch*,DISPID,WORD,unsigned,jsval_t*,jsval_t*);
 HRESULT disp_call_name(script_ctx_t*,IDispatch*,const WCHAR*,WORD,unsigned,jsval_t*,jsval_t*);
@@ -276,6 +273,7 @@ HRESULT jsdisp_delete_idx(jsdisp_t*,DWORD);
 HRESULT jsdisp_get_own_property(jsdisp_t*,const WCHAR*,BOOL,property_desc_t*);
 HRESULT jsdisp_define_property(jsdisp_t*,const WCHAR*,property_desc_t*);
 HRESULT jsdisp_define_data_property(jsdisp_t*,const WCHAR*,unsigned,jsval_t);
+HRESULT jsdisp_replace_builtin_property(jsdisp_t*,const WCHAR*,jsval_t);
 HRESULT jsdisp_next_prop(jsdisp_t*,DISPID,enum jsdisp_enum_type,DISPID*);
 HRESULT jsdisp_get_prop_name(jsdisp_t*,DISPID,jsstr_t**);
 HRESULT jsdisp_change_prototype(jsdisp_t*,jsdisp_t*);
@@ -527,21 +525,6 @@ static inline HRESULT disp_call_value(script_ctx_t *ctx, IDispatch *disp, jsval_
         jsval_t *argv, jsval_t *r)
 {
     return disp_call_value_with_caller(ctx, disp, vthis, flags, argc, argv, r, &ctx->jscaller->IServiceProvider_iface);
-}
-
-static inline IUnknown *jsdisp_get_edge_obj(jsdisp_t *jsdisp)
-{
-    if(jsdisp->builtin_info->get_host_disp)
-        return (IUnknown*)jsdisp->builtin_info->get_host_disp(jsdisp);
-    return (IUnknown*)&jsdisp->IWineJSDispatch_iface;
-}
-
-static inline IUnknown *get_edge_obj(IDispatch *disp)
-{
-    jsdisp_t *jsdisp = to_jsdisp(disp);
-    if(jsdisp)
-        return jsdisp_get_edge_obj(jsdisp);
-    return (IUnknown*)disp;
 }
 
 #define MAKE_JSERROR(code) MAKE_HRESULT(SEVERITY_ERROR, FACILITY_CONTROL, code)

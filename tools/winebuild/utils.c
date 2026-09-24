@@ -227,7 +227,11 @@ struct strarray find_tool( const char *name, const char * const *names )
         names++;
     }
 
-    if (!file && cc_command.count) file = find_clang_tool( cc_command, name );
+    if (!file && cc_command.count)
+    {
+        file = find_clang_tool( cc_command, strmake( "llvm-%s", name ));
+        if (!file) file = find_clang_tool( cc_command, name );
+    }
     if (!file) file = find_binary( "llvm", name );
     if (!file) file = find_clang_tool( empty_strarray, strmake( "llvm-%s", name ));
     if (!file) file = find_clang_tool( empty_strarray, name );
@@ -268,19 +272,29 @@ struct strarray get_as_command(void)
     {
         strarray_addall( &args, as_command );
     }
-    else if ((file = find_binary( target_alias, "as" )) || (file = find_binary( target_alias, "gas ")))
+    else
     {
-        strarray_add( &args, file );
-    }
-    else if ((file = find_binary( NULL, "clang" )))
-    {
-        strarray_add( &args, file );
-        if (target_alias)
+        const char *as_target = target_alias;
+        if (target.cpu == CPU_ARM64EC)
         {
-            strarray_add( &args, "-target" );
-            strarray_add( &args, target_alias );
+            const char *suffix = strchr( target_alias, '-' );
+            if (!suffix) suffix = "";
+            as_target = strmake( "x86_64%s", suffix );
         }
-        using_cc = 1;
+        if ((file = find_binary( as_target, "as" )) || (file = find_binary( as_target, "gas ")))
+        {
+            strarray_add( &args, file );
+        }
+        else if ((file = find_binary( NULL, "clang" )))
+        {
+            strarray_add( &args, file );
+            if (as_target)
+            {
+                strarray_add( &args, "-target" );
+                strarray_add( &args, as_target );
+            }
+            using_cc = 1;
+        }
     }
 
     if (using_cc)
@@ -341,6 +355,7 @@ struct strarray get_ld_command(void)
             break;
         case PLATFORM_MINGW:
         case PLATFORM_WINDOWS:
+        case PLATFORM_WINDOWS_GNU:
             strarray_add( &args, "-m" );
             strarray_add( &args, (force_pointer_size == 8) ? "i386pep" : "i386pe" );
             break;
@@ -743,6 +758,7 @@ const char *asm_name( const char *sym )
     {
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU:
         if (target.cpu != CPU_i386) return sym;
         if (sym[0] == '@') return sym;  /* fastcall */
         /* fall through */
@@ -754,17 +770,10 @@ const char *asm_name( const char *sym )
     }
 }
 
-/* return the assembly name for an ARM64/ARM64EC function */
-const char *arm64_name( const char *sym )
-{
-    if (target.cpu == CPU_ARM64EC) return strmake( "\"#%s\"", sym );
-    return asm_name( sym );
-}
-
 /* return an assembly function declaration for a C function name */
 void output_function_header( const char *func, int global )
 {
-    const char *name = arm64_name( func );
+    const char *name = asm_name( func );
 
     output( "\t.text\n" );
 
@@ -775,7 +784,7 @@ void output_function_header( const char *func, int global )
         break;
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
-        if (target.cpu == CPU_ARM64EC) output( ".section .text,\"xr\",discard,%s\n\t", name );
+    case PLATFORM_WINDOWS_GNU:
         output( "\t.def %s\n\t.scl 2\n\t.type 32\n\t.endef\n", name );
         if (global) output( "\t.globl %s\n", name );
         break;
@@ -796,6 +805,7 @@ void output_function_size( const char *name )
     case PLATFORM_APPLE:
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU:
         break;
     default:
         output( "\t.size %s, .-%s\n", name, name );
@@ -887,6 +897,7 @@ void output_gnu_stack_note(void)
     {
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU:
     case PLATFORM_APPLE:
         break;
     default:
@@ -904,6 +915,7 @@ const char *asm_globl( const char *func )
         return strmake( "\t.globl _%s\n\t.private_extern _%s\n_%s:", func, func, func );
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU:
     {
         const char *name = asm_name( func );
         return strmake( "\t.globl %s\n%s:", name, name );
@@ -939,10 +951,11 @@ const char *get_asm_export_section(void)
 {
     switch (target.platform)
     {
-    case PLATFORM_APPLE:   return ".data";
+    case PLATFORM_APPLE:       return ".data";
     case PLATFORM_MINGW:
-    case PLATFORM_WINDOWS: return ".section .edata";
-    default:               return ".section .data";
+    case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU: return ".section .edata";
+    default:                   return ".section .data";
     }
 }
 
@@ -950,10 +963,11 @@ const char *get_asm_rodata_section(void)
 {
     switch (target.platform)
     {
-    case PLATFORM_APPLE:   return ".const";
+    case PLATFORM_APPLE:       return ".const";
     case PLATFORM_MINGW:
-    case PLATFORM_WINDOWS: return ".section .rdata";
-    default:               return ".section .rodata";
+    case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU: return ".section .rdata";
+    default:                   return ".section .rodata";
     }
 }
 
@@ -961,10 +975,11 @@ const char *get_asm_rsrc_section(void)
 {
     switch (target.platform)
     {
-    case PLATFORM_APPLE:   return ".data";
+    case PLATFORM_APPLE:       return ".data";
     case PLATFORM_MINGW:
-    case PLATFORM_WINDOWS: return ".section .rsrc";
-    default:               return ".section .data";
+    case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU: return ".section .rsrc";
+    default:                   return ".section .data";
     }
 }
 
@@ -972,9 +987,10 @@ const char *get_asm_string_section(void)
 {
     switch (target.platform)
     {
-    case PLATFORM_APPLE:   return ".cstring";
+    case PLATFORM_APPLE:       return ".cstring";
     case PLATFORM_MINGW:
-    case PLATFORM_WINDOWS: return ".section .rdata";
-    default:               return ".section .rodata";
+    case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU: return ".section .rdata";
+    default:                   return ".section .rodata";
     }
 }

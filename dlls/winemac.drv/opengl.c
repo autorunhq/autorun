@@ -46,8 +46,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 struct gl_info {
     char *glExtensions;
 
-    char wglExtensions[4096];
-
     GLint max_viewport_dims[2];
 
     unsigned int max_major, max_minor;
@@ -58,20 +56,18 @@ static struct gl_info gl_info;
 
 struct macdrv_context
 {
-    int                     format;
-    GLint                   renderer_id;
-    macdrv_opengl_context   context;
-    CGLContextObj           cglcontext;
-    HWND                    draw_hwnd;
-    macdrv_view             draw_view;
-    CGLPBufferObj           draw_pbuffer;
+    struct opengl_context   base;
+    BOOL                    core;
+    WineOpenGLContext      *context;
     GLenum                  draw_pbuffer_face;
     GLint                   draw_pbuffer_level;
-    HWND                    read_hwnd;
-    macdrv_view             read_view;
-    CGLPBufferObj           read_pbuffer;
     int                     swap_interval;
 };
+
+static struct macdrv_context *macdrv_context_from_opengl_context(struct opengl_context *base)
+{
+    return CONTAINING_RECORD(base, struct macdrv_context, base);
+}
 
 struct gl_drawable
 {
@@ -229,6 +225,7 @@ C_ASSERT(sizeof(((pixel_format_or_code*)0)->format) <= sizeof(((pixel_format_or_
 
 static pixel_format *pixel_formats;
 static int nb_formats, nb_displayable_formats;
+static CGLOpenGLProfile core_profile;
 
 
 static const char* debugstr_attrib(int attrib, int value)
@@ -1204,56 +1201,51 @@ static const pixel_format *get_pixel_format(int format, BOOL allow_nondisplayabl
     return NULL;
 }
 
+static CGLContextObj init_context(CGLOpenGLProfile profile)
+{
+    CGLPixelFormatAttribute attribs[] =
+    {
+        kCGLPFADisplayMask, CGDisplayIDToOpenGLDisplayMask(CGMainDisplayID()),
+        kCGLPFAAccelerated, kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)profile, 0,
+    };
+    CGLPixelFormatObj pix;
+    CGLContextObj context;
+    GLint screens;
+    CGLError err;
+
+    if ((err = CGLChoosePixelFormat(attribs, &pix, &screens)) || !pix)
+    {
+        WARN("CGLChoosePixelFormat() failed with error %d %s\n", err, CGLErrorString(err));
+        return NULL;
+    }
+    if ((err = CGLCreateContext(pix, NULL, &context)) || !context)
+    {
+        WARN("CGLCreateContext() failed with error %d %s\n", err, CGLErrorString(err));
+        context = NULL;
+    }
+    CGLReleasePixelFormat(pix);
+
+    if ((err = CGLSetCurrentContext(context)))
+    {
+        WARN("CGLSetCurrentContext() failed with error %d %s\n", err, CGLErrorString(err));
+        CGLReleaseContext(context);
+        return NULL;
+    }
+
+    return context;
+}
 
 static BOOL init_gl_info(void)
 {
     static const char legacy_extensions[] = " WGL_EXT_extensions_string";
     static const char legacy_ext_swap_control[] = " WGL_EXT_swap_control";
 
-    CGDirectDisplayID display = CGMainDisplayID();
-    CGOpenGLDisplayMask displayMask = CGDisplayIDToOpenGLDisplayMask(display);
-    CGLPixelFormatAttribute attribs[] = {
-        kCGLPFADisplayMask, displayMask,
-        0
-    };
-    CGLPixelFormatAttribute core_attribs[] =
-    {
-        kCGLPFADisplayMask, displayMask,
-        kCGLPFAAccelerated,
-        kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core,
-        0
-    };
-    CGLPixelFormatObj pix;
-    GLint virtualScreens;
-    CGLError err;
     CGLContextObj context;
     CGLContextObj old_context = CGLGetCurrentContext();
     const char *str;
     size_t length;
 
-    err = CGLChoosePixelFormat(attribs, &pix, &virtualScreens);
-    if (err != kCGLNoError || !pix)
-    {
-        WARN("CGLChoosePixelFormat() failed with error %d %s\n", err, CGLErrorString(err));
-        return FALSE;
-    }
-
-    err = CGLCreateContext(pix, NULL, &context);
-    CGLReleasePixelFormat(pix);
-    if (err != kCGLNoError || !context)
-    {
-        WARN("CGLCreateContext() failed with error %d %s\n", err, CGLErrorString(err));
-        return FALSE;
-    }
-
-    err = CGLSetCurrentContext(context);
-    if (err != kCGLNoError)
-    {
-        WARN("CGLSetCurrentContext() failed with error %d %s\n", err, CGLErrorString(err));
-        CGLReleaseContext(context);
-        return FALSE;
-    }
-
+    if (!(context = init_context(kCGLOGLPVersion_Legacy))) return FALSE;
     str = (const char*)pglGetString(GL_EXTENSIONS);
     length = strlen(str) + sizeof(legacy_extensions);
     if (allow_vsync)
@@ -1273,38 +1265,23 @@ static BOOL init_gl_info(void)
 
     CGLSetCurrentContext(old_context);
     CGLReleaseContext(context);
+    core_profile = kCGLOGLPVersion_Legacy;
 
-    err = CGLChoosePixelFormat(core_attribs, &pix, &virtualScreens);
-    if (err != kCGLNoError || !pix)
-    {
-        WARN("CGLChoosePixelFormat() for a core context failed with error %d %s\n",
-             err, CGLErrorString(err));
-        return TRUE;
-    }
-
-    err = CGLCreateContext(pix, NULL, &context);
-    CGLReleasePixelFormat(pix);
-    if (err != kCGLNoError || !context)
-    {
-        WARN("CGLCreateContext() for a core context failed with error %d %s\n",
-             err, CGLErrorString(err));
-        return TRUE;
-    }
-
-    err = CGLSetCurrentContext(context);
-    if (err != kCGLNoError)
-    {
-        WARN("CGLSetCurrentContext() for a core context failed with error %d %s\n",
-             err, CGLErrorString(err));
-        CGLReleaseContext(context);
-        return TRUE;
-    }
-
+    if (!(context = init_context(kCGLOGLPVersion_GL3_Core))) return TRUE;
     str = (const char*)pglGetString(GL_VERSION);
-    TRACE("Core context GL version: %s\n", str);
+    TRACE("GL3_Core context version: %s\n", str);
     sscanf(str, "%u.%u", &gl_info.max_major, &gl_info.max_minor);
     CGLSetCurrentContext(old_context);
     CGLReleaseContext(context);
+    core_profile = kCGLOGLPVersion_GL3_Core;
+
+    if (!(context = init_context(kCGLOGLPVersion_GL4_Core))) return TRUE;
+    str = (const char*)pglGetString(GL_VERSION);
+    TRACE("GL4_Core context version: %s\n", str);
+    sscanf(str, "%u.%u", &gl_info.max_major, &gl_info.max_minor);
+    CGLSetCurrentContext(old_context);
+    CGLReleaseContext(context);
+    core_profile = kCGLOGLPVersion_GL4_Core;
 
     return TRUE;
 }
@@ -1313,7 +1290,7 @@ static BOOL init_gl_info(void)
 /**********************************************************************
  *              create_context
  */
-static BOOL create_context(struct macdrv_context *context, CGLContextObj share, unsigned int major)
+static BOOL create_context(struct macdrv_context *context, int format, CGLContextObj share, BOOL *shared)
 {
     const pixel_format *pf;
     CGLPixelFormatAttribute attribs[64];
@@ -1321,26 +1298,17 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
     CGLPixelFormatObj pix;
     GLint virtualScreens;
     CGLError err;
-    BOOL core = major >= 3;
 
-    pf = get_pixel_format(context->format, TRUE /* non-displayable */);
+    pf = get_pixel_format(format, TRUE /* non-displayable */);
     if (!pf)
     {
-        ERR("Invalid pixel format %d, expect problems!\n", context->format);
+        ERR("Invalid pixel format %d, expect problems!\n", format);
         RtlSetLastWin32Error(ERROR_INVALID_PIXEL_FORMAT);
         return FALSE;
     }
 
     attribs[n++] = kCGLPFAMinimumPolicy;
     attribs[n++] = kCGLPFAClosestPolicy;
-
-    if (context->renderer_id)
-    {
-        attribs[n++] = kCGLPFARendererID;
-        attribs[n++] = context->renderer_id;
-        attribs[n++] = kCGLPFASingleRenderer;
-        attribs[n++] = kCGLPFANoRecovery;
-    }
 
     if (pf->accelerated)
     {
@@ -1353,10 +1321,9 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
         attribs[n++] = kCGLRendererGenericFloatID;
     }
 
-    if (pf->double_buffer)
-        attribs[n++] = kCGLPFADoubleBuffer;
+    attribs[n++] = kCGLPFADoubleBuffer;
 
-    if (!core)
+    if (!context->core)
     {
         attribs[n++] = kCGLPFAAuxBuffers;
         attribs[n++] = pf->aux_buffers;
@@ -1378,13 +1345,13 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
     if (pf->stereo)
         attribs[n++] = kCGLPFAStereo;
 
-    if (pf->accum_mode && !core)
+    if (pf->accum_mode && !context->core)
     {
         attribs[n++] = kCGLPFAAccumSize;
         attribs[n++] = color_modes[pf->accum_mode - 1].color_bits;
     }
 
-    if (pf->pbuffer && !core)
+    if (pf->pbuffer && !context->core)
         attribs[n++] = kCGLPFAPBuffer;
 
     if (pf->sample_buffers && pf->samples)
@@ -1398,13 +1365,10 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
     if (pf->backing_store)
         attribs[n++] = kCGLPFABackingStore;
 
-    if (core)
+    if (context->core)
     {
         attribs[n++] = kCGLPFAOpenGLProfile;
-        if (major == 3)
-            attribs[n++] = (int)kCGLOGLPVersion_GL3_Core;
-        else
-            attribs[n++] = (int)kCGLOGLPVersion_GL4_Core;
+        attribs[n++] = (CGLPixelFormatAttribute)core_profile;
     }
 
     attribs[n] = 0;
@@ -1417,11 +1381,11 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
         return FALSE;
     }
 
-    err = CGLCreateContext(pix, share, &context->cglcontext);
+    err = CGLCreateContext(pix, share, (CGLContextObj *)&context->base.host_context);
     CGLReleasePixelFormat(pix);
-    if (err != kCGLNoError || !context->cglcontext)
+    if (err != kCGLNoError || !context->base.host_context)
     {
-        context->cglcontext = NULL;
+        context->base.host_context = NULL;
         WARN("CGLCreateContext() failed with error %d %s\n", err, CGLErrorString(err));
         RtlSetLastWin32Error(ERROR_INVALID_OPERATION);
         return FALSE;
@@ -1430,55 +1394,49 @@ static BOOL create_context(struct macdrv_context *context, CGLContextObj share, 
     if (gl_surface_mode == GL_SURFACE_IN_FRONT_TRANSPARENT)
     {
         GLint opacity = 0;
-        err = CGLSetParameter(context->cglcontext, kCGLCPSurfaceOpacity, &opacity);
+        err = CGLSetParameter(context->base.host_context, kCGLCPSurfaceOpacity, &opacity);
         if (err != kCGLNoError)
             WARN("CGLSetParameter(kCGLCPSurfaceOpacity) failed with error %d %s; leaving opaque\n", err, CGLErrorString(err));
     }
     else if (gl_surface_mode == GL_SURFACE_BEHIND)
     {
         GLint order = -1;
-        err = CGLSetParameter(context->cglcontext, kCGLCPSurfaceOrder, &order);
+        err = CGLSetParameter(context->base.host_context, kCGLCPSurfaceOrder, &order);
         if (err != kCGLNoError)
             WARN("CGLSetParameter(kCGLCPSurfaceOrder) failed with error %d %s; leaving in front\n", err, CGLErrorString(err));
     }
 
-    context->context = macdrv_create_opengl_context(context->cglcontext);
-    CGLReleaseContext(context->cglcontext);
-    if (!context->context)
+    if (!(context->context = macdrv_create_opengl_context(context->base.host_context)))
     {
         WARN("macdrv_create_opengl_context() failed\n");
         RtlSetLastWin32Error(ERROR_INVALID_OPERATION);
+        CGLReleaseContext(context->base.host_context);
         return FALSE;
     }
     context->swap_interval = INT_MIN;
 
-    TRACE("created context %p/%p/%p\n", context, context->context, context->cglcontext);
+    TRACE("created context %p/%p/%p\n", context, context->context, context->base.host_context);
 
     return TRUE;
 }
 
-static BOOL macdrv_surface_create(HWND hwnd, BOOL raw, int format, struct opengl_drawable **drawable)
+static BOOL macdrv_surface_create(struct client_surface *client, int format, struct opengl_drawable **drawable)
 {
-    struct macdrv_client_surface *client;
     struct macdrv_win_data *data;
+    HWND hwnd = client->hwnd;
     struct gl_drawable *gl;
 
-    TRACE("hwnd %p, format %d, drawable %p\n", hwnd, format, drawable);
+    TRACE("client %s, format %d, drawable %p\n", debugstr_client_surface(client), format, drawable);
 
     if (!(data = get_win_data(hwnd)))
     {
         FIXME("DC for window %p of other process: not implemented\n", hwnd);
         return FALSE;
     }
-
     data->pixel_format = format;
     release_win_data(data);
 
-    if (!(client = macdrv_client_surface_create(hwnd))) return FALSE;
-    gl = opengl_drawable_create(sizeof(*gl), &macdrv_surface_funcs, format, &client->client);
-    client_surface_release(&client->client);
-    if (!gl) return FALSE;
-
+    if (!(gl = opengl_drawable_create(&macdrv_surface_funcs, format, client, NULL))) return FALSE;
     *drawable = &gl->base;
     return TRUE;
 }
@@ -1488,38 +1446,28 @@ static void macdrv_surface_destroy(struct opengl_drawable *base)
     TRACE("drawable %s\n", debugstr_opengl_drawable(base));
 }
 
-/**********************************************************************
- *              make_context_current
- */
-static void make_context_current(struct macdrv_context *context, BOOL read)
+static void macdrv_context_select_drawable(struct macdrv_context *context, struct opengl_drawable *drawable)
 {
-    macdrv_view view;
-    RECT view_rect;
-    CGLPBufferObj pbuffer;
+    GLint enabled;
 
-    if (read)
+    TRACE("context %p, drawable %s\n", context, debugstr_opengl_drawable(drawable));
+
+    if (drawable && drawable->client)
     {
-        if (context->read_hwnd) NtUserGetClientRect(context->read_hwnd, &view_rect, NtUserGetDpiForWindow(context->read_hwnd));
-        view = context->read_view;
-        pbuffer = context->read_pbuffer;
-    }
-    else
-    {
-        if (context->draw_hwnd) NtUserGetClientRect(context->draw_hwnd, &view_rect, NtUserGetDpiForWindow(context->draw_hwnd));
-        view = context->draw_view;
-        pbuffer = context->draw_pbuffer;
+        struct macdrv_client_surface *surface = impl_from_client_surface(drawable->client);
+        RECT rect = surface->client.virtual_rect;
+        macdrv_make_context_current(context->context, surface->cocoa_view, cgrect_from_rect(rect));
+        return;
     }
 
-    if (view || !pbuffer)
-        macdrv_make_context_current(context->context, view, cgrect_from_rect(view_rect));
-    else
-    {
-        GLint enabled;
+    if (CGLIsEnabled(context->base.host_context, kCGLCESurfaceBackingSize, &enabled) != kCGLNoError) enabled = 0;
+    if (enabled) CGLDisable(context->base.host_context, kCGLCESurfaceBackingSize);
+    macdrv_make_context_current(context->context, NULL, CGRectNull);
 
-        if (CGLIsEnabled(context->cglcontext, kCGLCESurfaceBackingSize, &enabled) == kCGLNoError && enabled)
-            CGLDisable(context->cglcontext, kCGLCESurfaceBackingSize);
-        CGLSetPBuffer(context->cglcontext, pbuffer, context->draw_pbuffer_face, context->draw_pbuffer_level, 0);
-        CGLSetCurrentContext(context->cglcontext);
+    if (drawable)
+    {
+        struct gl_drawable *gl = impl_from_opengl_drawable(drawable);
+        CGLSetPBuffer(context->base.host_context, gl->pbuffer, context->draw_pbuffer_face, context->draw_pbuffer_level, 0);
     }
 }
 
@@ -1531,7 +1479,7 @@ static BOOL set_swap_interval(struct macdrv_context *context, long interval)
 {
     CGLError err;
 
-    if (!allow_vsync || !context->draw_hwnd) interval = 0;
+    if (!allow_vsync || !context->base.draw->client) interval = 0;
 
     if (interval < 0) interval = -interval;
     if (context->swap_interval == interval) return TRUE;
@@ -1539,10 +1487,10 @@ static BOOL set_swap_interval(struct macdrv_context *context, long interval)
     /* In theory, for single-buffered contexts, there's no such thing as a swap
        so the swap interval shouldn't matter.  But OS X will synchronize flushes
        of single-buffered contexts if the interval is set to non-zero. */
-    if (interval && !pixel_formats[context->format - 1].double_buffer)
+    if (interval && !pixel_formats[context->base.format - 1].double_buffer)
         interval = 0;
 
-    err = CGLSetParameter(context->cglcontext, kCGLCPSwapInterval, (GLint*)&interval);
+    err = CGLSetParameter(context->base.host_context, kCGLCPSwapInterval, (GLint*)&interval);
     if (err != kCGLNoError)
         WARN("CGLSetParameter(kCGLCPSwapInterval) failed; error %d %s\n", err, CGLErrorString(err));
     context->swap_interval = interval;
@@ -1976,15 +1924,12 @@ static BOOL query_renderer_integer(CGLRendererInfoObj renderer_info, GLint rende
 static void macdrv_glCopyColorTable(GLenum target, GLenum internalformat, GLint x, GLint y,
                                     GLsizei width)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
+    struct opengl_drawable *draw = context->base.draw, *read = context->base.read;
 
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, TRUE);
-
+    if (draw != read) macdrv_context_select_drawable(context, read);
     pglCopyColorTable(target, internalformat, x, y, width);
-
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, FALSE);
+    if (draw != read) macdrv_context_select_drawable(context, draw);
 }
 
 
@@ -1999,27 +1944,28 @@ static void macdrv_glCopyColorTable(GLenum target, GLenum internalformat, GLint 
  */
 static void macdrv_glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
+    struct opengl_drawable *draw = context->base.draw, *read = context->base.read;
 
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, TRUE);
-
+    if (draw != read) macdrv_context_select_drawable(context, read);
     pglCopyPixels(x, y, width, height, type);
-
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, FALSE);
+    if (draw != read) macdrv_context_select_drawable(context, draw);
 }
 
 static void macdrv_surface_flush(struct opengl_drawable *base, UINT flags)
 {
-    struct macdrv_client_surface *client = impl_from_client_surface(base->client);
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
 
     TRACE("%s flags %#x\n", debugstr_opengl_drawable(base), flags);
 
     if (!context) return;
     if (flags & GL_FLUSH_INTERVAL) set_swap_interval(context, base->interval);
-    if (flags & GL_FLUSH_UPDATED) make_context_current(context, context->read_view == client->cocoa_view);
+    if (flags & GL_FLUSH_UPDATED) macdrv_context_select_drawable(context, base);
+    if (flags & GL_FLUSH_PRESENT)
+    {
+        macdrv_flush_opengl_context(context->context);
+        client_surface_present(base->client);
+    }
 }
 
 
@@ -2055,15 +2001,12 @@ static const GLubyte *macdrv_glGetString(GLenum name)
 static void macdrv_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                                 GLenum format, GLenum type, void *pixels)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
+    struct opengl_drawable *draw = context->base.draw, *read = context->base.read;
 
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, TRUE);
-
+    if (draw != read) macdrv_context_select_drawable(context, read);
     pglReadPixels(x, y, width, height, format, type, pixels);
-
-    if (context->read_view || context->read_pbuffer)
-        make_context_current(context, FALSE);
+    if (draw != read) macdrv_context_select_drawable(context, draw);
 }
 
 
@@ -2074,17 +2017,16 @@ static void macdrv_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
  */
 static UINT macdrv_pbuffer_bind(HDC hdc, struct opengl_drawable *base, GLenum source)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
     struct gl_drawable *gl = impl_from_opengl_drawable(base);
     CGLPBufferObj pbuffer = gl->pbuffer;
     CGLError err;
 
     TRACE("hdc %p drawable %s source 0x%x\n", hdc, debugstr_opengl_drawable(base), source);
 
-    if (!context->draw_view && context->draw_pbuffer == pbuffer && source != GL_NONE)
-        funcs->p_glFlush();
+    if (context->base.draw == base && source != GL_NONE) funcs->p_glFlush();
 
-    err = CGLTexImagePBuffer(context->cglcontext, pbuffer, source);
+    err = CGLTexImagePBuffer(context->base.host_context, pbuffer, source);
     if (err != kCGLNoError)
     {
         WARN("CGLTexImagePBuffer failed with err %d %s\n", err, CGLErrorString(err));
@@ -2100,16 +2042,15 @@ static UINT macdrv_pbuffer_bind(HDC hdc, struct opengl_drawable *base, GLenum so
  *
  * WGL_ARB_create_context: wglCreateContextAttribsARB
  */
-static BOOL macdrv_context_create(int format, void *shared, const int *attrib_list, void **private)
+static struct opengl_context *macdrv_context_create(int format, struct opengl_context *share, const int *attrib_list, BOOL *shared)
 {
-    struct macdrv_context *share_context = shared;
+    CGLContextObj host_share = share ? share->host_context : NULL;
     struct macdrv_context *context;
     const int *iptr;
     int major = 1, minor = 0, profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB, flags = 0;
     BOOL core = FALSE;
-    GLint renderer_id = 0;
 
-    TRACE("format %d, share_context %p, attrib_list %p\n", format, share_context, attrib_list);
+    TRACE("format %d, share %p, attrib_list %p\n", format, share, attrib_list);
 
     for (iptr = attrib_list; iptr && *iptr; iptr += 2)
     {
@@ -2145,16 +2086,24 @@ static BOOL macdrv_context_create(int format, void *shared, const int *attrib_li
                 {
                     WARN("WGL_CONTEXT_PROFILE_MASK_ARB bits %#x invalid\n", value);
                     RtlSetLastWin32Error(ERROR_INVALID_PROFILE_ARB);
-                    return FALSE;
+                    return NULL;
                 }
+                core = value == WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
                 profile = value;
                 break;
 
             default:
                 WARN("Unknown attribute %s.\n", debugstr_attrib(attr, value));
                 RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
-                return FALSE;
+                return NULL;
         }
+    }
+
+    if (major > gl_info.max_major || (major == gl_info.max_major && minor > gl_info.max_minor))
+    {
+        WARN("Profile version %u.%u not supported\n", major, minor);
+        RtlSetLastWin32Error(ERROR_INVALID_VERSION_ARB);
+        return NULL;
     }
 
     if ((major == 3 && (minor == 2 || minor == 3)) ||
@@ -2164,66 +2113,57 @@ static BOOL macdrv_context_create(int format, void *shared, const int *attrib_li
         {
             WARN("OS X only supports forward-compatible 3.2+ contexts\n");
             RtlSetLastWin32Error(ERROR_INVALID_VERSION_ARB);
-            return FALSE;
+            return NULL;
         }
         if (profile != WGL_CONTEXT_CORE_PROFILE_BIT_ARB)
         {
             WARN("Compatibility profiles for GL version >= 3.2 not supported\n");
             RtlSetLastWin32Error(ERROR_INVALID_PROFILE_ARB);
-            return FALSE;
-        }
-        if (major > gl_info.max_major ||
-            (major == gl_info.max_major && minor > gl_info.max_minor))
-        {
-            WARN("This GL implementation does not support the requested GL version %u.%u\n",
-                 major, minor);
-            RtlSetLastWin32Error(ERROR_INVALID_PROFILE_ARB);
-            return FALSE;
+            return NULL;
         }
         core = TRUE;
-    }
-    else if (major >= 3)
-    {
-        WARN("Profile version %u.%u not supported\n", major, minor);
-        RtlSetLastWin32Error(ERROR_INVALID_VERSION_ARB);
-        return FALSE;
     }
     else if (major < 1 || (major == 1 && (minor < 0 || minor > 5)) ||
              (major == 2 && (minor < 0 || minor > 1)))
     {
         WARN("Invalid GL version requested\n");
         RtlSetLastWin32Error(ERROR_INVALID_VERSION_ARB);
-        return FALSE;
+        return NULL;
     }
     if (!core && flags & WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB)
     {
         WARN("Forward compatible context requested for GL version < 3\n");
         RtlSetLastWin32Error(ERROR_INVALID_VERSION_ARB);
-        return FALSE;
+        return NULL;
     }
 
-    if (!(context = calloc(1, sizeof(*context)))) return FALSE;
+    if (share && macdrv_context_from_opengl_context(share)->core != core)
+    {
+        WARN("Cannot share core context with compatibility context\n");
+        host_share = NULL;
+        *shared = FALSE;
+    }
 
-    context->format = format;
-    context->renderer_id = renderer_id;
-    if (!create_context(context, share_context ? share_context->cglcontext : NULL, major))
+    if (!(context = calloc(1, sizeof(*context)))) return NULL;
+    context->core = core;
+
+    if (!create_context(context, format, host_share, shared))
     {
         free(context);
-        return FALSE;
+        return NULL;
     }
 
-    *private = context;
-    return TRUE;
+    return &context->base;
 }
 
-static BOOL macdrv_pbuffer_create(HDC hdc, int format, BOOL largest, GLenum texture_format, GLenum texture_target,
-                                  GLint max_level, GLsizei *width, GLsizei *height, struct opengl_drawable **drawable)
+static BOOL macdrv_pbuffer_create(HDC hdc, int format, SIZE size, BOOL largest, GLenum texture_format, GLenum texture_target,
+                                  GLint max_level, struct opengl_drawable **drawable)
 {
     struct gl_drawable *gl;
     CGLError err;
 
-    TRACE("hdc %p, format %d, largest %u, texture_format %#x, texture_target %#x, max_level %#x, width %d, height %d, drawable %p\n",
-          hdc, format, largest, texture_format, texture_target, max_level, *width, *height, drawable);
+    TRACE("hdc %p, format %d, size %s, largest %u, texture_format %#x, texture_target %#x, max_level %#x, drawable %p\n",
+          hdc, format, wine_dbgstr_point((POINT *)&size), largest, texture_format, texture_target, max_level, drawable);
 
     if (!texture_target || !texture_format)
     {
@@ -2232,9 +2172,9 @@ static BOOL macdrv_pbuffer_create(HDC hdc, int format, BOOL largest, GLenum text
         texture_format = GL_RGB;
     }
 
-    if (!(gl = opengl_drawable_create(sizeof(*gl), &macdrv_pbuffer_funcs, format, NULL))) return FALSE;
+    if (!(gl = opengl_drawable_create(&macdrv_pbuffer_funcs, format, NULL, &size))) return FALSE;
 
-    err = CGLCreatePBuffer(*width, *height, texture_target, texture_format, max_level, &gl->pbuffer);
+    err = CGLCreatePBuffer(size.cx, size.cy, texture_target, texture_format, max_level, &gl->pbuffer);
     if (err != kCGLNoError)
     {
         WARN("CGLCreatePBuffer failed; err %d %s\n", err, CGLErrorString(err));
@@ -2256,55 +2196,16 @@ static void macdrv_pbuffer_destroy(struct opengl_drawable *base)
     CGLReleasePBuffer(gl->pbuffer);
 }
 
-static BOOL macdrv_make_current(struct opengl_drawable *draw_base, struct opengl_drawable *read_base, void *private)
+static BOOL macdrv_context_activate(struct opengl_context *base, struct opengl_drawable *draw, struct opengl_drawable *read)
 {
-    struct gl_drawable *draw = impl_from_opengl_drawable(draw_base), *read = impl_from_opengl_drawable(read_base);
-    struct macdrv_context *context = private;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(base);
 
-    TRACE("draw %s, read %s, context %p\n", debugstr_opengl_drawable(draw_base), debugstr_opengl_drawable(read_base), private);
+    TRACE("context %p, draw %s, read %s\n", context, debugstr_opengl_drawable(draw), debugstr_opengl_drawable(read));
 
-    if (!private)
-    {
-        macdrv_make_context_current(NULL, NULL, CGRectNull);
-        NtCurrentTeb()->glReserved2 = NULL;
-        return TRUE;
-    }
+    if (NtCurrentTeb()->glReserved2) funcs->p_glFlush();
 
-    context->read_hwnd = context->draw_hwnd = NULL;
-    context->read_view = context->draw_view = NULL;
-    context->read_pbuffer = context->draw_pbuffer = NULL;
-
-    if (draw->base.client)
-    {
-        struct macdrv_client_surface *client = impl_from_client_surface(draw->base.client);
-        context->draw_hwnd = draw->base.client->hwnd;
-        context->draw_view = client->cocoa_view;
-    }
-    else
-    {
-        context->draw_pbuffer = draw->pbuffer;
-    }
-
-    if (read != draw)
-    {
-        if (read->base.client)
-        {
-            struct macdrv_client_surface *client = impl_from_client_surface(read->base.client);
-            context->read_hwnd = read->base.client->hwnd;
-            context->read_view = client->cocoa_view;
-        }
-        else
-        {
-            context->read_pbuffer = read->pbuffer;
-        }
-    }
-
-    TRACE("making context current with draw_view %p draw_pbuffer %p read_view %p read_pbuffer %p format %u\n",
-          context->draw_view, context->draw_pbuffer, context->read_view, context->read_pbuffer, context->format);
-
-    make_context_current(context, FALSE);
-    NtCurrentTeb()->glReserved2 = context;
-
+    macdrv_context_select_drawable(context, draw);
+    CGLSetCurrentContext(context->base.host_context);
     return TRUE;
 }
 
@@ -2317,7 +2218,7 @@ static BOOL macdrv_make_current(struct opengl_drawable *draw_base, struct opengl
 static BOOL macdrv_wglQueryCurrentRendererIntegerWINE(GLenum attribute, GLuint *value)
 {
     BOOL ret = FALSE;
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
     CGLPixelFormatObj pixel_format;
     CGLError err;
     GLint virtual_screen;
@@ -2328,7 +2229,7 @@ static BOOL macdrv_wglQueryCurrentRendererIntegerWINE(GLenum attribute, GLuint *
     GLint renderer;
 
     TRACE("context %p/%p/%p attribute 0x%04x value %p\n", context, (context ? context->context : NULL),
-          (context ? context->cglcontext : NULL), attribute, value);
+          (context ? context->base.host_context : NULL), attribute, value);
 
     if (attribute == WGL_RENDERER_VERSION_WINE)
     {
@@ -2338,8 +2239,8 @@ static BOOL macdrv_wglQueryCurrentRendererIntegerWINE(GLenum attribute, GLuint *
         return TRUE;
     }
 
-    pixel_format = CGLGetPixelFormat(context->cglcontext);
-    err = CGLGetVirtualScreen(context->cglcontext, &virtual_screen);
+    pixel_format = CGLGetPixelFormat(context->base.host_context);
+    err = CGLGetVirtualScreen(context->base.host_context, &virtual_screen);
     if (err != kCGLNoError)
     {
         WARN("CGLGetVirtualScreen failed: %d %s\n", err, CGLErrorString(err));
@@ -2397,10 +2298,10 @@ static BOOL macdrv_wglQueryCurrentRendererIntegerWINE(GLenum attribute, GLuint *
 static const char *macdrv_wglQueryCurrentRendererStringWINE(GLenum attribute)
 {
     const char* ret = NULL;
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
 
     TRACE("context %p/%p/%p attribute 0x%04x\n", context, (context ? context->context : NULL),
-          (context ? context->cglcontext : NULL), attribute);
+          (context ? context->base.host_context : NULL), attribute);
 
     switch (attribute)
     {
@@ -2521,75 +2422,27 @@ done:
 
 static BOOL macdrv_pbuffer_updated(HDC hdc, struct opengl_drawable *base, GLenum cube_face, GLint mipmap_level)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
-    struct gl_drawable *gl = impl_from_opengl_drawable(base);
-    CGLPBufferObj pbuffer = gl->pbuffer;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
 
     TRACE("hdc %p drawable %s cube_face %#x mipmap_level %d\n", hdc, debugstr_opengl_drawable(base), cube_face, mipmap_level);
 
-    if (context && context->draw_pbuffer == pbuffer)
+    if (context && context->base.draw == base)
     {
         context->draw_pbuffer_face = cube_face;
         context->draw_pbuffer_level = mipmap_level;
-        make_context_current(context, FALSE);
+        macdrv_context_select_drawable(context, base);
     }
 
     return GL_TRUE;
 }
 
-static void register_extension(const char *ext)
+static void macdrv_init_extensions(struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT])
 {
-    if (gl_info.wglExtensions[0])
-        strcat(gl_info.wglExtensions, " ");
-    strcat(gl_info.wglExtensions, ext);
-
-    TRACE("'%s'\n", ext);
-}
-
-static const char *macdrv_init_wgl_extensions(struct opengl_funcs *funcs)
-{
-    /*
-     * ARB Extensions
-     */
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_color_buffer_float", (GLubyte*)gl_info.glExtensions))
-    {
-        register_extension("WGL_ARB_pixel_format_float");
-        register_extension("WGL_ATI_pixel_format_float");
-    }
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_multisample", (GLubyte*)gl_info.glExtensions))
-        register_extension("WGL_ARB_multisample");
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
-        register_extension("WGL_ARB_framebuffer_sRGB");
-
-    if (gluCheckExtension((GLubyte*)"GL_APPLE_pixel_buffer", (GLubyte*)gl_info.glExtensions))
-    {
-        if (gluCheckExtension((GLubyte*)"GL_ARB_texture_rectangle", (GLubyte*)gl_info.glExtensions) ||
-            gluCheckExtension((GLubyte*)"GL_EXT_texture_rectangle", (GLubyte*)gl_info.glExtensions))
-            register_extension("WGL_NV_render_texture_rectangle");
-    }
-
-    /* Presumably identical to [W]GL_ARB_framebuffer_sRGB, above, but clients may
-       check for either, so register them separately. */
-    if (gluCheckExtension((GLubyte*)"GL_EXT_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
-        register_extension("WGL_EXT_framebuffer_sRGB");
-
-    if (gluCheckExtension((GLubyte*)"GL_EXT_packed_float", (GLubyte*)gl_info.glExtensions))
-        register_extension("WGL_EXT_pixel_format_packed_float");
-
-    /*
-     * WINE-specific WGL Extensions
-     */
-
-    register_extension("WGL_WINE_query_renderer");
+    extensions[WGL_WINE_query_renderer] = 1;
     funcs->p_wglQueryCurrentRendererIntegerWINE = macdrv_wglQueryCurrentRendererIntegerWINE;
     funcs->p_wglQueryCurrentRendererStringWINE = macdrv_wglQueryCurrentRendererStringWINE;
     funcs->p_wglQueryRendererIntegerWINE = macdrv_wglQueryRendererIntegerWINE;
     funcs->p_wglQueryRendererStringWINE = macdrv_wglQueryRendererStringWINE;
-
-    return gl_info.wglExtensions;
 }
 
 /**********************************************************************
@@ -2730,14 +2583,15 @@ static BOOL macdrv_describe_pixel_format(int format, struct wgl_pixel_format *de
     return TRUE;
 }
 
-static BOOL macdrv_context_destroy(void *private)
+static BOOL macdrv_context_destroy(struct opengl_context *base)
 {
-    struct macdrv_context *context = private;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(base);
 
-    TRACE("deleting context %p/%p/%p\n", context, context->context, context->cglcontext);
-
+    TRACE("deleting context %p/%p/%p\n", context, context->context, context->base.host_context);
     macdrv_dispose_opengl_context(context->context);
+    CGLReleaseContext(context->base.host_context);
     free(context);
+
     return TRUE;
 }
 
@@ -2755,12 +2609,27 @@ static void *macdrv_get_proc_address(const char *name)
 
 static BOOL macdrv_surface_swap(struct opengl_drawable *base)
 {
-    struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+    struct macdrv_context *context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2);
 
     TRACE("%s context %p/%p/%p\n", debugstr_opengl_drawable(base), context, (context ? context->context : NULL),
-          (context ? context->cglcontext : NULL));
+          (context ? context->base.host_context : NULL));
 
-    macdrv_flush_opengl_context(context->context);
+    if (context)
+    {
+        macdrv_context_select_drawable(context, base);
+        macdrv_flush_opengl_context(context->context);
+    }
+    client_surface_present(base->client);
+    return TRUE;
+}
+
+static BOOL macdrv_cleanup_thread(void)
+{
+    struct macdrv_context *context;
+
+    if (!(context = macdrv_context_from_opengl_context(NtCurrentTeb()->glReserved2))) return TRUE;
+    macdrv_context_select_drawable(context, NULL);
+    CGLSetCurrentContext(NULL);
     return TRUE;
 }
 
@@ -2769,18 +2638,20 @@ static const struct opengl_driver_funcs macdrv_driver_funcs =
     .p_get_proc_address = macdrv_get_proc_address,
     .p_init_pixel_formats = macdrv_init_pixel_formats,
     .p_describe_pixel_format = macdrv_describe_pixel_format,
-    .p_init_wgl_extensions = macdrv_init_wgl_extensions,
+    .p_init_extensions = macdrv_init_extensions,
     .p_surface_create = macdrv_surface_create,
     .p_context_create = macdrv_context_create,
     .p_context_destroy = macdrv_context_destroy,
-    .p_make_current = macdrv_make_current,
+    .p_context_activate = macdrv_context_activate,
     .p_pbuffer_create = macdrv_pbuffer_create,
     .p_pbuffer_updated = macdrv_pbuffer_updated,
     .p_pbuffer_bind = macdrv_pbuffer_bind,
+    .p_cleanup_thread = macdrv_cleanup_thread,
 };
 
 static const struct opengl_drawable_funcs macdrv_surface_funcs =
 {
+    .size = sizeof(struct gl_drawable),
     .destroy = macdrv_surface_destroy,
     .flush = macdrv_surface_flush,
     .swap = macdrv_surface_swap,
@@ -2788,5 +2659,6 @@ static const struct opengl_drawable_funcs macdrv_surface_funcs =
 
 static const struct opengl_drawable_funcs macdrv_pbuffer_funcs =
 {
+    .size = sizeof(struct gl_drawable),
     .destroy = macdrv_pbuffer_destroy,
 };

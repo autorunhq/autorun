@@ -722,6 +722,7 @@ static void test_PropVariantCompareEx(void)
     SAFEARRAY emptysafearray;
     unsigned char bytevector1[] = {1,2,3};
     unsigned char bytevector2[] = {4,5,6};
+    WCHAR buff[100];
 
     PropVariantInit(&empty);
     PropVariantInit(&null);
@@ -880,6 +881,12 @@ static void test_PropVariantCompareEx(void)
 
     res = PropVariantCompareEx(&clsid, &clsid_null, 0, PVCF_TREATEMPTYASGREATERTHAN);
     ok(res == -1, "res=%i\n", res);
+
+    var1.vt = VT_LPWSTR;
+    var1.pwszVal = buff;
+    wcscpy(buff, L"{deadbeef-dead-beef-dead-beefcafebabe}");
+    res = PropVariantCompareEx(&clsid, &var1, 0, 0);
+    ok(res == 0, "res=%i\n", res);
 
     /* VT_R4/VT_R8 */
     res = PropVariantCompareEx(&r4_0, &r8_0, 0, 0);
@@ -3102,7 +3109,9 @@ static void test_PropertySystem(void)
         {&PKEY_Devices_ContainerId, L"System.Devices.ContainerId", VT_CLSID},
         {&PKEY_Devices_InterfaceClassGuid, L"System.Devices.InterfaceClassGuid", VT_CLSID, TYPE_E_ELEMENTNOTFOUND /* Win7 */},
         {&PKEY_Devices_HardwareIds, L"System.Devices.HardwareIds", VT_VECTOR | VT_LPWSTR, TYPE_E_ELEMENTNOTFOUND /* Win7 */},
-        {&PKEY_Devices_ClassGuid, L"System.Devices.ClassGuid", VT_CLSID, TYPE_E_ELEMENTNOTFOUND /* <= Win8 */}
+        {&PKEY_Devices_ClassGuid, L"System.Devices.ClassGuid", VT_CLSID, TYPE_E_ELEMENTNOTFOUND /* <= Win8 */},
+        {&PKEY_Devices_ModelName, L"System.Devices.ModelName", VT_LPWSTR},
+        {&PKEY_Devices_Manufacturer, L"System.Devices.Manufacturer", VT_LPWSTR},
     };
     IPropertySystem *system;
     HRESULT hr;

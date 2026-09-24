@@ -221,7 +221,6 @@ static void hid_device_queue_input( struct phys_device *pdo, HID_XFER_PACKET *pa
     HIDP_COLLECTION_DESC *desc = pdo->collection_desc;
     ULONG size, report_len = polled ? packet->reportBufferLen : desc->InputLength;
     struct hid_report *last_report, *report;
-    BOOL steam_overlay_open = FALSE;
     struct hid_queue *queue;
     LIST_ENTRY completed, *entry;
     KIRQL irql;
@@ -229,10 +228,7 @@ static void hid_device_queue_input( struct phys_device *pdo, HID_XFER_PACKET *pa
 
     TRACE( "pdo %p, packet %p\n", pdo, packet );
 
-    if (WaitForSingleObject(pdo->base.steam_overlay_event, 0) == WAIT_OBJECT_0) /* steam overlay is open */
-        steam_overlay_open = TRUE;
-
-    if (IsEqualGUID( pdo->base.class_guid, &GUID_DEVINTERFACE_HID ) && !steam_overlay_open)
+    if (IsEqualGUID( pdo->base.class_guid, &GUID_DEVINTERFACE_HID ))
     {
         struct hid_packet *hid;
 
@@ -382,8 +378,6 @@ struct device_strings
 
 static const struct device_strings device_strings[] =
 {
-    /* CW-Bug-Id: #23185 Emulate Steam Input native hooks for native SDL */
-    { .id = L"VID_28DE&PID_11FF", .product = L"Controller (XBOX 360 For Windows)" },
     /* Microsoft controllers */
     { .id = L"VID_045E&PID_028E", .product = L"Controller (XBOX 360 For Windows)" },
     { .id = L"VID_045E&PID_028F", .product = L"Controller (XBOX 360 For Windows)" },
@@ -422,7 +416,7 @@ static const WCHAR *find_device_string( const WCHAR *device_id, ULONG index )
 struct completion_params
 {
     HID_XFER_PACKET packet;
-    ULONG padding;
+    ULONG report_len;
     IRP *irp;
 };
 
@@ -434,7 +428,7 @@ static NTSTATUS CALLBACK xfer_completion( DEVICE_OBJECT *device, IRP *irp, void 
     TRACE( "device %p, irp %p, context %p\n", device, irp, context );
 
     orig_irp->IoStatus = irp->IoStatus;
-    orig_irp->IoStatus.Information -= params->padding;
+    if (params->report_len) orig_irp->IoStatus.Information = params->report_len;
     IoCompleteRequest( orig_irp, IO_NO_INCREMENT );
 
     free( params );
@@ -504,7 +498,8 @@ static NTSTATUS hid_device_xfer_report( struct phys_device *pdo, ULONG code, IRP
                                              sizeof(params->packet), TRUE, NULL, NULL );
         break;
     case IOCTL_HID_WRITE_REPORT:
-        params->padding = 1 - offset;
+        /* WriteFile returns the output report length, not the minidriver count */
+        params->report_len = report_len;
         /* fallthrough */
     case IOCTL_HID_SET_FEATURE:
     case IOCTL_HID_SET_OUTPUT_REPORT:

@@ -173,10 +173,8 @@ enum d3dx_pixel_format_id
 {
     D3DX_PIXEL_FORMAT_B8G8R8_UNORM,
     D3DX_PIXEL_FORMAT_B8G8R8A8_UNORM,
-    D3DX_PIXEL_FORMAT_B8G8R8A8_UNORM_SRGB,
     D3DX_PIXEL_FORMAT_B8G8R8X8_UNORM,
     D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM,
-    D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM_SRGB,
     D3DX_PIXEL_FORMAT_R8G8B8X8_UNORM,
     D3DX_PIXEL_FORMAT_B5G6R5_UNORM,
     D3DX_PIXEL_FORMAT_B5G5R5X1_UNORM,
@@ -200,13 +198,10 @@ enum d3dx_pixel_format_id
     D3DX_PIXEL_FORMAT_L8_UNORM,
     D3DX_PIXEL_FORMAT_L16_UNORM,
     D3DX_PIXEL_FORMAT_DXT1_UNORM,
-    D3DX_PIXEL_FORMAT_BC1_UNORM_SRGB,
     D3DX_PIXEL_FORMAT_DXT2_UNORM,
     D3DX_PIXEL_FORMAT_DXT3_UNORM,
-    D3DX_PIXEL_FORMAT_BC2_UNORM_SRGB,
     D3DX_PIXEL_FORMAT_DXT4_UNORM,
     D3DX_PIXEL_FORMAT_DXT5_UNORM,
-    D3DX_PIXEL_FORMAT_BC3_UNORM_SRGB,
     D3DX_PIXEL_FORMAT_BC4_UNORM,
     D3DX_PIXEL_FORMAT_BC4_SNORM,
     D3DX_PIXEL_FORMAT_BC5_UNORM,
@@ -216,7 +211,6 @@ enum d3dx_pixel_format_id
     D3DX_PIXEL_FORMAT_R16G16B16A16_FLOAT,
     D3DX_PIXEL_FORMAT_R32_FLOAT,
     D3DX_PIXEL_FORMAT_R32G32_FLOAT,
-    D3DX_PIXEL_FORMAT_R11G11B10_FLOAT,
     D3DX_PIXEL_FORMAT_R32G32B32_FLOAT,
     D3DX_PIXEL_FORMAT_R32G32B32A32_FLOAT,
     D3DX_PIXEL_FORMAT_P1_UINT,
@@ -252,8 +246,8 @@ enum conversion_flag
 {
     CONV_FLAG_PM_ALPHA_IN  = 0x01,
     CONV_FLAG_PM_ALPHA_OUT = 0x02,
-    CONV_FLAG_GAMMA_2_2_IN  = 0x04,
-    CONV_FLAG_GAMMA_2_2_OUT = 0x08,
+    CONV_FLAG_SRGB_IN  = 0x04,
+    CONV_FLAG_SRGB_OUT = 0x08,
 };
 
 enum component_type
@@ -280,7 +274,6 @@ enum format_flag
     FMT_FLAG_DXGI     = 0x08,
     /* Formats with premultiplied alpha, i.e DXT2/DXT4. */
     FMT_FLAG_PM_ALPHA = 0x10,
-    FMT_FLAG_SRGB     = 0x20,
 };
 
 struct pixel_format_desc {
@@ -433,6 +426,8 @@ HRESULT d3dx_calculate_pixels_size(enum d3dx_pixel_format_id format, uint32_t wi
     uint32_t *pitch, uint32_t *size);
 uint32_t d3dx_calculate_layer_pixels_size(enum d3dx_pixel_format_id format, uint32_t width, uint32_t height,
         uint32_t depth, uint32_t mip_levels);
+HRESULT d3dx_init_dds_header(struct dds_header *header, enum d3dx_resource_type resource_type,
+        enum d3dx_pixel_format_id format, const struct volume *size, uint32_t mip_levels);
 const char *debug_d3dx_image_file_format(enum d3dx_image_file_format format);
 HRESULT d3dx_pixels_init(const void *data, uint32_t row_pitch, uint32_t slice_pitch,
         const PALETTEENTRY *palette, enum d3dx_pixel_format_id format, uint32_t left, uint32_t top, uint32_t right,
@@ -456,15 +451,10 @@ struct d3dx_buffer_wrapper
 {
     HRESULT (*d3dx_buffer_create)(unsigned int size, struct d3dx_buffer *d3dx_buffer);
     void (*d3dx_buffer_destroy)(struct d3dx_buffer *d3dx_buffer);
-    unsigned int d3dx_version;
 };
 
 HRESULT d3dx_save_pixels_to_memory(struct d3dx_pixels *src_pixels, const struct pixel_format_desc *src_fmt_desc,
-        enum d3dx_image_file_format file_format, enum d3dx_pixel_format_id dst_format,
-        const struct d3dx_buffer_wrapper *wrapper, struct d3dx_buffer *dst_buffer);
-HRESULT d3dx_create_dds_file_blob(enum d3dx_pixel_format_id format, const PALETTEENTRY *palette,
-        enum d3dx_resource_type resource_type, const struct volume *size, uint32_t mip_levels, uint32_t layers,
-        const struct d3dx_buffer_wrapper *wrapper, struct d3dx_buffer *dst_buffer);
+        enum d3dx_image_file_format file_format, const struct d3dx_buffer_wrapper *wrapper, struct d3dx_buffer *dst_buffer);
 
 /* Compatible with D3D10_SUBRESOURCE_DATA and D3D11_SUBRESOURCE_DATA. */
 struct d3dx_subresource_data
@@ -481,7 +471,6 @@ HRESULT d3dx_create_subresource_data_for_texture(uint32_t width, uint32_t height
 /*
  * File/resource loading helper functions.
  */
-HRESULT d3dx_write_buffer_to_file(const WCHAR *dst_filename, void *buffer, unsigned int buffer_size);
 HRESULT d3dx_load_file(const WCHAR *path, void **data, uint32_t *size);
 HRESULT d3dx_load_resource_init_a(HMODULE module, const char *resource, HRSRC *rsrc);
 HRESULT d3dx_load_resource_init_w(HMODULE module, const WCHAR *resource, HRSRC *rsrc);
@@ -489,6 +478,4 @@ HRESULT d3dx_load_resource(HMODULE module, HRSRC rsrc, void **data, uint32_t *si
 HRESULT d3dx_load_resource_a(HMODULE module, const char *resource, void **data, uint32_t *size);
 HRESULT d3dx_load_resource_w(HMODULE module, const WCHAR *resource, void **data, uint32_t *size);
 
-/* debug helpers */
-const char *debug_d3dx_image_file_format(enum d3dx_image_file_format format);
 #endif /* __WINE_D3DX_HELPERS_H */

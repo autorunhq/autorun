@@ -30,7 +30,6 @@
 #include <sys/types.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winnt.h"
@@ -52,20 +51,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(resource);
 static inline BOOL is_data_file_module( HMODULE hmod )
 {
     return (ULONG_PTR)hmod & 1;
-}
-
-
-/**********************************************************************
- *  push_language
- *
- * push a language in the list of languages to try
- */
-static inline int push_language( WORD *list, int pos, WORD lang )
-{
-    int i;
-    for (i = 0; i < pos; i++) if (list[i] == lang) return pos;
-    list[pos++] = lang;
-    return pos;
 }
 
 
@@ -176,8 +161,8 @@ static NTSTATUS find_entry( HMODULE hmod, const LDR_RESOURCE_INFO *info,
     ULONG size;
     const void *root;
     const IMAGE_RESOURCE_DIRECTORY *resdirptr;
-    WORD list[9];  /* list of languages to try */
-    int i, pos = 0;
+    LANGID list[128];  /* list of languages to try */
+    ULONG i, count;
 
     root = RtlImageDirectoryEntryToData( hmod, TRUE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &size );
     if (!root) return STATUS_RESOURCE_DATA_NOT_FOUND;
@@ -195,47 +180,9 @@ static NTSTATUS find_entry( HMODULE hmod, const LDR_RESOURCE_INFO *info,
     if (!level--) return STATUS_SUCCESS;
     if (level) return STATUS_INVALID_PARAMETER;  /* level > 3 */
 
-    /* 1. specified language */
-    pos = push_language( list, pos, info->Language );
-
-    /* 2. specified language with neutral sublanguage */
-    pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(info->Language), SUBLANG_NEUTRAL ) );
-
-    /* 3. neutral language with neutral sublanguage */
-    pos = push_language( list, pos, MAKELANGID( LANG_NEUTRAL, SUBLANG_NEUTRAL ) );
-
-    /* if no explicitly specified language, try some defaults */
-    if (PRIMARYLANGID(info->Language) == LANG_NEUTRAL)
-    {
-        LANGID user_lang, user_neutral_lang, system_lang;
-
-        get_resource_lcids( &user_lang, &user_neutral_lang, &system_lang );
-
-        /* user defaults, unless SYS_DEFAULT sublanguage specified  */
-        if (SUBLANGID(info->Language) != SUBLANG_SYS_DEFAULT)
-        {
-            /* 4. current thread locale language */
-            pos = push_language( list, pos, LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale) );
-
-            /* 5. user locale language */
-            pos = push_language( list, pos, user_lang );
-
-            /* 6. user locale language with neutral sublanguage  */
-            pos = push_language( list, pos, user_neutral_lang );
-        }
-
-        /* 7. system locale language */
-        pos = push_language( list, pos, system_lang );
-
-        /* 8. system locale language with neutral sublanguage */
-        pos = push_language( list, pos, PRIMARYLANGID( system_lang ));
-
-        /* 9. English */
-        pos = push_language( list, pos, MAKELANGID( LANG_ENGLISH, SUBLANG_DEFAULT ) );
-    }
-
     resdirptr = *ret;
-    for (i = 0; i < pos; i++)
+    count = get_resource_lcids( list, ARRAY_SIZE(list), info->Language );
+    for (i = 0; i < count; i++)
         if ((*ret = find_entry_by_id( resdirptr, list[i], root, want_dir ))) return STATUS_SUCCESS;
 
     /* if no explicitly specified language, return the first entry */

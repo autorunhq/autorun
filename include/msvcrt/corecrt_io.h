@@ -6,6 +6,7 @@
 #ifndef _IO_DEFINED
 #define _IO_DEFINED
 
+#include <share.h>
 #include <corecrt_wio.h>
 
 #pragma pack(push,8)
@@ -32,7 +33,7 @@ struct _finddata32i64_t {
   __time32_t time_create;
   __time32_t time_access;
   __time32_t time_write;
-  __int64    DECLSPEC_ALIGN(8) size;
+  __int64    _CRT_ALIGN(8) size;
   char       name[260];
 };
 
@@ -50,7 +51,7 @@ struct _finddata64_t {
   __time64_t time_create;
   __time64_t time_access;
   __time64_t time_write;
-  __int64    DECLSPEC_ALIGN(8) size;
+  __int64    _CRT_ALIGN(8) size;
   char       name[260];
 };
 
@@ -99,6 +100,7 @@ _ACRTIMP int      __cdecl _chmod(const char*,int);
 _ACRTIMP int      __cdecl _chsize(int,__msvcrt_long);
 _ACRTIMP int      __cdecl _chsize_s(int,__int64);
 _ACRTIMP int      __cdecl _close(int);
+_ACRTIMP int      __cdecl _commit(int);
 _ACRTIMP int      __cdecl _creat(const char*,int);
 _ACRTIMP int      __cdecl _dup(int);
 _ACRTIMP int      __cdecl _dup2(int,int);

@@ -237,7 +237,7 @@ fail:
     wined3d_mutex_unlock();
     for (j = 0; j < i; ++j)
     {
-        IDXGISurface_Release(surface[i]);
+        IDXGISurface_Release(surface[j]);
     }
     IWineDXGIDeviceParent_Release(dxgi_device_parent);
     return hr;
@@ -462,7 +462,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_swapchain_factory_create_swapchain(IWineDX
         return E_OUTOFMEMORY;
     }
 
-    if (FAILED(hr = d3d11_swapchain_init(object, device, &wined3d_desc)))
+    if (FAILED(hr = d3d11_swapchain_init(object, device, &wined3d_desc, fullscreen_desc)))
     {
         WARN("Failed to initialise swapchain, hr %#lx.\n", hr);
         free(object);

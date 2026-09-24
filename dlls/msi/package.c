@@ -338,10 +338,9 @@ static void MSI_FreePackage( MSIOBJECTHDR *arg)
     msiobj_release( &package->db->hdr );
     free_package_structures(package);
     CloseHandle( package->log_file );
+
     if (package->rpc_server_started)
         RpcServerUnregisterIf(s_IWineMsiRemote_v0_0_s_ifspec, NULL, FALSE);
-    if (rpc_handle)
-        RpcBindingFree(&rpc_handle);
     if (package->custom_server_32_process)
         custom_stop_server(package->custom_server_32_process, package->custom_server_32_pipe);
     if (package->custom_server_64_process)
@@ -526,7 +525,12 @@ static LPWSTR get_fusion_filename(MSIPACKAGE *package)
         if (!RegQueryValueExW(hkey, L"InstallPath", NULL, &type, (BYTE *)path, &size))
         {
             len = lstrlenW(path) + lstrlenW(L"fusion.dll") + 2;
-            if (!(filename = malloc(len * sizeof(WCHAR)))) return NULL;
+            if (!(filename = malloc(len * sizeof(WCHAR))))
+            {
+                RegCloseKey(hkey);
+                RegCloseKey(netsetup);
+                return NULL;
+            }
 
             lstrcpyW(filename, path);
             lstrcatW(filename, L"\\");
@@ -616,29 +620,6 @@ static void set_msi_assembly_prop(MSIPACKAGE *package)
 done:
     free(fusion);
     free(version);
-}
-
-static void fixup_winver(DWORD *verval)
-{
-    static int cached = -1;
-
-    if (cached == -1)
-    {
-        const char *s;
-
-        cached = (s = getenv("STEAM_COMPAT_APP_ID")) &&
-                    (
-                        !strcmp(s, "976730")
-                        || !strcmp(s, "231430")
-                        || !strcmp(s, "1017900")
-                        || !strcmp(s, "285190")
-                        || !strcmp(s, "627270")
-                    );
-        if (cached)
-            ERR("HACK: setting winver 502.\n");
-    }
-    if (!cached) return;
-    if (*verval > 502) *verval = 502;
 }
 
 static VOID set_installer_properties(MSIPACKAGE *package)
@@ -768,7 +749,6 @@ static VOID set_installer_properties(MSIPACKAGE *package)
         verval = 603;
         OSVersion.dwBuildNumber = 9600;
     }
-    fixup_winver(&verval);
     len = swprintf( verstr, ARRAY_SIZE(verstr), L"%u", verval );
     switch (OSVersion.dwPlatformId)
     {

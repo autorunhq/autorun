@@ -81,7 +81,8 @@ static int sock_recv(int fd, void *msg, size_t len, int flags)
     return ret;
 }
 
-static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD security_flags, BOOL check_revocation )
+static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD security_flags, BOOL check_revocation,
+                                  PCCERT_CHAIN_CONTEXT *ret_chain )
 {
     HCERTSTORE store = cert->hCertStore;
     BOOL ret;
@@ -92,6 +93,7 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
     DWORD err = ERROR_SUCCESS;
 
     TRACE("verifying %s\n", debugstr_w( server ));
+    *ret_chain = NULL;
     chainPara.RequestedUsage.Usage.cUsageIdentifier = 1;
     chainPara.RequestedUsage.Usage.rgpszUsageIdentifier = server_auth;
     ret = CertGetCertificateChain( NULL, cert, NULL, store, &chainPara,
@@ -169,7 +171,7 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
                     err = ERROR_WINHTTP_SECURE_INVALID_CERT;
             }
         }
-        CertFreeCertificateChain( chain );
+        *ret_chain = chain;
     }
     else
         err = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
@@ -296,6 +298,7 @@ void netconn_release( struct netconn *conn )
         free(conn->ssl_read_buf);
         free(conn->ssl_write_buf);
         free(conn->extra_buf);
+        CertFreeCertificateChain(conn->chain);
         DeleteSecurityContext(&conn->ssl_ctx);
     }
     if (conn->socket != -1)
@@ -306,25 +309,28 @@ void netconn_release( struct netconn *conn )
     free(conn);
 }
 
-static DWORD netconn_negotiate( struct netconn *conn, WCHAR *hostname, CredHandle *cred_handle,
-                                CtxtHandle *prev_ctx, SecBufferDesc *prev_buf, CtxtHandle *ctx )
+DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD security_flags, CredHandle *cred_handle,
+                              BOOL check_revocation )
 {
     SecBuffer out_buf = {0, SECBUFFER_TOKEN, NULL}, in_bufs[2] = {{0, SECBUFFER_TOKEN}, {0, SECBUFFER_EMPTY}};
     SecBufferDesc out_desc = {SECBUFFER_VERSION, 1, &out_buf}, in_desc = {SECBUFFER_VERSION, 2, in_bufs};
     BYTE *read_buf;
     SIZE_T read_buf_size = 2048;
     ULONG attrs = 0;
+    CtxtHandle ctx;
     SSIZE_T size;
+    const CERT_CONTEXT *cert;
     SECURITY_STATUS status;
+    DWORD res = ERROR_SUCCESS;
 
     const DWORD isc_req_flags = ISC_REQ_ALLOCATE_MEMORY|ISC_REQ_USE_SESSION_KEY|ISC_REQ_CONFIDENTIALITY
         |ISC_REQ_SEQUENCE_DETECT|ISC_REQ_REPLAY_DETECT|ISC_REQ_MANUAL_CRED_VALIDATION;
 
     if (!(read_buf = malloc( read_buf_size ))) return ERROR_OUTOFMEMORY;
 
-    status = InitializeSecurityContextW(cred_handle, prev_ctx, hostname, isc_req_flags, 0, 0, prev_buf, 0,
-            ctx, &out_desc, &attrs, NULL);
-    if (!ctx) ctx = prev_ctx;
+    memset( &ctx, 0, sizeof(ctx) );
+    status = InitializeSecurityContextW(cred_handle, NULL, hostname, isc_req_flags, 0, 0, NULL, 0,
+            &ctx, &out_desc, &attrs, NULL);
 
     assert(status != SEC_E_OK);
 
@@ -337,7 +343,7 @@ static DWORD netconn_negotiate( struct netconn *conn, WCHAR *hostname, CredHandl
             size = sock_send(conn->socket, out_buf.pvBuffer, out_buf.cbBuffer, NULL);
             if(size != out_buf.cbBuffer) {
                 ERR("send failed\n");
-                status = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+                res = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
                 break;
             }
 
@@ -381,73 +387,63 @@ static DWORD netconn_negotiate( struct netconn *conn, WCHAR *hostname, CredHandl
 
         in_bufs[0].cbBuffer += size;
         in_bufs[0].pvBuffer = read_buf;
-        status = InitializeSecurityContextW(cred_handle, ctx, hostname, isc_req_flags, 0, 0, &in_desc,
+        status = InitializeSecurityContextW(cred_handle, &ctx, hostname,  isc_req_flags, 0, 0, &in_desc,
                 0, NULL, &out_desc, &attrs, NULL);
         TRACE( "InitializeSecurityContext ret %#lx\n", status );
-        if(status == SEC_E_OK && in_bufs[1].BufferType == SECBUFFER_EXTRA)
-            FIXME("SECBUFFER_EXTRA not supported\n");
+
+        if(status == SEC_E_OK) {
+            if(in_bufs[1].BufferType == SECBUFFER_EXTRA)
+                FIXME("SECBUFFER_EXTRA not supported\n");
+
+            status = QueryContextAttributesW(&ctx, SECPKG_ATTR_STREAM_SIZES, &conn->ssl_sizes);
+            if(status != SEC_E_OK) {
+                WARN("Could not get sizes\n");
+                break;
+            }
+
+            status = QueryContextAttributesW(&ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, (void*)&cert);
+            if(status == SEC_E_OK) {
+                res = netconn_verify_cert(cert, hostname, security_flags, check_revocation, &conn->chain);
+                CertFreeCertificateContext(cert);
+                if(res != ERROR_SUCCESS) {
+                    WARN( "cert verify failed: %lu\n", res );
+                    break;
+                }
+            }else {
+                WARN("Could not get cert\n");
+                break;
+            }
+
+            conn->ssl_read_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
+            if(!conn->ssl_read_buf) {
+                res = ERROR_OUTOFMEMORY;
+                break;
+            }
+            conn->ssl_write_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
+            if(!conn->ssl_write_buf) {
+                res = ERROR_OUTOFMEMORY;
+                break;
+            }
+        }
     }
 
     free(read_buf);
 
-    return status;
-}
-
-DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD security_flags, CredHandle *cred_handle,
-                              BOOL check_revocation )
-{
-    CtxtHandle ctx = {0};
-    const CERT_CONTEXT *cert;
-    SECURITY_STATUS status;
-    DWORD res = ERROR_SUCCESS;
-
-    status = netconn_negotiate(conn, hostname, cred_handle, NULL, NULL, &ctx);
-    if(status != SEC_E_OK || res != ERROR_SUCCESS)
-        goto failed;
-
-    status = QueryContextAttributesW(&ctx, SECPKG_ATTR_STREAM_SIZES, &conn->ssl_sizes);
-    if(status != SEC_E_OK) {
-        WARN("Could not get sizes\n");
-        goto failed;
+    if(status != SEC_E_OK || res != ERROR_SUCCESS) {
+        WARN( "Failed to initialize security context: %#lx\n", status );
+        free(conn->ssl_read_buf);
+        conn->ssl_read_buf = NULL;
+        free(conn->ssl_write_buf);
+        conn->ssl_write_buf = NULL;
+        DeleteSecurityContext(&ctx);
+        return ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
     }
 
-    status = QueryContextAttributesW(&ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, (void*)&cert);
-    if(status != SEC_E_OK) {
-        WARN("Could not get cert\n");
-        goto failed;
-    }
-
-    res = netconn_verify_cert(cert, hostname, security_flags, check_revocation);
-    CertFreeCertificateContext(cert);
-    if(res != ERROR_SUCCESS) {
-        WARN( "cert verify failed: %lu\n", res );
-        goto failed;
-    }
-
-    conn->ssl_read_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
-    if(!conn->ssl_read_buf) {
-        res = ERROR_OUTOFMEMORY;
-        goto failed;
-    }
-    conn->ssl_write_buf = malloc(conn->ssl_sizes.cbHeader + conn->ssl_sizes.cbMaximumMessage + conn->ssl_sizes.cbTrailer);
-    if(!conn->ssl_write_buf) {
-        res = ERROR_OUTOFMEMORY;
-        goto failed;
-    }
 
     TRACE("established SSL connection\n");
     conn->secure = TRUE;
     conn->ssl_ctx = ctx;
     return ERROR_SUCCESS;
-
-failed:
-    WARN( "Failed to initialize security context: %#lx\n", status );
-    free(conn->ssl_read_buf);
-    conn->ssl_read_buf = NULL;
-    free(conn->ssl_write_buf);
-    conn->ssl_write_buf = NULL;
-    DeleteSecurityContext(&ctx);
-    return ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
 }
 
 static DWORD send_ssl_chunk( struct netconn *conn, const void *msg, size_t size, WSAOVERLAPPED *ovr )
@@ -562,23 +558,8 @@ static DWORD read_ssl_chunk( struct netconn *conn, void *buf, SIZE_T buf_size, S
             break;
 
         case SEC_I_RENEGOTIATE:
-        {
-            SecBuffer out_buf = {0, SECBUFFER_TOKEN, NULL};
-            SecBufferDesc out_desc = {SECBUFFER_VERSION, 1, &out_buf};
-
             TRACE("renegotiate\n");
-
-            for(i = 0; i < ARRAY_SIZE(bufs); i++) {
-                if(bufs[i].BufferType == SECBUFFER_EXTRA) {
-                    out_buf.cbBuffer = bufs[i].cbBuffer;
-                    out_buf.pvBuffer = bufs[i].pvBuffer;
-                }
-            }
-
-            res = netconn_negotiate(conn, conn->host->hostname, NULL, &conn->ssl_ctx, &out_desc, NULL);
-            if (res != SEC_E_OK) return res;
-            continue;
-        }
+            return ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED;
 
         case SEC_I_CONTEXT_EXPIRED:
             TRACE("context expired\n");
@@ -694,11 +675,6 @@ void netconn_cancel_io( struct netconn *conn )
     closesocket( socket );
 }
 
-ULONG netconn_query_data_available( struct netconn *conn )
-{
-    return conn->secure ? conn->peek_len : 0;
-}
-
 DWORD netconn_set_timeout( struct netconn *netconn, BOOL send, int value )
 {
     int opt = send ? SO_SNDTIMEO : SO_RCVTIMEO;
@@ -709,6 +685,11 @@ DWORD netconn_set_timeout( struct netconn *netconn, BOOL send, int value )
         return err;
     }
     return ERROR_SUCCESS;
+}
+
+BOOL netconn_is_valid( struct netconn *netconn )
+{
+    return netconn && netconn->socket != -1;
 }
 
 BOOL netconn_is_alive( struct netconn *netconn )
@@ -745,7 +726,7 @@ BOOL netconn_is_alive( struct netconn *netconn )
     return len == 1 || (len == -1 && err == WSAEWOULDBLOCK);
 }
 
-static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct sockaddr_storage *sa )
+static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, DWORD flags, struct sockaddr_storage *sa )
 {
     ADDRINFOW *res, hints;
     int ret;
@@ -755,6 +736,7 @@ static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct soc
      * their IPv6 addresses even though they have IPv6 addresses in the DNS.
      */
     hints.ai_family = AF_INET;
+    hints.ai_flags  = flags;
 
     ret = GetAddrInfoW( name, NULL, &hints, &res );
     if (ret != 0)
@@ -788,12 +770,13 @@ struct async_resolve
     LONG                     ref;
     WCHAR                   *hostname;
     INTERNET_PORT            port;
+    DWORD                    flags;
     struct sockaddr_storage  addr;
     DWORD                    result;
     HANDLE                   done;
 };
 
-static struct async_resolve *create_async_resolve( const WCHAR *hostname, INTERNET_PORT port )
+static struct async_resolve *create_async_resolve( const WCHAR *hostname, INTERNET_PORT port, DWORD flags )
 {
     struct async_resolve *ret;
 
@@ -805,6 +788,7 @@ static struct async_resolve *create_async_resolve( const WCHAR *hostname, INTERN
     ret->ref = 1;
     ret->hostname = wcsdup( hostname );
     ret->port     = port;
+    ret->flags    = flags;
     if (!(ret->done = CreateEventW( NULL, FALSE, FALSE, NULL )))
     {
         free( ret->hostname );
@@ -827,21 +811,21 @@ static void CALLBACK resolve_proc( TP_CALLBACK_INSTANCE *instance, void *ctx )
 {
     struct async_resolve *async = ctx;
 
-    async->result = resolve_hostname( async->hostname, async->port, &async->addr );
+    async->result = resolve_hostname( async->hostname, async->port, async->flags, &async->addr );
     SetEvent( async->done );
     async_resolve_release( async );
 }
 
-DWORD netconn_resolve( WCHAR *hostname, INTERNET_PORT port, struct sockaddr_storage *addr, int timeout )
+DWORD netconn_resolve( const WCHAR *hostname, INTERNET_PORT port, DWORD flags, struct sockaddr_storage *addr, int timeout )
 {
     DWORD ret;
 
-    if (!timeout) ret = resolve_hostname( hostname, port, addr );
+    if (!timeout) ret = resolve_hostname( hostname, port, flags, addr );
     else
     {
         struct async_resolve *async;
 
-        if (!(async = create_async_resolve( hostname, port )))
+        if (!(async = create_async_resolve( hostname, port, flags )))
             return ERROR_OUTOFMEMORY;
 
         InterlockedIncrement( &async->ref );

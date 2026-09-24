@@ -54,7 +54,11 @@ static struct domain *add_domain( struct session *session, WCHAR *name )
     list_init( &domain->entry );
     list_init( &domain->cookies );
 
-    domain->name = wcsdup( name );
+    if (!(domain->name = wcsdup( name )))
+    {
+        free( domain );
+        return NULL;
+    }
     list_add_tail( &session->cookie_cache, &domain->entry );
 
     TRACE("%s\n", debugstr_w(domain->name));
@@ -270,9 +274,7 @@ BOOL set_cookies( struct request *request, const WCHAR *cookies )
     struct cookie *cookie;
     int len, used;
 
-    len = lstrlenW( cookies );
-    if (!(buffer = malloc( (len + 1) * sizeof(WCHAR) ))) return FALSE;
-    lstrcpyW( buffer, cookies );
+    if (!(buffer = wcsdup( cookies ))) return FALSE;
 
     p = buffer;
     while (*p && *p != ';') p++;

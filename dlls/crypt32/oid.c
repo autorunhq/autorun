@@ -26,6 +26,7 @@
 #include "winbase.h"
 #define CRYPT_OID_INFO_HAS_EXTRA_FIELDS
 #include "wincrypt.h"
+#include "wintrust.h"
 #include "winreg.h"
 #include "winternl.h"
 #include "winuser.h"
@@ -740,13 +741,29 @@ BOOL WINAPI CryptRegisterOIDInfo(PCCRYPT_OID_INFO info, DWORD flags)
     char *key_name;
     HKEY root = 0, key = 0;
     DWORD err;
+    CRYPT_OID_INFO info_copy = {0};
 
     TRACE("(%p, %lx)\n", info, flags );
 
-    if (!info || info->cbSize != sizeof(*info) || !info->pszOID)
+    if (!info || !info->pszOID)
     {
         SetLastError(E_INVALIDARG);
         return FALSE;
+    }
+
+    if (info->cbSize != sizeof(*info)) {
+#ifdef CRYPT_OID_INFO_HAS_EXTRA_FIELDS
+        if (info->cbSize == sizeof(CRYPT_OID_INFO) - sizeof(LPWSTR) * 2) {
+            memcpy(&info_copy, info, sizeof(CRYPT_OID_INFO) - sizeof(LPWSTR) * 2);
+            info_copy.cbSize = sizeof(CRYPT_OID_INFO);
+            info = &info_copy;
+        }
+        else
+#endif
+        {
+            SetLastError(E_INVALIDARG);
+            return FALSE;
+        }
     }
 
     if (!info->dwGroupId) return TRUE;
@@ -1371,9 +1388,9 @@ static const struct OIDInfoConstructor {
  { 6, szOID_NETSCAPE_CA_POLICY_URL, 0, (LPCWSTR)IDS_NETSCAPE_CA_POLICY_URL, NULL },
  { 6, szOID_NETSCAPE_SSL_SERVER_NAME, 0, (LPCWSTR)IDS_NETSCAPE_SSL_SERVER_NAME, NULL },
  { 6, szOID_NETSCAPE_COMMENT, 0, (LPCWSTR)IDS_NETSCAPE_COMMENT, NULL },
- { 6, "1.3.6.1.4.1.311.2.1.10", 0, L"SpcSpAgencyInfo", NULL },
- { 6, "1.3.6.1.4.1.311.2.1.27", 0, L"SpcFinancialCriteria", NULL },
- { 6, "1.3.6.1.4.1.311.2.1.26", 0, L"SpcMinimalCriteria", NULL },
+ { 6, SPC_SP_AGENCY_INFO_OBJID, 0, L"SpcSpAgencyInfo", NULL },
+ { 6, SPC_FINANCIAL_CRITERIA_OBJID, 0, L"SpcFinancialCriteria", NULL },
+ { 6, SPC_MINIMAL_CRITERIA_OBJID, 0, L"SpcMinimalCriteria", NULL },
  { 6, szOID_COUNTRY_NAME, 0, (LPCWSTR)IDS_COUNTRY, NULL },
  { 6, szOID_ORGANIZATION_NAME, 0, (LPCWSTR)IDS_ORGANIZATION, NULL },
  { 6, szOID_ORGANIZATIONAL_UNIT_NAME, 0, (LPCWSTR)IDS_ORGANIZATIONAL_UNIT, NULL },
@@ -1752,7 +1769,7 @@ PCCRYPT_OID_INFO WINAPI CryptFindOIDInfo(DWORD dwKeyType, void *pvKey,
         EnterCriticalSection(&oidInfoCS);
         LIST_FOR_EACH_ENTRY(info, &oidInfo, struct OIDInfo, entry)
         {
-            if (!wcscmp(info->info.pwszName, pvKey) &&
+            if (!wcsicmp(info->info.pwszName, pvKey) &&
              (!dwGroupId || info->info.dwGroupId == dwGroupId))
             {
                 ret = &info->info;

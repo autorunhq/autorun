@@ -438,7 +438,6 @@ compat_mode_t lock_document_mode(HTMLDocumentNode *doc)
 static void set_document_mode(HTMLDocumentNode *doc, compat_mode_t document_mode, BOOL emulate_mode, BOOL lock)
 {
     compat_mode_t max_compat_mode;
-    const char *sgi;
 
     if(doc->document_mode_locked) {
         WARN("attempting to set document mode %d on locked document %p\n", document_mode, doc);
@@ -455,9 +454,6 @@ static void set_document_mode(HTMLDocumentNode *doc, compat_mode_t document_mode
              document_mode, max_compat_mode);
         document_mode = max_compat_mode;
     }
-
-    if ((sgi = getenv("SteamGameId")) && (!strcmp(sgi, "39210")))
-        document_mode = COMPAT_MODE_IE11;
 
     doc->document_mode = document_mode;
     doc->emulate_mode = emulate_mode;
@@ -789,8 +785,27 @@ static void NSAPI nsDocumentObserver_AttributeWillChange(nsIDocumentObserver *if
 }
 
 static void NSAPI nsDocumentObserver_AttributeChanged(nsIDocumentObserver *iface, nsIDocument *aDocument,
-        void *aElement, LONG aNameSpaceID, nsIAtom *aAttribute, LONG aModType, const nsAttrValue *aOldValue)
+        /*mozilla::dom::Element*/ void *aElement, LONG aNameSpaceID, nsIAtom *aAttribute, LONG aModType, const nsAttrValue *aOldValue)
 {
+    HTMLDocumentNode *This = impl_from_nsIDocumentObserver(iface);
+    nsIDOMElement *elem;
+    nsAString name_str;
+    const WCHAR *name;
+    nsresult nsres;
+
+    nsAString_Init(&name_str, NULL);
+    nsres = nsIAtom_ScriptableToString(aAttribute, &name_str);
+    assert(nsres == NS_OK);
+    nsAString_GetData(&name_str, &name);
+
+    TRACE("(%p)->(%p, %s)\n", This, aElement, debugstr_w(name));
+
+    nsres = nsISupports_QueryInterface(aElement, &IID_nsIDOMElement, (void **)&elem);
+    assert(nsres == NS_OK);
+
+    event_attr_changed(This, elem, name);
+    nsAString_Finish(&name_str);
+    nsIDOMElement_Release(elem);
 }
 
 static void NSAPI nsDocumentObserver_NativeAnonymousChildListChange(nsIDocumentObserver *iface, nsIDocument *aDocument,
@@ -1221,7 +1236,7 @@ dispex_static_data_t MutationObserver_dispex = {
     .vtbl             = &mutation_observer_dispex_vtbl,
     .disp_tid         = IWineMSHTMLMutationObserver_tid,
     .iface_tids       = mutation_observer_iface_tids,
-    .min_compat_mode  = COMPAT_MODE_IE11 + 1,  /* FIXME HACK: Not exposed as FFXIV Launcher breaks with MutationObserver stub */
+    .min_compat_mode  = COMPAT_MODE_IE11,
 };
 
 static HRESULT create_mutation_observer(DispatchEx *owner, IDispatch *callback,

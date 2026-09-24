@@ -587,7 +587,7 @@ static void ResizeTabChild(HHInfo *info, int tab)
     RECT rect, tabrc;
     DWORD cnt;
 
-    GetClientRect(info->WinType.hwndNavigation, &rect);
+    GetClientRect(info->hwndTabCtrl, &rect);
     SendMessageW(info->hwndTabCtrl, TCM_GETITEMRECT, 0, (LPARAM)&tabrc);
     cnt = SendMessageW(info->hwndTabCtrl, TCM_GETROWCOUNT, 0, 0);
 
@@ -1343,7 +1343,7 @@ static BOOL AddContentTab(HHInfo *info)
         return TRUE; /* No "Contents" tab */
     hWnd = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, szEmpty, WS_CHILD | WS_BORDER | TVS_LINESATROOT
                            | TVS_SHOWSELALWAYS | TVS_HASBUTTONS, 50, 50, 100, 100,
-                           info->WinType.hwndNavigation, NULL, hhctrl_hinstance, NULL);
+                           info->hwndTabCtrl, NULL, hhctrl_hinstance, NULL);
     if(!hWnd) {
         ERR("Could not create treeview control\n");
         return FALSE;
@@ -1371,7 +1371,7 @@ static BOOL AddIndexTab(HHInfo *info)
         return TRUE; /* No "Index" tab */
     info->tabs[TAB_INDEX].hwnd = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW,
            szEmpty, WS_CHILD | WS_BORDER | LVS_SINGLESEL | LVS_REPORT | LVS_NOCOLUMNHEADER, 50, 50, 100, 100,
-           info->WinType.hwndNavigation, NULL, hhctrl_hinstance, NULL);
+           info->hwndTabCtrl, NULL, hhctrl_hinstance, NULL);
     if(!info->tabs[TAB_INDEX].hwnd) {
         ERR("Could not create ListView control\n");
         return FALSE;
@@ -1401,7 +1401,7 @@ static BOOL AddSearchTab(HHInfo *info)
     if(info->tabs[TAB_SEARCH].id == -1)
         return TRUE; /* No "Search" tab */
     hwndContainer = CreateWindowExW(WS_EX_CONTROLPARENT, L"HH Child", szEmpty,
-                                    WS_CHILD, 0, 0, 0, 0, info->WinType.hwndNavigation,
+                                    WS_CHILD, 0, 0, 0, 0, info->hwndTabCtrl,
                                     NULL, hhctrl_hinstance, NULL);
     if(!hwndContainer) {
         ERR("Could not create search window container control.\n");
@@ -1608,7 +1608,7 @@ static BOOL AddIndexPopup(HHInfo *info)
     hwndPopup = CreateWindowExW(WS_EX_LEFT | WS_EX_LTRREADING | WS_EX_APPWINDOW
                                  | WS_EX_WINDOWEDGE | WS_EX_RIGHTSCROLLBAR,
                                 L"HH Popup", window_title, WS_POPUPWINDOW
-                                 | WS_OVERLAPPEDWINDOW | WS_VISIBLE
+                                 | WS_OVERLAPPEDWINDOW
                                  | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, CW_USEDEFAULT,
                                 CW_USEDEFAULT, 300, 200, info->WinType.hwndHelp,
                                 NULL, hhctrl_hinstance, NULL);
@@ -1623,7 +1623,6 @@ static BOOL AddIndexPopup(HHInfo *info)
     if (!hwndCallback)
         return FALSE;
 
-    ShowWindow(hwndPopup, SW_HIDE);
     hwndList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, szEmpty,
                                WS_CHILD | WS_BORDER | LVS_SINGLESEL | LVS_REPORT
                                 | LVS_NOCOLUMNHEADER, 50, 50, 100, 100,

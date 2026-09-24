@@ -76,7 +76,6 @@ extern unsigned int horizon_server_sock_family( unsigned int handle );
 #endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winioctl.h"
 #define USE_WS_PREFIX
@@ -119,6 +118,7 @@ union unix_sockaddr
 struct async_recv_ioctl
 {
     struct async_fileio io;
+    HANDLE handle;
     void *control;
     struct WS_sockaddr *addr;
     int *addr_len;
@@ -132,6 +132,7 @@ struct async_recv_ioctl
 struct async_send_ioctl
 {
     struct async_fileio io;
+    HANDLE handle;
     const struct WS_sockaddr *addr;
     int addr_len;
     int unix_flags;
@@ -145,7 +146,8 @@ struct async_send_ioctl
 struct async_transmit_ioctl
 {
     struct async_fileio io;
-    HANDLE file;
+    HANDLE handle;              /* socket handle */
+    HANDLE file;                /* file to transmit */
     char *buffer;
     unsigned int buffer_size;   /* allocated size of buffer */
     unsigned int read_len;      /* amount of valid data currently in the buffer */
@@ -161,8 +163,6 @@ struct async_transmit_ioctl
     unsigned int tail_len;
     LARGE_INTEGER offset;
 };
-
-static int get_sock_type( HANDLE handle );
 
 static NTSTATUS sock_errno_to_status( int err )
 {
@@ -849,7 +849,7 @@ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *siz
 
     status = (hdr.msg_flags & MSG_TRUNC) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
     if (async->icmp_over_dgram)
-        ret = fixup_icmp_over_dgram( &hdr, &unix_addr, async->io.handle, ret, &status );
+        ret = fixup_icmp_over_dgram( &hdr, &unix_addr, async->handle, ret, &status );
 
     if (async->control)
     {
@@ -900,7 +900,7 @@ static NTSTATUS try_recv( int fd, struct async_recv_ioctl *async, ULONG_PTR *siz
     /* Where a datagram came from, as the program's socket speaks: IPv6 on one
      * it opened as AF_INET6, though the socket underneath is IPv4. */
     if (async->addr && hdr.msg_namelen && unix_addr.addr.sa_family == AF_INET &&
-        horizon_server_sock_family( HandleToULong( async->io.handle ) ) == WS_AF_INET6)
+        horizon_server_sock_family( HandleToULong( async->handle ) ) == WS_AF_INET6)
     {
         unsigned int len = horizon_ws_in6_from_v4( (const unsigned char *)&unix_addr.in.sin_port,
                                                    (const unsigned char *)&unix_addr.in.sin_addr,
@@ -925,7 +925,7 @@ static BOOL async_recv_proc( void *user, ULONG_PTR *info, unsigned int *status )
 
     if (*status == STATUS_ALERTED)
     {
-        if ((*status = server_get_unix_fd( async->io.handle, 0, &fd, &needs_close, NULL, NULL )))
+        if ((*status = server_get_unix_fd( async->handle, 0, &fd, &needs_close, NULL, NULL )))
             return TRUE;
 
         *status = try_recv( fd, async, info );
@@ -1024,9 +1024,10 @@ static NTSTATUS sock_ioctl_recv( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 
     async_size = offsetof( struct async_recv_ioctl, iov[count] );
 
-    if (!(async = (struct async_recv_ioctl *)alloc_fileio( async_size, async_recv_proc, handle )))
+    if (!(async = (struct async_recv_ioctl *)alloc_fileio( async_size, async_recv_proc )))
         return STATUS_NO_MEMORY;
 
+    async->handle = handle;
     async->count = count;
     if (in_wow64_call())
     {
@@ -1065,9 +1066,9 @@ NTSTATUS sock_read( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE apc,
     static const DWORD async_size = offsetof( struct async_recv_ioctl, iov[1] );
     struct async_recv_ioctl *async;
 
-    if (!(async = (struct async_recv_ioctl *)alloc_fileio( async_size, async_recv_proc, handle )))
+    if (!(async = (struct async_recv_ioctl *)alloc_fileio( async_size, async_recv_proc )))
         return STATUS_NO_MEMORY;
-
+    async->handle = handle;
     async->count = 1;
     async->iov[0].iov_base = buffer;
     async->iov[0].iov_len = length;
@@ -1171,21 +1172,6 @@ static NTSTATUS try_send( int fd, struct async_send_ioctl *async )
     return STATUS_SUCCESS;
 }
 
-static void hack_update_status( HANDLE handle, unsigned int *status )
-{
-    /* HACK: VRChat relies on send() reporting STATUS_SUCCESS for dropped UDP sockets when the
-     * network is actually lost but network adapters are still up on Windows. Fix VRChat internal
-     * error bug when resuming from sleep */
-    const char *appid;
-
-    if (*status == STATUS_NETWORK_UNREACHABLE && get_sock_type( handle ) == SOCK_DGRAM
-        && (appid = getenv( "SteamAppId" )) && !strcmp( appid, "438100" ))
-    {
-        WARN( "Replacing STATUS_NETWORK_UNREACHABLE with STATUS_SUCCESS for VRChat.\n" );
-        *status = STATUS_SUCCESS;
-    }
-}
-
 static BOOL async_send_proc( void *user, ULONG_PTR *info, unsigned int *status )
 {
     struct async_send_ioctl *async = user;
@@ -1196,12 +1182,11 @@ static BOOL async_send_proc( void *user, ULONG_PTR *info, unsigned int *status )
     if (*status == STATUS_ALERTED)
     {
         needs_close = FALSE;
-        if ((fd = async->fd) == -1 && (*status = server_get_unix_fd( async->io.handle, 0, &fd, &needs_close, NULL, NULL )))
+        if ((fd = async->fd) == -1 && (*status = server_get_unix_fd( async->handle, 0, &fd, &needs_close, NULL, NULL )))
             return TRUE;
 
         *status = try_send( fd, async );
         TRACE( "got status %#x\n", *status );
-        hack_update_status( async->io.handle, status );
 
         if (needs_close) close( fd );
 
@@ -1230,7 +1215,7 @@ static void sock_save_icmp_id( struct async_send_ioctl *async )
     seq = h->un.echo.sequence;
     SERVER_START_REQ( socket_send_icmp_id )
     {
-        req->handle = wine_server_obj_handle( async->io.handle );
+        req->handle = wine_server_obj_handle( async->handle );
         req->icmp_id = id;
         req->icmp_seq = seq;
         if (wine_server_call( req ))
@@ -1267,8 +1252,6 @@ static NTSTATUS sock_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
     if (status == STATUS_ALERTED)
     {
         status = try_send( fd, async );
-        hack_update_status( handle, &status );
-
         if (status == STATUS_DEVICE_NOT_READY && ((server_flags & SERVER_SOCKET_IO_FORCE_ASYNC) || !nonblocking))
             status = STATUS_PENDING;
 
@@ -1295,13 +1278,14 @@ static NTSTATUS sock_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
             addr_size = max( 0, async->addr_len );
             async_size = offsetof( struct async_send_ioctl, iov[1] ) + data_size + addr_size
                          + sizeof(IO_STATUS_BLOCK) + sizeof(IO_STATUS_BLOCK32);
-            if (!(rem_async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc, handle )))
+            if (!(rem_async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc )))
             {
                 status = STATUS_NO_MEMORY;
             }
             else
             {
                 /* Use a local copy of socket fd so the async send works after socket handle is closed. */
+                rem_async->handle = handle;
                 rem_async->fd = dup( fd );
                 rem_async->count = 1;
                 p = (char *)rem_async + offsetof( struct async_send_ioctl, iov[1] );
@@ -1358,9 +1342,10 @@ static NTSTATUS sock_ioctl_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 
     async_size = offsetof( struct async_send_ioctl, iov[count] );
 
-    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc, handle )))
+    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc )))
         return STATUS_NO_MEMORY;
 
+    async->handle = handle;
     async->count = count;
     if (in_wow64_call())
     {
@@ -1399,9 +1384,10 @@ NTSTATUS sock_write( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE apc,
     static const DWORD async_size = offsetof( struct async_send_ioctl, iov[1] );
     struct async_send_ioctl *async;
 
-    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc, handle )))
+    if (!(async = (struct async_send_ioctl *)alloc_fileio( async_size, async_send_proc )))
         return STATUS_NO_MEMORY;
 
+    async->handle = handle;
     async->fd = -1;
     async->count = 1;
     async->iov[0].iov_base = (void *)buffer;
@@ -1499,7 +1485,7 @@ static BOOL async_transmit_proc( void *user, ULONG_PTR *info, unsigned int *stat
 
     if (*status == STATUS_ALERTED)
     {
-        if ((*status = server_get_unix_fd( async->io.handle, 0, &sock_fd, &sock_needs_close, NULL, NULL )))
+        if ((*status = server_get_unix_fd( async->handle, 0, &sock_fd, &sock_needs_close, NULL, NULL )))
             return TRUE;
 
         if (async->file && (*status = server_get_unix_fd( async->file, 0, &file_fd, &file_needs_close, NULL, NULL )))
@@ -1551,9 +1537,10 @@ static NTSTATUS sock_transmit( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc,
         }
     }
 
-    if (!(async = (struct async_transmit_ioctl *)alloc_fileio( sizeof(*async), async_transmit_proc, handle )))
+    if (!(async = (struct async_transmit_ioctl *)alloc_fileio( sizeof(*async), async_transmit_proc )))
         return STATUS_NO_MEMORY;
 
+    async->handle = handle;
     async->file = ULongToHandle( params->file );
     async->buffer_size = params->buffer_size ? params->buffer_size : 65536;
     if (!(async->buffer = malloc( async->buffer_size )))

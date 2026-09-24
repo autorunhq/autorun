@@ -27,16 +27,27 @@
 #include <math.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
-#include "tomcrypt.h"
 #include "ntdll_misc.h"
 #include "ddk/ntddk.h"
+#include "symcrypt.h"
 #include "wine/exception.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+
+/* wrappers for symcrypt */
+SYMCRYPT_CPU_FEATURES SYMCRYPT_CALL SymCryptCpuFeaturesNeverPresent(void) { return 0; }
+void SYMCRYPT_CALL SymCryptFatal( UINT32 fatalCode ) { }
+void SYMCRYPT_CALL SymCryptInjectError( PBYTE pbBuf, SIZE_T cbBuf ) { }
+#if SYMCRYPT_CPU_X86 | SYMCRYPT_CPU_AMD64
+SYMCRYPT_ERROR SYMCRYPT_CALL SymCryptSaveXmm( PSYMCRYPT_EXTENDED_SAVE_DATA pSaveArea ) { return SYMCRYPT_NO_ERROR; }
+void SYMCRYPT_CALL SymCryptRestoreXmm( PSYMCRYPT_EXTENDED_SAVE_DATA pSaveArea ) { }
+#endif
+__ASM_GLOBAL_IMPORT(memcmp)
+__ASM_GLOBAL_IMPORT(memcpy)
+__ASM_GLOBAL_IMPORT(memset)
 
 #define SELF_RELATIVE_FIELD(sd,field) ((BYTE *)(sd) + ((SECURITY_DESCRIPTOR_RELATIVE *)(sd))->field)
 
@@ -290,8 +301,6 @@ DWORD WINAPI RtlLengthRequiredSid(DWORD nrofsubauths)
  */
 DWORD WINAPI RtlLengthSid(PSID pSid)
 {
-	TRACE("sid=%p\n",pSid);
-	if (!pSid) return 0;
 	return RtlLengthRequiredSid(*RtlSubAuthorityCountSid(pSid));
 }
 
@@ -372,18 +381,15 @@ LPBYTE WINAPI RtlSubAuthorityCountSid(PSID pSid)
 /**************************************************************************
  *                 RtlCopySid				[NTDLL.@]
  */
-BOOLEAN WINAPI RtlCopySid( DWORD nDestinationSidLength, PSID pDestinationSid, PSID pSourceSid )
+NTSTATUS WINAPI RtlCopySid( DWORD destlen, PSID dest, PSID source )
 {
-	if (!pSourceSid || !RtlValidSid(pSourceSid) ||
-	    (nDestinationSidLength < RtlLengthSid(pSourceSid)))
-          return FALSE;
+	DWORD len = RtlLengthSid(source);
 
-	if (nDestinationSidLength < (((SID*)pSourceSid)->SubAuthorityCount*4+8))
-	  return FALSE;
-
-	memmove(pDestinationSid, pSourceSid, ((SID*)pSourceSid)->SubAuthorityCount*4+8);
-	return TRUE;
+	if (destlen < len) return STATUS_BUFFER_TOO_SMALL;
+	memmove(dest, source, len);
+	return STATUS_SUCCESS;
 }
+
 /******************************************************************************
  * RtlValidSid [NTDLL.@]
  *
@@ -1879,13 +1885,12 @@ NTSTATUS WINAPI RtlCreateServiceSid( PUNICODE_STRING name, PSID pSid, LPDWORD le
     DWORD sid_length;
     NTSTATUS status;
     UNICODE_STRING name_upper;
-    hash_state hash_ctx;
-    ULONG hash[5];
     SID *sid = (SID *)pSid;
+    ULONG count = 1 + SYMCRYPT_SHA1_RESULT_SIZE / sizeof(sid->SubAuthority[0]);
 
     if (name == NULL || len == NULL) return STATUS_INVALID_PARAMETER;
 
-    sid_length = RtlLengthRequiredSid( 1 + ARRAY_SIZE(hash) );
+    sid_length = RtlLengthRequiredSid( count );
     if (*len < sid_length)
     {
         *len = sid_length;
@@ -1894,17 +1899,14 @@ NTSTATUS WINAPI RtlCreateServiceSid( PUNICODE_STRING name, PSID pSid, LPDWORD le
 
     sid->Revision = SID_REVISION;
     sid->IdentifierAuthority = nt_authority;
-    sid->SubAuthorityCount = 1 + ARRAY_SIZE(hash);
+    sid->SubAuthorityCount = count;
     sid->SubAuthority[0] = SECURITY_SERVICE_ID_BASE_RID;
     *len = sid_length;
 
     if ((status = RtlUpcaseUnicodeString( &name_upper, name, TRUE ))) return status;
 
-    sha1_init( &hash_ctx );
-    sha1_process( &hash_ctx, (UCHAR *)name_upper.Buffer, name_upper.Length );
-    sha1_done( &hash_ctx, (UCHAR *)hash );
+    SymCryptSha1( (BYTE *)name_upper.Buffer, name_upper.Length, (BYTE *)(sid->SubAuthority + 1) );
     RtlFreeUnicodeString( &name_upper );
-    memcpy( sid->SubAuthority + 1, hash, sizeof(hash) );
     return STATUS_SUCCESS;
 }
 
@@ -1916,7 +1918,6 @@ NTSTATUS WINAPI RtlDeriveCapabilitySidsFromName( UNICODE_STRING *cap_name, PSID 
     static const SID_IDENTIFIER_AUTHORITY app_authority = { SECURITY_APP_PACKAGE_AUTHORITY };
     static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
     UNICODE_STRING cap_upcase;
-    hash_state hash_ctx;
     NTSTATUS status;
     ULONG hash[8];
     SID *sid;
@@ -1924,9 +1925,7 @@ NTSTATUS WINAPI RtlDeriveCapabilitySidsFromName( UNICODE_STRING *cap_name, PSID 
     TRACE( "cap_name %s, cap_group_sid %p, cap_sid %p.\n", debugstr_us(cap_name), cap_group_sid, cap_sid );
 
     if ((status = RtlUpcaseUnicodeString( &cap_upcase, cap_name, TRUE ))) return status;
-    sha256_init( &hash_ctx );
-    sha256_process( &hash_ctx, (UCHAR *)cap_upcase.Buffer, cap_upcase.Length );
-    sha256_done( &hash_ctx, (UCHAR *)hash );
+    SymCryptSha256( (BYTE *)cap_upcase.Buffer, cap_upcase.Length, (BYTE *)hash );
     RtlFreeUnicodeString( &cap_upcase );
 
     sid = cap_sid;

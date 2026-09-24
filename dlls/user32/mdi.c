@@ -469,7 +469,7 @@ static void MDI_SwitchActiveChild( MDICLIENTINFO *ci, HWND hwndTo, BOOL activate
     {
         BOOL was_zoomed = IsZoomed(hwndPrev);
 
-        if (was_zoomed)
+        if (was_zoomed && (GetWindowLongW( hwndTo, GWL_STYLE ) & WS_MAXIMIZEBOX))
         {
             /* restore old MDI child */
             SendMessageW( hwndPrev, WM_SETREDRAW, FALSE, 0 );
@@ -992,6 +992,8 @@ LRESULT MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     MDICLIENTINFO *ci;
 
     TRACE("%p %04x (%s) %08Ix %08Ix\n", hwnd, message, SPY_GetMsgName(message, hwnd), wParam, lParam);
+
+    NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_MDICLIENT) );
 
     if (!(ci = get_client_info( hwnd )))
     {

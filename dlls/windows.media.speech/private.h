@@ -22,16 +22,11 @@
 
 #include <stdarg.h>
 
-#include "ntstatus.h"
-#define WIN32_NO_STATUS
-#include "winerror.h"
-#include "winternl.h"
 #define COBJMACROS
 #include "corerror.h"
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
-#include "winuser.h"
 #include "objbase.h"
 
 #include "activation.h"
@@ -50,8 +45,6 @@
 #include "wine/list.h"
 
 #include "async_private.h"
-
-#define SPERR_WINRT_INTERNAL_ERROR 0x800455a0
 
 /*
  *

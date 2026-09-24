@@ -79,11 +79,6 @@ void wine_nx_vk_release_memory_reference( void *reference )
     nvk_switch_release_memory_reference( reference );
 }
 
-struct nx_vk_surface
-{
-    struct client_surface client;
-};
-
 static void nx_log( const char *format, ... )
 {
     char buffer[256];
@@ -96,68 +91,31 @@ static void nx_log( const char *format, ... )
     wine_nx_runtime_trace( buffer );
 }
 
-/* The last reference is gone: the host surface was destroyed before it, so the
- * compositor or the framebuffer can have the NWindow back. */
-static void nx_vk_surface_destroy( struct client_surface *client )
-{
-    TRACE( "client %p\n", client );
-    wine_nx_gl_release_window();
-}
-
-static void nx_vk_surface_detach( struct client_surface *client )
-{
-    TRACE( "client %p\n", client );
-}
-
-static void nx_vk_surface_update( struct client_surface *client )
-{
-    TRACE( "client %p\n", client );
-}
-
-static void nx_vk_surface_present( struct client_surface *client, HDC hdc )
-{
-    TRACE( "client %p, hdc %p\n", client, hdc );
-}
-
-static const struct client_surface_funcs nx_vk_surface_funcs =
-{
-    .destroy = nx_vk_surface_destroy,
-    .detach = nx_vk_surface_detach,
-    .update = nx_vk_surface_update,
-    .present = nx_vk_surface_present,
-};
-
 /* Like an OpenGL window surface, a Vulkan surface covers the whole screen: the
  * Switch has one NWindow, and other windows are not shown meanwhile. */
-static VkResult nx_vulkan_surface_create( HWND hwnd, BOOL raw, const struct vulkan_instance *instance,
-                                          VkSurfaceKHR *handle, struct client_surface **client )
+static VkResult nx_vulkan_surface_create( struct client_surface *client, const struct vulkan_instance *instance,
+                                          VkSurfaceKHR *handle )
 {
     struct nx_vi_surface_create_info info = { .sType = NX_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN };
-    struct nx_vk_surface *surface;
+    HWND hwnd = client->hwnd;
     VkResult res;
 
-    TRACE( "hwnd %p, raw %u, instance %p\n", hwnd, raw, instance );
+    TRACE( "hwnd %p, raw %u, instance %p\n", hwnd, client->raw, instance );
 
     if (!(info.window = wine_nx_gl_acquire_window()))
     {
         ERR( "hwnd %p: the screen already has an OpenGL or Vulkan surface\n", hwnd );
         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
     }
-    if (!(surface = client_surface_create( sizeof(*surface), &nx_vk_surface_funcs, hwnd )))
-    {
-        wine_nx_gl_release_window();
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    }
     if ((res = wine_nx_vkCreateViSurfaceNN( instance->host.instance, &info, NULL, handle )))
     {
         ERR( "hwnd %p: vkCreateViSurfaceNN failed, res %d\n", hwnd, res );
         nx_log( "[NXVK] hwnd %p: vkCreateViSurfaceNN failed, res %d", hwnd, res );
-        client_surface_release( &surface->client );  /* gives the screen back */
+        wine_nx_gl_release_window();
         return res;
     }
 
     nx_log( "[NXVK] hwnd %p: a Vulkan surface has the screen", hwnd );
-    *client = &surface->client;
     return VK_SUCCESS;
 }
 

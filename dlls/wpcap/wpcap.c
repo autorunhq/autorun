@@ -23,7 +23,6 @@
 #include <malloc.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
@@ -823,8 +822,6 @@ int CDECL pcap_list_tstamp_types( struct pcap *pcap, int **types )
     struct list_tstamp_types_params params;
     int count = 8, *tmp;
     NTSTATUS status;
-
-    TRACE( "%p, %p\n", pcap, types );
 
     TRACE( "%p, %p\n", pcap, types );
 

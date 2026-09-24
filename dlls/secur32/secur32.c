@@ -21,7 +21,6 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
@@ -641,13 +640,11 @@ static void SECUR32_freeProviders(void)
 
 /***********************************************************************
  *		FreeContextBuffer (SECUR32.@)
- *
- * Doh--if pv was allocated by a crypto package, this may not be correct.
- * The sample ssp seems to use LocalAlloc/LocalFee, but there doesn't seem to
- * be any guarantee, nor is there an alloc function in secur32.
  */
 SECURITY_STATUS WINAPI FreeContextBuffer( void *pv )
 {
+    if (!RtlValidateHeap( GetProcessHeap(), 0, pv ))
+        return LsaFreeReturnBuffer( pv );
     RtlFreeHeap( GetProcessHeap(), 0, pv );
     return SEC_E_OK;
 }
@@ -1158,22 +1155,9 @@ BOOLEAN WINAPI GetUserNameExW(
             return FALSE;
         }
 
-    case NameDisplay:
-        {
-            static const WCHAR wineusernameW[] = {'W','I','N','E','U','S','E','R','N','A','M','E',0};
-
-            DWORD needed = GetEnvironmentVariableW(wineusernameW, NULL, 0);
-            if (*nSize < needed) {
-                *nSize = needed;
-                SetLastError(ERROR_MORE_DATA);
-                return FALSE;
-            }
-            *nSize = GetEnvironmentVariableW(wineusernameW, lpNameBuffer, *nSize);
-            return TRUE;
-        }
-
     case NameUnknown:
     case NameFullyQualifiedDN:
+    case NameDisplay:
     case NameUniqueId:
     case NameCanonical:
     case NameUserPrincipal:

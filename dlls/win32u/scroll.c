@@ -29,8 +29,15 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(scroll);
 
+static struct scroll_info *get_control_state( HWND hwnd )
+{
+    return (struct scroll_info *)NtUserGetPrivateData( hwnd, 0, sizeof(struct scroll_info *) );
+}
 
-#define SCROLLBAR_MAGIC 0x5c6011ba
+static struct scroll_info *set_control_state( HWND hwnd, struct scroll_info *state )
+{
+    return (struct scroll_info *)NtUserSetPrivateData( hwnd, 0, sizeof(struct scroll_info *), (LONG_PTR)state );
+}
 
 /* Minimum size of the rectangle between the arrows */
 #define SCROLL_MIN_RECT  4
@@ -72,8 +79,6 @@ struct win_scroll_bar_info
     struct scroll_info vert;
 };
 
-#define SCROLLBAR_MAGIC 0x5c6011ba
-
 
 static struct scroll_info *get_scroll_info_ptr( HWND hwnd, int bar, BOOL alloc )
 {
@@ -91,12 +96,7 @@ static struct scroll_info *get_scroll_info_ptr( HWND hwnd, int bar, BOOL alloc )
         if (win->pScroll) info = &win->pScroll->vert;
         break;
     case SB_CTL:
-        if (win->cbWndExtra >= sizeof(struct scroll_bar_win_data))
-        {
-            struct scroll_bar_win_data *data = (struct scroll_bar_win_data *)win->wExtra;
-            if (data->magic == SCROLLBAR_MAGIC) info = &data->info;
-        }
-        if (!info) WARN( "window is not a scrollbar control\n" );
+        if (!(info = get_control_state( hwnd ))) WARN( "window is not a scrollbar control\n" );
         break;
     case SB_BOTH:
         WARN( "with SB_BOTH\n" );
@@ -168,16 +168,6 @@ static BOOL show_scroll_bar( HWND hwnd, int bar, BOOL show_horz, BOOL show_vert 
         /* frame has been changed, let the window redraw itself */
         NtUserSetWindowPos( hwnd, 0, 0, 0, 0, 0,
                             SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED );
-
-        if ((set_bits & WS_HSCROLL) && !(old_style & WS_HSCROLL))
-            NtUserNotifyWinEvent( EVENT_OBJECT_SHOW, hwnd, OBJID_HSCROLL, 0 );
-        if ((set_bits & WS_VSCROLL) && !(old_style & WS_VSCROLL))
-            NtUserNotifyWinEvent( EVENT_OBJECT_SHOW, hwnd, OBJID_VSCROLL, 0 );
-        if ((clear_bits & WS_HSCROLL) && (old_style & WS_HSCROLL))
-            NtUserNotifyWinEvent( EVENT_OBJECT_HIDE, hwnd, OBJID_HSCROLL, 0 );
-        if ((clear_bits & WS_VSCROLL) && (old_style & WS_VSCROLL))
-            NtUserNotifyWinEvent( EVENT_OBJECT_HIDE, hwnd, OBJID_VSCROLL, 0 );
-
         return TRUE;
     }
     return FALSE; /* no frame changes */
@@ -263,7 +253,7 @@ static BOOL get_scroll_bar_rect( HWND hwnd, int bar, RECT *rect, int *arrow_size
         if (info->page)
         {
             *thumb_size = muldiv( pixels,info->page, info->maxVal - info->minVal + 1 );
-            min_thumb_size = muldiv( SCROLL_MIN_THUMB, get_dpi_for_window( hwnd ), 96 );
+            min_thumb_size = map_user_dpi( SCROLL_MIN_THUMB, get_dpi_for_window( hwnd ) );
             if (*thumb_size < min_thumb_size) *thumb_size = min_thumb_size;
         }
         else *thumb_size = get_system_metrics( SM_CXVSCROLL );
@@ -485,7 +475,7 @@ static UINT get_thumb_val( HWND hwnd, int bar, RECT *rect, BOOL vertical, int po
         if (info->page)
         {
             thumb_size = muldiv( pixels, info->page, info->maxVal - info->minVal + 1 );
-            min_thumb_size = muldiv( SCROLL_MIN_THUMB, get_dpi_for_window( hwnd ), 96 );
+            min_thumb_size = map_user_dpi( SCROLL_MIN_THUMB, get_dpi_for_window( hwnd ) );
             if (thumb_size < min_thumb_size) thumb_size = min_thumb_size;
         }
         else thumb_size = get_system_metrics( SM_CXVSCROLL );
@@ -881,13 +871,7 @@ BOOL get_scroll_info( HWND hwnd, int bar, SCROLLINFO *info )
     struct scroll_info *scroll;
 
     /* handle invalid data structure */
-    if (!validate_scroll_info( info ))
-        return FALSE;
-
-    if (bar != SB_CTL && !is_current_thread_window( hwnd ))
-        return send_message( hwnd, WM_WINE_GETSCROLLINFO, (WPARAM)bar, (LPARAM)info );
-
-    if (!(scroll = get_scroll_info_ptr( hwnd, bar, FALSE )))
+    if (!validate_scroll_info( info ) || !(scroll = get_scroll_info_ptr( hwnd, bar, FALSE )))
         return FALSE;
 
     /* fill in the desired scroll info structure */
@@ -1061,7 +1045,7 @@ done:
     return ret; /* Return current position */
 }
 
-BOOL get_scroll_bar_info( HWND hwnd, LONG id, SCROLLBARINFO *info )
+static BOOL get_scroll_bar_info( HWND hwnd, LONG id, SCROLLBARINFO *info )
 {
     struct scroll_info *scroll;
     int bar, dummy;
@@ -1079,9 +1063,6 @@ BOOL get_scroll_bar_info( HWND hwnd, LONG id, SCROLLBARINFO *info )
 
     /* handle invalid data structure */
     if (info->cbSize != sizeof(*info)) return FALSE;
-
-    if (bar != SB_CTL && !is_current_thread_window( hwnd ))
-        return send_message( hwnd, WM_WINE_GETSCROLLBARINFO, (WPARAM)id, (LPARAM)info );
 
     get_scroll_bar_rect( hwnd, bar, &info->rcScrollBar, &dummy,
                          &info->dxyLineButton, &info->xyThumbTop );
@@ -1149,21 +1130,13 @@ BOOL get_scroll_bar_info( HWND hwnd, LONG id, SCROLLBARINFO *info )
 
 static void create_scroll_bar( HWND hwnd, CREATESTRUCTW *create )
 {
-    struct scroll_info *info = NULL;
-    WND *win;
+    struct scroll_info *info;
 
     TRACE( "hwnd=%p create=%p\n", hwnd, create );
 
-    win = get_win_ptr( hwnd );
-    if (win->cbWndExtra >= sizeof(struct scroll_bar_win_data))
-    {
-        struct scroll_bar_win_data *data = (struct scroll_bar_win_data *)win->wExtra;
-        data->magic = SCROLLBAR_MAGIC;
-        info = &data->info;
-    }
-    else WARN( "Not enough extra data\n" );
-    release_win_ptr( win );
-    if (!info) return;
+    if (!(info = calloc( 1, sizeof(*info) ))) return;
+    NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_SCROLLBAR) );
+    set_control_state( hwnd, info );
 
     if (create->style & WS_DISABLED)
     {
@@ -1325,6 +1298,11 @@ LRESULT scroll_bar_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
             }
         }
         return 0;
+
+    case WM_GETOBJECT:
+        if ((LONG)lparam == OBJID_QUERYCLASSNAMEIDX)
+            return 0x1000a;
+        return default_window_proc( hwnd, msg, wparam, lparam, ansi );
 
     case WM_SETFOCUS:
         {

@@ -7,7 +7,6 @@
 #include <stddef.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
@@ -20,22 +19,6 @@
 struct process_attach_params
 {
     UINT64 call_gl_debug_message_callback;
-};
-
-struct wglCopyContext_params
-{
-    TEB *teb;
-    HGLRC hglrcSrc;
-    HGLRC hglrcDst;
-    UINT mask;
-    BOOL ret;
-};
-
-struct wglCreateContext_params
-{
-    TEB *teb;
-    HDC hDc;
-    HGLRC ret;
 };
 
 struct wglDeleteContext_params
@@ -52,35 +35,12 @@ struct wglGetPixelFormat_params
     int ret;
 };
 
-struct wglGetProcAddress_params
-{
-    TEB *teb;
-    LPCSTR lpszProc;
-    PROC ret;
-};
-
-struct wglMakeCurrent_params
-{
-    TEB *teb;
-    HDC hDc;
-    HGLRC newContext;
-    BOOL ret;
-};
-
 struct wglSetPixelFormat_params
 {
     TEB *teb;
     HDC hdc;
     int ipfd;
     const PIXELFORMATDESCRIPTOR *ppfd;
-    BOOL ret;
-};
-
-struct wglShareLists_params
-{
-    TEB *teb;
-    HGLRC hrcSrvShare;
-    HGLRC hrcSrvSource;
     BOOL ret;
 };
 
@@ -3372,6 +3332,11 @@ struct glBitmapxOES_params
     const GLubyte *bitmap;
 };
 
+struct glBlendBarrier_params
+{
+    TEB *teb;
+};
+
 struct glBlendBarrierKHR_params
 {
     TEB *teb;
@@ -3722,16 +3687,6 @@ struct glBufferStorage_params
     GLenum target;
     GLsizeiptr size;
     const void *data;
-    GLbitfield flags;
-};
-
-struct glBufferStorageExternalEXT_params
-{
-    TEB *teb;
-    GLenum target;
-    GLintptr offset;
-    GLsizeiptr size;
-    GLeglClientBufferEXT clientBuffer;
     GLbitfield flags;
 };
 
@@ -7416,6 +7371,18 @@ struct glFramebufferSamplePositionsfvAMD_params
     const GLfloat *values;
 };
 
+struct glFramebufferShadingRateEXT_params
+{
+    TEB *teb;
+    GLenum target;
+    GLenum attachment;
+    GLuint texture;
+    GLint baseLayer;
+    GLsizei numLayers;
+    GLsizei texelWidth;
+    GLsizei texelHeight;
+};
+
 struct glFramebufferTexture_params
 {
     TEB *teb;
@@ -8607,6 +8574,15 @@ struct glGetFragmentMaterialivSGIX_params
     GLenum face;
     GLenum pname;
     GLint *params;
+};
+
+struct glGetFragmentShadingRatesEXT_params
+{
+    TEB *teb;
+    GLsizei samples;
+    GLsizei maxCount;
+    GLsizei *count;
+    GLenum *shadingRates;
 };
 
 struct glGetFramebufferAttachmentParameteriv_params
@@ -11731,15 +11707,6 @@ struct glImageTransformParameterivHP_params
     const GLint *params;
 };
 
-struct glImportMemoryFdEXT_params
-{
-    TEB *teb;
-    GLuint memory;
-    GLuint64 size;
-    GLenum handleType;
-    GLint fd;
-};
-
 struct glImportMemoryWin32HandleEXT_params
 {
     TEB *teb;
@@ -11756,14 +11723,6 @@ struct glImportMemoryWin32NameEXT_params
     GLuint64 size;
     GLenum handleType;
     const void *name;
-};
-
-struct glImportSemaphoreFdEXT_params
-{
-    TEB *teb;
-    GLuint semaphore;
-    GLenum handleType;
-    GLint fd;
 };
 
 struct glImportSemaphoreWin32HandleEXT_params
@@ -14920,16 +14879,6 @@ struct glNamedBufferStorageEXT_params
     GLbitfield flags;
 };
 
-struct glNamedBufferStorageExternalEXT_params
-{
-    TEB *teb;
-    GLuint buffer;
-    GLintptr offset;
-    GLsizeiptr size;
-    GLeglClientBufferEXT clientBuffer;
-    GLbitfield flags;
-};
-
 struct glNamedBufferStorageMemEXT_params
 {
     TEB *teb;
@@ -16195,6 +16144,19 @@ struct glPresentFrameKeyedNV_params
     GLenum target1;
     GLuint fill1;
     GLuint key1;
+};
+
+struct glPrimitiveBoundingBox_params
+{
+    TEB *teb;
+    GLfloat minX;
+    GLfloat minY;
+    GLfloat minZ;
+    GLfloat minW;
+    GLfloat maxX;
+    GLfloat maxY;
+    GLfloat maxZ;
+    GLfloat maxW;
 };
 
 struct glPrimitiveBoundingBoxARB_params
@@ -19134,6 +19096,19 @@ struct glShaderStorageBlockBinding_params
     GLuint program;
     GLuint storageBlockIndex;
     GLuint storageBlockBinding;
+};
+
+struct glShadingRateCombinerOpsEXT_params
+{
+    TEB *teb;
+    GLenum combinerOp0;
+    GLenum combinerOp1;
+};
+
+struct glShadingRateEXT_params
+{
+    TEB *teb;
+    GLenum rate;
 };
 
 struct glShadingRateImageBarrierNV_params
@@ -25654,18 +25629,6 @@ struct wglBindTexImageARB_params
     BOOL ret;
 };
 
-struct wglChoosePixelFormatARB_params
-{
-    TEB *teb;
-    HDC hdc;
-    const int *piAttribIList;
-    const FLOAT *pfAttribFList;
-    UINT nMaxFormats;
-    int *piFormats;
-    UINT *nNumFormats;
-    BOOL ret;
-};
-
 struct wglCreateContextAttribsARB_params
 {
     TEB *teb;
@@ -25699,48 +25662,11 @@ struct wglFreeMemoryNV_params
     void *pointer;
 };
 
-struct wglGetExtensionsStringARB_params
-{
-    TEB *teb;
-    HDC hdc;
-    const char *ret;
-};
-
-struct wglGetExtensionsStringEXT_params
-{
-    TEB *teb;
-    const char *ret;
-};
-
 struct wglGetPbufferDCARB_params
 {
     TEB *teb;
     HPBUFFERARB hPbuffer;
     HDC ret;
-};
-
-struct wglGetPixelFormatAttribfvARB_params
-{
-    TEB *teb;
-    HDC hdc;
-    int iPixelFormat;
-    int iLayerPlane;
-    UINT nAttributes;
-    const int *piAttributes;
-    FLOAT *pfValues;
-    BOOL ret;
-};
-
-struct wglGetPixelFormatAttribivARB_params
-{
-    TEB *teb;
-    HDC hdc;
-    int iPixelFormat;
-    int iLayerPlane;
-    UINT nAttributes;
-    const int *piAttributes;
-    int *piValues;
-    BOOL ret;
 };
 
 struct wglGetSwapIntervalEXT_params
@@ -25856,14 +25782,9 @@ enum unix_funcs
     unix_thread_attach,
     unix_process_detach,
     unix_get_pixel_formats,
-    unix_wglCopyContext,
-    unix_wglCreateContext,
     unix_wglDeleteContext,
     unix_wglGetPixelFormat,
-    unix_wglGetProcAddress,
-    unix_wglMakeCurrent,
     unix_wglSetPixelFormat,
-    unix_wglShareLists,
     unix_wglSwapBuffers,
     unix_glAccum,
     unix_glAlphaFunc,
@@ -26302,6 +26223,7 @@ enum unix_funcs
     unix_glBinormal3svEXT,
     unix_glBinormalPointerEXT,
     unix_glBitmapxOES,
+    unix_glBlendBarrier,
     unix_glBlendBarrierKHR,
     unix_glBlendBarrierNV,
     unix_glBlendColor,
@@ -26341,7 +26263,6 @@ enum unix_funcs
     unix_glBufferParameteriAPPLE,
     unix_glBufferRegionEnabled,
     unix_glBufferStorage,
-    unix_glBufferStorageExternalEXT,
     unix_glBufferStorageMemEXT,
     unix_glBufferSubData,
     unix_glBufferSubDataARB,
@@ -26770,6 +26691,7 @@ enum unix_funcs
     unix_glFramebufferSampleLocationsfvARB,
     unix_glFramebufferSampleLocationsfvNV,
     unix_glFramebufferSamplePositionsfvAMD,
+    unix_glFramebufferShadingRateEXT,
     unix_glFramebufferTexture,
     unix_glFramebufferTexture1D,
     unix_glFramebufferTexture1DEXT,
@@ -26910,6 +26832,7 @@ enum unix_funcs
     unix_glGetFragmentLightivSGIX,
     unix_glGetFragmentMaterialfvSGIX,
     unix_glGetFragmentMaterialivSGIX,
+    unix_glGetFragmentShadingRatesEXT,
     unix_glGetFramebufferAttachmentParameteriv,
     unix_glGetFramebufferAttachmentParameterivEXT,
     unix_glGetFramebufferParameterfvAMD,
@@ -27274,10 +27197,8 @@ enum unix_funcs
     unix_glImageTransformParameterfvHP,
     unix_glImageTransformParameteriHP,
     unix_glImageTransformParameterivHP,
-    unix_glImportMemoryFdEXT,
     unix_glImportMemoryWin32HandleEXT,
     unix_glImportMemoryWin32NameEXT,
-    unix_glImportSemaphoreFdEXT,
     unix_glImportSemaphoreWin32HandleEXT,
     unix_glImportSemaphoreWin32NameEXT,
     unix_glImportSyncEXT,
@@ -27662,7 +27583,6 @@ enum unix_funcs
     unix_glNamedBufferPageCommitmentMemNV,
     unix_glNamedBufferStorage,
     unix_glNamedBufferStorageEXT,
-    unix_glNamedBufferStorageExternalEXT,
     unix_glNamedBufferStorageMemEXT,
     unix_glNamedBufferSubData,
     unix_glNamedBufferSubDataEXT,
@@ -27810,6 +27730,7 @@ enum unix_funcs
     unix_glPopGroupMarkerEXT,
     unix_glPresentFrameDualFillNV,
     unix_glPresentFrameKeyedNV,
+    unix_glPrimitiveBoundingBox,
     unix_glPrimitiveBoundingBoxARB,
     unix_glPrimitiveRestartIndex,
     unix_glPrimitiveRestartIndexNV,
@@ -28148,6 +28069,8 @@ enum unix_funcs
     unix_glShaderSource,
     unix_glShaderSourceARB,
     unix_glShaderStorageBlockBinding,
+    unix_glShadingRateCombinerOpsEXT,
+    unix_glShadingRateEXT,
     unix_glShadingRateImageBarrierNV,
     unix_glShadingRateImagePaletteNV,
     unix_glShadingRateSampleOrderCustomNV,
@@ -28932,16 +28855,11 @@ enum unix_funcs
     unix_glWriteMaskEXT,
     unix_wglAllocateMemoryNV,
     unix_wglBindTexImageARB,
-    unix_wglChoosePixelFormatARB,
     unix_wglCreateContextAttribsARB,
     unix_wglCreatePbufferARB,
     unix_wglDestroyPbufferARB,
     unix_wglFreeMemoryNV,
-    unix_wglGetExtensionsStringARB,
-    unix_wglGetExtensionsStringEXT,
     unix_wglGetPbufferDCARB,
-    unix_wglGetPixelFormatAttribfvARB,
-    unix_wglGetPixelFormatAttribivARB,
     unix_wglGetSwapIntervalEXT,
     unix_wglMakeContextCurrentARB,
     unix_wglQueryCurrentRendererIntegerWINE,

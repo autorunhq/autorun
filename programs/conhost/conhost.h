@@ -25,7 +25,6 @@
 #include <stdlib.h>
 
 #include <ntstatus.h>
-#define WIN32_NO_STATUS
 #include <windef.h>
 #include <winbase.h>
 #include <winuser.h>
@@ -88,6 +87,7 @@ struct console
     size_t                 read_buffer_count;   /* size of available data */
     size_t                 read_buffer_size;    /* size of buffer */
     unsigned int           read_ioctl;          /* current read ioctl */
+    USHORT                 read_flags;          /* flags for reading console data */
     size_t                 pending_read;        /* size of pending read buffer */
     struct edit_line       edit_line;           /* edit line context */
     unsigned int           key_state;

@@ -36,6 +36,8 @@ fixture = r'''
 #define CONTEXT_XSTATE CONTEXT_AMD64_XSTATE
 #include "unwind.h"
 #undef linux
+#undef __linux__
+#define HAS_FEATURE(...) TRUE
 #define TRACE(...) ((void)0)
 #define FIXME(...) ((void)0)
 #define ERR(...) assert(0)
@@ -60,10 +62,8 @@ static int start_clock(pthread_t *thread, const pthread_attr_t *attr, void *(*en
 #define pthread_create start_clock
 '''
 
-code = function(system[system.rindex('static void init_xstate_features('):],
-                'static void init_xstate_features(')
-code += function(system[system.rindex('void init_shared_data_cpuinfo('):],
-                 'void init_shared_data_cpuinfo(')
+code = function(system[system.rindex('void init_shared_data_cpuinfo('):],
+                'void init_shared_data_cpuinfo(')
 code += function(virtual, 'void wine_nx_start_user_shared_data_clock(')
 code += function(exception, 'ULONG64 WINAPI RtlGetEnabledExtendedFeatures(')
 code += exception[exception.index('struct context_copy_range\n'):
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-shared-context-') as directory:
     (path / 'test.c').write_text(fixture + code + tests)
     subprocess.run([os.environ.get('WINE_NX_HOST_CC', '/usr/bin/clang'), '-std=gnu11', '-g', '-O2',
                     '-fms-extensions', '-fshort-wchar', '-fsanitize=address,undefined',
-                    '-D__WINESRC__', '-D_WIN64',
+                    '-D__WINESRC__', '-D_WIN64', '-D__SWITCH__',
                     '-I' + str(root / 'include'), '-I' + str(root / 'dlls/ntdll'),
                     str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True, timeout=30)

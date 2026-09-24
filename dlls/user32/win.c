@@ -19,7 +19,6 @@
  */
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "user_private.h"
 #include "controls.h"
 #include "winver.h"
@@ -92,28 +91,6 @@ static BOOL enum_windows( HDESK desktop, HWND hwnd, DWORD tid, BOOL children,
     }
     HeapFree( GetProcessHeap(), 0, list );
     return ret;
-}
-
-
-/*******************************************************************
- *           is_desktop_window
- *
- * Check if window is the desktop or the HWND_MESSAGE top parent.
- */
-BOOL is_desktop_window( HWND hwnd )
-{
-    struct ntuser_thread_info *thread_info = NtUserGetThreadInfo();
-
-    if (!hwnd) return FALSE;
-    if (hwnd == UlongToHandle( thread_info->top_window )) return TRUE;
-    if (hwnd == UlongToHandle( thread_info->msg_window )) return TRUE;
-
-    if (!HIWORD(hwnd) || HIWORD(hwnd) == 0xffff)
-    {
-        if (LOWORD(thread_info->top_window) == LOWORD(hwnd)) return TRUE;
-        if (LOWORD(thread_info->msg_window) == LOWORD(hwnd)) return TRUE;
-    }
-    return FALSE;
 }
 
 
@@ -284,6 +261,7 @@ HWND WIN_CreateWindowEx( CREATESTRUCTW *cs, LPCWSTR className, HINSTANCE module,
 {
     WCHAR nameW[MAX_ATOM_LEN + 1];
     UNICODE_STRING class = RTL_CONSTANT_STRING(nameW), version, window_name = {0};
+    struct client_menu_name *menu_name;
     HWND hwnd, top_child = 0;
     MDICREATESTRUCTW mdi_cs;
     WNDCLASSEXW info;
@@ -293,7 +271,7 @@ HWND WIN_CreateWindowEx( CREATESTRUCTW *cs, LPCWSTR className, HINSTANCE module,
     init_class_name( &class, className );
     get_class_version( &class, &version, TRUE );
 
-    if (!NtUserGetClassInfoEx( module, &class, &info, NULL, FALSE ))
+    if (!NtUserGetClassInfoEx( module, &class, &info, &menu_name, FALSE ))
     {
         TRACE( "%s %p -> not found\n", debugstr_us(&class), module );
         SetLastError( ERROR_CLASS_DOES_NOT_EXIST );
@@ -573,9 +551,6 @@ HWND WINAPI FindWindowW( LPCWSTR className, LPCWSTR title )
  */
 HWND WINAPI GetDesktopWindow(void)
 {
-    struct ntuser_thread_info *thread_info = NtUserGetThreadInfo();
-
-    if (thread_info->top_window) return UlongToHandle( thread_info->top_window );
     return NtUserGetDesktopWindow();
 }
 

@@ -68,6 +68,11 @@ static BOOL unicodeOutput = FALSE;
 static HANDLE console_input;
 BOOL echo_mode = TRUE;
 
+/* Output handling */
+static DWORD orig_console_mode;
+static DWORD internal_console_mode = ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT
+                                     | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
 /* Variables pertaining to paging */
 static BOOL paged_mode;
 static const WCHAR *pagedMessage = NULL;
@@ -1798,6 +1803,8 @@ static RETURN_CODE spawn_external_full_path(const WCHAR *file, WCHAR *full_cmdli
         console = SHGetFileInfoW(exe_path, 0, &psfi, sizeof(psfi), SHGFI_EXETYPE);
 
     init_msvcrt_io_block(&si);
+    if (console && !HIWORD(console))
+        SetConsoleMode( GetStdHandle(STD_OUTPUT_HANDLE), orig_console_mode );
     ret = CreateProcessW(file, full_cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
     free(si.lpReserved2);
 
@@ -2165,10 +2172,10 @@ static BOOL push_std_redirections(CMD_REDIRECTION *redir, HANDLE saved[3])
                             &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (h == INVALID_HANDLE_VALUE)
             {
-                WARN("Failed to open (%ls)\n", expanded_filename);
+                WARN("Failed to open (%s)\n", wine_dbgstr_w(expanded_filename));
                 return FALSE;
             }
-            TRACE("Open (%ls) => %p\n", expanded_filename, h);
+            TRACE("Open (%s) => %p\n", wine_dbgstr_w(expanded_filename), h);
             break;
         case REDIR_WRITE_TO:
         case REDIR_WRITE_APPEND:
@@ -2180,10 +2187,10 @@ static BOOL push_std_redirections(CMD_REDIRECTION *redir, HANDLE saved[3])
                                 &sa, disposition, FILE_ATTRIBUTE_NORMAL, NULL);
                 if (h == INVALID_HANDLE_VALUE)
                 {
-                    WARN("Failed to open (%ls)\n", expanded_filename);
+                    WARN("Failed to open (%s)\n", wine_dbgstr_w(expanded_filename));
                     return FALSE;
                 }
-                TRACE("Open %u (%ls) => %p\n", redir->fd, expanded_filename, h);
+                TRACE("Open %u (%s) => %p\n", redir->fd, wine_dbgstr_w(expanded_filename), h);
                 if (SetFilePointer(h, 0, NULL, FILE_END) == INVALID_SET_FILE_POINTER)
                     WCMD_print_error();
             }
@@ -2812,7 +2819,7 @@ static BOOL node_builder_parse(struct node_builder *builder, unsigned precedence
     CMD_FOR_CONTROL *for_ctrl = NULL;
     union token_parameter pmt;
     enum builder_token tkn;
-    BOOL done, do_echo = TRUE;
+    BOOL done = FALSE, do_echo = TRUE;
 
 #define ERROR_IF(x) if (x) {bogus_line = __LINE__; goto error_handling;}
     do
@@ -3007,6 +3014,7 @@ static BOOL node_builder_parse(struct node_builder *builder, unsigned precedence
                 } while (tkn != TKN_CLOSEPAR);
                 ERROR_IF(!node_builder_expect_token(builder, TKN_DO));
                 ERROR_IF(!node_builder_parse(builder, 0, &do_block));
+                if (!for_ctrl->set) for_control_append_set(for_ctrl, L"");
                 left = node_create_for(for_ctrl, do_block, do_echo);
                 for_ctrl = NULL;
             }
@@ -3658,7 +3666,7 @@ enum read_parse_line WCMD_ReadAndParseLine(CMD_NODE **output)
     if (!(curPos = fetch_next_line(TRUE, extraSpace)))
         return RPL_EOF;
 
-    TRACE("About to parse line (%ls)\n", extraSpace);
+    TRACE("About to parse line (%s)\n", wine_dbgstr_w(extraSpace));
 
     node_builder_init(&builder);
 
@@ -4344,22 +4352,26 @@ static RETURN_CODE for_control_execute_set(CMD_FOR_CONTROL *for_ctrl, const WCHA
 
         wcscpy(&buffer[len], element);
 
-        TRACE("Doing set element %ls\n", buffer);
+        TRACE("Doing set element %s\n", wine_dbgstr_w(buffer));
 
         if (wcspbrk(element, L"?*"))
         {
             WIN32_FIND_DATAW fd;
-            HANDLE hff = FindFirstFileW(buffer, &fd);
-            size_t insert_pos = (wcsrchr(buffer, L'\\') ? wcsrchr(buffer, L'\\') + 1 - buffer : 0);
+            HANDLE hff;
+            size_t insert_pos;
+
+            if (*buffer == L'"') WCMD_strip_quotes(buffer);
+            hff = FindFirstFileW(buffer, &fd);
+            insert_pos = wcsrchr(buffer, L'\\') ? wcsrchr(buffer, L'\\') + 1 - buffer : 0;
 
             if (hff == INVALID_HANDLE_VALUE)
             {
-                TRACE("Couldn't FindFirstFile on %ls\n", buffer);
+                TRACE("Couldn't FindFirstFile on %s\n", wine_dbgstr_w(buffer));
                 continue;
             }
             do
             {
-                TRACE("Considering %ls\n", fd.cFileName);
+                TRACE("Considering %s\n", wine_dbgstr_w(fd.cFileName));
                 if (!lstrcmpW(fd.cFileName, L"..") || !lstrcmpW(fd.cFileName, L".")) continue;
                 if (!(for_ctrl->flags & CMD_FOR_FLAG_TREE_INCLUDE_FILES) &&
                     !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
@@ -4403,7 +4415,7 @@ static RETURN_CODE for_control_execute_walk_files(CMD_FOR_CONTROL *for_ctrl, CMD
 
     while (!WCMD_is_break(return_code) && dirs_to_walk)
     {
-        TRACE("About to walk %p %ls for %s\n", dirs_to_walk, dirs_to_walk->dirName, debugstr_for_control(for_ctrl));
+        TRACE("About to walk %p %s for %s\n", dirs_to_walk, wine_dbgstr_w(dirs_to_walk->dirName), debugstr_for_control(for_ctrl));
         if (for_ctrl->flags & CMD_FOR_FLAG_TREE_RECURSE)
             WCMD_add_dirstowalk(dirs_to_walk);
 
@@ -4423,13 +4435,8 @@ static RETURN_CODE for_control_execute_numbers(CMD_FOR_CONTROL *for_ctrl, CMD_NO
     int numbers[3] = {0, 0, 0}, var;
     int i;
 
-    if (for_ctrl->set)
-    {
-        wcscpy(set, for_ctrl->set);
-        handleExpansion(set, TRUE);
-    }
-    else
-        set[0] = L'\0';
+    wcscpy(set, for_ctrl->set);
+    handleExpansion(set, TRUE);
 
     /* Note: native doesn't check the actual number of parameters, and set
      * them by default to 0.
@@ -4462,7 +4469,7 @@ static RETURN_CODE for_control_execute(CMD_FOR_CONTROL *for_ctrl, CMD_NODE *node
 {
     RETURN_CODE return_code;
 
-    if (!for_ctrl->set && for_ctrl->operator != CMD_FOR_NUMBERS) return NO_ERROR;
+    if (!for_ctrl->set[0] && for_ctrl->operator != CMD_FOR_NUMBERS) return NO_ERROR;
 
     WCMD_save_for_loop_context(FALSE);
 
@@ -4689,6 +4696,7 @@ static RETURN_CODE node_execute_with_echo(CMD_NODE *node, BOOL with_echo)
 
 RETURN_CODE node_execute(CMD_NODE *node)
 {
+    SetConsoleMode( GetStdHandle(STD_OUTPUT_HANDLE), internal_console_mode );
     return node_execute_with_echo(node, echo_mode && WCMD_is_in_context(NULL));
 }
 
@@ -4849,7 +4857,7 @@ static void parse_command_line_parameters(struct cmd_parameters *parameters)
         /* opt_s left unflagged if the command starts with and contains exactly
          * one quoted string (exactly two quote characters). The quoted string
          * must be an executable name that has whitespace and must not have the
-         * following characters: &<>()@^|
+         * following characters: &<>@^|
          */
 
         /* 1. Confirm there is at least one quote */
@@ -4867,7 +4875,7 @@ static void parse_command_line_parameters(struct cmd_parameters *parameters)
             opt_s = TRUE;
             for (p = q1; p != q2; p++)
             {
-                if (wcschr(L"&<>()@^'", *p))
+                if (wcschr(L"&<>@^'", *p))
                 {
                     opt_s = TRUE;
                     break;
@@ -4941,6 +4949,7 @@ static void WCMD_setup(void)
     /* init for loop context */
     forloopcontext = NULL;
     WCMD_save_for_loop_context(TRUE);
+    GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &orig_console_mode);
 }
 
 /*****************************************************************************

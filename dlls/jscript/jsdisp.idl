@@ -43,35 +43,6 @@ const unsigned int HOSTOBJ_CONSTRUCTOR    = 0x0001;
 const unsigned int HOSTOBJ_VOLATILE_FILL  = 0x0002;
 const unsigned int HOSTOBJ_VOLATILE_PROPS = 0x0004;
 
-cpp_quote("DEFINE_GUID(IID_nsCycleCollectionISupports, 0xc61eac14,0x5f7a,0x4481,0x96,0x5e,0x7e,0xaa,0x6e,0xff,0xa8,0x5f);")
-cpp_quote("DEFINE_GUID(IID_nsXPCOMCycleCollectionParticipant, 0x9674489b,0x1f6f,0x4550,0xa7,0x30, 0xcc,0xae,0xdd,0x10,0x4c,0xf9);")
-
-typedef struct {
-    void *vtbl;
-    int ref_flags;
-    void *callbacks;
-} ExternalCycleCollectionParticipant;
-
-typedef struct nsCycleCollectionTraversalCallback nsCycleCollectionTraversalCallback;
-
-typedef struct {
-    HRESULT (__stdcall *traverse)(void*,void*,nsCycleCollectionTraversalCallback*);
-    HRESULT (__stdcall *unlink)(void*);
-    void (__stdcall *delete_cycle_collectable)(void*);
-} CCObjCallback;
-
-typedef void (__cdecl *note_edge_t)(IUnknown*,const char*,nsCycleCollectionTraversalCallback*);
-
-struct jshost_cc_api
-{
-    ExternalCycleCollectionParticipant participant;
-    BOOL (__cdecl *is_full_cc)(void);
-    void (__cdecl *collect)(void);
-    void (__cdecl *describe_node)(ULONG ref, const char *obj_name, nsCycleCollectionTraversalCallback *cb);
-    note_edge_t note_edge;
-    struct list entry;
-};
-
 interface IWineJSDispatchHost;
 
 [
@@ -82,8 +53,6 @@ interface IWineJSDispatchHost;
 interface IWineJSDispatch : IDispatchEx
 {
     void Free();
-    void Traverse(nsCycleCollectionTraversalCallback *cb);
-    void Unlink();
     HRESULT GetPropertyFlags(DISPID id, UINT32 *ret);
     HRESULT DefineProperty(const WCHAR *name, unsigned int flags, VARIANT *v);
     HRESULT UpdateProperty(struct property_info *desc);
@@ -109,7 +78,6 @@ interface IWineJSDispatchHost : IDispatchEx
     HRESULT FillProperties();
     HRESULT GetOuterDispatch(IWineJSDispatchHost **ret);
     HRESULT ToString(BSTR *str);
-    void InitCC(struct jshost_cc_api *cc_api, const CCObjCallback *callback);
 }
 
 const unsigned int SCRIPTLANGUAGEVERSION_HTML  = 0x400;

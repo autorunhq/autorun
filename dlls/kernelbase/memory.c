@@ -25,7 +25,6 @@
 #include <sys/types.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
@@ -41,6 +40,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(heap);
 WINE_DECLARE_DEBUG_CHANNEL(virtual);
 WINE_DECLARE_DEBUG_CHANNEL(globalmem);
 
+static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
 static CRITICAL_SECTION memstatus_section;
 static CRITICAL_SECTION_DEBUG critsect_debug =
@@ -123,23 +123,17 @@ DWORD WINAPI DECLSPEC_HOTPATCH DiscardVirtualMemory( void *addr, SIZE_T size )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH FlushViewOfFile( const void *base, SIZE_T size )
 {
-    NTSTATUS status = NtFlushVirtualMemory( GetCurrentProcess(), &base, &size, 0 );
+    NTSTATUS status = NtFlushVirtualMemory( GetCurrentProcess(), &base, &size, NULL );
 
     if (status == STATUS_NOT_MAPPED_DATA) status = STATUS_SUCCESS;
     return set_ntstatus( status );
 }
 
+
 /****************************************************************************
  *           FlushInstructionCache   (kernelbase.@)
  */
-#if defined(__i386__) || defined(__x86_64__)
 BOOL WINAPI DECLSPEC_HOTPATCH FlushInstructionCache( HANDLE process, LPCVOID addr, SIZE_T size )
-{
-    /* X86 processors have coherent instruction and data caches, no need to do anything */
-    return TRUE;
-}
-#else
-static BOOL flush_instruction_cache( HANDLE process, LPCVOID addr, SIZE_T size )
 {
     CROSS_PROCESS_WORK_LIST *list;
 
@@ -151,35 +145,13 @@ static BOOL flush_instruction_cache( HANDLE process, LPCVOID addr, SIZE_T size )
     return set_ntstatus( NtFlushInstructionCache( process, addr, size ));
 }
 
-#ifdef __arm64ec__
-/* Wrapper that preserves RDX/X0 */
-BOOL WINAPI __attribute__((naked)) FlushInstructionCache( HANDLE process, LPCVOID addr, SIZE_T size )
-{
-    asm( ".seh_proc \"#FlushInstructionCache\"\n\t"
-         "stp x29, x30, [sp, #-32]!\n\t"
-         "str x1, [sp, #16]\n\t"
-         ".seh_save_fplr_x 32\n\t"
-         ".seh_endprologue\n\t"
-         "bl \"#flush_instruction_cache\"\n\t"
-         "ldr x1, [sp, #16]\n\t"
-         "ldp x29, x30, [sp], #32\n\t"
-         "ret\n\t"
-         ".seh_endproc" );
-}
-#else
-BOOL WINAPI DECLSPEC_HOTPATCH FlushInstructionCache( HANDLE process, LPCVOID addr, SIZE_T size )
-{
-    return flush_instruction_cache( process, addr, size );
-}
-#endif
-#endif
 
 /***********************************************************************
  *          GetLargePageMinimum   (kernelbase.@)
  */
 SIZE_T WINAPI GetLargePageMinimum(void)
 {
-    return 2 * 1024 * 1024;
+    return user_shared_data->LargePageMinimum;
 }
 
 
@@ -237,18 +209,16 @@ void WINAPI DECLSPEC_HOTPATCH GetNativeSystemInfo( SYSTEM_INFO *si )
 {
     SYSTEM_BASIC_INFORMATION basic_info;
     SYSTEM_CPU_INFORMATION cpu_info;
+    USHORT current_machine, native_machine;
 
-    if (is_wow64)
+    RtlWow64GetProcessMachines( 0, &current_machine, &native_machine );
+
+    if (!is_wow64 || native_machine != IMAGE_FILE_MACHINE_AMD64)
     {
-        USHORT current_machine, native_machine;
-
-        RtlWow64GetProcessMachines( 0, &current_machine, &native_machine );
-        if (native_machine != IMAGE_FILE_MACHINE_AMD64)
-        {
-            GetSystemInfo( si );
+        GetSystemInfo( si );
+        if (is_wow64 && native_machine != IMAGE_FILE_MACHINE_AMD64)
             si->wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
-            return;
-        }
+        return;
     }
 
     if (!set_ntstatus( RtlGetNativeSystemInformation( SystemBasicInformation,
@@ -1610,9 +1580,9 @@ BOOL WINAPI SetProcessDefaultCpuSets(HANDLE process, const ULONG *cpu_set_ids, U
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetNumaHighestNodeNumber( ULONG *node )
 {
-    FIXME( "semi-stub: %p\n", node );
-    *node = 0;
-    return TRUE;
+    TRACE( "node %p.\n", node );
+
+    return set_ntstatus( NtQuerySystemInformation( SystemNumaProcessorMap, node, sizeof(*node), NULL ));
 }
 
 
@@ -1621,9 +1591,21 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetNumaHighestNodeNumber( ULONG *node )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetNumaNodeProcessorMaskEx( USHORT node, GROUP_AFFINITY *mask )
 {
-    FIXME( "stub: %hu %p\n", node, mask );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    SYSTEM_NUMA_INFORMATION info;
+    NTSTATUS status;
+
+    TRACE( "node %u, mask %p.\n", node, mask );
+
+    if ((status = NtQuerySystemInformation( SystemNumaProcessorMap, &info, sizeof(info), NULL )))
+        return set_ntstatus( status );
+
+    if (node > info.HighestNodeNumber)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    *mask = info.ActiveProcessorsGroupAffinity[node];
+    return TRUE;
 }
 
 
@@ -1632,6 +1614,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetNumaNodeProcessorMaskEx( USHORT node, GROUP_AFF
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetNumaProximityNodeEx( ULONG proximity_id, USHORT *node )
 {
+    FIXME( "proximity_id %lu, node %p stub.\n", proximity_id, node );
+
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }

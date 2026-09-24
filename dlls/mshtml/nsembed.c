@@ -599,7 +599,6 @@ static BOOL init_xpcom(const PRUnichar *gre_path)
 
     init_dispex_cc();
     init_window_cc();
-    init_enum_cc();
 
     return TRUE;
 }
@@ -2175,16 +2174,6 @@ static const nsISupportsWeakReferenceVtbl nsSupportsWeakReferenceVtbl = {
     nsSupportsWeakReference_GetWeakReference
 };
 
-void cycle_collect(nsIDOMWindowUtils *window_utils)
-{
-    thread_data_t *thread_data = get_thread_data(TRUE);
-    if(thread_data) {
-        thread_data->full_cc_in_progress++;
-        nsIDOMWindowUtils_CycleCollect(window_utils, NULL, 0);
-        thread_data->full_cc_in_progress--;
-    }
-}
-
 static HRESULT init_browser(GeckoBrowser *browser)
 {
     mozIDOMWindowProxy *mozwindow;
@@ -2408,7 +2397,7 @@ void detach_gecko_browser(GeckoBrowser *This)
 
     /* Force cycle collection */
     if(window_utils) {
-        cycle_collect(window_utils);
+        nsIDOMWindowUtils_CycleCollect(window_utils, NULL, 0);
         nsIDOMWindowUtils_Release(window_utils);
     }
 }

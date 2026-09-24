@@ -41,7 +41,6 @@
 #include <limits.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winreg.h"
@@ -298,13 +297,12 @@ void restore_clipping_region( X11DRV_PDEVICE *dev )
 /***********************************************************************
  *           X11DRV_SetDeviceClipping
  */
-void X11DRV_SetDeviceClipping( PHYSDEV dev, HRGN rgn, HRGN monitor_rgn )
+void X11DRV_SetDeviceClipping( PHYSDEV dev, HRGN rgn )
 {
     X11DRV_PDEVICE *physDev = get_x11drv_dev( dev );
 
-    if (physDev->region) NtGdiDeleteObjectApp( physDev->region );
-    physDev->region = clone_gdi_region( monitor_rgn );
-    update_x11_clipping( physDev, physDev->region );
+    physDev->region = rgn;
+    update_x11_clipping( physDev, rgn );
 }
 
 
@@ -1684,7 +1682,7 @@ void init_icm_profile(void)
 
     RtlInitUnicodeString( &name, fullname );
     InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
-    status = NtCreateFile( &file, GENERIC_WRITE, &attr, &io, NULL, 0, 0, FILE_CREATE,
+    status = NtCreateFile( &file, GENERIC_WRITE | SYNCHRONIZE, &attr, &io, NULL, 0, 0, FILE_CREATE,
                            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0 );
     if (!status)
     {

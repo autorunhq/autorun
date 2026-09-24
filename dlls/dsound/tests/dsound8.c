@@ -311,7 +311,11 @@ static HRESULT test_dsound8(LPGUID lpGuid)
 
         /* Create a second DirectSound8 object */
         rc = DirectSoundCreate8(lpGuid, &dso1, NULL);
-        ok(rc==DS_OK,"DirectSoundCreate8() failed: %08lx\n",rc);
+        /* Running without pulseaudio can't open twice. */
+        if (rc==AUDCLNT_E_DEVICE_IN_USE)
+            skip("Failed to open device a second time, skipping test.\n");
+        else
+            ok(rc==DS_OK,"DirectSoundCreate8() failed: %08lx\n",rc);
         if (rc==DS_OK) {
             /* Release the second DirectSound8 object */
             ref=IDirectSound8_Release(dso1);
@@ -1228,7 +1232,7 @@ static IMediaObject testdmo;
 static IMediaObjectInPlace testdmo_inplace;
 static LONG testdmo_refcount;
 static WAVEFORMATEX testdmo_input_type;
-static BOOL testdmo_input_type_set, testdmo_output_type_set;
+static BOOL testdmo_input_type_set;
 
 static unsigned int got_Discontinuity;
 static HANDLE got_Process;
@@ -1298,7 +1302,7 @@ static HRESULT WINAPI dmo_SetInputType(IMediaObject *iface, DWORD index, const D
     ok(!flags, "Got unexpected flags %#lx.\n", flags);
 
     ok(IsEqualGUID(&type->majortype, &MEDIATYPE_Audio), "Got major type %s.\n", debugstr_guid(&type->majortype));
-    todo_wine ok(IsEqualGUID(&type->subtype, &MEDIASUBTYPE_PCM), "Got subtype %s.\n", debugstr_guid(&type->subtype));
+    ok(IsEqualGUID(&type->subtype, &MEDIASUBTYPE_PCM), "Got subtype %s.\n", debugstr_guid(&type->subtype));
     ok(type->bFixedSizeSamples == TRUE, "Got fixed size %d.\n", type->bFixedSizeSamples);
     ok(!type->bTemporalCompression, "Got temporal compression %d.\n", type->bTemporalCompression);
     ok(IsEqualGUID(&type->formattype, &FORMAT_WaveFormatEx), "Got format type %s.\n", debugstr_guid(&type->formattype));
@@ -1306,7 +1310,7 @@ static HRESULT WINAPI dmo_SetInputType(IMediaObject *iface, DWORD index, const D
     ok(type->cbFormat == sizeof(WAVEFORMATEX), "Got format size %lu.\n", type->cbFormat);
 
     wfx = (WAVEFORMATEX *)type->pbFormat;
-    todo_wine ok(type->lSampleSize == wfx->nBlockAlign, "Got sample size %lu.\n", type->lSampleSize);
+    ok(type->lSampleSize == wfx->nBlockAlign, "Got sample size %lu.\n", type->lSampleSize);
 
     if (wfx->wBitsPerSample != 8)
         return DMO_E_TYPE_NOT_ACCEPTED;
@@ -1335,8 +1339,6 @@ static HRESULT WINAPI dmo_SetOutputType(IMediaObject *iface, DWORD index, const 
     ok(type->cbFormat == sizeof(WAVEFORMATEX), "Got format size %lu.\n", type->cbFormat);
 
     ok(!memcmp(type->pbFormat, &testdmo_input_type, sizeof(WAVEFORMATEX)), "Format blocks didn't match.\n");
-
-    testdmo_output_type_set = TRUE;
     return S_OK;
 }
 
@@ -1474,12 +1476,22 @@ static ULONG WINAPI dmo_inplace_Release(IMediaObjectInPlace *iface)
 static HRESULT WINAPI dmo_inplace_Process(IMediaObjectInPlace *iface, ULONG size,
         BYTE *data, REFERENCE_TIME start, DWORD flags)
 {
+    static const BYTE expected_data[] = {0xad, 0x10, 0xda, 0x7a};
+    int i;
+
     if (winetest_debug > 1) trace("Process(size %lu)\n", size);
 
     ok(!start, "Got start time %s.\n", wine_dbgstr_longlong(start));
     ok(!flags, "Got flags %#lx.\n", flags);
 
-    SetEvent(got_Process);
+    for (i = 0; i < size + 1 - sizeof(expected_data); ++i)
+    {
+        if (!memcmp(data + i, expected_data, sizeof(expected_data)))
+        {
+            SetEvent(got_Process);
+            break;
+        }
+    }
 
     return S_FALSE;
 }
@@ -1574,6 +1586,7 @@ static void test_effects(void)
     IUnknown *unk;
     HRESULT hr;
     ULONG ref;
+    int i;
 
     hr = DirectSoundCreate8(NULL, &dsound, NULL);
     ok(hr == DS_OK || hr == DSERR_NODRIVER, "Got hr %#lx.\n", hr);
@@ -1750,31 +1763,51 @@ static void test_effects(void)
     IMediaObject_Release(echo);
     IMediaObject_Release(reverb);
 
+    hr = IDirectSoundBuffer8_Lock(buffer8, 0, 0, &ptr1, &size1, &ptr2, &size2, DSBLOCK_ENTIREBUFFER);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    for (i = 0;;)
+    {
+        if (i >= size1) break;
+        ((BYTE *)ptr1)[i] = 0xad;
+        ++i;
+        if (i >= size1) break;
+        ((BYTE *)ptr1)[i] = 0x10;
+        ++i;
+        if (i >= size1) break;
+        ((BYTE *)ptr1)[i] = 0xda;
+        ++i;
+        if (i >= size1) break;
+        ((BYTE *)ptr1)[i] = 0x7a;
+        ++i;
+    }
+    hr = IDirectSoundBuffer8_Unlock(buffer8, ptr1, size1, ptr2, size2);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
     got_Process = CreateEventA(NULL, TRUE, FALSE, NULL);
 
     effects[0].guidDSFXClass = testdmo_clsid;
     results[0] = 0xdeadbeef;
     hr = IDirectSoundBuffer8_SetFX(buffer8, 1, effects, results);
-    todo_wine ok(hr == DS_OK, "Got hr %#lx.\n", hr);
-    todo_wine ok(results[0] == DSFXR_LOCSOFTWARE, "Got result %#lx.\n", results[0]);
-    todo_wine ok(!memcmp(&testdmo_input_type, &wfx, sizeof(WAVEFORMATEX)), "Format blocks didn't match.\n");
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    ok(results[0] == DSFXR_LOCSOFTWARE, "Got result %#lx.\n", results[0]);
+    ok(!memcmp(&testdmo_input_type, &wfx, sizeof(WAVEFORMATEX)), "Format blocks didn't match.\n");
 
     ResetEvent(notify_params.hEventNotify);
     hr = IDirectSoundBuffer8_Play(buffer8, 0, 0, 0);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
-    todo_wine ok(got_Discontinuity == 1, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
+    ok(got_Discontinuity == 1, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
 
-    todo_wine ok(!WaitForSingleObject(got_Process, 100), "Wait timed out.\n");
+    ok(!WaitForSingleObject(got_Process, 100), "Wait timed out.\n");
 
     hr = IDirectSoundBuffer8_Stop(buffer8);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
-    todo_wine ok(got_Discontinuity == 1, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
+    ok(got_Discontinuity == 1, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
     ok(!WaitForSingleObject(notify_params.hEventNotify, 1000), "Wait timed out.\n");
 
     ResetEvent(notify_params.hEventNotify);
     hr = IDirectSoundBuffer8_Play(buffer8, 0, 0, 0);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
-    todo_wine ok(got_Discontinuity == 2, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
+    ok(got_Discontinuity == 2, "Got %u calls to IMediaObject::Discontinuity().\n", got_Discontinuity);
 
     hr = IDirectSoundBuffer8_Stop(buffer8);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
@@ -1931,6 +1964,61 @@ static void test_implicit_mta(void)
     ok(test_apt_data.type == APTTYPE_UNITIALIZED, "got apt type %d.\n", test_apt_data.type);
 }
 
+static void test_primary_independent(void)
+{
+    DSBUFFERDESC bufdesc = {.dwSize = sizeof(bufdesc)};
+    IDirectSoundBuffer *primary1, *primary2;
+    IDirectSound8 *dso1, *dso2;
+    DSBCAPS caps;
+    HRESULT hr;
+    LONG vol;
+
+    hr = DirectSoundCreate8(NULL, &dso1, NULL);
+    ok(hr == DS_OK || hr == DSERR_NODRIVER || hr == DSERR_ALLOCATED || hr == E_FAIL,
+       "DirectSoundCreate8() failed: %08lx\n", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = DirectSoundCreate8(NULL, &dso2, NULL);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectSound8_SetCooperativeLevel(dso1, get_hwnd(), DSSCL_PRIORITY);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectSound8_SetCooperativeLevel(dso2, get_hwnd(), DSSCL_PRIORITY);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    /* Create a primary buffer on dso1 with CTRL3D but without CTRLVOLUME */
+    bufdesc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D;
+    hr = IDirectSound8_CreateSoundBuffer(dso1, &bufdesc, &primary1, NULL);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    /* Create a primary buffer on dso2 with CTRLVOLUME */
+    bufdesc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME;
+    hr = IDirectSound8_CreateSoundBuffer(dso2, &bufdesc, &primary2, NULL);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    /* Check whether the two IDirectSound objects share a primary buffer */
+    ok(primary1 != primary2,
+       "Two IDirectSound objects should have independent primary buffers\n");
+
+    /* GetVolume on dso2's primary buffer should succeed */
+    hr = IDirectSoundBuffer_GetVolume(primary2, &vol);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    /* Verify dso2's primary buffer has CTRLVOLUME */
+    memset(&caps, 0, sizeof(caps));
+    caps.dwSize = sizeof(caps);
+    hr = IDirectSoundBuffer_GetCaps(primary2, &caps);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    ok(caps.dwFlags & DSBCAPS_CTRLVOLUME, "Unexpected dwFlags %#lx.\n", caps.dwFlags);
+
+    IDirectSoundBuffer_Release(primary2);
+    IDirectSoundBuffer_Release(primary1);
+    IDirectSound8_Release(dso2);
+    IDirectSound8_Release(dso1);
+}
+
 START_TEST(dsound8)
 {
     DWORD cookie;
@@ -1955,6 +2043,8 @@ START_TEST(dsound8)
     test_effects();
 
     CoRevokeClassObject(cookie);
+
+    test_primary_independent();
 
     CoUninitialize();
 }

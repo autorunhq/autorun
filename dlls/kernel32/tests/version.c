@@ -25,13 +25,12 @@
 #include "winternl.h"
 #include "appmodel.h"
 
-static LONG (WINAPI * pGetPackagePath)(const PACKAGE_ID *, const UINT32, UINT32 *, WCHAR *);
-static LONG (WINAPI * pGetPackagesByPackageFamily)(const WCHAR *, UINT32 *, WCHAR **, UINT32 *, WCHAR *);
 static BOOL (WINAPI * pGetProductInfo)(DWORD, DWORD, DWORD, DWORD, DWORD *);
 static UINT (WINAPI * pEnumSystemFirmwareTables)(DWORD, void *, DWORD);
 static UINT (WINAPI * pGetSystemFirmwareTable)(DWORD, DWORD, void *, DWORD);
 static LONG (WINAPI * pPackageFullNameFromId)(const PACKAGE_ID *, UINT32 *, WCHAR *);
 static LONG (WINAPI * pPackageIdFromFullName)(const WCHAR *, UINT32, UINT32 *, BYTE *);
+
 static NTSTATUS (WINAPI * pNtQuerySystemInformation)(SYSTEM_INFORMATION_CLASS, void *, ULONG, ULONG *);
 static NTSTATUS (WINAPI * pRtlGetVersion)(RTL_OSVERSIONINFOEXW *);
 
@@ -49,8 +48,6 @@ static void init_function_pointers(void)
 
     hmod = GetModuleHandleA("kernel32.dll");
 
-    GET_PROC(GetPackagePath);
-    GET_PROC(GetPackagesByPackageFamily);
     GET_PROC(GetProductInfo);
     GET_PROC(EnumSystemFirmwareTables);
     GET_PROC(GetSystemFirmwareTable);
@@ -833,11 +830,9 @@ static void test_PackageIdFromFullName(void)
     {
         0, PROCESSOR_ARCHITECTURE_INTEL,
                 {{.Major = 1, .Minor = 2, .Build = 3, .Revision = 4}},
-                (WCHAR *)L"TestPackage", (WCHAR *)L"TestResource",
+                (WCHAR *)L"TestPackage", NULL,
                 (WCHAR *)L"TestResourceId", (WCHAR *)L"0abcdefghjkme"
     };
-    static const WCHAR test_package_fullname[] =
-            L"TestPackage_1.2.3.4_x86_TestResourceId_0abcdefghjkme";
     UINT32 size, expected_size;
     PACKAGE_ID test_id;
     WCHAR fullname[512];
@@ -950,22 +945,6 @@ static void test_PackageIdFromFullName(void)
     size = sizeof(id_buffer);
     ret = pPackageIdFromFullName(L"TestPackage_1.2.3.4_X86_0abcdefghjkme", 0, &size, id_buffer);
     ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %lu.\n", ret);
-
-    ret = pPackageFullNameFromId(&test_package_id, NULL, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-
-    size = sizeof(fullname);
-    ret = pPackageFullNameFromId(&test_package_id, &size, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-
-    size = 0;
-    ret = pPackageFullNameFromId(&test_package_id, &size, NULL);
-    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Got unexpected ret %u.\n", ret);
-    ok(size == lstrlenW(test_package_fullname) + 1, "Got unexpected size %u.\n", size);
-
-    ret = pPackageFullNameFromId(&test_package_id, &size, fullname);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(!lstrcmpW(fullname, test_package_fullname), "Got unexpected fullname %s.\n", debugstr_w(fullname));
 }
 
 #define TEST_VERSION_WIN7   1
@@ -1125,185 +1104,70 @@ static void test_pe_os_version(void)
     }
 }
 
-
-static void test_package_info(void)
+static void test_PackageFullNameFromId(void)
 {
-    static const WCHAR package_family_msvc140[] = L"Microsoft.VCLibs.140.00_8wekyb3d8bbwe";
-    UINT32 count, length, curr_length, size, path_length, total_length;
-    WCHAR buffer[2048], path[MAX_PATH];
-    PACKAGE_ID *id, saved_id;
-    WCHAR *full_names[32];
-    BYTE id_buffer[512];
-    DWORD arch, attrib;
-    BOOL arch_found;
-    SYSTEM_INFO si;
-    unsigned int i;
+    WCHAR buffer[100];
+    PACKAGE_ID id;
+    UINT32 length;
     LONG ret;
 
-    if (!pGetPackagesByPackageFamily)
+    if (!pPackageFullNameFromId)
     {
-        win_skip("GetPackagesByPackageFamily not available.\n");
+        win_skip("PackageFullNameFromId not available.\n");
         return;
     }
 
-    GetSystemInfo(&si);
-    arch = si.wProcessorArchitecture;
+    ret = pPackageFullNameFromId(NULL, NULL, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
-    count = 0;
-    length = 0;
-    ret = pGetPackagesByPackageFamily(L"Unknown_8wekyb3d8bbwe", &count, NULL, &length, NULL);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-    ok(!length, "Got unexpected length %u.\n", length);
+    memset(&id, 0, sizeof(id));
+    ret = pPackageFullNameFromId(&id, NULL, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
-    count = 0;
-    length = 0;
-    ret = pGetPackagesByPackageFamily(L"Unknown_iekyb3d8bbwe", &count, NULL, &length, NULL);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-    ok(!length, "Got unexpected length %u.\n", length);
-
-    count = 0xdeadbeef;
-    length = 0xdeadbeef;
-    ret = pGetPackagesByPackageFamily(L"Unknown", &count, NULL, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(count == 0xdeadbeef, "Got unexpected count %u.\n", count);
-    ok(length == 0xdeadbeef, "Got unexpected length %u.\n", length);
-
-    count = 0;
-    length = 0;
-    ret = pGetPackagesByPackageFamily(L"Unknown", &count, NULL, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-    ok(!length, "Got unexpected length %u.\n", length);
-
-    count = 0;
-    length = 0;
-    ret = pGetPackagesByPackageFamily(L"Unknown_8wekyb3d8bbwe_b", &count, NULL, &length, NULL);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-    ok(!length, "Got unexpected length %u.\n", length);
-
-    count = 0;
-    length = 0;
-    ret = pGetPackagesByPackageFamily(L"Unknown_", &count, NULL, &length, NULL);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-    ok(!length, "Got unexpected length %u.\n", length);
+    length = 123;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
     length = 0;
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, NULL, NULL, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(!length, "Got unexpected length %u.\n", length);
-
-    count = 0;
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, NULL, NULL, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(!count, "Got unexpected count %u.\n", count);
-
-    count = ARRAY_SIZE(full_names);
-    length = ARRAY_SIZE(buffer);
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, NULL, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(count == ARRAY_SIZE(full_names), "Got unexpected count %u.\n", count);
-    ok(length == ARRAY_SIZE(buffer), "Got unexpected length %u.\n", length);
-
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, full_names, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(count == ARRAY_SIZE(full_names), "Got unexpected count %u.\n", count);
-    ok(length == ARRAY_SIZE(buffer), "Got unexpected length %u.\n", length);
-
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, NULL, &length, buffer);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-    ok(count == ARRAY_SIZE(full_names), "Got unexpected count %u.\n", count);
-    ok(length == ARRAY_SIZE(buffer), "Got unexpected length %u.\n", length);
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
     length = 0;
-    ret = pGetPackagePath(NULL, 0, &length, NULL);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
+    id.processorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
-    count = 0;
     length = 0;
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, NULL, &length, NULL);
-    if (!ret && !count && !length)
-    {
-        win_skip("Package VCLibs.140.00 is not installed.\n");
-        return;
-    }
+    id.processorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
+    id.version.Major = 1;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 
-    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Got unexpected ret %u.\n", ret);
-    ok(count >= 1, "Got unexpected count %u.\n", count);
-    ok(length > 1, "Got unexpected length %u.\n", length);
+    length = 0;
+    id.processorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
+    id.version.Major = 1;
+    id.version.Minor = 2;
+    id.version.Build = 3;
+    id.version.Revision = 4;
+    id.name = (WCHAR *)L"name";
+    id.publisher = (WCHAR *)L"publisher";
+    id.resourceId = (WCHAR *)L"resourceid";
+    id.publisherId = (WCHAR *)L"1234567890abc";
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
 
-    ret = pGetPackagesByPackageFamily(package_family_msvc140, &count, full_names, &length, buffer);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    ok(count >= 1, "Got unexpected count %u.\n", count);
-    ok(length > 1, "Got unexpected length %u.\n", length);
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_resourceid_1234567890abc"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
 
-    total_length = length;
-    id = (PACKAGE_ID *)id_buffer;
-    curr_length = 0;
-    arch_found = FALSE;
-    for (i = 0; i < count; ++i)
-    {
-        curr_length += lstrlenW(full_names[i]) + 1;
-
-        size = sizeof(id_buffer);
-        ret = pPackageIdFromFullName(full_names[i], 0, &size, id_buffer);
-        ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-
-        if (id->processorArchitecture == arch)
-            arch_found = TRUE;
-
-        path_length = 0;
-        ret = pGetPackagePath(id, 0, &path_length, NULL);
-        ok(ret == ERROR_INSUFFICIENT_BUFFER, "Got unexpected ret %u.\n", ret);
-        ok(path_length > 1, "Got unexpected path_length %u.\n", path_length);
-
-        length = path_length;
-        ret = pGetPackagePath(id, 0, &length, path);
-        ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-        ok(length == path_length, "Got unexpected length %u.\n", length);
-        attrib = GetFileAttributesW(path);
-        ok(attrib != INVALID_FILE_ATTRIBUTES && attrib & FILE_ATTRIBUTE_DIRECTORY,
-                "Got unexpected attrib %#x, GetLastError() %u.\n", attrib, GetLastError());
-    }
-    ok(curr_length == total_length, "Got unexpected length %u.\n", length);
-    ok(arch_found, "Did not find package for current arch.\n");
-
-    size = sizeof(id_buffer);
-    ret = pPackageIdFromFullName(full_names[0], 0, &size, id_buffer);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-    saved_id = *id;
-
-    id->publisherId = NULL;
-    length = ARRAY_SIZE(path);
-    ret = pGetPackagePath(id, 0, &length, path);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-
-    *id = saved_id;
-    id->name = NULL;
-    length = ARRAY_SIZE(path);
-    ret = pGetPackagePath(id, 0, &length, path);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-
-    *id = saved_id;
-    id->publisher = NULL;
-    length = ARRAY_SIZE(path);
-    ret = pGetPackagePath(id, 0, &length, path);
-    ok(ret == ERROR_SUCCESS, "Got unexpected ret %u.\n", ret);
-
-    *id = saved_id;
-    id->processorArchitecture = ~0u;
-    length = ARRAY_SIZE(path);
-    ret = pGetPackagePath(id, 0, &length, path);
-    ok(ret == ERROR_INVALID_PARAMETER, "Got unexpected ret %u.\n", ret);
-
-    *id = saved_id;
-    id->name[0] = L'X';
-    length = ARRAY_SIZE(path);
-    ret = pGetPackagePath(id, 0, &length, path);
-    ok(ret == ERROR_NOT_FOUND, "Got unexpected ret %u.\n", ret);
+    /* Publisher ID is calculated if not provided. */
+    id.publisherId = NULL;
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    todo_wine
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_resourceid_0mk95qz5wh294"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
 }
 
 START_TEST(version)
@@ -1333,5 +1197,5 @@ START_TEST(version)
     test_pe_os_version();
     test_SystemFirmwareTable();
     test_PackageIdFromFullName();
-    test_package_info();
+    test_PackageFullNameFromId();
 }

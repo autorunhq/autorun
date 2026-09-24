@@ -91,25 +91,7 @@ static void Enumerator_destructor(jsdisp_t *dispex)
 
 static HRESULT Enumerator_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *dispex)
 {
-    EnumeratorInstance *This = enumerator_from_jsdisp(dispex);
-
-    if(op == GC_TRAVERSE_UNLINK) {
-        IEnumVARIANT *enumvar = This->enumvar;
-        if(enumvar) {
-            This->enumvar = NULL;
-            IEnumVARIANT_Release(enumvar);
-        }
-    }
-    return gc_process_linked_val(gc_ctx, op, dispex, &This->item);
-}
-
-static void Enumerator_cc_traverse(jsdisp_t *dispex, nsCycleCollectionTraversalCallback *cb)
-{
-    EnumeratorInstance *This = enumerator_from_jsdisp(dispex);
-    if(This->enumvar)
-        cc_api.note_edge((IUnknown*)This->enumvar, "enumvar", cb);
-    if(is_object_instance(This->item))
-        cc_api.note_edge(get_edge_obj(get_object(This->item)), "item", cb);
+    return gc_process_linked_val(gc_ctx, op, &enumerator_from_jsdisp(dispex)->item);
 }
 
 static HRESULT Enumerator_atEnd(script_ctx_t *ctx, jsval_t vthis, WORD flags, unsigned argc, jsval_t *argv,
@@ -207,8 +189,7 @@ static const builtin_info_t Enumerator_info = {
 static const builtin_info_t EnumeratorInst_info = {
     .class       = JSCLASS_ENUMERATOR,
     .destructor  = Enumerator_destructor,
-    .gc_traverse = Enumerator_gc_traverse,
-    .cc_traverse = Enumerator_cc_traverse
+    .gc_traverse = Enumerator_gc_traverse
 };
 
 static HRESULT alloc_enumerator(script_ctx_t *ctx, jsdisp_t *object_prototype, EnumeratorInstance **ret)

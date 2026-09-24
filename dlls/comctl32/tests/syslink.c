@@ -330,6 +330,7 @@ static void test_LM_GETIDEALSIZE(void)
     {
         ok(sz.cx > 5, "Unexpected ideal width, %ld.\n", sz.cx);
         ok(sz.cy == ret, "Unexpected ideal height, %ld.\n", sz.cy);
+        ok(sz.cx > sz.cy, "Expected sz.cx > sz.cy (%ld > %ld).\n", sz.cx, sz.cy);
     }
 
     DestroyWindow(hwnd);
@@ -396,7 +397,7 @@ static void test_msaa(void)
     }
 
     hr = ObjectFromLresult(lr, &IID_IAccessible, 0, (void**)&acc);
-    ok(hr == S_OK, "ObjectFromLresult failed, hr=%lx", hr);
+    ok(hr == S_OK, "ObjectFromLresult failed, hr=%lx\n", hr);
 
     VariantInit(&varChild);
     VariantInit(&varResult);

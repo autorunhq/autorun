@@ -38,30 +38,6 @@ static double       (WINAPI *pPdhVbGetDoubleCounterValue)(PDH_HCOUNTER, PDH_STAT
 
 #define GETFUNCPTR(func) p##func = (void *)GetProcAddress( pdh, #func );
 
-
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
-
 static void init_function_ptrs( void )
 {
     pdh = GetModuleHandleA( "pdh" );
@@ -94,6 +70,9 @@ static void test_PdhOpenQueryA( void )
     ret = PdhCloseQuery( NULL );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
+    ret = PdhCloseQuery( (PDH_HQUERY)0xdeadbeef );
+    ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
+
     ret = PdhCloseQuery( &query );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
@@ -116,6 +95,9 @@ static void test_PdhOpenQueryW( void )
     ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
 
     ret = PdhCloseQuery( NULL );
+    ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
+
+    ret = PdhCloseQuery( (PDH_HQUERY)0xdeadbeef );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
     ret = PdhCloseQuery( &query );
@@ -421,6 +403,185 @@ static void test_PdhGetRawCounterValue( void )
     ret = PdhGetRawCounterValue( counter, NULL, &value );
     ok(ret == ERROR_SUCCESS, "PdhGetRawCounterValue failed 0x%08lx\n", ret);
     ok(value.CStatus == ERROR_SUCCESS, "expected ERROR_SUCCESS got %lx\n", value.CStatus);
+
+    ret = PdhCloseQuery( query );
+    ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
+}
+
+static void test_PdhGetFormattedCounterArrayW( void )
+{
+    PDH_STATUS ret;
+    PDH_HQUERY query;
+    PDH_HCOUNTER counter;
+    PDH_FMT_COUNTERVALUE_ITEM_W buffer[2];
+    PDH_FMT_COUNTERVALUE value;
+    DWORD size, count;
+
+    ret = PdhOpenQueryW( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+
+    ret = PdhAddCounterW( query, system_uptime, 0, &counter );
+    ok(ret == ERROR_SUCCESS, "PdhAddCounterW failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayW( NULL, PDH_FMT_LARGE, NULL, NULL, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayW( NULL, PDH_FMT_LARGE, &size, &count, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT || ret == PDH_INVALID_HANDLE,
+        "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, NULL, &count, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, NULL, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    size = 0;
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(size == sizeof(*buffer) + sizeof(WCHAR), "expected %lu got %lu\n",
+       (DWORD)(sizeof(*buffer) + sizeof(WCHAR)), size);
+    ok(count == 1, "expected 1 got %lu\n", count);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(size == sizeof(*buffer) + sizeof(WCHAR), "expected %lu got %lu\n",
+       (DWORD)(sizeof(*buffer) + sizeof(WCHAR)), size);
+    ok(count == 1, "expected 1 got %lu\n", count);
+    ok(buffer[0].szName == (LPWSTR)((char *)buffer + sizeof(*buffer)),
+       "expected %p got %p\n", (LPWSTR)((char *)buffer + sizeof(*buffer)), buffer[0].szName);
+    ok(buffer[0].FmtValue.CStatus == ERROR_SUCCESS, "expected ERROR_SUCCESS got %lx\n", buffer[0].FmtValue.CStatus);
+
+    ret = PdhCollectQueryData( query );
+    ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(count == 1, "expected 1 got %lu\n", count);
+
+    ret = PdhGetFormattedCounterValue( counter, PDH_FMT_LARGE, NULL, &value );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterValue failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(buffer[0].FmtValue.largeValue == value.largeValue,
+       "expected %s got %s\n", wine_dbgstr_longlong(value.largeValue),
+       wine_dbgstr_longlong(buffer[0].FmtValue.largeValue));
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LONG, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_DOUBLE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE | PDH_FMT_1000, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    size = 0;
+    ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+
+    ret = PdhCloseQuery( query );
+    ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
+}
+
+static void test_PdhGetFormattedCounterArrayA( void )
+{
+    PDH_STATUS ret;
+    PDH_HQUERY query;
+    PDH_HCOUNTER counter;
+    PDH_FMT_COUNTERVALUE_ITEM_A buffer[2];
+    PDH_FMT_COUNTERVALUE value;
+    DWORD size, count;
+
+    ret = PdhOpenQueryA( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryA failed 0x%08lx\n", ret);
+
+    ret = PdhAddCounterA( query, "\\System\\System Up Time", 0, &counter );
+    ok(ret == ERROR_SUCCESS, "PdhAddCounterA failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayA( NULL, PDH_FMT_LARGE, NULL, NULL, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayA( NULL, PDH_FMT_LARGE, &size, &count, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, NULL, &count, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, NULL, NULL );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    size = 0;
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+    ok(size == sizeof(*buffer) + sizeof(CHAR), "expected %lu got %lu\n",
+       (DWORD)(sizeof(*buffer) + sizeof(CHAR)), size);
+    ok(count == 1, "expected 1 got %lu\n", count);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+    ok(size == sizeof(*buffer) + sizeof(CHAR), "expected %lu got %lu\n",
+       (DWORD)(sizeof(*buffer) + sizeof(CHAR)), size);
+    ok(count == 1, "expected 1 got %lu\n", count);
+    ok(buffer[0].szName == (LPSTR)((char *)buffer + sizeof(*buffer)),
+       "expected %p got %p\n", (LPSTR)((char *)buffer + sizeof(*buffer)), buffer[0].szName);
+    ok(buffer[0].FmtValue.CStatus == ERROR_SUCCESS, "expected ERROR_SUCCESS got %lx\n", buffer[0].FmtValue.CStatus);
+
+    ret = PdhCollectQueryData( query );
+    ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+    ok(count == 1, "expected 1 got %lu\n", count);
+
+    ret = PdhGetFormattedCounterValue( counter, PDH_FMT_LARGE, NULL, &value );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterValue failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+    ok(buffer[0].FmtValue.largeValue == value.largeValue,
+       "expected %s got %s\n", wine_dbgstr_longlong(value.largeValue),
+       wine_dbgstr_longlong(buffer[0].FmtValue.largeValue));
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LONG, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_DOUBLE, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    size = sizeof(buffer);
+    count = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE | PDH_FMT_1000, &size, &count, buffer );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
+
+    size = 0;
+    ret = PdhGetFormattedCounterArrayA( counter, PDH_FMT_LARGE, &size, &count, buffer );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayA failed 0x%08lx\n", ret);
 
     ret = PdhCloseQuery( query );
     ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
@@ -1018,11 +1179,7 @@ static void test_PdhGetDllVersion(void)
 
 START_TEST(pdh)
 {
-    if (!is_lang_english())
-    {
-        skip("An English UI is needed for the pdh tests\n");
-        return;
-    }
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
     init_function_ptrs();
 
     test_PdhOpenQueryA();
@@ -1037,6 +1194,8 @@ START_TEST(pdh)
 
     test_PdhGetFormattedCounterValue();
     test_PdhGetRawCounterValue();
+    test_PdhGetFormattedCounterArrayW();
+    test_PdhGetFormattedCounterArrayA();
     test_PdhSetCounterScaleFactor();
     test_PdhGetCounterTimeBase();
 

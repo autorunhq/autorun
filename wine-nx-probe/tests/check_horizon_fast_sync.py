@@ -285,6 +285,8 @@ client = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+struct thread_data { unsigned tid; };
+static struct thread_data thread_data = { 42 };
 enum { REQ_select, REQ_event_op, REQ_query_event, REQ_release_mutex, REQ_query_mutex,
        REQ_release_semaphore, REQ_query_semaphore, REQ_other };
 union apc_result { uint64_t words[8]; };
@@ -301,16 +303,15 @@ struct __server_request_info {
     unsigned data_count;
     void *reply_data;
 };
-static struct { struct { void *UniqueThread; } ClientId; } teb = {{(void *)42}};
 static int reads, calls, quitting, quit_calls;
 static int horizon_fast_sync_enabled = 1;
 volatile int wine_nx_quit_requested;
 static jmp_buf quit_jump;
 void wine_nx_quit_point(void) __attribute__((weak));
 void wine_nx_quit_point(void) { quit_calls++; if (quitting) longjmp(quit_jump, 1); }
-static void *current_teb(void) { assert(!quitting); reads++; return &teb; }
-#define NtCurrentTeb() ((__typeof__(&teb))current_teb())
-#define HandleToULong(h) ((unsigned)(uintptr_t)(h))
+static struct thread_data *get_thread_data(void) {
+    assert(!quitting); reads++; return &thread_data;
+}
 static int horizon_server_sync_call(unsigned tid, const void *r, const void *d,
                                     unsigned size, void *reply, void *extra)
 {

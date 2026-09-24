@@ -46,9 +46,6 @@
 #ifdef HAVE_SYS_PARAM_H
 # include <sys/param.h>
 #endif
-#ifdef HAVE_SYS_PRCTL_H
-# include <sys/prctl.h>
-#endif
 #ifdef HAVE_SYS_QUEUE_H
 # include <sys/queue.h>
 #endif
@@ -64,7 +61,6 @@
 #endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "winioctl.h"
@@ -274,19 +270,11 @@ static unsigned int get_pe_file_info( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
     memset( info, 0, sizeof(*info) );
     if (!(status = get_nt_and_unix_names( attr, nt_name, unix_name, FILE_OPEN, FALSE )))
     {
-        status = open_unix_file( handle, *unix_name, GENERIC_READ, attr, 0,
+        status = open_unix_file( handle, *unix_name, GENERIC_READ | SYNCHRONIZE, attr, 0,
                                  FILE_SHARE_READ | FILE_SHARE_DELETE,
                                  FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
     }
-    if (status)
-    {
-        if (is_builtin_path( attr->ObjectName, &info->machine ))
-        {
-            TRACE( "assuming %04x builtin for %s\n", info->machine, debugstr_us(attr->ObjectName));
-            return STATUS_SUCCESS;
-        }
-        return status;
-    }
+    if (status) goto done;
 
     if (!(status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY |
                                     SECTION_MAP_READ | SECTION_MAP_EXECUTE,
@@ -312,6 +300,13 @@ static unsigned int get_pe_file_info( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
             status = get_non_pe_file_info( unix_fd, info );
             if (needs_close) close( unix_fd );
         }
+    }
+
+ done:
+    if (status && is_prefix_bootstrap && is_system_dir_path( attr->ObjectName, &info->machine ))
+    {
+        TRACE( "assuming %04x builtin for %s\n", info->machine, debugstr_us(attr->ObjectName));
+        return STATUS_SUCCESS;
     }
     return status;
 }
@@ -425,7 +420,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     {
         if (!(pid = fork()))  /* grandchild */
         {
-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+            if ((peb && peb->ProcessParameters &&
+                 params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                 params->ConsoleHandle == NULL)
@@ -596,7 +592,8 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
         {
             close( fd[0] );
 
-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+            if ((peb && peb->ProcessParameters &&
+                 params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                 params->ConsoleHandle == NULL)
@@ -702,7 +699,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     ULONG startup_info_size, env_size;
     int unixdir, socketfd[2] = { -1, -1 };
     struct pe_image_info pe_info;
-    CLIENT_ID id;
+    ULONG process_id, thread_id;
     USHORT machine = 0;
     HANDLE parent = 0, debug = 0, token = 0;
     UNICODE_STRING nt_name, path = {0};
@@ -785,7 +782,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         goto done;
     env_size = get_env_size( params, &winedebug );
 
-    if ((status = alloc_object_attributes( process_attr, &objattr, &attr_len ))) goto done;
+    if ((status = wine_server_alloc_object_attributes( process_attr, &objattr, &attr_len ))) goto done;
 
     if ((status = alloc_handle_list( handles_attr, &handles, &handles_size )))
     {
@@ -842,7 +839,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         if (!(status = wine_server_call( req )))
         {
             process_handle = wine_server_ptr_handle( reply->handle );
-            id.UniqueProcess = ULongToHandle( reply->pid );
+            process_id     = reply->pid;
         }
         process_info = wine_server_ptr_handle( reply->info );
     }
@@ -867,7 +864,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         goto done;
     }
 
-    if ((status = alloc_object_attributes( thread_attr, &objattr, &attr_len ))) goto done;
+    if ((status = wine_server_alloc_object_attributes( thread_attr, &objattr, &attr_len ))) goto done;
 
     SERVER_START_REQ( new_thread )
     {
@@ -879,7 +876,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         if (!(status = wine_server_call( req )))
         {
             thread_handle = wine_server_ptr_handle( reply->handle );
-            id.UniqueThread = ULongToHandle( reply->tid );
+            thread_id     = reply->tid;
         }
     }
     SERVER_END_REQ;
@@ -912,8 +909,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     }
 
     TRACE( "%s pid %04x tid %04x handles %p/%p\n", debugstr_us(&path),
-           HandleToULong(id.UniqueProcess), HandleToULong(id.UniqueThread),
-           process_handle, thread_handle );
+           process_id, thread_id, process_handle, thread_handle );
 
     /* update output attributes */
 
@@ -923,6 +919,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         {
         case PS_ATTRIBUTE_CLIENT_ID:
         {
+            CLIENT_ID id = make_client_id( process_id, thread_id );
             SIZE_T size = min( ps_attr->Attributes[i].Size, sizeof(id) );
             memcpy( ps_attr->Attributes[i].ValuePtr, &id, size );
             if (ps_attr->Attributes[i].ReturnLength) *ps_attr->Attributes[i].ReturnLength = size;
@@ -963,8 +960,6 @@ done:
     return status;
 }
 
-BOOL terminate_process_running;
-LONG terminate_process_exit_code;
 
 /******************************************************************************
  *              NtTerminateProcess  (NTDLL.@)
@@ -987,7 +982,7 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
         extern void wine_nx_runtime_dump_std_streams(void) __attribute__((weak));
         extern void wine_nx_box64_trace_exit( const I386_CONTEXT * ) __attribute__((weak));
-        if (wine_nx_box64_trace_exit) wine_nx_box64_trace_exit( get_cpu_area( IMAGE_FILE_MACHINE_I386 ) );
+        if (wine_nx_box64_trace_exit) wine_nx_box64_trace_exit( get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ) );
         horizon_registry_flush();
         {
             /* The runtime wants it for a program it ran for itself (the
@@ -1017,17 +1012,6 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     }
 #endif
 
-    if (handle == GetCurrentProcess())
-    {
-        if (process_termination_delay)
-        {
-            ERR( "HACK: delaying termination.\n" );
-            usleep( 50 * 1000 );
-        }
-        terminate_process_running = TRUE;
-        terminate_process_exit_code = exit_code;
-    }
-
     SERVER_START_REQ( terminate_process )
     {
         req->handle    = wine_server_obj_handle( handle );
@@ -1036,8 +1020,6 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         self = reply->self;
     }
     SERVER_END_REQ;
-
-    TRACE("handle %p, self %d, process_exiting %d.\n", handle, self, process_exiting);
     if (self)
     {
         if (!handle) process_exiting = TRUE;
@@ -1067,11 +1049,6 @@ void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
         pvmi->PeakWorkingSetSize = info.resident_size_max;
     }
 #endif
-}
-
-int get_unix_debugger_pid(void)
-{
-    return 0;
 }
 
 #elif defined(linux)
@@ -1109,23 +1086,6 @@ void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
     fclose(f);
 }
 
-int get_unix_debugger_pid(void)
-{
-    int unix_pid = 0;
-    char line[256];
-    FILE *file;
-
-    if (!(file = fopen( "/proc/self/status", "r" ))) return 0;
-    while (fgets( line, sizeof(line), file ))
-    {
-        if (sscanf( line, "TracerPid: %d", &unix_pid )) break;
-        unix_pid = 0;
-    }
-    fclose( file );
-
-    return unix_pid;
-}
-
 #elif defined(HAVE_LIBPROCSTAT)
 
 void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
@@ -1150,11 +1110,6 @@ void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
     }
 }
 
-int get_unix_debugger_pid(void)
-{
-    return 0;
-}
-
 #else
 
 void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
@@ -1162,71 +1117,7 @@ void fill_vm_counters( VM_COUNTERS_EX *pvmi, int unix_pid )
     /* FIXME : real data */
 }
 
-int get_unix_debugger_pid(void)
-{
-    return 0;
-}
-
 #endif
-
-static NTSTATUS get_unix_pid( HANDLE process, int *pid )
-{
-    NTSTATUS status;
-    HANDLE thread;
-
-    if ((status = NtGetNextThread( process, NULL, THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &thread ))) return status;
-
-    SERVER_START_REQ( get_thread_times )
-    {
-        req->handle = wine_server_obj_handle( thread );
-        status = wine_server_call( req );
-        if (!status) *pid = reply->unix_pid;
-    }
-    SERVER_END_REQ;
-
-    NtClose( thread );
-    return status;
-}
-
-static BOOL set_hardware_tso( BOOL enable ) {
-#ifdef HAVE_PRCTL
-#ifndef PR_GET_MEM_MODEL
-#define PR_GET_MEM_MODEL 0x6d4d444c
-#endif
-#ifndef PR_SET_MEM_MODEL
-#define PR_SET_MEM_MODEL 0x4d4d444c
-#endif
-#ifndef PR_SET_MEM_MODEL_DEFAULT
-#define PR_SET_MEM_MODEL_DEFAULT 0
-#endif
-#ifndef PR_SET_MEM_MODEL_TSO
-#define PR_SET_MEM_MODEL_TSO 1
-#endif
-    if (enable)
-    {
-        int ret = prctl( PR_GET_MEM_MODEL, 0, 0, 0, 0 );
-        if (ret == PR_SET_MEM_MODEL_DEFAULT)
-            return !prctl( PR_SET_MEM_MODEL, PR_SET_MEM_MODEL_TSO, 0, 0, 0 );
-        return ret == PR_SET_MEM_MODEL_TSO;
-    }
-
-    prctl( PR_SET_MEM_MODEL, PR_SET_MEM_MODEL_DEFAULT, 0, 0, 0 );
-    return TRUE;
-#else
-    return FALSE;
-#endif
-}
-
-static BOOL set_unalign_atomic_mode( ULONG64 flags ) {
-#ifdef HAVE_PRCTL
-#ifndef PR_ARM64_SET_UNALIGN_ATOMIC
-#define PR_ARM64_SET_UNALIGN_ATOMIC 0x46455849
-#endif
-    return !prctl( PR_ARM64_SET_UNALIGN_ATOMIC, flags, 0, 0, 0 );;
-#else
-    return FALSE;
-#endif
-}
 
 #define UNIMPLEMENTED_INFO_CLASS(c) \
     case c: \
@@ -1737,17 +1628,6 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
         else ret = STATUS_INFO_LENGTH_MISMATCH;
         break;
 
-    case ProcessWineUnixDebuggerPid:
-        if (handle != NtCurrentProcess()) ret = STATUS_INVALID_PARAMETER;
-        else if (size != sizeof(int)) ret = STATUS_INFO_LENGTH_MISMATCH;
-        else *(int *)info = get_unix_debugger_pid();
-        break;
-
-    case ProcessWineUnixPid:
-        if (size != sizeof(int)) ret = STATUS_INFO_LENGTH_MISMATCH;
-        else ret = get_unix_pid( handle, (int *)info );
-        break;
-
     case ProcessQuotaLimits:
         {
             QUOTA_LIMITS qlimits;
@@ -1881,33 +1761,6 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         if (size != sizeof(UINT)) return STATUS_INVALID_PARAMETER;
         process_error_mode = *(UINT *)info;
         break;
-
-    case ProcessTlsInformation:
-    {
-        PROCESS_TLS_INFORMATION *t = info;
-        unsigned int i;
-
-        if (handle != NtCurrentProcess())
-        {
-            FIXME( "ProcessTlsInformation is not supported for the other process yet, handle %p.\n", handle );
-            return STATUS_INVALID_HANDLE;
-        }
-
-        if (size < sizeof(*t) || size != offsetof(PROCESS_TLS_INFORMATION, ThreadData[t->ThreadDataCount]))
-            return STATUS_INFO_LENGTH_MISMATCH;
-        if (t->Flags & ~PROCESS_TLS_INFORMATION_WOW64)
-        {
-            WARN( "ProcessTlsInformation: unknown flags %#x.\n", (int)t->Flags );
-            return STATUS_INFO_LENGTH_MISMATCH;
-        }
-        if (t->Flags & PROCESS_TLS_INFORMATION_WOW64 && !(is_win64 && is_wow64()))
-            return STATUS_INVALID_PARAMETER;
-        if (t->OperationType >= MaxProcessTlsOperation) return STATUS_INFO_LENGTH_MISMATCH;
-        for (i = 0; i < t->ThreadDataCount; ++i)
-            if (t->ThreadData[i].Flags) return STATUS_INVALID_PARAMETER;
-        ret = virtual_set_tls_information( t );
-        break;
-    }
 
     case ProcessAffinityMask:
     {
@@ -2077,14 +1930,6 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         }
         SERVER_END_REQ;
         break;
-
-    case ProcessFexHardwareTso:
-        if (size != sizeof(BOOL)) return STATUS_INFO_LENGTH_MISMATCH;
-        return set_hardware_tso( *(BOOL *)info ) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
-
-    case ProcessFexUnalignAtomic:
-        if (size != sizeof(ULONG64)) return STATUS_INFO_LENGTH_MISMATCH;
-        return set_unalign_atomic_mode( *(ULONG64 *)info ) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
 
     case ProcessPowerThrottlingState:
         FIXME( "ProcessPowerThrottlingState - stub\n" );

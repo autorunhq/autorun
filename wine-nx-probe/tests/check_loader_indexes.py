@@ -96,11 +96,6 @@ code += '\n' + '\n'.join(block(loader, signature) for signature in (
     'static int module_address_search_compare(', 'NTSTATUS WINAPI LdrFindEntryForAddress(',
     'PIMAGE_NT_HEADERS WINAPI RtlImageNtHeader(', 'PIMAGE_SECTION_HEADER WINAPI RtlImageRvaToSection(',
     'PVOID WINAPI RtlImageRvaToVa(', 'PVOID WINAPI RtlImageDirectoryEntryToData('))
-start = unwind.index('struct module_exception_dir_entry\n')
-end = unwind.index('void register_module_exception_directory(', start)
-code += '\n' + unwind[start:end]
-code += '\n' + block(unwind, 'void register_module_exception_directory(')
-code += '\n' + block(unwind, 'void unregister_module_exception_directory(')
 code += '\n' + block(loader, 'void CDECL wine_nx_init_loader_indexes(')
 code += '\n' + block(unwind, 'PRUNTIME_FUNCTION WINAPI RtlLookupFunctionTable(')
 start = unwind.index('struct unwind_info_ext\n')
@@ -170,7 +165,6 @@ int main(void) {
         assert(!RtlLookupFunctionEntry((ULONG_PTR)images[i] + 0x830, &base, NULL));
     }
     wine_nx_init_loader_indexes();
-    assert(exception_dir_table.count == 6 && exception_dir_table.entries[0].dllbase == images[0]);
     for (unsigned i = 0; i < 6; ++i) check_module(i);
     assert(LdrFindEntryForAddress((void*)((ULONG_PTR)images[0] - 1), &module) == STATUS_NO_MORE_ENTRIES);
     assert(LdrFindEntryForAddress(images[6], &module) == STATUS_NO_MORE_ENTRIES);
@@ -190,11 +184,9 @@ int main(void) {
     }
     InsertTailList(&hash_table[hash_basename(&modules[6].BaseDllName)], &modules[6].HashLinks);
     assert(!rtl_rb_tree_put(&base_address_index_tree, images[6], &modules[6].BaseAddressIndexNode, base_address_compare));
-    register_module_exception_directory(images[6]);
     for (unsigned i = 0; i < 7; ++i) check_module(i);
     RtlRbRemoveNode(&base_address_index_tree, &modules[2].BaseAddressIndexNode);
     RemoveEntryList(&modules[2].HashLinks);
-    unregister_module_exception_directory(images[2]);
     assert(!RtlLookupFunctionEntry((ULONG_PTR)images[2] + 0x830, &base, NULL));
     for (unsigned i = 0; i < 7; ++i) if (i != 2) check_module(i);
     puts("Loader indexes: bootstrap adoption, names, address bounds, unwind lookup, ARM64 stack walk and DLL changes passed");

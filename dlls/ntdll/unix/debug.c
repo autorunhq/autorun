@@ -33,10 +33,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <errno.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winnt.h"
 #include "winternl.h"
@@ -45,9 +43,7 @@
 
 WINE_DECLARE_DEBUG_CHANNEL(pid);
 WINE_DECLARE_DEBUG_CHANNEL(timestamp);
-WINE_DECLARE_DEBUG_CHANNEL(microsecs);
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
-WINE_DECLARE_DEBUG_CHANNEL(ftracelog);
 
 struct debug_info
 {
@@ -59,7 +55,6 @@ struct debug_info
 
 C_ASSERT( sizeof(struct debug_info) == 0x800 );
 
-static BOOL init_done;
 static struct debug_info initial_info;  /* debug info for initial thread */
 static unsigned char default_flags = (1 << __WINE_DBCL_ERR) | (1 << __WINE_DBCL_FIXME);
 static int nb_debug_options = -1;
@@ -69,14 +64,9 @@ static struct __wine_debug_channel *debug_options;
 static const char * const debug_classes[] = { "fixme", "err", "warn", "trace" };
 
 /* get the debug info pointer for the current thread */
-static inline struct debug_info *get_info(void)
+static inline struct debug_info *get_info( struct thread_data *data )
 {
-    if (!init_done) return &initial_info;
-#ifdef _WIN64
-    return (struct debug_info *)((TEB32 *)((char *)NtCurrentTeb() + teb_offset) + 1);
-#else
-    return (struct debug_info *)(NtCurrentTeb() + 1);
-#endif
+    return data ? (struct debug_info *)data->debug_info : &initial_info;
 }
 
 /* add a string to the output buffer */
@@ -217,6 +207,9 @@ static void init_options(void)
         default_flags = 0;
         return;
     }
+    setbuf( stdout, NULL );
+    setbuf( stderr, NULL );
+
     if (!wine_debug) return;
     if (!strcmp( wine_debug, "help" )) debug_usage();
 
@@ -265,7 +258,7 @@ unsigned char __cdecl __wine_dbg_get_channel_flags( struct __wine_debug_channel 
  */
 const char * __cdecl __wine_dbg_strdup( const char *str )
 {
-    struct debug_info *info = get_info();
+    struct debug_info *info = get_info( get_thread_data() );
     unsigned int pos = info->str_pos;
     size_t n = strlen( str ) + 1;
 
@@ -306,60 +299,6 @@ NTSTATUS unixcall_wine_dbg_write( void *args )
 #endif
 }
 
-static void __wine_dbg_ftrace_write( const char *str, unsigned int str_len )
-{
-    static int ftrace_fd = -1;
-
-    if (ftrace_fd == -1)
-    {
-        int expected = -1;
-        const char *fn;
-        int fd;
-
-        if (!(fn = getenv( "WINE_FTRACE_FILE" ))) fn = "/sys/kernel/tracing/trace_marker";
-        if ((fd = open( fn, O_WRONLY )) == -1)
-        {
-            MESSAGE( "wine: error opening ftrace file: %s.\n", strerror(errno) );
-            ftrace_fd = -2;
-            return;
-        }
-        if (!__atomic_compare_exchange_n( &ftrace_fd, &expected, fd, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
-            close( fd );
-        else
-            MESSAGE( "wine: ftrace initialized.\n" );
-    }
-
-    if (ftrace_fd == -2) return;
-    write( ftrace_fd, str, str_len );
-}
-
-unsigned int WINAPI __wine_dbg_ftrace( char *str, unsigned int str_size, unsigned int ctx )
-{
-    static unsigned int curr_ctx;
-    unsigned int str_len;
-    char ctx_str[64];
-    int ctx_len;
-
-    if (ctx == ~0u) ctx_len = 0;
-    else if (ctx) ctx_len = sprintf( ctx_str, " (end_ctx=%u)", ctx );
-    else
-    {
-        ctx = __atomic_add_fetch( &curr_ctx, 1, __ATOMIC_SEQ_CST );
-        ctx_len = sprintf( ctx_str, " (begin_ctx=%u)", ctx );
-    }
-
-    str_len = strlen(str);
-    if (ctx_len > 0)
-    {
-        if (str_size < ctx_len) return ~0u;
-        if (str_len + ctx_len > str_size) str_len = str_size - ctx_len;
-        memcpy( &str[str_len], ctx_str, ctx_len );
-        str_len += ctx_len;
-    }
-    __wine_dbg_ftrace_write( str, str_len );
-    return ctx;
-}
-
 #ifdef _WIN64
 /***********************************************************************
  *		wow64_wine_dbg_write
@@ -385,7 +324,7 @@ NTSTATUS wow64_wine_dbg_write( void *args )
  */
 int __cdecl __wine_dbg_output( const char *str )
 {
-    struct debug_info *info = get_info();
+    struct debug_info *info = get_info( get_thread_data() );
     const char *end = strrchr( str, '\n' );
     int ret = 0;
 
@@ -393,7 +332,6 @@ int __cdecl __wine_dbg_output( const char *str )
     {
         ret += append_output( info, str, end + 1 - str );
         write( 2, info->output, info->out_pos );
-        if (TRACE_ON(ftracelog)) __wine_dbg_ftrace_write( info->output, info->out_pos );
         info->out_pos = 0;
         str = end + 1;
     }
@@ -408,30 +346,28 @@ int __cdecl __wine_dbg_header( enum __wine_debug_class cls, struct __wine_debug_
                                const char *function )
 {
     static const char * const classes[] = { "fixme", "err", "warn", "trace" };
-    struct debug_info *info = get_info();
-    char *pos = info->output;
+    struct thread_data *data;
+    struct debug_info *info;
+    char *pos;
 
     if (!(__wine_dbg_get_channel_flags( channel ) & (1 << cls))) return -1;
+
+    data = get_thread_data();
+    info = get_info( data );
+    pos  = info->output;
 
     /* only print header if we are at the beginning of the line */
     if (info->out_pos) return 0;
 
-    if (init_done)
+    if (data)
     {
-        if (TRACE_ON(microsecs))
-        {
-            LARGE_INTEGER counter, frequency, microsecs;
-            NtQueryPerformanceCounter(&counter, &frequency);
-            microsecs.QuadPart = counter.QuadPart * 1000000 / frequency.QuadPart;
-            pos += sprintf( pos, "%3u.%06u:", (unsigned int)(microsecs.QuadPart / 1000000), (unsigned int)(microsecs.QuadPart % 1000000) );
-        }
-        else if (TRACE_ON(timestamp))
+        if (TRACE_ON(timestamp))
         {
             UINT ticks = NtGetTickCount();
             pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%3u.%03u:", ticks / 1000, ticks % 1000 );
         }
-        if (TRACE_ON(pid)) pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", GetCurrentProcessId() );
-        pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", GetCurrentThreadId() );
+        if (TRACE_ON(pid)) pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", pid );
+        if (data->tid) pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%04x:", data->tid );
     }
     if (function && cls < ARRAY_SIZE( classes ))
         pos += snprintf( pos, sizeof(info->output) - (pos - info->output), "%s:%s:%s ",
@@ -447,9 +383,6 @@ void dbg_init(void)
 {
     struct __wine_debug_channel *options, default_option = { default_flags };
 
-    setbuf( stdout, NULL );
-    setbuf( stderr, NULL );
-
     if (nb_debug_options == -1) init_options();
 
     options = (struct __wine_debug_channel *)((char *)peb + (is_win64 ? 2 : 1) * page_size);
@@ -457,7 +390,6 @@ void dbg_init(void)
     free( debug_options );
     debug_options = options;
     options[nb_debug_options] = default_option;
-    init_done = TRUE;
 }
 
 

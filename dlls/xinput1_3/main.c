@@ -55,12 +55,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(xinput);
 
 struct xinput_controller
 {
-    CRITICAL_SECTION crit;
-    XINPUT_STATE state;
-    XINPUT_GAMEPAD last_keystroke;
+    XINPUT_CAPABILITIES caps;
     XINPUT_VIBRATION vibration;
     HANDLE device;
     WCHAR device_path[MAX_PATH];
+    HANDLE read_event;
     BOOL enabled;
 
     struct
@@ -74,7 +73,6 @@ struct xinput_controller
         HIDP_VALUE_CAPS ry_caps;
         HIDP_VALUE_CAPS rt_caps;
 
-        HANDLE read_event;
         OVERLAPPED read_ovl;
 
         char *input_report_buf;
@@ -87,43 +85,43 @@ struct xinput_controller
     } hid;
 };
 
+static CRITICAL_SECTION_DEBUG xinput_cs_debug;
+static CRITICAL_SECTION xinput_cs = { &xinput_cs_debug, -1, 0, 0, 0, 0 };
+static CRITICAL_SECTION_DEBUG xinput_cs_debug =
+{
+    0, 0, &xinput_cs,
+    { &xinput_cs_debug.ProcessLocksList, &xinput_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": xinput_cs") }
+};
+
 static struct xinput_controller controllers[XUSER_MAX_COUNT];
-static CRITICAL_SECTION_DEBUG controller_critsect_debug[XUSER_MAX_COUNT] =
-{
-    {
-        0, 0, &controllers[0].crit,
-        { &controller_critsect_debug[0].ProcessLocksList, &controller_critsect_debug[0].ProcessLocksList },
-          0, 0, { (DWORD_PTR)(__FILE__ ": controllers[0].crit") }
-    },
-    {
-        0, 0, &controllers[1].crit,
-        { &controller_critsect_debug[1].ProcessLocksList, &controller_critsect_debug[1].ProcessLocksList },
-          0, 0, { (DWORD_PTR)(__FILE__ ": controllers[1].crit") }
-    },
-    {
-        0, 0, &controllers[2].crit,
-        { &controller_critsect_debug[2].ProcessLocksList, &controller_critsect_debug[2].ProcessLocksList },
-          0, 0, { (DWORD_PTR)(__FILE__ ": controllers[2].crit") }
-    },
-    {
-        0, 0, &controllers[3].crit,
-        { &controller_critsect_debug[3].ProcessLocksList, &controller_critsect_debug[3].ProcessLocksList },
-          0, 0, { (DWORD_PTR)(__FILE__ ": controllers[3].crit") }
-    },
-};
-
-static struct xinput_controller controllers[XUSER_MAX_COUNT] =
-{
-    {{ &controller_critsect_debug[0], -1, 0, 0, 0, 0 }},
-    {{ &controller_critsect_debug[1], -1, 0, 0, 0, 0 }},
-    {{ &controller_critsect_debug[2], -1, 0, 0, 0, 0 }},
-    {{ &controller_critsect_debug[3], -1, 0, 0, 0, 0 }},
-};
-
 static HMODULE xinput_instance;
 static HANDLE start_event;
 static HANDLE update_event;
-static HANDLE steam_overlay_event;
+
+static SRWLOCK state_lock = SRWLOCK_INIT;
+static XINPUT_STATE current_state[XUSER_MAX_COUNT];
+
+static void set_current_state(UINT index, const XINPUT_STATE *state)
+{
+    AcquireSRWLockExclusive(&state_lock);
+    if (!state) memset(current_state + index, 0, sizeof(*state));
+    else
+    {
+        memcpy(current_state + index, state, sizeof(*state));
+        if (!++current_state[index].dwPacketNumber) ++current_state[index].dwPacketNumber;
+    }
+    ReleaseSRWLockExclusive(&state_lock);
+}
+
+static BOOL get_current_state(UINT index, XINPUT_STATE *state)
+{
+    AcquireSRWLockShared(&state_lock);
+    memcpy(state, current_state + index, sizeof(*state));
+    ReleaseSRWLockShared(&state_lock);
+
+    return state->dwPacketNumber;
+}
 
 /* Wine-NX: the Switch's controller, read by the runtime through a static unix
  * call table (wine-nx-probe/source/xinput_unix.c). There is no HID device on
@@ -224,6 +222,7 @@ static void check_waveform_caps(struct xinput_controller *controller, HANDLE dev
 static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE device, PHIDP_PREPARSED_DATA preparsed)
 {
     USHORT caps_count = 0, waveform_caps_count = 0;
+    XINPUT_CAPABILITIES *caps = &controller->caps;
     HIDP_LINK_COLLECTION_NODE *collections;
     HIDP_VALUE_CAPS waveform_caps[8];
     HIDP_BUTTON_CAPS *button_caps;
@@ -231,6 +230,9 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
     HIDP_VALUE_CAPS *value_caps;
     int i, u, button_count = 0;
     NTSTATUS status;
+
+    /* Count buttons */
+    memset(caps, 0, sizeof(XINPUT_CAPABILITIES));
 
     if (!(button_caps = malloc(sizeof(*button_caps) * controller->hid.caps.NumberInputButtonCaps))) return FALSE;
     status = HidP_GetButtonCaps(HidP_Input, button_caps, &controller->hid.caps.NumberInputButtonCaps, preparsed);
@@ -245,7 +247,9 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
             button_count = max(button_count, button_caps[i].NotRange.Usage);
     }
     free(button_caps);
-    if (button_count < 11) WARN("Too few buttons, continuing anyway\n");
+    if (button_count < 11)
+        WARN("Too few buttons, continuing anyway\n");
+    caps->Gamepad.wButtons = 0xffff;
 
     if (!(value_caps = malloc(sizeof(*value_caps) * controller->hid.caps.NumberInputValueCaps))) return FALSE;
     status = HidP_GetValueCaps(HidP_Input, value_caps, &controller->hid.caps.NumberInputValueCaps, preparsed);
@@ -260,11 +264,20 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
     free(value_caps);
 
     if (!controller->hid.lt_caps.UsagePage) WARN("Missing axis LeftTrigger\n");
+    else caps->Gamepad.bLeftTrigger = (1u << (sizeof(caps->Gamepad.bLeftTrigger) + 1)) - 1;
     if (!controller->hid.rt_caps.UsagePage) WARN("Missing axis RightTrigger\n");
+    else caps->Gamepad.bRightTrigger = (1u << (sizeof(caps->Gamepad.bRightTrigger) + 1)) - 1;
     if (!controller->hid.lx_caps.UsagePage) WARN("Missing axis ThumbLX\n");
+    else caps->Gamepad.sThumbLX = (1u << (sizeof(caps->Gamepad.sThumbLX) + 1)) - 1;
     if (!controller->hid.ly_caps.UsagePage) WARN("Missing axis ThumbLY\n");
+    else caps->Gamepad.sThumbLY = (1u << (sizeof(caps->Gamepad.sThumbLY) + 1)) - 1;
     if (!controller->hid.rx_caps.UsagePage) WARN("Missing axis ThumbRX\n");
+    else caps->Gamepad.sThumbRX = (1u << (sizeof(caps->Gamepad.sThumbRX) + 1)) - 1;
     if (!controller->hid.ry_caps.UsagePage) WARN("Missing axis ThumbRY\n");
+    else caps->Gamepad.sThumbRY = (1u << (sizeof(caps->Gamepad.sThumbRY) + 1)) - 1;
+
+    caps->Type = XINPUT_DEVTYPE_GAMEPAD;
+    caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
 
     collections_count = controller->hid.caps.NumberLinkCollectionNodes;
     if (!(collections = malloc(sizeof(*collections) * controller->hid.caps.NumberLinkCollectionNodes))) return FALSE;
@@ -284,6 +297,14 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
     for (i = 0; i < waveform_caps_count; ++i) check_waveform_caps(controller, device, preparsed, collections, waveform_caps + i);
     free(collections);
 
+    if (controller->hid.haptics_rumble_caps.UsagePage ||
+        controller->hid.haptics_buzz_caps.UsagePage)
+    {
+        caps->Flags |= XINPUT_CAPS_FFB_SUPPORTED;
+        caps->Vibration.wLeftMotorSpeed = 255;
+        caps->Vibration.wRightMotorSpeed = 255;
+    }
+
     return TRUE;
 }
 
@@ -297,7 +318,7 @@ static DWORD HID_set_state(struct xinput_controller *controller, XINPUT_VIBRATIO
     NTSTATUS status;
     BYTE report_id;
 
-    if (!controller->hid.haptics_rumble_caps.UsagePage && !controller->hid.haptics_buzz_caps.UsagePage) return ERROR_SUCCESS;
+    if (!(controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED)) return ERROR_SUCCESS;
 
     update_rumble = (controller->vibration.wLeftMotorSpeed != state->wLeftMotorSpeed);
     controller->vibration.wLeftMotorSpeed = state->wLeftMotorSpeed;
@@ -323,90 +344,71 @@ static DWORD HID_set_state(struct xinput_controller *controller, XINPUT_VIBRATIO
 
     ret = HidD_SetOutputReport(controller->device, report_buf, report_len);
     if (!ret) WARN("HidD_SetOutputReport failed with error %lu\n", GetLastError());
-    return 0;
 
     return ERROR_SUCCESS;
 }
 
-static void controller_disable(struct xinput_controller *controller)
-{
-    XINPUT_VIBRATION state = {0};
+static void controller_destroy(struct xinput_controller *controller, BOOL already_removed);
 
-    if (!controller->enabled) return;
-    HID_set_state(controller, &state);
-    controller->enabled = FALSE;
-
-    CancelIoEx(controller->device, &controller->hid.read_ovl);
-    WaitForSingleObject(controller->hid.read_ovl.hEvent, INFINITE);
-    SetEvent(update_event);
-}
-
-static void controller_destroy(struct xinput_controller *controller, BOOL already_removed)
-{
-    EnterCriticalSection(&controller->crit);
-
-    if (controller->device)
-    {
-        TRACE("removing device %s from index %Iu\n", debugstr_w(controller->device_path), controller - controllers);
-
-        if (!already_removed) controller_disable(controller);
-        CloseHandle(controller->device);
-        controller->device = NULL;
-
-        free(controller->hid.input_report_buf);
-        free(controller->hid.output_report_buf);
-        free(controller->hid.feature_report_buf);
-        HidD_FreePreparsedData(controller->hid.preparsed);
-        memset(&controller->hid, 0, sizeof(controller->hid));
-    }
-
-    LeaveCriticalSection(&controller->crit);
-}
-
-static void controller_enable(struct xinput_controller *controller)
+/* enable an opened controller, xinput_cs must be held */
+static BOOL controller_enable(struct xinput_controller *controller)
 {
     ULONG report_len = controller->hid.caps.InputReportByteLength;
     char *report_buf = controller->hid.input_report_buf;
     XINPUT_VIBRATION state = controller->vibration;
     BOOL ret;
 
-    if (controller->enabled) return;
-    HID_set_state(controller, &state);
-    controller->enabled = TRUE;
+    if (controller->enabled) return TRUE;
+    if (controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED) HID_set_state(controller, &state);
 
     memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
-    controller->hid.read_ovl.hEvent = controller->hid.read_event;
+    controller->hid.read_ovl.hEvent = controller->read_event;
     ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
-    if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy(controller, TRUE);
-    else SetEvent(update_event);
+    if (!ret && GetLastError() != ERROR_IO_PENDING) return FALSE;
+
+    controller->enabled = TRUE;
+    SetEvent(update_event);
+    return TRUE;
 }
 
+/* disable an opened controller, xinput_cs must be held */
+static void controller_disable(struct xinput_controller *controller)
+{
+    XINPUT_VIBRATION state = {0};
+
+    if (!controller->enabled) return;
+    if (controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED) HID_set_state(controller, &state);
+    controller->enabled = FALSE;
+
+    if (CancelIoEx(controller->device, &controller->hid.read_ovl))
+        WaitForSingleObject(controller->hid.read_ovl.hEvent, INFINITE);
+    SetEvent(update_event);
+}
+
+/* opened a new controller device, xinput_cs must be held */
 static BOOL controller_init(struct xinput_controller *controller, PHIDP_PREPARSED_DATA preparsed,
                             HIDP_CAPS *caps, HANDLE device, const WCHAR *device_path)
 {
-    HANDLE event = NULL;
+    XINPUT_STATE state = {0};
 
     controller->hid.caps = *caps;
     if (!(controller->hid.feature_report_buf = calloc(1, controller->hid.caps.FeatureReportByteLength))) goto failed;
     if (!controller_check_caps(controller, device, preparsed)) goto failed;
-    if (!(event = CreateEventW(NULL, TRUE, FALSE, NULL))) goto failed;
 
     TRACE("Found gamepad %s\n", debugstr_w(device_path));
 
     controller->hid.preparsed = preparsed;
-    controller->hid.read_event = event;
     if (!(controller->hid.input_report_buf = calloc(1, controller->hid.caps.InputReportByteLength))) goto failed;
     if (!(controller->hid.output_report_buf = calloc(1, controller->hid.caps.OutputReportByteLength))) goto failed;
 
-    memset(&controller->state, 0, sizeof(controller->state));
     memset(&controller->vibration, 0, sizeof(controller->vibration));
     lstrcpynW(controller->device_path, device_path, MAX_PATH);
     controller->enabled = FALSE;
 
-    EnterCriticalSection(&controller->crit);
     controller->device = device;
-    controller_enable(controller);
-    LeaveCriticalSection(&controller->crit);
+    if (!controller_enable(controller)) goto failed;
+
+    set_current_state(controller - controllers, &state);
     return TRUE;
 
 failed:
@@ -414,7 +416,7 @@ failed:
     free(controller->hid.output_report_buf);
     free(controller->hid.feature_report_buf);
     memset(&controller->hid, 0, sizeof(controller->hid));
-    CloseHandle(event);
+    controller->device = NULL;
     return FALSE;
 }
 
@@ -464,9 +466,9 @@ static BOOL device_is_overridden(HANDLE device)
     return disable;
 }
 
+/* open a device with the given path at the given index, xinput_cs must be held */
 static BOOL open_device_at_index(const WCHAR *device_path, int index)
 {
-    SP_DEVICE_INTERFACE_DATA iface = {sizeof(iface)};
     PHIDP_PREPARSED_DATA preparsed;
     HIDP_CAPS caps;
     NTSTATUS status;
@@ -501,33 +503,26 @@ static BOOL open_device_at_index(const WCHAR *device_path, int index)
     return TRUE;
 }
 
-static BOOL find_opened_device(const WCHAR *device_path, int *free_slot)
+static BOOL find_opened_device(const WCHAR *device_path, int *slot)
 {
     int i;
 
-    *free_slot = XUSER_MAX_COUNT;
+    *slot = XUSER_MAX_COUNT;
     for (i = XUSER_MAX_COUNT; i > 0; i--)
     {
-        if (!controllers[i - 1].device) *free_slot = i - 1;
-        else if (!wcsicmp(device_path, controllers[i - 1].device_path)) return TRUE;
+        if (!controllers[i - 1].device) *slot = i - 1;
+        else if (!wcsicmp(device_path, controllers[i - 1].device_path))
+        {
+            *slot = i - 1;
+            return TRUE;
+        }
     }
-
-    /* CW-Bug-Id: #23185 Emulate Steam Input native hooks for native SDL */
-    if ((swscanf(device_path, L"\\\\?\\hid#vid_28de&pid_11ff&xi_%02u#", &i) == 1 ||
-         swscanf(device_path, L"\\\\?\\HID#VID_28DE&PID_11FF&XI_%02u#", &i) == 1) &&
-        i < XUSER_MAX_COUNT && *free_slot != i)
-    {
-        controller_destroy(&controllers[i], TRUE);
-        if (*free_slot != XUSER_MAX_COUNT) open_device_at_index(controllers[i].device_path, *free_slot);
-        *free_slot = i;
-    }
-
     return FALSE;
 }
 
+/* try opening a new controller device from the given path, xinput_cs must be held */
 static BOOL try_add_device(const WCHAR *device_path)
 {
-    SP_DEVICE_INTERFACE_DATA iface = {sizeof(iface)};
     int i;
 
     if (find_opened_device(device_path, &i)) return TRUE; /* already opened */
@@ -535,12 +530,13 @@ static BOOL try_add_device(const WCHAR *device_path)
     return open_device_at_index(device_path, i);
 }
 
+/* try closing an open controller device with the given path, xinput_cs must be held */
 static void try_remove_device(const WCHAR *device_path)
 {
     int i;
 
     if (find_opened_device(device_path, &i))
-        controller_destroy(&controllers[i], TRUE);
+        controller_destroy(&controllers[i], FALSE);
 }
 
 static void update_controller_list(void)
@@ -548,11 +544,11 @@ static void update_controller_list(void)
     char buffer[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + MAX_PATH * sizeof(WCHAR)];
     SP_DEVICE_INTERFACE_DETAIL_DATA_W *detail = (SP_DEVICE_INTERFACE_DETAIL_DATA_W *)buffer;
     SP_DEVICE_INTERFACE_DATA iface = {sizeof(iface)};
+    GUID guid = GUID_DEVINTERFACE_WINEXINPUT;
     HDEVINFO set;
     DWORD idx;
-    GUID guid;
 
-    guid = GUID_DEVINTERFACE_WINEXINPUT;
+    EnterCriticalSection(&xinput_cs);
 
     set = SetupDiGetClassDevsW(&guid, NULL, NULL, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
     detail->cbSize = sizeof(*detail);
@@ -567,6 +563,29 @@ static void update_controller_list(void)
     }
 
     SetupDiDestroyDeviceInfoList(set);
+
+    LeaveCriticalSection(&xinput_cs);
+}
+
+/* close a possibly opened controller, xinput_cs must be held */
+static void controller_destroy(struct xinput_controller *controller, BOOL already_removed)
+{
+    set_current_state(controller - controllers, NULL);
+
+    if (controller->device)
+    {
+        if (already_removed) controller->enabled = FALSE;
+        else controller_disable(controller);
+
+        CloseHandle(controller->device);
+        controller->device = NULL;
+
+        free(controller->hid.input_report_buf);
+        free(controller->hid.output_report_buf);
+        free(controller->hid.feature_report_buf);
+        HidD_FreePreparsedData(controller->hid.preparsed);
+        memset(&controller->hid, 0, sizeof(controller->hid));
+    }
 }
 
 static LONG sign_extend(ULONG value, const HIDP_VALUE_CAPS *caps)
@@ -584,6 +603,7 @@ static LONG scale_value(ULONG value, const HIDP_VALUE_CAPS *caps, LONG min, LONG
     return min + MulDiv(tmp - caps->LogicalMin, max - min, caps->LogicalMax - caps->LogicalMin);
 }
 
+/* read the controller state from the HID device, xinput_cs must be held */
 static void read_controller_state(struct xinput_controller *controller)
 {
     ULONG read_len, report_len = controller->hid.caps.InputReportByteLength;
@@ -609,6 +629,8 @@ static void read_controller_state(struct xinput_controller *controller)
     button_length = ARRAY_SIZE(buttons);
     status = HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, buttons, &button_length, controller->hid.preparsed, report_buf, report_len);
     if (status != HIDP_STATUS_SUCCESS) WARN("HidP_GetUsages HID_USAGE_PAGE_BUTTON returned %#lx\n", status);
+
+    get_current_state(controller - controllers, &state);
 
     state.Gamepad.wButtons = 0;
     for (i = 0; i < button_length; i++)
@@ -675,17 +697,14 @@ static void read_controller_state(struct xinput_controller *controller)
     if (status != HIDP_STATUS_SUCCESS) WARN("HidP_GetUsageValue HID_USAGE_PAGE_GENERIC / HID_USAGE_GENERIC_Z returned %#lx\n", status);
     else state.Gamepad.bLeftTrigger = scale_value(value, &controller->hid.lt_caps, 0, 255);
 
-    EnterCriticalSection(&controller->crit);
     if (controller->enabled)
     {
-        state.dwPacketNumber = controller->state.dwPacketNumber + 1;
-        controller->state = state;
+        set_current_state(controller - controllers, &state);
         memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
-        controller->hid.read_ovl.hEvent = controller->hid.read_event;
+        controller->hid.read_ovl.hEvent = controller->read_event;
         ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
         if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy(controller, TRUE);
     }
-    LeaveCriticalSection(&controller->crit);
 }
 
 static LRESULT CALLBACK xinput_devnotify_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -693,8 +712,11 @@ static LRESULT CALLBACK xinput_devnotify_wndproc(HWND hwnd, UINT msg, WPARAM wpa
     if (msg == WM_DEVICECHANGE)
     {
         DEV_BROADCAST_DEVICEINTERFACE_W *iface = (DEV_BROADCAST_DEVICEINTERFACE_W *)lparam;
+
+        EnterCriticalSection(&xinput_cs);
         if (wparam == DBT_DEVICEARRIVAL) try_add_device(iface->dbcc_name);
         if (wparam == DBT_DEVICEREMOVECOMPLETE) try_remove_device(iface->dbcc_name);
+        LeaveCriticalSection(&xinput_cs);
     }
 
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -736,22 +758,20 @@ static DWORD WINAPI hid_update_thread_proc(void *param)
     {
         if (ret == count) while (PeekMessageW(&msg, hwnd, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         if (ret == WAIT_TIMEOUT) update_controller_list();
-        if (ret < count - 1) read_controller_state(devices[ret]);
 
-        count = 0;
-        for (i = 0; i < XUSER_MAX_COUNT; ++i)
+        EnterCriticalSection(&xinput_cs);
+        if (ret < count - 1 && devices[ret]->device) read_controller_state(devices[ret]);
+        for (count = 0, i = 0; i < XUSER_MAX_COUNT; ++i)
         {
-            if (!controllers[i].device) continue;
-            EnterCriticalSection(&controllers[i].crit);
-            if (controllers[i].enabled)
+            if (controllers[i].device && controllers[i].enabled)
             {
                 devices[count] = controllers + i;
-                events[count] = controllers[i].hid.read_event;
+                events[count] = controllers[i].read_event;
                 count++;
             }
-            LeaveCriticalSection(&controllers[i].crit);
         }
         events[count++] = update_event;
+        LeaveCriticalSection(&xinput_cs);
     }
     while ((ret = MsgWaitForMultipleObjectsEx(count, events, 2000, QS_ALLINPUT, MWMO_ALERTABLE)) <= count ||
             ret == WAIT_TIMEOUT);
@@ -769,17 +789,22 @@ static BOOL WINAPI start_update_thread_once( INIT_ONCE *once, void *param, void 
 {
     HANDLE thread;
     HMODULE module;
+    int i;
 
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (void*)hid_update_thread_proc, &module))
         WARN("Failed to increase module's reference count, error: %lu\n", GetLastError());
-
-    steam_overlay_event = CreateEventA(NULL, TRUE, FALSE, "__wine_steamclient_GameOverlayActivated");
 
     start_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (!start_event) ERR("failed to create start event, error %lu\n", GetLastError());
 
     update_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (!update_event) ERR("failed to create update event, error %lu\n", GetLastError());
+
+    for (i = 0; i < XUSER_MAX_COUNT; i++)
+    {
+        controllers[i].read_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+        if (!controllers[i].read_event) ERR("failed to create read event for controller %d, error %lu\n", i, GetLastError());
+    }
 
     thread = CreateThread(NULL, 0, hid_update_thread_proc, NULL, 0, NULL);
     if (!thread) ERR("failed to create update thread, error %lu\n", GetLastError());
@@ -793,26 +818,6 @@ static void start_update_thread(void)
 {
     static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
     InitOnceExecuteOnce(&init_once, start_update_thread_once, NULL, NULL);
-}
-
-static BOOL controller_lock(struct xinput_controller *controller)
-{
-    if (!controller->device) return FALSE;
-
-    EnterCriticalSection(&controller->crit);
-
-    if (!controller->device)
-    {
-        LeaveCriticalSection(&controller->crit);
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-static void controller_unlock(struct xinput_controller *controller)
-{
-    LeaveCriticalSection(&controller->crit);
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
@@ -844,13 +849,14 @@ void WINAPI DECLSPEC_HOTPATCH XInputEnable(BOOL enable)
     be sent */
     start_update_thread();
 
+    EnterCriticalSection(&xinput_cs);
     for (index = 0; index < XUSER_MAX_COUNT; index++)
     {
-        if (!controller_lock(&controllers[index])) continue;
-        if (enable) controller_enable(&controllers[index]);
-        else controller_disable(&controllers[index]);
-        controller_unlock(&controllers[index]);
+        if (!controllers[index].device) continue;
+        if (!enable) controller_disable(&controllers[index]);
+        else if (!controller_enable(&controllers[index])) controller_destroy(&controllers[index], TRUE);
     }
+    LeaveCriticalSection(&xinput_cs);
 }
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vibration)
@@ -864,12 +870,14 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
     start_update_thread();
 
     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
-    if (!controller_lock(&controllers[index])) return ERROR_DEVICE_NOT_CONNECTED;
 
-    if (WaitForSingleObject(steam_overlay_event, 0) == WAIT_OBJECT_0) ret = ERROR_SUCCESS;
-    else ret = HID_set_state(&controllers[index], vibration);
-
-    controller_unlock(&controllers[index]);
+    EnterCriticalSection(&xinput_cs);
+    if (!controllers[index].device) update_controller_list();
+    if (!controllers[index].device)
+        ret = ERROR_DEVICE_NOT_CONNECTED;
+    else
+        ret = HID_set_state(&controllers[index], vibration);
+    LeaveCriticalSection(&xinput_cs);
 
     return ret;
 }
@@ -878,6 +886,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
  * XInputGetState() in the hook, so we need a wrapper. */
 static DWORD xinput_get_state(DWORD index, XINPUT_STATE *state)
 {
+    DWORD ret;
+
     if (!state) return ERROR_BAD_ARGUMENTS;
 
     if (nx_backend) return nx_get_state(index, state);
@@ -885,14 +895,14 @@ static DWORD xinput_get_state(DWORD index, XINPUT_STATE *state)
     start_update_thread();
 
     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
-    if (!controller_lock(&controllers[index])) return ERROR_DEVICE_NOT_CONNECTED;
+    if (get_current_state(index, state)) return ERROR_SUCCESS;
 
-    if (WaitForSingleObject(steam_overlay_event, 0) == WAIT_OBJECT_0) memset(state, 0, sizeof(*state));
-    else *state = controllers[index].state;
+    EnterCriticalSection(&xinput_cs);
+    update_controller_list();
+    ret = get_current_state(index, state) ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+    LeaveCriticalSection(&xinput_cs);
 
-    controller_unlock(&controllers[index]);
-
-    return ERROR_SUCCESS;
+    return ret;
 }
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputGetState(DWORD index, XINPUT_STATE *state)
@@ -1011,9 +1021,13 @@ static BOOL trigger_is_on(const BYTE value)
 
 static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
 {
-    struct xinput_controller *controller = &controllers[index];
+    static XINPUT_GAMEPAD last_state[XUSER_MAX_COUNT];
+    static SRWLOCK keystroke_lock = SRWLOCK_INIT;
+
+    XINPUT_GAMEPAD *last = last_state + index;
     const XINPUT_GAMEPAD *cur;
     DWORD ret = ERROR_EMPTY;
+    XINPUT_STATE state;
     int i;
 
     static const struct
@@ -1038,26 +1052,27 @@ static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
         /* note: guide button does not send an event */
     };
 
-    if (!controller_lock(controller)) return ERROR_DEVICE_NOT_CONNECTED;
+    if ((ret = xinput_get_state(index, &state))) return ret;
+    AcquireSRWLockExclusive(&keystroke_lock);
 
-    cur = &controller->state.Gamepad;
+    cur = &state.Gamepad;
 
     /*** buttons ***/
     for (i = 0; i < ARRAY_SIZE(buttons); ++i)
     {
-        if ((cur->wButtons & buttons[i].mask) ^ (controller->last_keystroke.wButtons & buttons[i].mask))
+        if ((cur->wButtons & buttons[i].mask) ^ (last->wButtons & buttons[i].mask))
         {
             keystroke->VirtualKey = buttons[i].vk;
             keystroke->Unicode = 0; /* unused */
             if (cur->wButtons & buttons[i].mask)
             {
                 keystroke->Flags = XINPUT_KEYSTROKE_KEYDOWN;
-                controller->last_keystroke.wButtons |= buttons[i].mask;
+                last->wButtons |= buttons[i].mask;
             }
             else
             {
                 keystroke->Flags = XINPUT_KEYSTROKE_KEYUP;
-                controller->last_keystroke.wButtons &= ~buttons[i].mask;
+                last->wButtons &= ~buttons[i].mask;
             }
             keystroke->UserIndex = index;
             keystroke->HidCode = 0;
@@ -1067,46 +1082,45 @@ static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
     }
 
     /*** triggers ***/
-    if (trigger_is_on(cur->bLeftTrigger) ^ trigger_is_on(controller->last_keystroke.bLeftTrigger))
+    if (trigger_is_on(cur->bLeftTrigger) ^ trigger_is_on(last->bLeftTrigger))
     {
         keystroke->VirtualKey = VK_PAD_LTRIGGER;
         keystroke->Unicode = 0; /* unused */
         keystroke->Flags = trigger_is_on(cur->bLeftTrigger) ? XINPUT_KEYSTROKE_KEYDOWN : XINPUT_KEYSTROKE_KEYUP;
         keystroke->UserIndex = index;
         keystroke->HidCode = 0;
-        controller->last_keystroke.bLeftTrigger = cur->bLeftTrigger;
+        last->bLeftTrigger = cur->bLeftTrigger;
         ret = ERROR_SUCCESS;
         goto done;
     }
 
-    if (trigger_is_on(cur->bRightTrigger) ^ trigger_is_on(controller->last_keystroke.bRightTrigger))
+    if (trigger_is_on(cur->bRightTrigger) ^ trigger_is_on(last->bRightTrigger))
     {
         keystroke->VirtualKey = VK_PAD_RTRIGGER;
         keystroke->Unicode = 0; /* unused */
         keystroke->Flags = trigger_is_on(cur->bRightTrigger) ? XINPUT_KEYSTROKE_KEYDOWN : XINPUT_KEYSTROKE_KEYUP;
         keystroke->UserIndex = index;
         keystroke->HidCode = 0;
-        controller->last_keystroke.bRightTrigger = cur->bRightTrigger;
+        last->bRightTrigger = cur->bRightTrigger;
         ret = ERROR_SUCCESS;
         goto done;
     }
 
     /*** joysticks ***/
     ret = check_joystick_keystroke(index, keystroke, &cur->sThumbLX, &cur->sThumbLY,
-            &controller->last_keystroke.sThumbLX,
-            &controller->last_keystroke.sThumbLY, VK_PAD_LTHUMB_UP);
+            &last->sThumbLX,
+            &last->sThumbLY, VK_PAD_LTHUMB_UP);
     if (ret == ERROR_SUCCESS)
         goto done;
 
     ret = check_joystick_keystroke(index, keystroke, &cur->sThumbRX, &cur->sThumbRY,
-            &controller->last_keystroke.sThumbRX,
-            &controller->last_keystroke.sThumbRY, VK_PAD_RTHUMB_UP);
+            &last->sThumbRX,
+            &last->sThumbRY, VK_PAD_RTHUMB_UP);
     if (ret == ERROR_SUCCESS)
         goto done;
 
 done:
-    controller_unlock(controller);
-
+    ReleaseSRWLockExclusive(&keystroke_lock);
     return ret;
 }
 
@@ -1145,23 +1159,29 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilities(DWORD index, DWORD flags, X
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputGetDSoundAudioDeviceGuids(DWORD index, GUID *render_guid, GUID *capture_guid)
 {
+    DWORD ret;
+
     FIXME("index %lu, render_guid %s, capture_guid %s stub!\n", index, debugstr_guid(render_guid),
           debugstr_guid(capture_guid));
 
     if (index >= XUSER_MAX_COUNT || !render_guid || !capture_guid) return ERROR_BAD_ARGUMENTS;
     if (nx_backend) return nx_get_state(index, NULL) ? ERROR_DEVICE_NOT_CONNECTED : ERROR_NOT_SUPPORTED;
-    if (!controllers[index].device) return ERROR_DEVICE_NOT_CONNECTED;
 
-    return ERROR_NOT_SUPPORTED;
+    EnterCriticalSection(&xinput_cs);
+    ret = controllers[index].device ? ERROR_NOT_SUPPORTED : ERROR_DEVICE_NOT_CONNECTED;
+    LeaveCriticalSection(&xinput_cs);
+
+    return ret;
 }
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputGetBatteryInformation(DWORD index, BYTE type, XINPUT_BATTERY_INFORMATION* battery)
 {
     static int once;
+    DWORD ret;
 
     if (!once++) FIXME("index %lu, type %u, battery %p.\n", index, type, battery);
 
-    if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+    if (index >= XUSER_MAX_COUNT || !battery) return ERROR_BAD_ARGUMENTS;
     if (nx_backend)
     {
         if (nx_get_state(index, NULL)) return ERROR_DEVICE_NOT_CONNECTED;
@@ -1169,17 +1189,15 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetBatteryInformation(DWORD index, BYTE typ
         battery->BatteryLevel = BATTERY_LEVEL_FULL;
         return ERROR_SUCCESS;
     }
-    if (!controllers[index].device) return ERROR_DEVICE_NOT_CONNECTED;
+    EnterCriticalSection(&xinput_cs);
+    ret = controllers[index].device ? ERROR_NOT_SUPPORTED : ERROR_DEVICE_NOT_CONNECTED;
+    LeaveCriticalSection(&xinput_cs);
 
-    return ERROR_NOT_SUPPORTED;
+    return ret;
 }
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilitiesEx(DWORD unk, DWORD index, DWORD flags, XINPUT_CAPABILITIES_EX *caps)
 {
-    static const UINT XINPUT_BUTTONS_ALL = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT
-                                         | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB
-                                         | XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER
-                                         | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y;
     HIDD_ATTRIBUTES attr;
     DWORD ret = ERROR_SUCCESS;
 
@@ -1198,7 +1216,11 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilitiesEx(DWORD unk, DWORD index, D
 #if XINPUT_VER >= 3
         caps->Capabilities.Flags |= XINPUT_CAPS_VOICE_SUPPORTED;
 #endif
-        caps->Capabilities.Gamepad.wButtons = XINPUT_BUTTONS_ALL;
+        caps->Capabilities.Gamepad.wButtons = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN
+                | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_START
+                | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB
+                | XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER
+                | XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y;
         caps->Capabilities.Gamepad.bLeftTrigger = 0xff;
         caps->Capabilities.Gamepad.bRightTrigger = 0xff;
         caps->Capabilities.Gamepad.sThumbLX = ~0x3f;
@@ -1216,49 +1238,23 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilitiesEx(DWORD unk, DWORD index, D
 
     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
 
-    if (!controller_lock(&controllers[index])) return ERROR_DEVICE_NOT_CONNECTED;
-
-    if (!HidD_GetAttributes(controllers[index].device, &attr))
+    EnterCriticalSection(&xinput_cs);
+    if (!controllers[index].device) update_controller_list();
+    if (!controllers[index].device)
+        ret = ERROR_DEVICE_NOT_CONNECTED;
+    else if (flags & XINPUT_FLAG_GAMEPAD && controllers[index].caps.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)
+        ret = ERROR_DEVICE_NOT_CONNECTED;
+    else if (!HidD_GetAttributes(controllers[index].device, &attr))
         ret = ERROR_DEVICE_NOT_CONNECTED;
     else
     {
-        memset(caps, 0, sizeof(*caps));
-
-#if XINPUT_VER >= 4
-        caps->Capabilities.Type = XINPUT_DEVTYPE_GAMEPAD;
-#endif
-        caps->Capabilities.SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
-#if XINPUT_VER >= 4
-        caps->Capabilities.Flags |= XINPUT_CAPS_PMD_SUPPORTED;
-#endif
-#if XINPUT_VER >= 3
-        caps->Capabilities.Flags |= XINPUT_CAPS_VOICE_SUPPORTED;
-#endif
-
-        caps->Capabilities.Gamepad.wButtons = XINPUT_BUTTONS_ALL;
-        caps->Capabilities.Gamepad.bLeftTrigger = 0xff;
-        caps->Capabilities.Gamepad.bRightTrigger = 0xff;
-        caps->Capabilities.Gamepad.sThumbLX = ~0x3f;
-        caps->Capabilities.Gamepad.sThumbLY = ~0x3f;
-        caps->Capabilities.Gamepad.sThumbRX = ~0x3f;
-        caps->Capabilities.Gamepad.sThumbRY = ~0x3f;
-        caps->Capabilities.Vibration.wLeftMotorSpeed = 0xff;
-        caps->Capabilities.Vibration.wRightMotorSpeed = 0xff;
-
+        caps->Capabilities = controllers[index].caps;
         caps->VendorId = attr.VendorID;
         caps->ProductId = attr.ProductID;
         caps->VersionNumber = attr.VersionNumber;
-
-        /* CW-Bug-Id: #23185 Emulate Steam Input native hooks for native SDL */
-        if (attr.VendorID == 0x28de && attr.ProductID == 0x11ff)
-        {
-            caps->Capabilities.Type = XINPUT_DEVTYPE_GAMEPAD;
-            caps->Capabilities.Flags = XINPUT_CAPS_WIRELESS;
-            caps->unk2 = index;
-        }
     }
 
-    controller_unlock(&controllers[index]);
+    LeaveCriticalSection(&xinput_cs);
 
     return ret;
 }

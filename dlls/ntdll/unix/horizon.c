@@ -114,7 +114,7 @@ BOOL horizon_is_native_stack_range( const void *address, size_t size )
 WINE_DEFAULT_DEBUG_CHANNEL(horizon);
 
 #ifndef SERVER_PROTOCOL_VERSION
-#define SERVER_PROTOCOL_VERSION 931
+#define SERVER_PROTOCOL_VERSION 963
 #endif
 
 #if defined(__aarch64__) && !defined(HORIZON_NO_LIBNX_EXCEPTION_HANDLER)
@@ -502,16 +502,16 @@ struct horizon_fd_queue
 #define HORIZON_REQ_RECV_SOCKET 55
 #define HORIZON_REQ_SEND_SOCKET 56
 #define HORIZON_REQ_SOCKET_GET_EVENTS 57
-#define HORIZON_REQ_QUERY_DIRECTORY_FILE 244
-#define HORIZON_REQ_SET_FD_DISP_INFO 275
-#define HORIZON_REQ_SET_FD_NAME_INFO 276
-#define HORIZON_REQ_SET_FD_EOF_INFO 277
-#define HORIZON_REQ_SET_ASYNC_DIRECT_RESULT 137
-#define HORIZON_REQ_CANCEL_ASYNC 135
-#define HORIZON_REQ_GET_ASYNC_RESULT 136
-#define HORIZON_REQ_IOCTL 140
-#define HORIZON_REQ_CREATE_NAMED_PIPE 142
-#define HORIZON_REQ_SET_NAMED_PIPE_INFO 143
+#define HORIZON_REQ_QUERY_DIRECTORY_FILE 308
+#define HORIZON_REQ_SET_FD_DISP_INFO 273
+#define HORIZON_REQ_SET_FD_NAME_INFO 274
+#define HORIZON_REQ_SET_FD_EOF_INFO 275
+#define HORIZON_REQ_SET_ASYNC_DIRECT_RESULT 135
+#define HORIZON_REQ_CANCEL_ASYNC 133
+#define HORIZON_REQ_GET_ASYNC_RESULT 134
+#define HORIZON_REQ_IOCTL 138
+#define HORIZON_REQ_CREATE_NAMED_PIPE 140
+#define HORIZON_REQ_SET_NAMED_PIPE_INFO 141
 #define HORIZON_REQ_CREATE_MAPPING 63
 #define HORIZON_REQ_OPEN_MAPPING 64
 #define HORIZON_REQ_GET_MAPPING_INFO 65
@@ -522,114 +522,116 @@ struct horizon_fd_queue
 #define HORIZON_REQ_GET_MAPPING_COMMITTED_RANGE 72
 #define HORIZON_REQ_ADD_MAPPING_COMMITTED_RANGE 73
 #define HORIZON_REQ_IS_SAME_MAPPING 74
-#define HORIZON_REQ_GET_TOKEN_SID 230
-#define HORIZON_REQ_ALLOCATE_LOCALLY_UNIQUE_ID 252
-#define HORIZON_REQ_OPEN_DIRECTORY 242
-#define HORIZON_REQ_GET_DIRECTORY_ENTRIES 243
-#define HORIZON_REQ_UPDATE_RAWINPUT_DEVICES 285
+#define HORIZON_REQ_GET_TOKEN_SID 229
+#define HORIZON_REQ_ALLOCATE_LOCALLY_UNIQUE_ID 250
+#define HORIZON_REQ_OPEN_DIRECTORY 241
+#define HORIZON_REQ_GET_DIRECTORY_ENTRIES 242
+#define HORIZON_REQ_UPDATE_RAWINPUT_DEVICES 283
 #define HORIZON_REQ_CREATE_KEY 86
 #define HORIZON_REQ_OPEN_KEY 87
 #define HORIZON_REQ_DELETE_KEY 88
-#define HORIZON_REQ_ENUM_KEY 91
-#define HORIZON_REQ_SET_KEY_VALUE 92
-#define HORIZON_REQ_GET_KEY_VALUE 93
-#define HORIZON_REQ_ENUM_KEY_VALUE 94
-#define HORIZON_REQ_DELETE_KEY_VALUE 95
-#define HORIZON_REQ_SET_REGISTRY_NOTIFICATION 99
-#define HORIZON_REQ_RENAME_KEY 100
-#define HORIZON_REQ_CREATE_TIMER 101
-#define HORIZON_REQ_OPEN_TIMER 102
-#define HORIZON_REQ_SET_TIMER 103
-#define HORIZON_REQ_CANCEL_TIMER 104
-#define HORIZON_REQ_GET_TIMER_INFO 105
-#define HORIZON_REQ_GET_THREAD_CONTEXT 106
-#define HORIZON_REQ_SET_THREAD_CONTEXT 107
-#define HORIZON_REQ_ADD_ATOM 108
-#define HORIZON_REQ_FIND_ATOM 110
-#define HORIZON_REQ_ADD_USER_ATOM 112
-#define HORIZON_REQ_GET_USER_ATOM_NAME 113
-#define HORIZON_REQ_GET_MSG_QUEUE_HANDLE 114
-#define HORIZON_REQ_GET_MSG_QUEUE 115
-#define HORIZON_REQ_SET_QUEUE_MASK 117
-#define HORIZON_REQ_GET_QUEUE_STATUS 118
-#define HORIZON_REQ_SEND_MESSAGE 120
-#define HORIZON_REQ_POST_QUIT_MESSAGE 121
-#define HORIZON_REQ_SEND_HARDWARE_MESSAGE 122
-#define HORIZON_REQ_GET_MESSAGE 124
-#define HORIZON_REQ_REPLY_MESSAGE 125
-#define HORIZON_REQ_ACCEPT_HARDWARE_MESSAGE 126
-#define HORIZON_REQ_GET_MESSAGE_REPLY 127
-#define HORIZON_REQ_SET_WIN_TIMER 128
-#define HORIZON_REQ_KILL_WIN_TIMER 129
-#define HORIZON_REQ_CREATE_WINDOW 144
-#define HORIZON_REQ_DESTROY_WINDOW 145
-#define HORIZON_REQ_GET_DESKTOP_WINDOW 146
-#define HORIZON_REQ_SET_WINDOW_OWNER 147
-#define HORIZON_REQ_GET_WINDOW_INFO 148
-#define HORIZON_REQ_INIT_WINDOW_INFO 149
-#define HORIZON_REQ_SET_WINDOW_INFO 150
-#define HORIZON_REQ_GET_WINDOW_LIST 153
-#define HORIZON_REQ_GET_WINDOW_CHILDREN_FROM_POINT 155
-#define HORIZON_REQ_GET_WINDOW_TREE 156
-#define HORIZON_REQ_SET_WINDOW_POS 157
-#define HORIZON_REQ_GET_WINDOW_RECTANGLES 158
-#define HORIZON_REQ_GET_WINDOW_TEXT 159
-#define HORIZON_REQ_SET_WINDOW_TEXT 160
-#define HORIZON_REQ_GET_WINDOWS_OFFSET 161
-#define HORIZON_REQ_GET_VISIBLE_REGION 162
-#define HORIZON_REQ_GET_WINDOW_REGION 163
-#define HORIZON_REQ_SET_WINDOW_REGION 164
-#define HORIZON_REQ_GET_UPDATE_REGION 165
-#define HORIZON_REQ_UPDATE_WINDOW_ZORDER 166
-#define HORIZON_REQ_REDRAW_WINDOW 167
-#define HORIZON_REQ_SET_WINDOW_PROPERTY 168
-#define HORIZON_REQ_REMOVE_WINDOW_PROPERTY 169
-#define HORIZON_REQ_GET_WINDOW_PROPERTY 170
-#define HORIZON_REQ_GET_WINDOW_PROPERTIES 171
-#define HORIZON_REQ_CREATE_WINSTATION 172
-#define HORIZON_REQ_OPEN_WINSTATION 173
-#define HORIZON_REQ_CLOSE_WINSTATION 174
-#define HORIZON_REQ_SET_WINSTATION_MONITORS 175
-#define HORIZON_REQ_GET_PROCESS_WINSTATION 176
-#define HORIZON_REQ_SET_PROCESS_WINSTATION 177
-#define HORIZON_REQ_ENUM_WINSTATION 178
-#define HORIZON_REQ_CREATE_DESKTOP 179
-#define HORIZON_REQ_OPEN_DESKTOP 180
-#define HORIZON_REQ_OPEN_INPUT_DESKTOP 181
-#define HORIZON_REQ_SET_INPUT_DESKTOP 182
-#define HORIZON_REQ_CLOSE_DESKTOP 183
-#define HORIZON_REQ_GET_THREAD_DESKTOP 184
-#define HORIZON_REQ_SET_THREAD_DESKTOP 185
-#define HORIZON_REQ_SET_USER_OBJECT_INFO 186
-#define HORIZON_REQ_GET_THREAD_INPUT 190
-#define HORIZON_REQ_GET_KEY_STATE 192
-#define HORIZON_REQ_SET_KEY_STATE 193
-#define HORIZON_REQ_SET_FOREGROUND_WINDOW 194
-#define HORIZON_REQ_SET_FOCUS_WINDOW 195
-#define HORIZON_REQ_SET_ACTIVE_WINDOW 196
-#define HORIZON_REQ_SET_CAPTURE_WINDOW 197
-#define HORIZON_REQ_SET_CARET_WINDOW 198
-#define HORIZON_REQ_SET_CARET_INFO 199
-#define HORIZON_REQ_CREATE_CLASS 205
-#define HORIZON_REQ_OPEN_CLIPBOARD 209
-#define HORIZON_REQ_CLOSE_CLIPBOARD 210
-#define HORIZON_REQ_EMPTY_CLIPBOARD 211
-#define HORIZON_REQ_SET_CLIPBOARD_DATA 212
-#define HORIZON_REQ_GET_CLIPBOARD_DATA 213
-#define HORIZON_REQ_GET_CLIPBOARD_FORMATS 214
-#define HORIZON_REQ_ENUM_CLIPBOARD_FORMATS 215
-#define HORIZON_REQ_RELEASE_CLIPBOARD 216
-#define HORIZON_REQ_GET_CLIPBOARD_INFO 217
-#define HORIZON_REQ_SET_CLIPBOARD_VIEWER 218
-#define HORIZON_REQ_ADD_CLIPBOARD_LISTENER 219
-#define HORIZON_REQ_REMOVE_CLIPBOARD_LISTENER 220
-#define HORIZON_REQ_DESTROY_CLASS 206
-#define HORIZON_REQ_GET_OBJECT_INFO 248
-#define HORIZON_REQ_GET_WINDOW_LAYERED_INFO 278
-#define HORIZON_REQ_SET_WINDOW_LAYERED_INFO 279
-#define HORIZON_REQ_ALLOC_USER_HANDLE 280
-#define HORIZON_REQ_FREE_USER_HANDLE 281
-#define HORIZON_REQ_SET_CURSOR 282
+#define HORIZON_REQ_ENUM_KEY 90
+#define HORIZON_REQ_SET_KEY_VALUE 91
+#define HORIZON_REQ_GET_KEY_VALUE 92
+#define HORIZON_REQ_ENUM_KEY_VALUE 93
+#define HORIZON_REQ_DELETE_KEY_VALUE 94
+#define HORIZON_REQ_SET_REGISTRY_NOTIFICATION 98
+#define HORIZON_REQ_RENAME_KEY 99
+#define HORIZON_REQ_CREATE_TIMER 100
+#define HORIZON_REQ_OPEN_TIMER 101
+#define HORIZON_REQ_SET_TIMER 102
+#define HORIZON_REQ_CANCEL_TIMER 103
+#define HORIZON_REQ_GET_TIMER_INFO 104
+#define HORIZON_REQ_GET_THREAD_CONTEXT 105
+#define HORIZON_REQ_SET_THREAD_CONTEXT 106
+#define HORIZON_REQ_ADD_ATOM 107
+#define HORIZON_REQ_FIND_ATOM 109
+#define HORIZON_REQ_ADD_USER_ATOM 111
+#define HORIZON_REQ_GET_USER_ATOM_NAME 112
+#define HORIZON_REQ_GET_MSG_QUEUE_HANDLE 113
+#define HORIZON_REQ_GET_MSG_QUEUE 114
+#define HORIZON_REQ_SET_QUEUE_MASK 116
+#define HORIZON_REQ_GET_QUEUE_STATUS 117
+#define HORIZON_REQ_SEND_MESSAGE 119
+#define HORIZON_REQ_POST_QUIT_MESSAGE 120
+#define HORIZON_REQ_SEND_HARDWARE_MESSAGE 121
+#define HORIZON_REQ_GET_MESSAGE 122
+#define HORIZON_REQ_REPLY_MESSAGE 123
+#define HORIZON_REQ_ACCEPT_HARDWARE_MESSAGE 124
+#define HORIZON_REQ_GET_MESSAGE_REPLY 125
+#define HORIZON_REQ_SET_WIN_TIMER 126
+#define HORIZON_REQ_KILL_WIN_TIMER 127
+#define HORIZON_REQ_CREATE_WINDOW 142
+#define HORIZON_REQ_DESTROY_WINDOW 143
+#define HORIZON_REQ_GET_DESKTOP_WINDOW 144
+#define HORIZON_REQ_SET_WINDOW_OWNER 145
+#define HORIZON_REQ_GET_WINDOW_INFO 146
+#define HORIZON_REQ_INIT_WINDOW_INFO 147
+#define HORIZON_REQ_SET_WINDOW_INFO 148
+#define HORIZON_REQ_GET_WINDOW_LIST 152
+#define HORIZON_REQ_GET_WINDOW_CHILDREN_FROM_POINT 154
+#define HORIZON_REQ_GET_WINDOW_TREE 155
+#define HORIZON_REQ_SET_WINDOW_POS 156
+#define HORIZON_REQ_GET_WINDOW_RECTANGLES 157
+#define HORIZON_REQ_GET_WINDOW_TEXT 158
+#define HORIZON_REQ_SET_WINDOW_TEXT 159
+#define HORIZON_REQ_GET_WINDOWS_OFFSET 160
+#define HORIZON_REQ_GET_VISIBLE_REGION 161
+#define HORIZON_REQ_GET_WINDOW_REGION 162
+#define HORIZON_REQ_SET_WINDOW_REGION 163
+#define HORIZON_REQ_GET_UPDATE_REGION 164
+#define HORIZON_REQ_UPDATE_WINDOW_ZORDER 165
+#define HORIZON_REQ_REDRAW_WINDOW 166
+#define HORIZON_REQ_SET_WINDOW_PROPERTY 167
+#define HORIZON_REQ_REMOVE_WINDOW_PROPERTY 168
+#define HORIZON_REQ_GET_WINDOW_PROPERTY 169
+#define HORIZON_REQ_GET_WINDOW_PROPERTIES 170
+#define HORIZON_REQ_CREATE_WINSTATION 171
+#define HORIZON_REQ_OPEN_WINSTATION 172
+#define HORIZON_REQ_CLOSE_WINSTATION 173
+#define HORIZON_REQ_SET_WINSTATION_MONITORS 174
+#define HORIZON_REQ_GET_PROCESS_WINSTATION 175
+#define HORIZON_REQ_SET_PROCESS_WINSTATION 176
+#define HORIZON_REQ_ENUM_WINSTATION 177
+#define HORIZON_REQ_CREATE_DESKTOP 178
+#define HORIZON_REQ_OPEN_DESKTOP 179
+#define HORIZON_REQ_OPEN_INPUT_DESKTOP 180
+#define HORIZON_REQ_SET_INPUT_DESKTOP 181
+#define HORIZON_REQ_CLOSE_DESKTOP 182
+#define HORIZON_REQ_GET_THREAD_DESKTOP 183
+#define HORIZON_REQ_SET_THREAD_DESKTOP 184
+#define HORIZON_REQ_SET_USER_OBJECT_INFO 185
+#define HORIZON_REQ_GET_THREAD_INPUT 189
+#define HORIZON_REQ_GET_KEY_STATE 191
+#define HORIZON_REQ_SET_KEY_STATE 192
+#define HORIZON_REQ_SET_FOREGROUND_WINDOW 193
+#define HORIZON_REQ_SET_FOCUS_WINDOW 194
+#define HORIZON_REQ_SET_ACTIVE_WINDOW 195
+#define HORIZON_REQ_SET_CAPTURE_WINDOW 196
+#define HORIZON_REQ_SET_CARET_WINDOW 197
+#define HORIZON_REQ_SET_CARET_INFO 198
+#define HORIZON_REQ_CREATE_CLASS 204
+#define HORIZON_REQ_SET_CLASS_INFO 206
+#define HORIZON_REQ_SET_WINDOW_FNID 149
+#define HORIZON_REQ_OPEN_CLIPBOARD 208
+#define HORIZON_REQ_CLOSE_CLIPBOARD 209
+#define HORIZON_REQ_EMPTY_CLIPBOARD 210
+#define HORIZON_REQ_SET_CLIPBOARD_DATA 211
+#define HORIZON_REQ_GET_CLIPBOARD_DATA 212
+#define HORIZON_REQ_GET_CLIPBOARD_FORMATS 213
+#define HORIZON_REQ_ENUM_CLIPBOARD_FORMATS 214
+#define HORIZON_REQ_RELEASE_CLIPBOARD 215
+#define HORIZON_REQ_GET_CLIPBOARD_INFO 216
+#define HORIZON_REQ_SET_CLIPBOARD_VIEWER 217
+#define HORIZON_REQ_ADD_CLIPBOARD_LISTENER 218
+#define HORIZON_REQ_REMOVE_CLIPBOARD_LISTENER 219
+#define HORIZON_REQ_DESTROY_CLASS 205
+#define HORIZON_REQ_GET_OBJECT_INFO 246
+#define HORIZON_REQ_GET_WINDOW_LAYERED_INFO 276
+#define HORIZON_REQ_SET_WINDOW_LAYERED_INFO 277
+#define HORIZON_REQ_ALLOC_USER_HANDLE 278
+#define HORIZON_REQ_FREE_USER_HANDLE 279
+#define HORIZON_REQ_SET_CURSOR 280
 #define HORIZON_STATUS_SUCCESS 0
 #define HORIZON_STATUS_OBJECT_NAME_EXISTS 0x40000000u
 #define HORIZON_STATUS_KERNEL_APC 0x00000100u
@@ -743,6 +745,18 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_GWLP_HINSTANCE (-6)
 #define HORIZON_GWLP_WNDPROC (-4)
 #define HORIZON_GWLP_USERDATA (-21)
+#define HORIZON_GCL_STYLE (-26)
+#define HORIZON_GCL_CBWNDEXTRA (-18)
+#define HORIZON_GCLP_HMODULE (-16)
+#define HORIZON_GCLP_WNDPROC (-24)
+#define HORIZON_GCLP_HCURSOR (-12)
+#define HORIZON_GCLP_HBRBACKGROUND (-10)
+#define HORIZON_GCLP_HICON (-14)
+#define HORIZON_GCLP_HICONSM (-34)
+#define HORIZON_GCLP_MENUNAME (-8)
+#define HORIZON_NTUSER_WNDPROC_DIALOG 10
+#define HORIZON_NTUSER_WNDPROC_MDICLIENT 13
+#define HORIZON_NTUSER_NB_PROCS 17
 #define HORIZON_WS_VISIBLE 0x10000000u
 #define HORIZON_WS_DISABLED 0x08000000u
 #define HORIZON_DCX_WINDOW 0x00000001u
@@ -878,6 +892,24 @@ enum horizon_server_object_type
     HORIZON_SERVER_OBJECT_NAMED_PIPE
 };
 
+struct horizon_ratio
+{
+    unsigned short num;
+    unsigned short den;
+};
+
+struct horizon_luid
+{
+    unsigned int low_part;
+    int high_part;
+};
+
+struct horizon_obj_locator
+{
+    unsigned long long id;
+    unsigned long long offset;
+};
+
 struct horizon_server_request_header
 {
     int req;
@@ -902,6 +934,8 @@ struct horizon_init_first_thread_request
     int debug_level;
     int reply_fd;
     int wait_fd;
+    unsigned int page_size;
+    char __pad_36[4];
 };
 
 struct horizon_init_first_thread_reply
@@ -913,14 +947,14 @@ struct horizon_init_first_thread_reply
     unsigned int session_id;
     unsigned int inproc_device;
     unsigned int info_size;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_init_process_done_reply
 {
     struct horizon_server_reply_header header;
     int suspend;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_init_thread_request
@@ -937,16 +971,15 @@ struct horizon_init_thread_reply
 {
     struct horizon_server_reply_header header;
     int suspend;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_init_process_done_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long teb;
     unsigned long long peb;
-    unsigned long long ldt_copy;
 };
 
 struct horizon_terminate_thread_request
@@ -954,14 +987,14 @@ struct horizon_terminate_thread_request
     struct horizon_server_request_header header;
     unsigned int handle;
     int exit_code;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_terminate_thread_reply
 {
     struct horizon_server_reply_header header;
     int self;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_thread_info_request
@@ -969,7 +1002,7 @@ struct horizon_get_thread_info_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int access;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_thread_info_reply
@@ -1014,7 +1047,7 @@ struct horizon_set_thread_info_request
     unsigned int token;
     int disable_boost;
     unsigned int mask;
-    char pad[4];
+    char __pad_52[4];
 };
 
 struct horizon_open_thread_request
@@ -1029,15 +1062,13 @@ struct horizon_suspend_thread_request
 {
     struct horizon_server_request_header header;
     unsigned int handle;
-    unsigned int waited_handle;
-    char pad[4];
 };
 
 struct horizon_suspend_thread_reply
 {
     struct horizon_server_reply_header header;
     int count;
-    unsigned int wait_handle;
+    char __pad_12[4];
 };
 
 struct horizon_get_thread_context_request
@@ -1048,7 +1079,7 @@ struct horizon_get_thread_context_request
     unsigned int flags;
     unsigned int native_flags;
     unsigned short machine;
-    char pad[2];
+    char __pad_30[2];
 };
 
 struct horizon_get_thread_context_reply
@@ -1063,14 +1094,14 @@ struct horizon_set_thread_context_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int native_flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_thread_context_reply
 {
     struct horizon_server_reply_header header;
     int self;
-    char pad[4];
+    char __pad_12[4];
 };
 
 C_ASSERT( offsetof(struct horizon_get_thread_context_request, handle) == 12 );
@@ -1092,7 +1123,7 @@ struct horizon_set_handle_info_reply
 {
     struct horizon_server_reply_header header;
     int old_flags;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_dup_handle_request
@@ -1104,14 +1135,14 @@ struct horizon_dup_handle_request
     unsigned int access;
     unsigned int attributes;
     unsigned int options;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_dup_handle_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_allocate_reserve_object_request
@@ -1124,7 +1155,7 @@ struct horizon_allocate_reserve_object_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_compare_objects_request
@@ -1132,7 +1163,7 @@ struct horizon_compare_objects_request
     struct horizon_server_request_header header;
     unsigned int first;
     unsigned int second;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_object_info_request
@@ -1147,14 +1178,14 @@ struct horizon_get_object_info_reply
     unsigned int access;
     unsigned int ref_count;
     unsigned int handle_count;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_open_process_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_directory_entries_request
@@ -1170,7 +1201,6 @@ struct horizon_get_directory_entries_reply
     struct horizon_server_reply_header header;
     unsigned int total_len;
     unsigned int count;
-    /* VARARG(entries,directory_entries) */
 };
 
 struct horizon_select_request
@@ -1198,7 +1228,7 @@ struct horizon_queue_apc_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int reserve_handle;
-    /* followed by the call, an apc_call the client built */
+    char __pad_20[4];
 };
 
 struct horizon_queue_apc_reply
@@ -1235,7 +1265,7 @@ struct horizon_create_event_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_event_op_request
@@ -1243,14 +1273,14 @@ struct horizon_event_op_request
     struct horizon_server_request_header header;
     unsigned int handle;
     int op;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_event_op_reply
 {
     struct horizon_server_reply_header header;
     int state;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_query_event_request
@@ -1288,7 +1318,7 @@ struct horizon_create_file_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_set_fd_disp_info_request
@@ -1296,7 +1326,7 @@ struct horizon_set_fd_disp_info_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_fd_name_info_request
@@ -1307,7 +1337,6 @@ struct horizon_set_fd_name_info_request
     unsigned int namelen;
     int link;
     unsigned int flags;
-    /* VARARG(name,unicode_str,namelen); VARARG(filename,string); */
 };
 
 struct horizon_set_fd_eof_info_request
@@ -1327,7 +1356,7 @@ struct horizon_get_handle_unix_name_reply
 {
     struct horizon_server_reply_header header;
     unsigned int name_len;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_handle_fd_request
@@ -1355,14 +1384,14 @@ struct horizon_query_directory_file_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int restart_scan;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_query_directory_file_reply
 {
     struct horizon_server_reply_header header;
     unsigned int total_len;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_new_thread_request
@@ -1372,7 +1401,7 @@ struct horizon_new_thread_request
     unsigned int access;
     unsigned int flags;
     int request_fd;
-    char pad[4];
+    int is_system;
 };
 
 struct horizon_new_thread_reply
@@ -1392,7 +1421,7 @@ struct horizon_resume_thread_reply
 {
     struct horizon_server_reply_header header;
     int count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_open_file_object_request
@@ -1403,14 +1432,14 @@ struct horizon_open_file_object_request
     unsigned int rootdir;
     unsigned int sharing;
     unsigned int options;
-    /* UTF-16LE filename follows as request data */
+    unsigned long long async_user;
 };
 
 struct horizon_open_file_object_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    unsigned int wait;
 };
 
 struct horizon_create_named_pipe_request
@@ -1423,9 +1452,9 @@ struct horizon_create_named_pipe_request
     unsigned int maxinstances;
     unsigned int outsize;
     unsigned int insize;
-    unsigned long long timeout;
+    long long timeout;
     unsigned int flags;
-    char pad[4];
+    char __pad_52[4];
 };
 
 struct horizon_create_named_pipe_reply
@@ -1440,7 +1469,7 @@ struct horizon_set_named_pipe_info_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 C_ASSERT( offsetof(struct horizon_create_named_pipe_request, access) == 12 );
@@ -1472,7 +1501,7 @@ struct horizon_recv_socket_request
     int oob;
     struct horizon_async_data async;
     int force_async;
-    char pad[4];
+    char __pad_60[4];
 };
 
 struct horizon_socket_io_reply
@@ -1504,7 +1533,7 @@ struct horizon_set_async_direct_result_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_ioctl_request
@@ -1512,7 +1541,6 @@ struct horizon_ioctl_request
     struct horizon_server_request_header header;
     unsigned int code;
     struct horizon_async_data async;
-    /* in_data follows as request data */
 };
 
 #define HORIZON_ASYNC_DATA_DEFINED 1
@@ -1522,7 +1550,7 @@ struct horizon_ioctl_request
 struct horizon_get_async_result_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long user_arg;
 };
 
@@ -1532,6 +1560,7 @@ struct horizon_cancel_async_request
     unsigned int handle;
     unsigned long long iosb;
     int only_thread;
+    char __pad_28[4];
 };
 
 /* The wire layouts these are read from are server_protocol.h's. */
@@ -1579,7 +1608,6 @@ struct horizon_ioctl_reply
     struct horizon_server_reply_header header;
     unsigned int wait;
     unsigned int options;
-    /* out_data follows as reply data */
 };
 
 struct horizon_socket_get_events_request
@@ -1587,15 +1615,14 @@ struct horizon_socket_get_events_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int event;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_socket_get_events_reply
 {
     struct horizon_server_reply_header header;
     unsigned int flags;
-    char pad[4];
-    /* status[13] follows as reply data */
+    char __pad_12[4];
 };
 
 struct horizon_create_mapping_request
@@ -1606,14 +1633,14 @@ struct horizon_create_mapping_request
     unsigned int file_access;
     unsigned long long size;
     unsigned int file_handle;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_create_mapping_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_mapping_info_request
@@ -1621,7 +1648,7 @@ struct horizon_get_mapping_info_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int access;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_mapping_info_reply
@@ -1631,7 +1658,9 @@ struct horizon_get_mapping_info_reply
     unsigned int flags;
     unsigned int shared_file;
     unsigned int name_len;
+    unsigned int ver_len;
     unsigned int total;
+    char __pad_36[4];
 };
 
 struct horizon_get_image_map_address_request
@@ -1651,10 +1680,10 @@ struct horizon_map_view_request
     struct horizon_server_request_header header;
     unsigned int mapping;
     unsigned int access;
-    char pad[4];
+    char __pad_20[4];
     unsigned long long base;
     unsigned long long size;
-    long long start;
+    unsigned long long start;
 };
 
 struct horizon_map_image_view_request
@@ -1666,22 +1695,22 @@ struct horizon_map_image_view_request
     unsigned long long offset;
     unsigned int entry;
     unsigned short machine;
-    char pad[2];
+    char __pad_46[2];
 };
 
 struct horizon_unmap_view_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long base;
 };
 
 struct horizon_get_mapping_committed_range_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long base;
-    long long offset;
+    unsigned long long offset;
 };
 
 struct horizon_get_mapping_committed_range_reply
@@ -1689,22 +1718,22 @@ struct horizon_get_mapping_committed_range_reply
     struct horizon_server_reply_header header;
     unsigned long long size;
     int committed;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_add_mapping_committed_range_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long base;
-    long long offset;
+    unsigned long long offset;
     unsigned long long size;
 };
 
 struct horizon_is_same_mapping_request
 {
     struct horizon_server_request_header header;
-    char pad[4];
+    char __pad_12[4];
     unsigned long long base1;
     unsigned long long base2;
 };
@@ -1759,14 +1788,14 @@ struct horizon_create_mutex_request
     struct horizon_server_request_header header;
     unsigned int access;
     int owned;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_create_mutex_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_release_mutex_request
@@ -1779,7 +1808,7 @@ struct horizon_release_mutex_reply
 {
     struct horizon_server_reply_header header;
     unsigned int prev_count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_query_mutex_request
@@ -1794,7 +1823,7 @@ struct horizon_query_mutex_reply
     unsigned int count;
     int owned;
     int abandoned;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_create_semaphore_request
@@ -1809,7 +1838,7 @@ struct horizon_create_semaphore_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_release_semaphore_request
@@ -1817,14 +1846,14 @@ struct horizon_release_semaphore_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int count;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_release_semaphore_reply
 {
     struct horizon_server_reply_header header;
     unsigned int prev_count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_query_semaphore_request
@@ -1845,14 +1874,14 @@ struct horizon_create_timer_request
     struct horizon_server_request_header header;
     unsigned int access;
     int manual;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_create_timer_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_set_timer_request
@@ -1863,22 +1892,21 @@ struct horizon_set_timer_request
     unsigned long long callback;
     unsigned long long arg;
     int period;
-    char pad[4];
+    char __pad_44[4];
 };
 
 /* Wine's luid_t after the reply header: AllocateLocallyUniqueId's answer. */
 struct horizon_allocate_locally_unique_id_reply
 {
     struct horizon_server_reply_header header;
-    unsigned int low_part;
-    int high_part;
+    struct horizon_luid luid;
 };
 
 struct horizon_set_timer_reply
 {
     struct horizon_server_reply_header header;
     int signaled;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_cancel_timer_request
@@ -1891,7 +1919,7 @@ struct horizon_cancel_timer_reply
 {
     struct horizon_server_reply_header header;
     int signaled;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_timer_info_request
@@ -1905,7 +1933,7 @@ struct horizon_get_timer_info_reply
     struct horizon_server_reply_header header;
     long long when;
     int signaled;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_atom_reply
@@ -1926,7 +1954,9 @@ struct horizon_create_window_request
     unsigned int dpi_context;
     unsigned int style;
     unsigned int ex_style;
-    char pad[4];
+    unsigned int ansi;
+    struct horizon_ratio dpi;
+    struct horizon_ratio raw_dpi;
 };
 
 struct horizon_create_window_reply
@@ -1935,7 +1965,7 @@ struct horizon_create_window_reply
     unsigned int handle;
     unsigned int parent;
     unsigned int owner;
-    int extra;
+    char __pad_20[4];
     unsigned long long class_ptr;
 };
 
@@ -1971,7 +2001,7 @@ struct horizon_set_window_owner_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int owner;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_window_owner_reply
@@ -1993,7 +2023,7 @@ struct horizon_get_window_info_reply
 {
     struct horizon_server_reply_header header;
     unsigned int last_active;
-    int is_unicode;
+    char __pad_12[4];
     unsigned long long info;
 };
 
@@ -2003,8 +2033,6 @@ struct horizon_init_window_info_request
     unsigned int handle;
     unsigned int style;
     unsigned int ex_style;
-    short is_unicode;
-    char pad[6];
 };
 
 struct horizon_set_window_info_request
@@ -2014,12 +2042,16 @@ struct horizon_set_window_info_request
     int offset;
     unsigned int size;
     unsigned long long new_info;
+    unsigned int new_ansi;
+    unsigned int internal;
 };
 
 struct horizon_set_window_info_reply
 {
     struct horizon_server_reply_header header;
     unsigned long long old_info;
+    unsigned int old_ansi;
+    char __pad_20[4];
 };
 
 struct horizon_get_window_tree_request
@@ -2035,14 +2067,14 @@ struct horizon_get_window_list_request
     unsigned int handle;
     unsigned int tid;
     int children;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_get_window_list_reply
 {
     struct horizon_server_reply_header header;
     int count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_window_children_from_point_request
@@ -2051,15 +2083,15 @@ struct horizon_get_window_children_from_point_request
     unsigned int parent;
     int x;
     int y;
-    int dpi;
-    char pad[4];
+    struct horizon_ratio dpi;
+    char __pad_28[4];
 };
 
 struct horizon_get_window_children_from_point_reply
 {
     struct horizon_server_reply_header header;
     int count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_get_window_tree_reply
@@ -2080,12 +2112,10 @@ struct horizon_set_window_pos_request
     struct horizon_server_request_header header;
     unsigned short swp_flags;
     unsigned short paint_flags;
-    unsigned int monitor_dpi;
     unsigned int handle;
     unsigned int previous;
     struct horizon_rectangle window;
     struct horizon_rectangle client;
-    char pad[4];
 };
 
 struct horizon_set_window_pos_reply
@@ -2094,7 +2124,7 @@ struct horizon_set_window_pos_reply
     unsigned int new_style;
     unsigned int new_ex_style;
     unsigned int surface_win;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_window_rectangles_request
@@ -2102,7 +2132,7 @@ struct horizon_get_window_rectangles_request
     struct horizon_server_request_header header;
     unsigned int handle;
     int relative;
-    int dpi;
+    struct horizon_ratio dpi;
 };
 
 struct horizon_get_window_rectangles_reply
@@ -2110,6 +2140,7 @@ struct horizon_get_window_rectangles_reply
     struct horizon_server_reply_header header;
     struct horizon_rectangle window;
     struct horizon_rectangle client;
+    struct horizon_rectangle visible;
 };
 
 struct horizon_get_window_text_request
@@ -2122,7 +2153,7 @@ struct horizon_get_window_text_reply
 {
     struct horizon_server_reply_header header;
     unsigned int length;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_set_window_text_request
@@ -2136,7 +2167,7 @@ struct horizon_get_windows_offset_request
     struct horizon_server_request_header header;
     unsigned int from;
     unsigned int to;
-    int dpi;
+    struct horizon_ratio dpi;
 };
 
 struct horizon_get_windows_offset_reply
@@ -2145,7 +2176,7 @@ struct horizon_get_windows_offset_reply
     int x;
     int y;
     int mirror;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_visible_region_request
@@ -2153,7 +2184,7 @@ struct horizon_get_visible_region_request
     struct horizon_server_request_header header;
     unsigned int window;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_visible_region_reply
@@ -2164,7 +2195,7 @@ struct horizon_get_visible_region_reply
     struct horizon_rectangle win_rect;
     unsigned int paint_flags;
     unsigned int total_size;
-    char pad[4];
+    char __pad_52[4];
 };
 
 struct horizon_get_window_region_request
@@ -2172,7 +2203,7 @@ struct horizon_get_window_region_request
     struct horizon_server_request_header header;
     unsigned int window;
     int surface;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_window_region_reply
@@ -2180,7 +2211,7 @@ struct horizon_get_window_region_reply
     struct horizon_server_reply_header header;
     struct horizon_rectangle visible_rect;
     unsigned int total_size;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_set_window_region_request
@@ -2188,7 +2219,7 @@ struct horizon_set_window_region_request
     struct horizon_server_request_header header;
     unsigned int window;
     int redraw;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_window_layered_info_request
@@ -2203,7 +2234,7 @@ struct horizon_get_window_layered_info_reply
     unsigned int color_key;
     unsigned int alpha;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_window_layered_info_request
@@ -2213,7 +2244,7 @@ struct horizon_set_window_layered_info_request
     unsigned int color_key;
     unsigned int alpha;
     unsigned int flags;
-    char pad[4];
+    char __pad_28[4];
 };
 
 C_ASSERT( sizeof(struct horizon_get_window_text_request) == 16 );
@@ -2242,7 +2273,7 @@ struct horizon_get_update_region_reply
     unsigned int child;
     unsigned int flags;
     unsigned int total_size;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_send_message_request
@@ -2286,7 +2317,7 @@ struct horizon_kill_win_timer_request
     unsigned int win;
     unsigned long long id;
     unsigned int msg;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_get_msg_queue_handle_reply
@@ -2299,8 +2330,7 @@ struct horizon_get_msg_queue_handle_reply
 struct horizon_get_msg_queue_reply
 {
     struct horizon_server_reply_header header;
-    unsigned long long locator_id;      /* struct obj_locator */
-    unsigned long long locator_offset;
+    struct horizon_obj_locator locator;
 };
 
 struct horizon_set_queue_mask_request
@@ -2353,7 +2383,7 @@ struct horizon_get_user_atom_name_reply
 {
     struct horizon_server_reply_header header;
     unsigned int total;
-    char pad[4];
+    char __pad_12[4];
 };
 
 /* open_clipboard, release_clipboard and the listener requests: one window. */
@@ -2378,7 +2408,7 @@ struct horizon_set_clipboard_data_request
     struct horizon_server_request_header header;
     unsigned int format;
     unsigned int lcid;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_clipboard_data_request
@@ -2388,7 +2418,7 @@ struct horizon_get_clipboard_data_request
     int render;
     int cached;
     unsigned int seqno;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_get_clipboard_data_reply
@@ -2421,7 +2451,7 @@ struct horizon_set_clipboard_viewer_request
     struct horizon_server_request_header header;
     unsigned int viewer;
     unsigned int previous;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_message_request
@@ -2435,7 +2465,7 @@ struct horizon_get_message_request
     unsigned int wake_mask;
     unsigned int changed_mask;
     unsigned int internal;
-    char pad[4];
+    char __pad_44[4];
 };
 
 struct horizon_get_message_reply
@@ -2450,7 +2480,7 @@ struct horizon_get_message_reply
     int y;
     unsigned int time;
     unsigned int total;
-    char pad[4];
+    char __pad_52[4];
 };
 
 struct horizon_hw_mouse_input
@@ -2489,7 +2519,7 @@ struct horizon_send_hardware_message_request
     unsigned int win;
     union horizon_hw_input input;
     unsigned int flags;
-    char pad[4];
+    char __pad_60[4];
 };
 
 struct horizon_send_hardware_message_reply
@@ -2500,7 +2530,7 @@ struct horizon_send_hardware_message_reply
     int prev_y;
     int new_x;
     int new_y;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_accept_hardware_message_request
@@ -2514,14 +2544,14 @@ struct horizon_get_key_state_request
     struct horizon_server_request_header header;
     int async;
     int key;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_get_key_state_reply
 {
     struct horizon_server_reply_header header;
     unsigned char state;
-    char pad[7];
+    char __pad_9[7];
 };
 
 struct horizon_hardware_msg_data
@@ -2545,11 +2575,6 @@ struct horizon_hardware_msg_data
     } rawinput;
 };
 
-struct horizon_obj_locator
-{
-    unsigned long long id;
-    unsigned long long offset;
-};
 
 struct horizon_get_thread_input_request
 {
@@ -2574,7 +2599,7 @@ struct horizon_set_foreground_window_request
     struct horizon_server_request_header header;
     unsigned int handle;
     int internal;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_foreground_window_reply
@@ -2583,7 +2608,7 @@ struct horizon_set_foreground_window_reply
     unsigned int previous;
     int send_msg_old;
     int send_msg_new;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_input_window_reply
@@ -2598,7 +2623,7 @@ struct horizon_set_capture_window_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_capture_window_reply
@@ -2623,7 +2648,7 @@ struct horizon_set_caret_window_reply
     struct horizon_rectangle old_rect;
     int old_hide;
     int old_state;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_set_caret_info_request
@@ -2635,7 +2660,7 @@ struct horizon_set_caret_info_request
     int y;
     int hide;
     int state;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_set_caret_info_reply
@@ -2645,7 +2670,7 @@ struct horizon_set_caret_info_reply
     struct horizon_rectangle old_rect;
     int old_hide;
     int old_state;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_set_cursor_request
@@ -2670,30 +2695,30 @@ struct horizon_set_cursor_reply
     int new_y;
     struct horizon_rectangle new_clip;
     unsigned int last_change;
-    char pad[4];
+    char __pad_52[4];
 };
 
 struct horizon_alloc_user_handle_request
 {
     struct horizon_server_request_header header;
     unsigned short type;
-    char pad[2];
+    char __pad_14[2];
 };
 
 struct horizon_alloc_user_handle_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_free_user_handle_request
 {
     struct horizon_server_request_header header;
     unsigned short type;
-    char pad0[2];
+    char __pad_14[2];
     unsigned int handle;
-    char pad1[4];
+    char __pad_20[4];
 };
 
 struct horizon_update_window_zorder_request
@@ -2708,7 +2733,7 @@ struct horizon_redraw_window_request
     struct horizon_server_request_header header;
     unsigned int window;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_window_property_request
@@ -2716,8 +2741,8 @@ struct horizon_set_window_property_request
     struct horizon_server_request_header header;
     unsigned int window;
     unsigned long long data;
-    unsigned short atom;
-    char pad[6];
+    unsigned int atom;
+    char __pad_28[4];
 };
 
 struct horizon_window_property_request
@@ -2744,13 +2769,12 @@ struct horizon_get_window_properties_reply
 {
     struct horizon_server_reply_header header;
     int total;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_property_data
 {
-    unsigned short atom;
-    char pad[2];
+    unsigned int atom;
     int string;
     unsigned long long data;
 };
@@ -2758,11 +2782,9 @@ struct horizon_property_data
 struct horizon_create_winstation_request
 {
     struct horizon_server_request_header header;
-    unsigned int flags;
     unsigned int access;
-    unsigned int attributes;
-    unsigned int rootdir;
-    char pad[4];
+    unsigned int flags;
+    char __pad_20[4];
 };
 
 struct horizon_winstation_handle_reply
@@ -2806,9 +2828,9 @@ struct horizon_enum_winstation_reply
 struct horizon_create_desktop_request
 {
     struct horizon_server_request_header header;
-    unsigned int flags;
     unsigned int access;
-    unsigned int attributes;
+    unsigned int flags;
+    char __pad_20[4];
 };
 
 struct horizon_open_desktop_request
@@ -2818,7 +2840,7 @@ struct horizon_open_desktop_request
     unsigned int flags;
     unsigned int access;
     unsigned int attributes;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_get_thread_desktop_request
@@ -2832,7 +2854,7 @@ struct horizon_get_thread_desktop_reply
     struct horizon_server_reply_header header;
     struct horizon_obj_locator locator;
     unsigned int handle;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_set_thread_desktop_request
@@ -2853,7 +2875,6 @@ struct horizon_set_user_object_info_request
     unsigned int handle;
     unsigned int flags;
     unsigned int obj_flags;
-    long long close_timeout;
 };
 
 struct horizon_set_user_object_info_reply
@@ -2866,14 +2887,12 @@ struct horizon_set_user_object_info_reply
 struct horizon_create_class_request
 {
     struct horizon_server_request_header header;
-    int local;
     unsigned int atom;
-    unsigned int style;
-    unsigned long long instance;
+    unsigned int fnid;
+    unsigned int ansi;
     unsigned long long client_ptr;
-    short cls_extra;
-    short win_extra;
     unsigned int name_offset;
+    char __pad_36[4];
 };
 
 struct horizon_create_class_reply
@@ -2881,7 +2900,7 @@ struct horizon_create_class_reply
     struct horizon_server_reply_header header;
     struct horizon_obj_locator locator;
     unsigned int atom;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_destroy_class_request
@@ -2889,6 +2908,29 @@ struct horizon_destroy_class_request
     struct horizon_server_request_header header;
     unsigned int atom;
     unsigned long long instance;
+};
+
+struct horizon_set_class_info_request
+{
+    struct horizon_server_request_header header;
+    unsigned int window;
+    int offset;
+    unsigned int size;
+    unsigned long long new_info;
+    unsigned int ansi;
+    char __pad_36[4];
+};
+struct horizon_set_class_info_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned long long old_info;
+};
+struct horizon_set_window_fnid_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned int atom;
+    char __pad_20[4];
 };
 
 struct horizon_select_wait_op
@@ -2955,24 +2997,52 @@ struct horizon_input_shm
     unsigned long long keystate_serial;
 };
 
-struct horizon_class_shm
+struct horizon_class_info
 {
     unsigned int atom;
     unsigned int style;
     unsigned int cls_extra;
     unsigned int win_extra;
+    unsigned int cursor;
+    unsigned int background;
+    unsigned int icon;
+    unsigned int icon_small;
     unsigned long long instance;
+    unsigned long long wndproc;
+    unsigned long long menu_name;
+};
+
+struct horizon_class_shm
+{
     unsigned int name_offset;
     unsigned int name_len;
     unsigned short name[HORIZON_MAX_ATOM_LEN];
-    unsigned short pad;
+    unsigned short local;
+    struct horizon_class_info info;
     char extra[];
+};
+
+struct horizon_window_info
+{
+    unsigned long long id;
+    unsigned long long instance;
+    unsigned long long user_data;
+    unsigned long long wndproc;
 };
 
 struct horizon_window_shm
 {
     struct horizon_obj_locator class;
     unsigned int dpi_context;
+    unsigned int fnid;
+    unsigned int ansi;
+    int __pad;
+    struct horizon_ratio dpi;
+    struct horizon_ratio raw_dpi;
+    unsigned int private_size;
+    unsigned int extra_size;
+    struct horizon_window_info info;
+    char extra[];
 };
 
 /* queue_shm_t. Its access time stays 0, so win32u always asks get_message
@@ -2985,7 +3055,7 @@ struct horizon_queue_shm
     unsigned int changed_mask;
     unsigned int changed_bits;
     unsigned int internal_bits;
-    int hooks_count[16];
+    int hooks_count[17];
 };
 
 union horizon_object_shm
@@ -3020,6 +3090,8 @@ struct horizon_atom_entry
 struct horizon_user_class
 {
     int local;
+    unsigned int fnid;
+    unsigned int ansi;
     unsigned int atom;
     unsigned int base_atom;
     unsigned int style;
@@ -3779,7 +3851,7 @@ void horizon_pin_current_thread( ULONG_PTR requested_mask )
     TRACE( "pinned current thread to preferred %u, mask %#lx.\n", preferred, (unsigned long)mask );
     if ((requested_mask & system_mask) && wine_nx_thread_affinity_fixed) wine_nx_thread_affinity_fixed();
     /* Its server connection thread follows it (horizon_server_follow_client). */
-    if ((pipe = horizon_pipe_from_fd( ntdll_get_thread_data()->request_fd )))
+    if ((pipe = horizon_pipe_from_fd( get_thread_data()->request_fd )))
         __atomic_store_n( &pipe->client_cores, (unsigned int)mask, __ATOMIC_RELAXED );
 }
 
@@ -3788,10 +3860,10 @@ void horizon_pin_current_thread( ULONG_PTR requested_mask )
  * thread follows it from the next request. */
 void horizon_follow_thread_cores( void *teb, unsigned int mask )
 {
-    struct ntdll_thread_data *thread_data = (struct ntdll_thread_data *)&((TEB *)teb)->GdiTebBatch;
+    struct thread_data *thread_data = ((struct teb_data *)&((TEB *)teb)->GdiTebBatch)->thread;
     struct horizon_pipe *pipe;
 
-    if ((pipe = horizon_pipe_from_fd( thread_data->request_fd )))
+    if (thread_data && (pipe = horizon_pipe_from_fd( thread_data->request_fd )))
         __atomic_store_n( &pipe->client_cores, mask, __ATOMIC_RELAXED );
 }
 
@@ -5415,9 +5487,17 @@ static unsigned int horizon_server_flush_session_range_locked( unsigned long lon
                                                                unsigned long long size )
 {
     struct horizon_session_view *view;
+    struct horizon_shared_object *object = NULL;
 
     if (!size) return HORIZON_STATUS_SUCCESS;
-    if (offset + size > HORIZON_SESSION_MAPPING_SIZE) return HORIZON_STATUS_INVALID_PARAMETER;
+    if (offset > HORIZON_SESSION_MAPPING_SIZE || size > HORIZON_SESSION_MAPPING_SIZE - offset)
+        return HORIZON_STATUS_INVALID_PARAMETER;
+    if (offset >= sizeof(struct horizon_session_shm))
+    {
+        if (size < offsetof(struct horizon_shared_object, shm)) return HORIZON_STATUS_INVALID_PARAMETER;
+        object = (struct horizon_shared_object *)(horizon_session_data + offset);
+        object->seq += 2;
+    }
     /* Horizon cannot share the mapping, so each client view gets a copy. The
      * backing file is not updated: views are filled from memory when they
      * register (horizon_server_note_session_view_locked), and writing the SD
@@ -5428,8 +5508,20 @@ static unsigned int horizon_server_flush_session_range_locked( unsigned long lon
         unsigned long long end = offset + size < view->offset + view->size ? offset + size : view->offset + view->size;
 
         if (start >= end) continue;
-        memcpy( (void *)(ULONG_PTR)(view->base + start - view->offset),
-                horizon_session_data + start, end - start );
+        if (object)
+        {
+            struct horizon_shared_object *dest;
+
+            if (start != offset || end != offset + size) continue;
+            dest = (void *)(ULONG_PTR)(view->base + offset - view->offset);
+            __atomic_store_n( &dest->seq, object->seq - 1, __ATOMIC_RELAXED );
+            __atomic_thread_fence( __ATOMIC_SEQ_CST );
+            memcpy( (char *)dest + sizeof(dest->seq), (char *)object + sizeof(object->seq),
+                    size - sizeof(object->seq) );
+            __atomic_store_n( &dest->seq, object->seq, __ATOMIC_RELEASE );
+        }
+        else memcpy( (void *)(ULONG_PTR)(view->base + start - view->offset),
+                     horizon_session_data + start, end - start );
     }
     return HORIZON_STATUS_SUCCESS;
 }
@@ -5445,7 +5537,7 @@ static unsigned int horizon_server_alloc_shared_object_locked( unsigned long lon
     if ((status = horizon_server_ensure_session_locked())) return status;
 
     offset = (horizon_session_used + 7) & ~7ull;
-    size = offsetof( struct horizon_shared_object, shm ) + shm_size;
+    size = offsetof( struct horizon_shared_object, shm ) + max( shm_size, sizeof(union horizon_object_shm) );
     size = (size + 7) & ~7ull;
     if (!shm_size || offset + size > HORIZON_SESSION_MAPPING_SIZE)
         return HORIZON_STATUS_NO_MEMORY;
@@ -6509,13 +6601,11 @@ static int horizon_server_handle_create_winstation( struct horizon_server_connec
     struct horizon_object_name name;
 
     memset( &reply, 0, sizeof(reply) );
-    memset( &name, 0, sizeof(name) );
-    name.rootdir = request->rootdir;
-    name.name = data;
-    name.name_len = data_size;
+    reply.header.error = horizon_server_parse_object_attributes( data, data_size, &name );
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
-    reply.header.error = horizon_server_create_winstation_locked( &name, request->flags, &reply.handle );
+    if (!reply.header.error)
+        reply.header.error = horizon_server_create_winstation_locked( &name, request->flags, &reply.handle );
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -6624,13 +6714,14 @@ static int horizon_server_handle_create_desktop( struct horizon_server_connectio
     struct horizon_object_name name;
 
     memset( &reply, 0, sizeof(reply) );
-    memset( &name, 0, sizeof(name) );
-    name.rootdir = horizon_process_winstation;
-    name.name = data;
-    name.name_len = data_size;
+    reply.header.error = horizon_server_parse_object_attributes( data, data_size, &name );
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
-    reply.header.error = horizon_server_create_desktop_locked( &name, request->flags, &reply.handle );
+    if (!reply.header.error)
+    {
+        name.rootdir = horizon_process_winstation;
+        reply.header.error = horizon_server_create_desktop_locked( &name, request->flags, &reply.handle );
+    }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -6810,8 +6901,16 @@ static int horizon_server_handle_create_class( struct horizon_server_connection 
     unsigned char atom_name[32];
     unsigned int name_len, atom, base_atom, base_offset = 0;
     unsigned long long shm_size;
+    struct horizon_class_info info;
+    int local;
 
     memset( &reply, 0, sizeof(reply) );
+    if (data_size < sizeof(info))
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_INVALID_PARAMETER );
+    memcpy( &info, data, sizeof(info) );
+    data += sizeof(info);
+    data_size -= sizeof(info);
+    local = !request->fnid && !(info.style & 0x4000);
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
     reply.header.error = horizon_server_class_name_from_request_locked( request, data, data_size,
@@ -6836,22 +6935,21 @@ static int horizon_server_handle_create_class( struct horizon_server_connection 
     }
     if (!reply.header.error)
     {
-        struct horizon_user_class *existing = horizon_server_find_class_locked( atom, request->instance );
+        struct horizon_user_class *existing = horizon_server_find_class_locked( atom, info.instance );
 
         /* As Wine's server: callers such as quartz's video window check for this
          * error to reuse a class they registered before; a local and a global
          * class may share a name. */
-        if (existing && !existing->local == !request->local)
+        if (existing && !existing->local == !local)
             reply.header.error = 0xc0010582u;  /* ERROR_CLASS_ALREADY_EXISTS */
     }
     if (!reply.header.error &&
-        (request->cls_extra < 0 || request->cls_extra > 4096 ||
-         request->win_extra < 0 || request->win_extra > 4096 ||
+        (info.cls_extra > 4096 || info.win_extra > 4096 ||
          name_len > HORIZON_MAX_ATOM_LEN * sizeof(unsigned short)))
         reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
     if (!reply.header.error)
     {
-        shm_size = offsetof( struct horizon_class_shm, extra ) + request->cls_extra;
+        shm_size = offsetof( struct horizon_class_shm, extra ) + info.cls_extra;
         reply.header.error = horizon_server_alloc_shared_object_locked( shm_size, &locator );
     }
     if (!reply.header.error)
@@ -6866,28 +6964,28 @@ static int horizon_server_handle_create_class( struct horizon_server_connection 
         {
             memcpy( class->name, name, name_len );
             class->name_len = name_len;
-            class->local = request->local;
+            class->local = local;
             class->atom = atom;
             class->base_atom = base_atom;
-            class->style = request->style;
-            class->instance = request->instance;
+            class->style = info.style;
+            class->instance = info.instance;
             class->client_ptr = request->client_ptr;
-            class->cls_extra = request->cls_extra;
-            class->win_extra = request->win_extra;
+            class->cls_extra = info.cls_extra;
+            class->win_extra = info.win_extra;
+            class->fnid = request->fnid;
+            class->ansi = !!request->ansi;
             class->locator = locator;
             class->next = horizon_classes;
             horizon_classes = class;
 
             shared = horizon_server_shared_object_locked( locator );
-            shared->shm.class.atom = base_atom;
-            shared->shm.class.style = request->style;
-            shared->shm.class.cls_extra = request->cls_extra;
-            shared->shm.class.win_extra = request->win_extra;
-            shared->shm.class.instance = request->instance;
+            info.atom = base_atom;
+            shared->shm.class.info = info;
+            shared->shm.class.local = local;
             shared->shm.class.name_offset = base_offset;
             shared->shm.class.name_len = name_len;
             memcpy( shared->shm.class.name, name, name_len );
-            memset( shared->shm.class.extra, 0, request->cls_extra );
+            memset( shared->shm.class.extra, 0, info.cls_extra );
             reply.header.error = horizon_server_flush_session_range_locked(
                 locator.offset, offsetof( struct horizon_shared_object, shm ) + shm_size );
             reply.locator = locator;
@@ -6928,6 +7026,131 @@ static int horizon_server_handle_destroy_class( struct horizon_server_connection
     reply.error = HORIZON_STATUS_INVALID_HANDLE;
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static unsigned int horizon_server_class_private_size( const struct horizon_user_class *class )
+{
+    if ((class->fnid & ~0x7fff) != 0x8000) return 0;
+    if ((class->fnid & 0x7fff) == HORIZON_NTUSER_WNDPROC_DIALOG ||
+        (class->fnid & 0x7fff) == HORIZON_NTUSER_WNDPROC_MDICLIENT) return 0;
+    return class->win_extra;
+}
+
+static unsigned long long horizon_server_class_wndproc( const struct horizon_user_class *class,
+                                                       unsigned int *ansi )
+{
+    unsigned long long wndproc = horizon_server_shared_object_locked( class->locator )->shm.class.info.wndproc;
+    unsigned int index = wndproc & 0xffff;
+
+    if (wndproc != (0xffff0000u | index) || index >= HORIZON_NTUSER_NB_PROCS) *ansi = class->ansi;
+    return wndproc;
+}
+
+static int horizon_server_handle_set_class_info( struct horizon_server_connection *connection,
+                                                 const unsigned char *message )
+{
+    const struct horizon_set_class_info_request *request = (const void *)message;
+    struct horizon_set_class_info_reply reply = {0};
+    struct horizon_user_window *window;
+    struct horizon_user_class *class;
+    struct horizon_class_shm *shared;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->window )))
+        reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
+    else
+    {
+        class = window->class;
+        shared = &horizon_server_shared_object_locked( class->locator )->shm.class;
+        switch (request->offset)
+        {
+        case HORIZON_GCL_STYLE:
+            reply.old_info = shared->info.style;
+            shared->info.style = class->style = request->new_info;
+            break;
+        case HORIZON_GCL_CBWNDEXTRA:
+            if (request->new_info > 4096) reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+            else
+            {
+                reply.old_info = shared->info.win_extra;
+                shared->info.win_extra = class->win_extra = request->new_info;
+            }
+            break;
+        case HORIZON_GCLP_HMODULE:
+            reply.old_info = shared->info.instance;
+            shared->info.instance = class->instance = request->new_info;
+            break;
+        case HORIZON_GCLP_WNDPROC:
+            reply.old_info = shared->info.wndproc;
+            shared->info.wndproc = request->new_info;
+            class->ansi = !!request->ansi;
+            break;
+        case HORIZON_GCLP_HCURSOR:
+            reply.old_info = shared->info.cursor;
+            shared->info.cursor = request->new_info;
+            break;
+        case HORIZON_GCLP_HBRBACKGROUND:
+            reply.old_info = shared->info.background;
+            shared->info.background = request->new_info;
+            break;
+        case HORIZON_GCLP_HICON:
+            reply.old_info = shared->info.icon;
+            shared->info.icon = request->new_info;
+            break;
+        case HORIZON_GCLP_HICONSM:
+            reply.old_info = shared->info.icon_small;
+            shared->info.icon_small = request->new_info;
+            break;
+        case HORIZON_GCLP_MENUNAME:
+            reply.old_info = shared->info.menu_name;
+            shared->info.menu_name = request->new_info;
+            break;
+        default:
+            if (request->size > sizeof(request->new_info) || request->offset < 0 ||
+                request->offset > (int)shared->info.cls_extra - (int)request->size)
+                reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+            else
+            {
+                memcpy( &reply.old_info, shared->extra + request->offset, request->size );
+                memcpy( shared->extra + request->offset, &request->new_info, request->size );
+            }
+            break;
+        }
+        if (!reply.header.error)
+            reply.header.error = horizon_server_flush_session_range_locked( class->locator.offset,
+                offsetof( struct horizon_shared_object, shm ) + sizeof(*shared) + shared->info.cls_extra );
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_set_window_fnid( struct horizon_server_connection *connection,
+                                                  const unsigned char *message )
+{
+    const struct horizon_set_window_fnid_request *request = (const void *)message;
+    struct horizon_user_window *window;
+    struct horizon_user_class *class;
+    struct horizon_window_shm *shared;
+    unsigned int status = HORIZON_STATUS_SUCCESS;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(window = horizon_server_find_window_locked( request->handle )) ||
+        !(class = horizon_server_find_class_locked( request->atom, 0 )))
+        status = HORIZON_STATUS_INVALID_HANDLE;
+    else
+    {
+        shared = &horizon_server_shared_object_locked( window->locator )->shm.window;
+        if (shared->fnid && shared->fnid != class->fnid) status = HORIZON_STATUS_INVALID_PARAMETER;
+        else
+        {
+            shared->fnid = class->fnid;
+            shared->private_size = horizon_server_class_private_size( class );
+            status = horizon_server_flush_session_range_locked( window->locator.offset,
+                offsetof( struct horizon_shared_object, shm ) + sizeof(*shared) );
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_status( connection->reply_fd, status );
 }
 
 static unsigned int horizon_server_create_window_locked( unsigned int parent_handle,
@@ -6971,7 +7194,8 @@ static unsigned int horizon_server_create_window_locked( unsigned int parent_han
             return HORIZON_STATUS_INVALID_HANDLE;
     }
 
-    if ((status = horizon_server_alloc_shared_object_locked( sizeof(struct horizon_window_shm), &locator )))
+    if ((status = horizon_server_alloc_shared_object_locked( sizeof(struct horizon_window_shm) + class->win_extra,
+                                                              &locator )))
         return status;
     if (!(window = calloc( 1, sizeof(*window) ))) return HORIZON_STATUS_NO_MEMORY;
     if ((status = horizon_server_alloc_user_handle_locked( HORIZON_NTUSER_OBJ_WINDOW, locator,
@@ -6984,8 +7208,19 @@ static unsigned int horizon_server_create_window_locked( unsigned int parent_han
     shared = horizon_server_shared_object_locked( locator );
     shared->shm.window.class = class->locator;
     shared->shm.window.dpi_context = dpi_context ? dpi_context : HORIZON_NTUSER_DPI_PER_MONITOR_AWARE;
+    if (parent && parent->parent)
+        shared->shm.window.dpi_context = horizon_server_shared_object_locked( parent->locator )->shm.window.dpi_context;
+    shared->shm.window.fnid = class->fnid;
+    shared->shm.window.ansi = class->ansi;
+    shared->shm.window.dpi = (struct horizon_ratio){ 96, 1 };
+    shared->shm.window.raw_dpi = shared->shm.window.dpi;
+    shared->shm.window.extra_size = class->win_extra;
+    shared->shm.window.private_size = horizon_server_class_private_size( class );
+    shared->shm.window.info.instance = instance;
+    shared->shm.window.info.wndproc = horizon_server_shared_object_locked( class->locator )->shm.class.info.wndproc;
     if ((status = horizon_server_flush_session_range_locked(
-             locator.offset, offsetof( struct horizon_shared_object, shm ) + sizeof(struct horizon_window_shm) )))
+             locator.offset, offsetof( struct horizon_shared_object, shm ) +
+             sizeof(struct horizon_window_shm) + class->win_extra )))
     {
         free( window );
         return status;
@@ -7042,10 +7277,18 @@ static int horizon_server_handle_create_window( struct horizon_server_connection
                                                                   &window );
         if (!reply.header.error && window)
         {
+            struct horizon_shared_object *shared = horizon_server_shared_object_locked( window->locator );
+            shared->shm.window.ansi = !!request->ansi;
+            shared->shm.window.info.wndproc = horizon_server_class_wndproc( window->class, &shared->shm.window.ansi );
+            shared->shm.window.dpi = request->dpi;
+            shared->shm.window.raw_dpi = request->raw_dpi;
+            window->monitor_dpi = request->dpi.den ? request->dpi.num / request->dpi.den : 96;
+            window->is_unicode = !shared->shm.window.ansi;
+            reply.header.error = horizon_server_flush_session_range_locked(
+                window->locator.offset, offsetof( struct horizon_shared_object, shm ) + sizeof(shared->shm.window) );
             reply.handle = window->handle;
             reply.parent = window->parent;
             reply.owner = window->owner;
-            reply.extra = window->class->win_extra;
             reply.class_ptr = window->class->client_ptr;
         }
     }
@@ -7241,6 +7484,8 @@ static unsigned long long horizon_server_get_window_info_locked( const struct ho
                                                                  int offset, unsigned int size,
                                                                  unsigned int *status )
 {
+    struct horizon_window_shm *shared = &horizon_server_shared_object_locked( window->locator )->shm.window;
+    unsigned long long value = 0;
     *status = HORIZON_STATUS_SUCCESS;
     switch (offset)
     {
@@ -7249,28 +7494,36 @@ static unsigned long long horizon_server_get_window_info_locked( const struct ho
     case HORIZON_GWL_EXSTYLE:
         return window->ex_style;
     case HORIZON_GWLP_ID:
-        return window->id;
+        return shared->info.id;
     case HORIZON_GWLP_HINSTANCE:
-        return window->instance;
+        return shared->info.instance;
     case HORIZON_GWLP_WNDPROC:
-        return window->is_unicode;
+        return shared->info.wndproc;
     case HORIZON_GWLP_USERDATA:
-        return window->user_data;
+        return shared->info.user_data;
     default:
         if (size > sizeof(unsigned long long) ||
-            offset < 0 || offset > window->class->win_extra - (int)size)
+            offset < 0 || offset > (int)shared->extra_size - (int)size)
             *status = HORIZON_STATUS_INVALID_PARAMETER;
-        return 0;
+        else memcpy( &value, shared->extra + offset, size );
+        return value;
     }
 }
 
 static void horizon_server_set_window_info_locked( struct horizon_user_window *window, int offset,
                                                    unsigned long long value, unsigned int size,
+                                                   unsigned int ansi, unsigned int internal,
                                                    unsigned long long *old_value,
                                                    unsigned int *status )
 {
+    struct horizon_window_shm *shared = &horizon_server_shared_object_locked( window->locator )->shm.window;
     *old_value = horizon_server_get_window_info_locked( window, offset, size, status );
     if (*status) return;
+    if (offset >= 0 && !internal && offset < shared->private_size)
+    {
+        *status = HORIZON_STATUS_INVALID_PARAMETER;
+        return;
+    }
 
     switch (offset)
     {
@@ -7281,21 +7534,26 @@ static void horizon_server_set_window_info_locked( struct horizon_user_window *w
         window->ex_style = value;
         break;
     case HORIZON_GWLP_ID:
-        window->id = value;
+        shared->info.id = window->id = value;
         break;
     case HORIZON_GWLP_HINSTANCE:
-        window->instance = value;
+        shared->info.instance = window->instance = value;
         break;
     case HORIZON_GWLP_WNDPROC:
-        window->is_unicode = value;
+        shared->info.wndproc = value ? value : horizon_server_class_wndproc( window->class, &ansi );
+        shared->ansi = !!ansi;
+        window->is_unicode = !ansi;
         break;
     case HORIZON_GWLP_USERDATA:
-        window->user_data = value;
+        if (size <= sizeof(unsigned short)) value = (shared->info.user_data & ~0xffffull) | (value & 0xffff);
+        shared->info.user_data = window->user_data = value;
         break;
     default:
-        /* Extra window bytes are owned by the client WND for same-process windows. */
+        memcpy( shared->extra + offset, &value, size );
         break;
     }
+    *status = horizon_server_flush_session_range_locked( window->locator.offset,
+        offsetof( struct horizon_shared_object, shm ) + sizeof(*shared) + shared->extra_size );
 }
 
 static int horizon_server_handle_set_window_owner( struct horizon_server_connection *connection,
@@ -7334,7 +7592,6 @@ static int horizon_server_handle_get_window_info( struct horizon_server_connecti
     else
     {
         reply.last_active = window->last_active ? window->last_active : window->handle;
-        reply.is_unicode = window->is_unicode;
         reply.info = horizon_server_get_window_info_locked( window, request->offset,
                                                             request->size, &reply.header.error );
     }
@@ -7356,7 +7613,6 @@ static int horizon_server_handle_init_window_info( struct horizon_server_connect
     {
         window->style = request->style;
         window->ex_style = request->ex_style;
-        window->is_unicode = request->is_unicode;
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_status( connection->reply_fd, status );
@@ -7374,9 +7630,12 @@ static int horizon_server_handle_set_window_info( struct horizon_server_connecti
     if (!(window = horizon_server_find_window_locked( request->handle )))
         reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
     else
+    {
+        reply.old_ansi = !window->is_unicode;
         horizon_server_set_window_info_locked( window, request->offset, request->new_info,
-                                               request->size, &reply.old_info,
+                                               request->size, request->new_ansi, request->internal, &reply.old_info,
                                                &reply.header.error );
+    }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -7596,15 +7855,15 @@ static void horizon_server_link_window_locked( struct horizon_user_window *windo
 /* SetParent and GetAncestor's list of parents. Without them SetParent failed,
  * so a window given an owner that way (a DirectShow video window put in
  * WarCraft III's movie window) stayed top-level, over its would-be parent. */
-#define HORIZON_REQ_SET_PARENT 151
-#define HORIZON_REQ_GET_WINDOW_PARENTS 152
+#define HORIZON_REQ_SET_PARENT 150
+#define HORIZON_REQ_GET_WINDOW_PARENTS 151
 
 struct horizon_set_parent_request
 {
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int parent;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_set_parent_reply
@@ -7624,7 +7883,7 @@ struct horizon_get_window_parents_reply
 {
     struct horizon_server_reply_header header;
     int count;
-    char pad[4];
+    char __pad_12[4];
 };
 
 /* server/window.c's set_parent_window: the window goes to the top of its new
@@ -7752,7 +8011,6 @@ static int horizon_server_handle_set_window_pos( struct horizon_server_connectio
                        request->client.right, request->client.bottom );
         window->visible_rect = data_size >= sizeof(*extra) ? extra[0] : request->window;
         window->surface_rect = data_size >= 2 * sizeof(*extra) ? extra[1] : window->visible_rect;
-        window->monitor_dpi = request->monitor_dpi ? request->monitor_dpi : 96;
         window->paint_flags = request->paint_flags;
         if (request->swp_flags & HORIZON_SWP_SHOWWINDOW) window->style |= HORIZON_WS_VISIBLE;
         if (request->swp_flags & HORIZON_SWP_HIDEWINDOW) window->style &= ~HORIZON_WS_VISIBLE;
@@ -8702,20 +8960,25 @@ static int horizon_server_handle_get_window_rectangles( struct horizon_server_co
     {
         reply.window = window->window_rect;
         reply.client = window->client_rect;
+        reply.visible = window->visible_rect;
         switch (request->relative)
         {
         case HORIZON_COORDS_CLIENT:
             horizon_server_offset_rect( &reply.window, -window->client_rect.left, -window->client_rect.top );
             horizon_server_offset_rect( &reply.client, -window->client_rect.left, -window->client_rect.top );
+            horizon_server_offset_rect( &reply.visible, -window->client_rect.left, -window->client_rect.top );
             break;
         case HORIZON_COORDS_WINDOW:
             horizon_server_offset_rect( &reply.window, -window->window_rect.left, -window->window_rect.top );
             horizon_server_offset_rect( &reply.client, -window->window_rect.left, -window->window_rect.top );
+            horizon_server_offset_rect( &reply.visible, -window->window_rect.left, -window->window_rect.top );
             break;
         case HORIZON_COORDS_PARENT:
             break;
         case HORIZON_COORDS_SCREEN:
             horizon_server_window_screen_rects_locked( window, &reply.window, &reply.client );
+            horizon_server_offset_rect( &reply.visible, reply.window.left - window->window_rect.left,
+                                       reply.window.top - window->window_rect.top );
             break;
         default:
             reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
@@ -8831,7 +9094,7 @@ static int horizon_server_handle_get_windows_offset( struct horizon_server_conne
                 x = window->client_rect.right - window->client_rect.left;
             }
             horizon_server_window_client_origin_locked( window, &x, &y );
-            dpi = request->dpi > 0 ? (unsigned int)request->dpi : window->monitor_dpi;
+            dpi = request->dpi.den ? request->dpi.num / request->dpi.den : window->monitor_dpi;
             reply.x += horizon_server_scale_dpi_coordinate( x, window->monitor_dpi, dpi );
             reply.y += horizon_server_scale_dpi_coordinate( y, window->monitor_dpi, dpi );
         }
@@ -8849,7 +9112,7 @@ static int horizon_server_handle_get_windows_offset( struct horizon_server_conne
                 x = window->client_rect.right - window->client_rect.left;
             }
             horizon_server_window_client_origin_locked( window, &x, &y );
-            dpi = request->dpi > 0 ? (unsigned int)request->dpi : window->monitor_dpi;
+            dpi = request->dpi.den ? request->dpi.num / request->dpi.den : window->monitor_dpi;
             reply.x -= horizon_server_scale_dpi_coordinate( x, window->monitor_dpi, dpi );
             reply.y -= horizon_server_scale_dpi_coordinate( y, window->monitor_dpi, dpi );
         }
@@ -9676,8 +9939,8 @@ static int horizon_server_handle_get_msg_queue( struct horizon_server_connection
     if (!(queue = horizon_server_queue_locked( connection->tid ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
     else
     {
-        reply.locator_id = queue->shm_id;
-        reply.locator_offset = queue->shm_offset;
+        reply.locator.id = queue->shm_id;
+        reply.locator.offset = queue->shm_offset;
         horizon_server_refresh_queue_locked( queue, horizon_server_timer_clock() );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -10960,8 +11223,8 @@ static void horizon_server_merge_context( struct context_data *dst, const struct
         memcpy( &dst->ctl, &src->ctl, sizeof(dst->ctl) );
         if (src->machine == HORIZON_IMAGE_FILE_MACHINE_ARM64)
         {
-            dst->integer.arm64_regs.x[29] = src->integer.arm64_regs.x[29];
-            dst->integer.arm64_regs.x[30] = src->integer.arm64_regs.x[30];
+            dst->integer.arm64_regs.x19[10] = src->integer.arm64_regs.x19[10];
+            dst->integer.arm64_regs.x19[11] = src->integer.arm64_regs.x19[11];
         }
         else if (src->machine == HORIZON_IMAGE_FILE_MACHINE_AMD64)
             dst->integer.x86_64_regs.rbp = src->integer.x86_64_regs.rbp;
@@ -10971,8 +11234,11 @@ static void horizon_server_merge_context( struct context_data *dst, const struct
     if (flags & SERVER_CTX_INTEGER)
     {
         if (src->machine == HORIZON_IMAGE_FILE_MACHINE_ARM64)
-            memcpy( dst->integer.arm64_regs.x, src->integer.arm64_regs.x,
-                    29 * sizeof(src->integer.arm64_regs.x[0]) );
+        {
+            memcpy( dst->integer.arm64_regs.x0, src->integer.arm64_regs.x0, sizeof(src->integer.arm64_regs.x0) );
+            memcpy( dst->integer.arm64_regs.x19, src->integer.arm64_regs.x19,
+                    10 * sizeof(src->integer.arm64_regs.x19[0]) );
+        }
         else memcpy( &dst->integer, &src->integer, sizeof(dst->integer) );
     }
     if (flags & SERVER_CTX_SEGMENTS) memcpy( &dst->seg, &src->seg, sizeof(dst->seg) );
@@ -14309,8 +14575,8 @@ static int horizon_server_handle_allocate_locally_unique_id( struct horizon_serv
 
     memset( &reply, 0, sizeof(reply) );
     reply.header.error = HORIZON_STATUS_SUCCESS;
-    reply.low_part = (unsigned int)InterlockedIncrement( &last_luid );
-    reply.high_part = 0;
+    reply.luid.low_part = (unsigned int)InterlockedIncrement( &last_luid );
+    reply.luid.high_part = 0;
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -15477,6 +15743,12 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_SET_CARET_INFO:
             status = horizon_server_handle_set_caret_info( connection, message );
             break;
+        case HORIZON_REQ_SET_CLASS_INFO:
+            status = horizon_server_handle_set_class_info( connection, message );
+            break;
+        case HORIZON_REQ_SET_WINDOW_FNID:
+            status = horizon_server_handle_set_window_fnid( connection, message );
+            break;
         case HORIZON_REQ_CREATE_CLASS:
             status = horizon_server_handle_create_class( connection, message, request_data,
                                                          header->request_size );
@@ -15619,7 +15891,7 @@ __attribute__((weak)) void wine_nx_runtime_trace( const char *msg )
     (void)msg;
 }
 
-__attribute__((weak)) NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
+__attribute__((weak)) NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, void *stack )
 {
     (void)rec;
     (void)stack;
@@ -15828,19 +16100,19 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         }
         if (rec.ExceptionCode != STATUS_ACCESS_VIOLATION) rec.NumberParameters = 0;
         status = rec.ExceptionCode == STATUS_ACCESS_VIOLATION ?
-                 virtual_handle_fault( &rec, (void *)ctx->sp.x ) : rec.ExceptionCode;
+                 virtual_handle_fault( get_thread_data(), &rec, (void *)ctx->sp.x ) : rec.ExceptionCode;
         if (!status) horizon_resume_exception( ctx );
-        if (NtCurrentTeb() && ntdll_get_thread_data()->jmp_buf)
+        if (get_thread_data() && get_thread_data()->jmp_buf)
         {
-            ctx->cpu_gprs[0].x = (ULONG_PTR)ntdll_get_thread_data()->jmp_buf;
+            ctx->cpu_gprs[0].x = (ULONG_PTR)get_thread_data()->jmp_buf;
             ctx->cpu_gprs[1].x = 1;
             ctx->pc.x = (ULONG_PTR)longjmp;
-            ntdll_get_thread_data()->jmp_buf = NULL;
+            get_thread_data()->jmp_buf = NULL;
             horizon_resume_exception( ctx );
         }
         rec.ExceptionCode = status;
         horizon_exception_context( ctx, &context );
-        status = call_user_exception_dispatcher( &rec, &context );
+        status = call_user_exception_dispatcher( get_thread_data(), &rec, &context );
         snprintf( buf, sizeof(buf),
                   "[EXC] FEX delivery failed status=0x%08x code=0x%08x pc=0x%llx far=0x%llx sp=0x%llx",
                   (unsigned)status, (unsigned)rec.ExceptionCode, (unsigned long long)ctx->pc.x,
@@ -15888,7 +16160,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
               (unsigned long long)ctx->cpu_gprs[18].x );
     wine_nx_runtime_trace( buf );
 
-    status = virtual_handle_fault( &rec, (void *)ctx->sp.x );
+    status = virtual_handle_fault( get_thread_data(), &rec, (void *)ctx->sp.x );
 #if defined(__aarch64__)
     /* A fault inside a Wine __TRY block returns to its handler, as
      * handle_syscall_fault does on Unix. virtual_check_buffer_for_write and
@@ -15908,12 +16180,12 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
             svcExitThread();
         }
     }
-    if (status && NtCurrentTeb() && ntdll_get_thread_data()->jmp_buf)
+    if (status && get_thread_data() && get_thread_data()->jmp_buf)
     {
-        ctx->cpu_gprs[0].x = (ULONG_PTR)ntdll_get_thread_data()->jmp_buf;
+        ctx->cpu_gprs[0].x = (ULONG_PTR)get_thread_data()->jmp_buf;
         ctx->cpu_gprs[1].x = 1;
         ctx->pc.x = (ULONG_PTR)longjmp;
-        ntdll_get_thread_data()->jmp_buf = NULL;
+        get_thread_data()->jmp_buf = NULL;
         wine_nx_runtime_trace( "[EXC] returning to the __TRY handler that probed it" );
         horizon_resume_exception( ctx );
     }

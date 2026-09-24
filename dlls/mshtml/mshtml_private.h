@@ -160,6 +160,7 @@ struct constructor;
     XDIID(DispHTMLWindow2) \
     XDIID(DispHTMLXMLHttpRequest) \
     XDIID(DispXDomainRequest) \
+    XDIID(DispXMLSerializer) \
     XDIID(DispSVGCircleElement) \
     XDIID(DispSVGSVGElement) \
     XDIID(DispSVGTSpanElement) \
@@ -176,6 +177,7 @@ struct constructor;
     XIID(IDOMUIEvent) \
     XIID(IDOMDocumentType) \
     XIID(IDOMParser) \
+    XIID(IDOMXmlSerializer) \
     XIID(IDocumentEvent) \
     XIID(IDocumentRange) \
     XIID(IDocumentSelector) \
@@ -368,6 +370,7 @@ typedef struct dispex_dynamic_data_t dispex_dynamic_data_t;
 #define MSHTML_CUSTOM_DISPID_CNT (MSHTML_DISPID_CUSTOM_MAX-MSHTML_DISPID_CUSTOM_MIN)
 
 typedef struct DispatchEx DispatchEx;
+typedef struct nsCycleCollectionTraversalCallback nsCycleCollectionTraversalCallback;
 typedef struct dispex_static_data_t dispex_static_data_t;
 
 typedef struct {
@@ -529,7 +532,8 @@ typedef struct {
     X(Window)                              \
     X(XDomainRequest)                      \
     X(XMLDocument)                         \
-    X(XMLHttpRequest)
+    X(XMLHttpRequest)                      \
+    X(XMLSerializer)
 
 typedef enum {
     OBJID_NONE,
@@ -563,7 +567,6 @@ ALL_OBJECTS
 #undef X
 
 extern dispex_static_data_t *object_descriptors[OBJID_LAST];
-extern struct list cc_api_list;
 
 typedef HRESULT (*dispex_hook_invoke_t)(DispatchEx*,WORD,DISPPARAMS*,VARIANT*,
                                         EXCEPINFO*,IServiceProvider*);
@@ -622,6 +625,20 @@ struct DispatchEx {
         return IWineJSDispatchHost_Release(&(dispex).IWineJSDispatchHost_iface);                       \
     }                                                                                          \
     DISPEX_IDISPATCH_NOUNK_IMPL(prefix, iface_name, dispex)
+
+typedef struct {
+    void *vtbl;
+    int ref_flags;
+    void *callbacks;
+} ExternalCycleCollectionParticipant;
+
+typedef struct {
+    nsresult (NSAPI *traverse)(void*,void*,nsCycleCollectionTraversalCallback*);
+    nsresult (NSAPI *unlink)(void*);
+    void (NSAPI *delete_cycle_collectable)(void*);
+} CCObjCallback;
+
+DEFINE_GUID(IID_nsXPCOMCycleCollectionParticipant, 0x9674489b,0x1f6f,0x4550,0xa7,0x30, 0xcc,0xae,0xdd,0x10,0x4c,0xf9);
 
 extern nsrefcnt (__cdecl *ccref_incr)(nsCycleCollectingAutoRefCnt*,nsISupports*);
 extern nsrefcnt (__cdecl *ccref_decr)(nsCycleCollectingAutoRefCnt*,nsISupports*,ExternalCycleCollectionParticipant*);
@@ -1186,8 +1203,6 @@ HRESULT create_document_node(nsIDOMDocument*,GeckoBrowser*,HTMLInnerWindow*,HTML
                              compat_mode_t,HTMLDocumentNode**);
 HRESULT create_doctype_node(HTMLDocumentNode*,nsIDOMNode*,HTMLDOMNode**);
 HRESULT create_enum_variant(DispatchEx*,IUnknown**);
-HRESULT create_marshaled_doc(HWND,REFIID,void**);
-
 HRESULT create_outer_window(GeckoBrowser*,mozIDOMWindowProxy*,HTMLOuterWindow*,HTMLOuterWindow**);
 HRESULT update_window_doc(HTMLInnerWindow*);
 HTMLOuterWindow *mozwindow_to_window(const mozIDOMWindowProxy*);
@@ -1225,8 +1240,6 @@ void ConnectionPointContainer_Destroy(ConnectionPointContainer*);
 
 HRESULT create_gecko_browser(HTMLDocumentObj*,GeckoBrowser**);
 void detach_gecko_browser(GeckoBrowser*);
-void cycle_collect(nsIDOMWindowUtils*);
-void __cdecl cc_api_collect(void);
 
 DWORD get_compat_mode_version(compat_mode_t compat_mode);
 compat_mode_t lock_document_mode(HTMLDocumentNode*);
@@ -1259,7 +1272,6 @@ float get_viewer_zoom(GeckoBrowser*);
 
 void init_dispex_cc(void);
 void init_window_cc(void);
-void init_enum_cc(void);
 
 HRESULT nsuri_to_url(LPCWSTR,BOOL,BSTR*);
 
@@ -1535,7 +1547,6 @@ typedef struct {
     struct list *pending_xhr_events_tail;
     struct wine_rb_tree session_storage_map;
     void *blocking_xhr;
-    unsigned full_cc_in_progress;
     unsigned tasks_locked;
     BOOL timer_blocked;
 } thread_data_t;

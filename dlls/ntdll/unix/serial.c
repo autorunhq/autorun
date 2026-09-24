@@ -92,7 +92,6 @@ NTSTATUS serial_FlushBuffersFile( int fd )
 #endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "winioctl.h"
@@ -415,14 +414,15 @@ static NTSTATUS get_properties(int fd, SERIAL_COMMPROP *prop)
     prop->ServiceMask       = SP_SERIALCOMM;
     prop->MaxTxQueue        = 4096;
     prop->MaxRxQueue        = 4096;
-    prop->MaxBaud           = BAUD_115200;
+    prop->MaxBaud           = BAUD_USER;
     prop->ProvSubType       = PST_RS232;
     prop->ProvCapabilities  = PCF_DTRDSR | PCF_PARITY_CHECK | PCF_RTSCTS | PCF_TOTALTIMEOUTS | PCF_INTTIMEOUTS;
     prop->SettableParams    = SP_BAUD | SP_DATABITS | SP_HANDSHAKING |
                               SP_PARITY | SP_PARITY_CHECK | SP_STOPBITS ;
     prop->SettableBaud      = BAUD_075 | BAUD_110 | BAUD_134_5 | BAUD_150 |
                               BAUD_300 | BAUD_600 | BAUD_1200 | BAUD_1800 | BAUD_2400 | BAUD_4800 |
-                              BAUD_9600 | BAUD_19200 | BAUD_38400 | BAUD_57600 | BAUD_115200 ;
+                              BAUD_7200 | BAUD_9600 | BAUD_14400 | BAUD_19200 | BAUD_38400 |
+                              BAUD_56K | BAUD_57600 | BAUD_115200 | BAUD_128K | BAUD_USER ;
     prop->SettableData       = DATABITS_5 | DATABITS_6 | DATABITS_7 | DATABITS_8 ;
     prop->SettableStopParity = STOPBITS_10 | STOPBITS_15 | STOPBITS_20 |
                 PARITY_NONE | PARITY_ODD |PARITY_EVEN | PARITY_MARK | PARITY_SPACE;
@@ -1003,6 +1003,7 @@ typedef struct serial_irq_info
 typedef struct async_commio
 {
     struct async_fileio io;
+    HANDLE              handle;
     DWORD*              events;
     UINT                evtmask;
     UINT                mstat;
@@ -1114,13 +1115,13 @@ static BOOL async_wait_proc( void *user, ULONG_PTR *info, unsigned int *status )
         return TRUE;
     }
 
-    if (!server_get_unix_fd( commio->io.handle, FILE_READ_DATA | FILE_WRITE_DATA, &fd, &needs_close, NULL, NULL ))
+    if (!server_get_unix_fd( commio->handle, FILE_READ_DATA | FILE_WRITE_DATA, &fd, &needs_close, NULL, NULL ))
     {
         serial_irq_info new_irq_info;
         UINT new_mstat, dummy;
 
         TRACE( "device=%p fd=0x%08x mask=0x%08x buffer=%p irq_info=%p\n",
-               commio->io.handle, fd, commio->evtmask, commio->events, &commio->irq_info );
+               commio->handle, fd, commio->evtmask, commio->events, &commio->irq_info );
 
         /*
          * FIXME:
@@ -1148,7 +1149,7 @@ static BOOL async_wait_proc( void *user, ULONG_PTR *info, unsigned int *status )
             }
             else
             {
-                get_wait_mask( commio->io.handle, &dummy, (commio->evtmask & EV_TXEMPTY) ? &commio->pending_write : NULL );
+                get_wait_mask( commio->handle, &dummy, (commio->evtmask & EV_TXEMPTY) ? &commio->pending_write : NULL );
                 if (needs_close) close( fd );
                 return FALSE;
             }
@@ -1168,9 +1169,10 @@ static NTSTATUS wait_on( HANDLE handle, int fd, HANDLE event, PIO_APC_ROUTINE ap
     HANDLE wait_handle;
     ULONG options;
 
-    if (!(commio = (async_commio *)alloc_fileio( sizeof(*commio), async_wait_proc, handle )))
+    if (!(commio = (async_commio *)alloc_fileio( sizeof(*commio), async_wait_proc )))
         return STATUS_NO_MEMORY;
 
+    commio->handle = handle;
     commio->events = out_buffer;
     commio->pending_write = 0;
     status = get_wait_mask( handle, &commio->evtmask, (commio->evtmask & EV_TXEMPTY) ? &commio->pending_write : NULL );

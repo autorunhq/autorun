@@ -23,7 +23,6 @@
 #include <stdio.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "wincon.h"
@@ -358,11 +357,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH SignalObjectAndWait( HANDLE signal, HANDLE wait,
                                                     DWORD timeout, BOOL alertable )
 {
     NTSTATUS status;
-#ifdef __i386__
-    DECLSPEC_ALIGN(4) LARGE_INTEGER time;
-#else
     LARGE_INTEGER time;
-#endif
 
     TRACE( "%p %p %ld %d\n", signal, wait, timeout, alertable );
 
@@ -786,7 +781,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH OpenMutexW( DWORD access, BOOL inherit, LPCWSTR 
 {
     HANDLE ret;
     UNICODE_STRING nameW;
-    DECLSPEC_ALIGN(32) OBJECT_ATTRIBUTES attr;
+    OBJECT_ATTRIBUTES attr;
 
     if (!is_version_nt()) access = MUTEX_ALL_ACCESS;
 

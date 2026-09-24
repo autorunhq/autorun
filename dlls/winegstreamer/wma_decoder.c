@@ -30,8 +30,7 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wmadec);
-
-extern const GUID MFAudioFormat_XMAudio2;
+WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 static const GUID *const wma_decoder_input_types[] =
 {
@@ -39,7 +38,6 @@ static const GUID *const wma_decoder_input_types[] =
     &MFAudioFormat_WMAudioV8,
     &MFAudioFormat_WMAudioV9,
     &MFAudioFormat_WMAudio_Lossless,
-    &MFAudioFormat_XMAudio2,
 };
 static const GUID *const wma_decoder_output_types[] =
 {
@@ -470,14 +468,34 @@ failed:
 
 static HRESULT WINAPI transform_GetInputCurrentType(IMFTransform *iface, DWORD id, IMFMediaType **type)
 {
-    FIXME("iface %p, id %lu, type %p stub!\n", iface, id, type);
-    return E_NOTIMPL;
+    struct wma_decoder *decoder = impl_from_IMFTransform(iface);
+
+    TRACE("iface %p, id %lu, type %p.\n", iface, id, type);
+
+    if (!type)
+        return E_POINTER;
+    if (id)
+        return MF_E_INVALIDSTREAMNUMBER;
+    if (IsEqualGUID(&decoder->input_type.majortype, &GUID_NULL))
+        return MF_E_TRANSFORM_TYPE_NOT_SET;
+
+    return MFCreateMediaTypeFromRepresentation(AM_MEDIA_TYPE_REPRESENTATION, &decoder->input_type, type);
 }
 
 static HRESULT WINAPI transform_GetOutputCurrentType(IMFTransform *iface, DWORD id, IMFMediaType **type)
 {
-    FIXME("iface %p, id %lu, type %p stub!\n", iface, id, type);
-    return E_NOTIMPL;
+    struct wma_decoder *decoder = impl_from_IMFTransform(iface);
+
+    TRACE("iface %p, id %lu, type %p.\n", iface, id, type);
+
+    if (!type)
+        return E_POINTER;
+    if (id)
+        return MF_E_INVALIDSTREAMNUMBER;
+    if (IsEqualGUID(&decoder->output_type.majortype, &GUID_NULL))
+        return MF_E_TRANSFORM_TYPE_NOT_SET;
+
+    return MFCreateMediaTypeFromRepresentation(AM_MEDIA_TYPE_REPRESENTATION, &decoder->output_type, type);
 }
 
 static HRESULT WINAPI transform_GetInputStatus(IMFTransform *iface, DWORD id, DWORD *flags)
@@ -506,18 +524,7 @@ static HRESULT WINAPI transform_ProcessEvent(IMFTransform *iface, DWORD id, IMFM
 
 static HRESULT WINAPI transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_TYPE message, ULONG_PTR param)
 {
-    struct wma_decoder *decoder = impl_from_IMFTransform(iface);
-
-    TRACE("iface %p, message %#x, param %p.\n", iface, message, (void *)param);
-
-    if (!decoder->wg_transform)
-        return MF_E_TRANSFORM_TYPE_NOT_SET;
-
-    if (message == MFT_MESSAGE_COMMAND_DRAIN)
-        return wg_transform_drain(decoder->wg_transform);
-
-    FIXME("Ignoring message %#x.\n", message);
-
+    FIXME("iface %p, message %#x, param %p stub!\n", iface, message, (void *)param);
     return S_OK;
 }
 
@@ -717,6 +724,7 @@ static HRESULT WINAPI media_object_SetInputType(IMediaObject *iface, DWORD index
         const DMO_MEDIA_TYPE *type, DWORD flags)
 {
     struct wma_decoder *decoder = impl_from_IMediaObject(iface);
+    unsigned int i;
 
     TRACE("iface %p, index %lu, type %p, flags %#lx.\n", iface, index, type, flags);
 
@@ -744,6 +752,12 @@ static HRESULT WINAPI media_object_SetInputType(IMediaObject *iface, DWORD index
     if (!IsEqualGUID(&type->majortype, &MEDIATYPE_Audio))
         return DMO_E_TYPE_NOT_ACCEPTED;
 
+    for (i = 0; i < ARRAY_SIZE(wma_decoder_input_types); ++i)
+        if (IsEqualGUID(&type->subtype, wma_decoder_input_types[i]))
+            break;
+    if (i == ARRAY_SIZE(wma_decoder_input_types))
+        return DMO_E_TYPE_NOT_ACCEPTED;
+
     if (flags & DMO_SET_TYPEF_TEST_ONLY)
         return S_OK;
 
@@ -756,22 +770,6 @@ static HRESULT WINAPI media_object_SetInputType(IMediaObject *iface, DWORD index
         wg_transform_destroy(decoder->wg_transform);
         decoder->wg_transform = 0;
     }
-
-{
-    const char *sgi = getenv("SteamGameId");
-    if (sgi && (0
-        || !strcmp(sgi, "802870")
-        || !strcmp(sgi, "1230140")
-        || !strcmp(sgi, "2515070")
-        || !strcmp(sgi, "3625380")
-    ))
-    {
-        WAVEFORMATEX *wfx = (WAVEFORMATEX *)decoder->input_type.pbFormat;
-        decoder->input_type.subtype = MFAudioFormat_PCM;
-        wfx->wFormatTag = WAVE_FORMAT_PCM;
-        wfx->wBitsPerSample = 16;
-    }
-}
 
     return S_OK;
 }
@@ -996,11 +994,12 @@ static HRESULT WINAPI media_object_ProcessOutput(IMediaObject *iface, DWORD flag
         wg_sample_queue_flush(decoder->wg_sample_queue, false);
     }
     else if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
+    {
+        buffers[0].dwStatus = 0;
         hr = S_FALSE;
+    }
 
 
-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
-        return S_FALSE;
     return hr;
 }
 
@@ -1085,10 +1084,26 @@ static const IPropertyBagVtbl property_bag_vtbl =
 
 HRESULT wma_decoder_create(IUnknown *outer, IUnknown **out)
 {
+    static const WAVEFORMATEX output_format =
+    {
+        .wFormatTag = WAVE_FORMAT_IEEE_FLOAT, .wBitsPerSample = 32, .nSamplesPerSec = 44100, .nChannels = 1,
+    };
+    static const WMAUDIO2WAVEFORMAT input_format =
+    {
+        .wfx = {.wFormatTag = WAVE_FORMAT_WMAUDIO2, .wBitsPerSample = 16, .nSamplesPerSec = 44100, .nChannels = 1,
+                .nAvgBytesPerSec = 3000, .nBlockAlign = 139, .cbSize = sizeof(input_format) - sizeof(WAVEFORMATEX)},
+        .wEncodeOptions = 1,
+    };
     struct wma_decoder *decoder;
     HRESULT hr;
 
     TRACE("outer %p, out %p.\n", outer, out);
+
+    if (FAILED(hr = check_audio_transform_support(&input_format.wfx, &output_format)))
+    {
+        ERR_(winediag)("GStreamer doesn't support WMA decoding, please install appropriate plugins.\n");
+        return hr;
+    }
 
     if (!(decoder = calloc(1, sizeof(*decoder))))
         return E_OUTOFMEMORY;
@@ -1109,4 +1124,27 @@ HRESULT wma_decoder_create(IUnknown *outer, IUnknown **out)
     *out = &decoder->IUnknown_inner;
     TRACE("Created decoder %p\n", *out);
     return S_OK;
+}
+
+HRESULT WINAPI winegstreamer_create_wma_decoder(IUnknown *outer, REFIID riid, void **out)
+{
+    IUnknown *unk;
+    HRESULT hr;
+
+    TRACE("outer %p, riid %s, out %p\n", outer, debugstr_guid(riid), out);
+
+    if (!init_gstreamer())
+        return E_FAIL;
+
+    if (outer && !IsEqualGUID(riid, &IID_IUnknown))
+        return E_NOINTERFACE;
+
+    *out = NULL;
+    if (FAILED(hr = wma_decoder_create(outer, &unk)))
+        return hr;
+
+    hr = IUnknown_QueryInterface(unk, riid, out);
+    IUnknown_Release(unk);
+
+    return hr;
 }

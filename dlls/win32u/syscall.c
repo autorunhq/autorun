@@ -25,16 +25,95 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winnt.h"
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
 #include "ntuser.h"
+#include "wine/asm.h"
 #include "wine/unixlib.h"
 #include "win32syscalls.h"
 
 ULONG_PTR zero_bits = 0;
+
+#if defined(__aarch64__) && defined(__APPLE__)
+
+/* macOS doesn't follow the standard ABI for stack packing: types
+ * smaller that 64-bit are packed on the stack. The first 8 args are
+ * in registers, so it only affects a few functions.
+ */
+
+#define WRAP_FUNC(name,code) \
+    extern NTSTATUS wrap_##name(void); \
+    __ASM_GLOBAL_FUNC( wrap_##name, code "b " __ASM_NAME(#name) )
+
+WRAP_FUNC( NtGdiAlphaBlend, /* int, int, DWORD, HANDLE */
+           "ldp x8, x9, [sp, #0x08]\n\t"
+           "ldr x10, [sp, #0x18]\n\t"
+           "stp w8, w9, [sp, #0x4]\n\t"
+           "str x10, [sp, #0x10]\n\t" )
+WRAP_FUNC( NtGdiArcInternal, /* INT, INT */
+           "ldr w8, [sp, #8]\n\t"
+           "str w8, [sp, #4]\n\t" )
+WRAP_FUNC( NtGdiBitBlt, /* DWORD, DWORD, FLONG */
+           "ldp x8, x9, [sp, #8]\n\t"
+           "stp w8, w9, [sp, #4]\n\t" )
+WRAP_FUNC( NtGdiCreateDIBitmapInternal, /* UINT, ULONG, HANDLE */
+           "ldp x8, x9, [sp, #8]\n\t"
+           "str w8, [sp, #4]\n\t"
+           "str x9, [sp, #8]\n\t" )
+WRAP_FUNC( NtGdiExtCreatePen, /* ULONG, BOOL, HBRUSH */
+           "ldp x8, x9, [sp, #8]\n\t"
+           "str w8, [sp, #4]\n\t"
+           "str x9, [sp, #8]\n\t" )
+WRAP_FUNC( NtGdiMaskBlt, /* HBITMAP, INT, INT, DWORD, DWORD */
+           "ldp x8, x9, [sp, #0x8]\n\t"
+           "ldp x10, x11, [sp, #0x18]\n\t"
+           "stp w8, w9, [sp, #0x8]\n\t"
+           "stp w10, w11, [sp, #0x10]\n\t" )
+WRAP_FUNC( NtGdiPlgBlt,/* INT, INT, DWORD */
+           "ldp x8, x9, [sp, #8]\n\t"
+           "stp w8, w9, [sp, #4]\n\t" )
+WRAP_FUNC( NtGdiSetDIBitsToDeviceInternal, /* UINT, void*, BITMAPINFO*, UINT, UINT, UINT, BOOL, HANDLE */
+           "ldp x8, x9, [sp, #0x20]\n\t"
+           "ldp x10, x11, [sp, #0x30]\n\t"
+           "str w8, [sp, #0x1c]\n\t"
+           "stp w9, w10, [sp, #0x20]\n\t"
+           "str x11, [sp, #0x28]\n\t" )
+WRAP_FUNC( NtGdiStretchBlt, /* INT, INT, DWORD, COLORREF */
+           "ldr w8, [sp, #0x8]\n\t"
+           "ldp x9, x10, [sp, #0x10]\n\t"
+           "str w8, [sp, #0x4]\n\t"
+           "stp w9, w10, [sp, #0x8]\n\t" )
+WRAP_FUNC( NtGdiStretchDIBitsInternal, /* INT, void*, BITMAPINFO*, UINT, DWORD, UINT, UINT, HANDLE */
+           "ldp x8, x9, [sp, #0x20]\n\t"
+           "ldp x10, x11, [sp, #0x30]\n\t"
+           "str w8, [sp, #0x1c]\n\t"
+           "stp w9, w10, [sp, #0x20]\n\t"
+           "str x11, [sp, #0x28]\n\t" )
+WRAP_FUNC( NtGdiTransparentBlt, /* int, int, UINT */
+           "ldp x8, x9, [sp, #8]\n\t"
+           "stp w8, w9, [sp, #4]\n\t" )
+WRAP_FUNC( NtUserDeferWindowPosAndBand, /* UINT, UINT */
+           "ldr w8, [sp, #8]\n\t"
+           "str w8, [sp, #4]\n\t" )
+
+#define NtGdiAlphaBlend wrap_NtGdiAlphaBlend
+#define NtGdiArcInternal wrap_NtGdiArcInternal
+#define NtGdiBitBlt wrap_NtGdiBitBlt
+#define NtGdiCreateDIBitmapInternal wrap_NtGdiCreateDIBitmapInternal
+#define NtGdiExtCreatePen wrap_NtGdiExtCreatePen
+#define NtGdiMaskBlt wrap_NtGdiMaskBlt
+#define NtGdiPlgBlt wrap_NtGdiPlgBlt
+#define NtGdiSetDIBitsToDeviceInternal wrap_NtGdiSetDIBitsToDeviceInternal
+#define NtGdiStretchBlt wrap_NtGdiStretchBlt
+#define NtGdiStretchDIBitsInternal wrap_NtGdiStretchDIBitsInternal
+#define NtGdiTransparentBlt wrap_NtGdiTransparentBlt
+#define NtUserDeferWindowPosAndBand wrap_NtUserDeferWindowPosAndBand
+
+#undef WRAP_FUNC
+
+#endif  /* __aarch64__ && __APPLE__ */
 
 static void stub_syscall( const char *name )
 {
@@ -89,7 +168,13 @@ static const char *usercall_names[NtUserCallCount] =
 #undef USER32_CALLBACK_ENTRY
 };
 
-static NTSTATUS init( void *args )
+static pthread_key_t user_thread_info_key;
+
+#ifdef __SWITCH__
+NTSTATUS wine_nx_win32u_unix_init(void)
+#else
+NTSTATUS __wine_unix_lib_init(void)
+#endif
 {
 #ifdef _WIN64
     if (NtCurrentTeb()->WowTebOffset)
@@ -102,20 +187,34 @@ static NTSTATUS init( void *args )
 #endif
     KeAddSystemServiceTable( syscalls, NULL, ARRAY_SIZE(syscalls), arguments, 1 );
     ntdll_add_syscall_debug_info( 1, syscall_names, usercall_names );
+    pthread_key_create( &user_thread_info_key, NULL );
     return STATUS_SUCCESS;
 }
 
-#ifdef __SWITCH__
-/* Statically linked into the runtime alongside ntdll's own unix funcs, so the
- * table is exposed under a unique name and registered via the static-unixlib
- * lookup in ntdll/unix/virtual.c (win32u.dll DllMain -> __wine_unix_call). */
-const unixlib_entry_t wine_nx_win32u_unix_funcs[] =
+struct user_thread_info *get_user_thread_info(void)
 {
-    init,
-};
-#else
-const unixlib_entry_t __wine_unix_call_funcs[] =
-{
-    init,
-};
+    struct user_thread_info *info = pthread_getspecific( user_thread_info_key );
+
+    if (!info)
+    {
+        TEB *teb = NtCurrentTeb();
+
+        info = calloc( 1, sizeof(*info) );
+        pthread_setspecific( user_thread_info_key, info );
+        list_init( &info->known_pointers );
+
+        if (teb)
+        {
+#ifndef _WIN64
+            if (teb->GdiBatchCount)
+            {
+                TEB64 *teb64 = (TEB64 *)(UINT_PTR)teb->GdiBatchCount;
+                info->client_info = (struct ntuser_thread_info *)teb64->Win32ClientInfo;
+            }
+            else
 #endif
+            info->client_info = (struct ntuser_thread_info *)teb->Win32ClientInfo;
+        }
+    }
+    return info;
+}

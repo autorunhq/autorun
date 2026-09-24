@@ -571,11 +571,10 @@ static HRESULT WINAPI source_Disconnect(IPin *iface)
 {
     HRESULT hr;
     struct strmbase_source *This = impl_source_from_IPin(iface);
-    struct strmbase_filter *filter = This->pin.filter;
 
     TRACE("pin %p %s:%s.\n", This, debugstr_w(This->pin.filter->name), debugstr_w(This->pin.name));
 
-    EnterCriticalSection(&filter->filter_cs);
+    EnterCriticalSection(&This->pin.filter->filter_cs);
     {
         if (This->pin.filter->state != State_Stopped)
         {
@@ -583,6 +582,9 @@ static HRESULT WINAPI source_Disconnect(IPin *iface)
             WARN("Filter is not stopped; returning VFW_E_NOT_STOPPED.\n");
             return VFW_E_NOT_STOPPED;
         }
+
+        if (This->pFuncsTable->source_disconnect)
+            This->pFuncsTable->source_disconnect(This);
 
         if (This->pMemInputPin)
         {
@@ -606,11 +608,8 @@ static HRESULT WINAPI source_Disconnect(IPin *iface)
         }
         else
             hr = S_FALSE;
-
-        if (This->pFuncsTable->source_disconnect)
-            This->pFuncsTable->source_disconnect(This);
     }
-    LeaveCriticalSection(&filter->filter_cs);
+    LeaveCriticalSection(&This->pin.filter->filter_cs);
 
     return hr;
 }
@@ -1149,10 +1148,14 @@ static HRESULT WINAPI MemInputPin_ReceiveMultiple(IMemInputPin * iface, IMediaSa
 static HRESULT WINAPI MemInputPin_ReceiveCanBlock(IMemInputPin * iface)
 {
     struct strmbase_sink *pin = impl_from_IMemInputPin(iface);
+    HRESULT hr = S_OK;
 
     TRACE("pin %p %s:%s.\n", pin, debugstr_w(pin->pin.filter->name), debugstr_w(pin->pin.name));
 
-    return S_OK;
+    if (pin->pFuncsTable->sink_receive_can_block)
+        hr = pin->pFuncsTable->sink_receive_can_block(pin);
+
+    return hr;
 }
 
 static const IMemInputPinVtbl MemInputPin_Vtbl =

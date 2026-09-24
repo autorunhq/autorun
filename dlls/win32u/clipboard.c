@@ -29,7 +29,6 @@
 
 #include <pthread.h>
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "win32u_private.h"
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
@@ -37,6 +36,9 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(clipboard);
+
+#define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
+#define GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
 
 static pthread_mutex_t clipboard_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -756,7 +758,7 @@ LRESULT drag_drop_call( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, void 
         return KeUserModeCallback( NtUserDragDropLeave, 0, 0, &ret_ptr, &ret_len );
     case WINE_DRAG_DROP_DRAG:
     {
-        RECT rect = {LOWORD(wparam), HIWORD(wparam), LOWORD(wparam), HIWORD(wparam)};
+        RECT rect = {GET_X_LPARAM(wparam), GET_Y_LPARAM(wparam), GET_X_LPARAM(wparam), GET_Y_LPARAM(wparam)};
         struct drag_drop_drag_params params =
         {
             .hwnd = hwnd,

@@ -30,7 +30,7 @@
 #define AT_SYMLINK_NOFOLLOW 0x100
 #endif
 
-const char wine_build[] __attribute__((weak)) = "wine-11.0-nx";
+const char wine_build[] = "wine-11.18-nx";
 
 extern unixlib_handle_t __wine_unixlib_handle;
 extern unixlib_handle_t wine_nx_get_ntdll_unixlib_handle(void);
@@ -254,9 +254,7 @@ SECTION_IMAGE_INFORMATION main_image_info __attribute__((weak)) =
     .ImageContainsCode = TRUE,
 };
 
-SIZE_T kernel_stack_size __attribute__((weak)) = 1024 * 1024;
 BOOL simulate_writecopy __attribute__((weak)) = FALSE;
-SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4] __attribute__((weak));
 
 /* Serialize seek-based positioned I/O and preserve the caller's cursor.
  * Ordinary read/write on a shared descriptor still require caller coordination. */

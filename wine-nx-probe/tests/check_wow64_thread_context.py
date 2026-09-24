@@ -33,8 +33,11 @@ static WOW64_CPURESERVED cpu = {0, IMAGE_FILE_MACHINE_I386};
 static I386_CONTEXT saved;
 static unsigned queries, comparisons;
 static NTSTATUS query_error;
-static void *get_cpu_area(USHORT machine) {
-    assert(machine == IMAGE_FILE_MACHINE_I386);
+struct thread_data {};
+static struct thread_data thread_data;
+static struct thread_data *get_thread_data(void) { return &thread_data; }
+static void *get_cpu_area(struct thread_data *data, USHORT machine) {
+    assert(data == &thread_data && machine == IMAGE_FILE_MACHINE_I386);
     return &saved;
 }
 NTSTATUS WINAPI NtCompareObjects(HANDLE first, HANDLE second) {

@@ -53,7 +53,7 @@
 
 #define VKD3D_MAX_COMPATIBLE_FORMAT_COUNT 6u
 #define VKD3D_MAX_QUEUE_FAMILY_COUNT      3u
-#define VKD3D_MAX_SHADER_EXTENSIONS       5u
+#define VKD3D_MAX_SHADER_EXTENSIONS       6u
 #define VKD3D_MAX_SHADER_STAGES           5u
 #define VKD3D_MAX_VK_SYNC_OBJECTS         4u
 #define VKD3D_MAX_DEVICE_BLOCKED_QUEUES  16u
@@ -108,11 +108,10 @@ HRESULT hresult_from_vkd3d_result(int vkd3d_result);
 
 struct vkd3d_device_descriptor_limits
 {
-    unsigned int uniform_buffer_max_descriptors;
-    unsigned int sampled_image_max_descriptors;
-    unsigned int storage_buffer_max_descriptors;
-    unsigned int storage_image_max_descriptors;
-    unsigned int sampler_max_descriptors;
+    unsigned int max_cbv_descriptor_count;
+    unsigned int max_srv_descriptor_count;
+    unsigned int max_uav_descriptor_count;
+    unsigned int max_sampler_descriptor_count;
 };
 
 struct vkd3d_vulkan_info
@@ -131,6 +130,7 @@ struct vkd3d_vulkan_info
     bool KHR_portability_subset;
     bool KHR_push_descriptor;
     bool KHR_sampler_mirror_clamp_to_edge;
+    bool KHR_shader_float_controls;
     bool KHR_timeline_semaphore;
     bool KHR_zero_initialize_workgroup_memory;
     /* EXT device extensions */
@@ -138,12 +138,13 @@ struct vkd3d_vulkan_info
     bool EXT_calibrated_timestamps;
     bool EXT_conditional_rendering;
     bool EXT_debug_marker;
-    bool EXT_depth_range_unrestricted;
     bool EXT_depth_clip_enable;
+    bool EXT_depth_range_unrestricted;
     bool EXT_descriptor_indexing;
     bool EXT_fragment_shader_interlock;
     bool EXT_mutable_descriptor_type;
     bool EXT_robustness2;
+    bool EXT_sampler_filter_minmax;
     bool EXT_shader_demote_to_helper_invocation;
     bool EXT_shader_stencil_export;
     bool EXT_shader_viewport_index_layer;
@@ -396,6 +397,7 @@ struct d3d12_fence
 
     uint64_t value;
     uint64_t max_pending_value;
+    uint64_t last_waited_value;
     struct vkd3d_mutex mutex;
 
     struct vkd3d_waiting_event
@@ -1134,6 +1136,8 @@ struct d3d12_pipeline_state_desc
     D3D12_SHADER_BYTECODE hs;
     D3D12_SHADER_BYTECODE gs;
     D3D12_SHADER_BYTECODE cs;
+    D3D12_SHADER_BYTECODE as;
+    D3D12_SHADER_BYTECODE ms;
     D3D12_STREAM_OUTPUT_DESC stream_output;
     D3D12_BLEND_DESC blend_state;
     unsigned int sample_mask;
@@ -1277,6 +1281,13 @@ enum vkd3d_pipeline_bind_point
     VKD3D_PIPELINE_BIND_POINT_COUNT = 0x2,
 };
 
+struct vkd3d_resource_list
+{
+    struct d3d12_resource **resources;
+    size_t count;
+    size_t capacity;
+};
+
 /* ID3D12CommandList */
 struct d3d12_command_list
 {
@@ -1301,6 +1312,13 @@ struct d3d12_command_list
     unsigned int fb_height;
     unsigned int fb_layer_count;
     VkFormat dsv_format;
+
+    /* Resources for views bound to d3d12 state */
+    struct d3d12_resource *rtv_resources[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    struct d3d12_resource *dsv_resource;
+    /* Resources bound since the last pipeline barrier */
+    struct vkd3d_resource_list rtv_resources_since_last_barrier;
+    struct vkd3d_resource_list dsv_resources_since_last_barrier;
 
     bool xfb_enabled;
     bool has_depth_bounds;

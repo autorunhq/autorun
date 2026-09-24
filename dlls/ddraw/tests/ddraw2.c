@@ -115,6 +115,14 @@ static void flush_events(void)
     }
 }
 
+static void pump_messages(void)
+{
+    MSG msg;
+
+    while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+        DispatchMessageA(&msg);
+}
+
 static HWND create_foreground_window(void)
 {
     for (UINT retries = 5; retries; retries--)
@@ -2745,6 +2753,7 @@ static void test_window_style(void)
     RECT fullscreen_rect, r;
     HWND window, window2;
     IDirectDraw2 *ddraw;
+    unsigned int i;
     HRESULT hr;
     ULONG ref;
     BOOL ret;
@@ -2955,10 +2964,19 @@ static void test_window_style(void)
     ok(tmp & WS_VISIBLE, "Expected WS_VISIBLE.\n");
     tmp = GetWindowLongA(window, GWL_EXSTYLE);
     ok(tmp & WS_EX_TOPMOST, "Expected WS_EX_TOPMOST.\n");
-    ret = ShowWindow(window, SW_HIDE);
-    ok(ret, "ShowWindow failed, error %#lx.\n", GetLastError());
-    ret = SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
-    ok(ret, "SetWindowPos failed, error %#lx.\n", GetLastError());
+    for (i = 0; i < 5; ++i)
+    {
+        /* Try a few times to hide the window. Something in Win11 26H1 shows it again and makes it
+         * topmost. This is in addition to the ddraw periodic check below, which only makes it
+         * topmost but not visible */
+        ret = SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_HIDEWINDOW);
+        ok(ret, "SetWindowPos failed, error %#lx.\n", GetLastError());
+        tmp = GetWindowLongA(window, GWL_STYLE);
+        if (!(tmp & WS_VISIBLE))
+            break;
+        Sleep(100);
+    }
+    ok(i < 5, "Failed to hide the window.\n");
     tmp = GetWindowLongA(window, GWL_STYLE);
     ok(!(tmp & WS_VISIBLE), "Got unexpected WS_VISIBLE.\n");
     tmp = GetWindowLongA(window, GWL_EXSTYLE);
@@ -15423,7 +15441,10 @@ static void test_caps(void)
         {
             .dwSize = sizeof(DDSURFACEDESC),
             .dwFlags = DDSD_CAPS | DDSD_ZBUFFERBITDEPTH | DDSD_WIDTH | DDSD_HEIGHT,
-            .ddsCaps.dwCaps = DDSCAPS_ZBUFFER,
+            .ddsCaps =
+            {
+                .dwCaps = DDSCAPS_ZBUFFER,
+            },
             .dwZBufferBitDepth = depth_caps[i].depth,
             .dwWidth = 64,
             .dwHeight = 64,
@@ -15516,7 +15537,10 @@ static void test_caps(void)
             {
                 .dwSize = sizeof(DDSURFACEDESC),
                 .dwFlags = DDSD_CAPS | DDSD_ZBUFFERBITDEPTH | DDSD_WIDTH | DDSD_HEIGHT,
-                .ddsCaps.dwCaps = DDSCAPS_ZBUFFER,
+                .ddsCaps =
+                {
+                    .dwCaps = DDSCAPS_ZBUFFER,
+                },
                 .dwZBufferBitDepth = depth_caps[i].depth,
                 .dwWidth = 64,
                 .dwHeight = 64,
@@ -16593,7 +16617,7 @@ static HRESULT WINAPI test_enum_devices_caps_callback(GUID *guid, char *device_d
                 | D3DDEVCAPS_TEXTURESYSTEMMEMORY
                 | D3DDEVCAPS_DRAWPRIMTLVERTEX;
 
-        todo_wine ok(enum_devices_index == 1, "Expected index %u.\n", enum_devices_index);
+        ok(enum_devices_index == 1, "Expected index %u.\n", enum_devices_index);
         ok(!strcmp(device_name, "RGB Emulation"), "Got name %s.\n", debugstr_a(device_name));
 
         todo_wine ok(hel->dwFlags == hel_flags, "Got HEL flags %#lx.\n", hel->dwFlags);
@@ -16625,7 +16649,7 @@ static HRESULT WINAPI test_enum_devices_caps_callback(GUID *guid, char *device_d
                 | D3DDD_LIGHTINGCAPS
                 | D3DDD_BCLIPPING;
 
-        todo_wine ok(enum_devices_index == 2, "Expected index %u.\n", enum_devices_index);
+        ok(enum_devices_index == 2, "Expected index %u.\n", enum_devices_index);
         ok(!strcmp(device_name, "Direct3D HAL"), "Got name %s.\n", debugstr_a(device_name));
 
         ok(hal->dcmColorModel == D3DCOLOR_RGB, "HAL Device hal caps has colormodel %lu\n", hel->dcmColorModel);
@@ -17037,13 +17061,13 @@ static void test_d3d_state_reset(void)
 
     window = CreateWindowA("static", "ddraw_test", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, 0, 0, 0, 0);
 
-    window = create_window();
     ddraw = create_ddraw();
     ok(!!ddraw, "Failed to create a ddraw object.\n");
 
     if (!(device = create_device(ddraw, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN)))
     {
         skip("Failed to create 3D device.\n");
+        IDirectDraw2_Release(ddraw);
         DestroyWindow(window);
         return;
     }
@@ -17437,6 +17461,137 @@ out:
     DestroyWindow(window);
 }
 
+static void check_surface_clipper(IDirectDrawSurface *surface,
+        IDirectDrawClipper *clipper, RECT *window_rect, DWORD style)
+{
+    unsigned int c;
+    DDBLTFX fx;
+    HRESULT hr;
+
+    memset(&fx, 0, sizeof(fx));
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0xff00ff00;
+
+    fill_surface(surface, 0xffff0000);
+
+    /* Clippers with a region work. Clippers with a window work on Windows 98,
+     * but are ignored on modern windows. */
+
+    hr = IDirectDrawSurface_SetClipper(surface, clipper);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    c = get_surface_color(surface, 101, 101);
+    ok(c == 0x00ff0000, "got %#x.\n", c);
+    hr = IDirectDrawSurface_Blt(surface, NULL, NULL, NULL, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    c = get_surface_color(surface, 0, 0);
+    ok(c == 0x00ff0000, "got %#x.\n", c);
+    c = get_surface_color(surface, 101, 101);
+    ok(c == 0x0000ff00, "got %#x.\n", c);
+
+    hr = IDirectDrawSurface_SetClipper(surface, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    fill_surface(surface, 0);
+}
+
+static void test_clipper_in_exclusive_fullscreen(void)
+{
+    static const struct
+    {
+        DWORD style;
+        BOOL parent;
+    }
+    tests[] =
+    {
+        { WS_POPUP },
+        { WS_POPUP, TRUE },
+        { WS_CHILD, TRUE },
+        { WS_OVERLAPPED },
+        { WS_CHILD | WS_VISIBLE, TRUE },
+        { WS_POPUP | WS_VISIBLE },
+    };
+    IDirectDrawSurface *primary, *offscreen;
+    IDirectDrawClipper *clipper;
+    DDSURFACEDESC surface_desc;
+    IDirectDraw2 *ddraw;
+    RGNDATA *rgn_data;
+    DWORD ret, style;
+    RECT window_rect;
+    ULONG refcount;
+    unsigned int i;
+    HWND window;
+    HRESULT hr;
+    HRGN rgn;
+
+    if (!(ddraw = create_ddraw()))
+    {
+        skip("Failed to create ddraw, skipping test.\n");
+        return;
+    }
+    hr = IDirectDraw2_CreateClipper(ddraw, 0, &clipper, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    window = CreateWindowA("static", "ddraw_fullscreen", WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, NULL, NULL, NULL, NULL);
+    pump_messages();
+    hr = IDirectDraw2_SetCooperativeLevel(ddraw, NULL, DDSCL_NORMAL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    hr = IDirectDraw2_SetCooperativeLevel(ddraw, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    pump_messages();
+
+    rgn = CreateRectRgn(100, 100, 200, 200);
+    ok(!!rgn, "Failed to create region.\n");
+    ret = GetRegionData(rgn, 0, NULL);
+    rgn_data = malloc(ret);
+    ret = GetRegionData(rgn, ret, rgn_data);
+    ok(!!ret, "Failed to get region data.\n");
+    DeleteObject(rgn);
+    hr = IDirectDrawClipper_SetClipList(clipper, rgn_data, 0);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    free(rgn_data);
+
+    memset(&surface_desc, 0, sizeof(surface_desc));
+    surface_desc.dwSize = sizeof(surface_desc);
+    surface_desc.dwFlags = DDSD_CAPS;
+    surface_desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    hr = IDirectDraw2_CreateSurface(ddraw, &surface_desc, &primary, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    surface_desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    surface_desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+    surface_desc.dwWidth = 640;
+    surface_desc.dwHeight = 480;
+    hr = IDirectDraw2_CreateSurface(ddraw, &surface_desc, &offscreen, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("test %u", i);
+        style = tests[i].style;
+
+        winetest_push_context("primary");
+        check_surface_clipper(primary, clipper, &window_rect, style);
+        winetest_pop_context();
+
+        winetest_push_context("offscreen");
+        check_surface_clipper(offscreen, clipper, &window_rect, style);
+        winetest_pop_context();
+
+        winetest_pop_context();
+    }
+
+    hr = IDirectDraw2_SetCooperativeLevel(ddraw, NULL, DDSCL_NORMAL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    IDirectDrawClipper_Release(clipper);
+    refcount = IDirectDrawSurface_Release(offscreen);
+    ok(!refcount, "Got unexpected refcount %lu.\n", refcount);
+    refcount = IDirectDrawSurface_Release(primary);
+    ok(!refcount, "Got unexpected refcount %lu.\n", refcount);
+
+    IDirectDraw2_Release(ddraw);
+    DestroyWindow(window);
+    pump_messages();
+}
+
 START_TEST(ddraw2)
 {
     DDDEVICEIDENTIFIER identifier;
@@ -17569,4 +17724,5 @@ START_TEST(ddraw2)
     test_sysmem_x_channel();
     test_yuv_blit();
     test_blit_to_self();
+    test_clipper_in_exclusive_fullscreen();
 }

@@ -30,7 +30,6 @@
 #include <gst/audio/audio.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "winternl.h"
 #include "windef.h"
 #include "winbase.h"
@@ -63,23 +62,17 @@ DEFINE_MEDIATYPE_GUID(MFVideoFormat_CVID,MAKEFOURCC('c','v','i','d'));
 DEFINE_MEDIATYPE_GUID(MFVideoFormat_IV50,MAKEFOURCC('I','V','5','0'));
 DEFINE_MEDIATYPE_GUID(MFVideoFormat_VC1S,MAKEFOURCC('V','C','1','S'));
 DEFINE_MEDIATYPE_GUID(MFVideoFormat_ABGR32,D3DFMT_A8B8G8R8);
-DEFINE_MEDIATYPE_GUID(MFVideoFormat_theora,MAKEFOURCC('t','h','e','o'));
 
-static void init_caps_codec_data_name(GstCaps *caps, const void *codec_data, int codec_data_size, const char *name)
+static void init_caps_codec_data(GstCaps *caps, const void *codec_data, int codec_data_size)
 {
     GstBuffer *buffer;
 
     if (codec_data_size > 0 && (buffer = gst_buffer_new_and_alloc(codec_data_size)))
     {
         gst_buffer_fill(buffer, 0, codec_data, codec_data_size);
-        gst_caps_set_simple(caps, name, GST_TYPE_BUFFER, buffer, NULL);
+        gst_caps_set_simple(caps, "codec_data", GST_TYPE_BUFFER, buffer, NULL);
         gst_buffer_unref(buffer);
     }
-}
-
-static void init_caps_codec_data(GstCaps *caps, const void *codec_data, int codec_data_size)
-{
-    init_caps_codec_data_name(caps, codec_data, codec_data_size, "codec_data");
 }
 
 static void init_caps_from_wave_format_mpeg1(GstCaps *caps, const MPEG1WAVEFORMAT *format, UINT32 format_size)
@@ -169,62 +162,6 @@ static void init_caps_from_wave_format_wma3(GstCaps *caps, const WMAUDIO3WAVEFOR
     gst_caps_set_simple(caps, "bitrate", G_TYPE_INT, format->wfx.nAvgBytesPerSec * 8, NULL);
 }
 
-static void init_caps_from_wave_format_vorbis(GstCaps *caps, const WAVEFORMATEX *format, UINT32 format_size)
-{
-    init_caps_codec_data(caps, format + 1, format->cbSize);
-
-    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
-    gst_structure_set_name(gst_caps_get_structure(caps, 0), "audio/x-vorbis");
-    gst_caps_set_simple(caps, "block_align", G_TYPE_INT, format->nBlockAlign, NULL);
-    gst_caps_set_simple(caps, "depth", G_TYPE_INT, format->wBitsPerSample, NULL);
-    gst_caps_set_simple(caps, "bitrate", G_TYPE_INT, format->nAvgBytesPerSec * 8, NULL);
-}
-
-static void init_caps_from_wave_format_opus(GstCaps *caps, const WAVEFORMATEX *format, UINT32 format_size)
-{
-    const guint8 *codec_data = (const guint8 *)(format + 1);
-
-    init_caps_codec_data(caps, codec_data, format->cbSize);
-
-    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
-    gst_structure_set_name(gst_caps_get_structure(caps, 0), "audio/x-opus");
-    gst_caps_set_simple(caps, "channel-mapping-family", G_TYPE_INT, 0, NULL);
-    gst_caps_set_simple(caps, "block_align", G_TYPE_INT, format->nBlockAlign, NULL);
-    gst_caps_set_simple(caps, "depth", G_TYPE_INT, format->wBitsPerSample, NULL);
-    gst_caps_set_simple(caps, "bitrate", G_TYPE_INT, format->nAvgBytesPerSec * 8, NULL);
-
-    if (format->nChannels > 2)
-    {
-        GValue mapping = G_VALUE_INIT;
-        GValue v = G_VALUE_INIT;
-        gint i;
-
-        if (format->cbSize < 21 + format->nChannels)
-        {
-            GST_WARNING("Invalid extra data size %u", format->cbSize);
-            return;
-        }
-
-        /* Decoding > 2 channels requires additional values,
-         * found in the extra data at fixed offsets. */
-        gst_caps_set_simple(caps, "channel-mapping-family", G_TYPE_INT, codec_data[18], NULL);
-        gst_caps_set_simple(caps, "stream-count", G_TYPE_INT, codec_data[19], NULL);
-        gst_caps_set_simple(caps, "coupled-count", G_TYPE_INT, codec_data[20], NULL);
-
-        g_value_init(&mapping, GST_TYPE_ARRAY);
-        g_value_init(&v, G_TYPE_INT);
-        for (i = 0; i < format->nChannels; ++i)
-        {
-            g_value_set_int(&v, codec_data[21 + i]);
-            gst_value_array_append_value(&mapping, &v);
-        }
-
-        gst_structure_set_value(gst_caps_get_structure(caps, 0), "channel-mapping", &mapping);
-        g_value_unset(&mapping);
-        g_value_unset(&v);
-    }
-}
-
 static void init_caps_from_wave_format(GstCaps *caps, const GUID *subtype,
         const void *format, UINT32 format_size)
 {
@@ -244,10 +181,6 @@ static void init_caps_from_wave_format(GstCaps *caps, const GUID *subtype,
         return init_caps_from_wave_format_wma3(caps, format, format_size, 3);
     if (IsEqualGUID(subtype, &MFAudioFormat_WMAudio_Lossless))
         return init_caps_from_wave_format_wma3(caps, format, format_size, 4);
-    if (IsEqualGUID(subtype, &MFAudioFormat_Vorbis))
-        return init_caps_from_wave_format_vorbis(caps, format, format_size);
-    if (IsEqualGUID(subtype, &MFAudioFormat_Opus))
-        return init_caps_from_wave_format_opus(caps, format, format_size);
 
     GST_FIXME("Unsupported subtype " WG_GUID_FORMAT, WG_GUID_ARGS(*subtype));
 }
@@ -366,13 +299,7 @@ static void init_caps_from_video_h264(GstCaps *caps, const MFVIDEOFORMAT *format
     if (format_size > sizeof(*format) && (buffer = gst_buffer_new_and_alloc(format_size - sizeof(*format))))
     {
         gst_buffer_fill(buffer, 0, format + 1, format_size - sizeof(*format));
-        if (format_size - sizeof(*format) >= sizeof(UINT32) && *(UINT32 *)(format + 1) == 0x01000000)
-            gst_caps_set_simple(caps, "streamheader", GST_TYPE_BUFFER, buffer, NULL);
-        else
-        {
-            gst_caps_set_simple(caps, "codec_data", GST_TYPE_BUFFER, buffer, NULL);
-            gst_caps_set_simple(caps, "stream-format", G_TYPE_STRING, "avc", NULL);
-        }
+        gst_caps_set_simple(caps, "streamheader", GST_TYPE_BUFFER, buffer, NULL);
         gst_buffer_unref(buffer);
     }
 }
@@ -408,30 +335,6 @@ static void init_caps_from_video_mpeg(GstCaps *caps, const struct mpeg_video_for
     gst_caps_set_simple(caps, "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
 }
 
-static void init_caps_from_video_theora(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
-{
-    init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
-
-    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
-    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-theora");
-}
-
-static void init_caps_from_video_av1(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
-{
-    init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
-
-    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
-    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-av1");
-}
-
-static void init_caps_from_video_vp9(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
-{
-    init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
-
-    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
-    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-vp9");
-}
-
 static void init_caps_from_video_subtype(GstCaps *caps, const GUID *subtype, const void *format, UINT format_size)
 {
     if (IsEqualGUID(subtype, &MFVideoFormat_CVID))
@@ -452,12 +355,6 @@ static void init_caps_from_video_subtype(GstCaps *caps, const GUID *subtype, con
         return init_caps_from_video_indeo(caps, format, format_size);
     if (IsEqualGUID(subtype, &MEDIASUBTYPE_MPEG1Payload))
         return init_caps_from_video_mpeg(caps, format, format_size);
-    if (IsEqualGUID(subtype, &MFVideoFormat_theora))
-        return init_caps_from_video_theora(caps, format, format_size);
-    if (IsEqualGUID(subtype, &MFVideoFormat_AV1))
-        return init_caps_from_video_av1(caps, format, format_size);
-    if (IsEqualGUID(subtype, &MFVideoFormat_VP90))
-        return init_caps_from_video_vp9(caps, format, format_size);
 
     GST_FIXME("Unsupported subtype " WG_GUID_FORMAT, WG_GUID_ARGS(*subtype));
 }

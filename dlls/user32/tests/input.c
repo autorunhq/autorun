@@ -104,7 +104,14 @@ static const char *debugstr_ok( const char *cond )
         POINT v = (r);                                                                             \
         ok( !memcmp( &v, &(e), sizeof(v) ), "%s %s\n", debugstr_ok(#r), wine_dbgstr_point(&v) );   \
     } while (0)
+#define ok_ex( r, op, e, t, f, ... )                                                               \
+    do                                                                                             \
+    {                                                                                              \
+        t v = (r);                                                                                 \
+        ok( v op (e), "%s " f "\n", debugstr_ok( #r ), v, ##__VA_ARGS__ );                         \
+    } while (0)
 #define ok_ret( e, r ) ok_eq( e, r, UINT_PTR, "%Iu, error %ld", GetLastError() )
+#define ok_ptr( r, op, e ) ok_ex( r, op, e, void *, "%p" )
 
 enum user_function
 {
@@ -431,6 +438,8 @@ static UINT (WINAPI *pGetRawInputDeviceInfoA) (HANDLE, UINT, void *, UINT *);
 static BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL);
 static HKL (WINAPI *pLoadKeyboardLayoutEx)(HKL, const WCHAR *, UINT);
 static INT (WINAPI *pScheduleDispatchNotification)(HWND);
+static UINT_PTR (WINAPI *pDelegateInput)(void *, void *, void *, void *, void *, void *);
+static void (WINAPI *pUndelegateInput)(void *, void *);
 
 /**********************adapted from input.c **********************************/
 
@@ -446,6 +455,7 @@ static void init_function_pointers(void)
     if (!(p ## func = (void*)GetProcAddress(hdll, #func))) \
       trace("GetProcAddress(%s) failed\n", #func)
 
+    GET_PROC(DelegateInput);
     GET_PROC(EnableMouseInPointer);
     GET_PROC(IsMouseInPointerEnabled);
     GET_PROC(GetCurrentInputMessageSource);
@@ -459,6 +469,7 @@ static void init_function_pointers(void)
     GET_PROC(GetRawInputDeviceInfoW);
     GET_PROC(GetRawInputDeviceInfoA);
     GET_PROC(LoadKeyboardLayoutEx);
+    GET_PROC(UndelegateInput);
 
     hdll = GetModuleHandleA("kernel32");
     GET_PROC(IsWow64Process);
@@ -1309,6 +1320,27 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
         {0},
     };
 
+    struct send_input_keyboard_test pause_scan[] =
+    {
+        {.scan = 0x21d, .flags = KEYEVENTF_SCANCODE, .expect_state = {[VK_CONTROL] = 0x80, [VK_LCONTROL] = 0x80},
+         .expect = {KEY_HOOK(WM_KEYDOWN, 0x1d, VK_LCONTROL), KEY_MSG(WM_KEYDOWN, 0x1d, VK_CONTROL), {0}}},
+        {.scan = 0x21d, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, .expect_state = {[VK_CONTROL] = 0x01, [VK_LCONTROL] = 0x01},
+         .expect = {KEY_HOOK(WM_KEYUP, 0x1d, VK_LCONTROL), KEY_MSG(WM_KEYUP, 0x1d, VK_CONTROL), {0}}},
+        {.scan = 0xe11d, .flags = KEYEVENTF_SCANCODE, .expect_state = {[VK_CONTROL] = 0x80, [VK_LCONTROL] = 0x80},
+         .expect = {KEY_HOOK(WM_KEYDOWN, 0x1d, VK_LCONTROL), KEY_MSG(WM_KEYDOWN, 0x1d, VK_CONTROL), {0}}},
+        {.scan = 0xe11d, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, .expect_state = {[VK_CONTROL] = 0x01, [VK_LCONTROL] = 0x01},
+         .expect = {KEY_HOOK(WM_KEYUP, 0x1d, VK_LCONTROL), KEY_MSG(WM_KEYUP, 0x1d, VK_CONTROL), {0}}},
+        {.scan = 0xe11d, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY, .expect_state = {[VK_CONTROL] = 0x80, [VK_RCONTROL] = 0x80},
+         .expect = {KEY_HOOK_(WM_KEYDOWN, 0x1d, VK_RCONTROL, LLKHF_EXTENDED, .todo_value = TRUE), KEY_MSG(WM_KEYDOWN, 0x11d, VK_CONTROL), {0}}},
+        {.scan = 0xe11d, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, .expect_state = {[VK_CONTROL] = 0x01, [VK_RCONTROL] = 0x01},
+         .expect = {KEY_HOOK_(WM_KEYUP, 0x1d, VK_RCONTROL, LLKHF_EXTENDED, .todo_value = TRUE), KEY_MSG(WM_KEYUP, 0x11d, VK_CONTROL), {0}}},
+        {.vkey = VK_PAUSE, .expect_state = {[VK_PAUSE] = 0x80},
+         .expect = {KEY_HOOK(WM_KEYDOWN, 0x7, VK_PAUSE), KEY_MSG(WM_KEYDOWN, 0x7, VK_PAUSE), {0}}},
+        {.vkey = VK_PAUSE, .flags = KEYEVENTF_KEYUP, .expect_state = {[VK_PAUSE] = 0x01},
+         .expect = {KEY_HOOK(WM_KEYUP, 0x8, VK_PAUSE), KEY_MSG(WM_KEYUP, 0x8, VK_PAUSE), {0}}},
+        {0},
+    };
+
 #undef WIN_MSG
 #undef KBD_HOOK
 #undef KEY_HOOK_
@@ -1393,6 +1425,7 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
     check_send_input_keyboard_test( unicode_vkey_packet, TRUE );
     check_send_input_keyboard_test( numpad_scan, TRUE );
     check_send_input_keyboard_test( numpad_scan_numlock, TRUE );
+    check_send_input_keyboard_test( pause_scan, TRUE );
     winetest_pop_context();
 
     wait_messages( 100, FALSE );
@@ -1440,6 +1473,7 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
     check_send_input_keyboard_test( unicode_vkey_packet, FALSE );
     check_send_input_keyboard_test( numpad_scan, FALSE );
     check_send_input_keyboard_test( numpad_scan_numlock, FALSE );
+    check_send_input_keyboard_test( pause_scan, FALSE );
     winetest_pop_context();
 
     ok_ret( 1, DestroyWindow( hwnd ) );
@@ -1452,6 +1486,36 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
 
 static void test_keynames(void)
 {
+    static const struct
+    {
+        LONG lparam;
+        const char *expected_name;
+        BOOL todo;
+        BOOL todo_value;
+    } tests[] =
+    {
+        {0x00370000, "Num *", .todo_value = TRUE},
+        {0x01370000, "Prnt Scrn", .todo_value = TRUE},
+        {0x02370000, "Num *", .todo_value = TRUE},
+        {0xe0370000, "Num *", .todo_value = TRUE},
+        {0xe1370000, "Prnt Scrn", .todo_value = TRUE},
+        {0x00450000, "Pause", .todo_value = TRUE},
+        {0x01450000, "Num Lock"},
+        {0x02450000, "Pause", .todo_value = TRUE},
+        {0xe0450000, "Pause", .todo_value = TRUE},
+        {0xe1450000, "Num Lock"},
+        {0x00460000, "Scroll Lock", .todo_value = TRUE},
+        {0x01460000, "Break", .todo_value = TRUE},
+        {0xe0460000, "Scroll Lock", .todo_value = TRUE},
+        {0xe1460000, "Break", .todo_value = TRUE},
+        {0x01480000, "Up"},
+        {0x001d0000, "Ctrl", .todo_value = TRUE},
+        {0x011d0000, "Right Ctrl", .todo_value = TRUE},
+        {0x021d0000, "Ctrl", .todo_value = TRUE},
+        {0xe01d0000, "Ctrl", .todo_value = TRUE},
+        {0xe11d0000, "Right Ctrl", .todo_value = TRUE},
+    };
+    BOOL us_kbd = (GetKeyboardLayout(0) == (HKL)(ULONG_PTR)0x04090409);
     int i, len;
     char buff[256];
 
@@ -1460,6 +1524,18 @@ static void test_keynames(void)
         strcpy(buff, "----");
         len = GetKeyNameTextA(i << 16, buff, sizeof(buff));
         ok(len || !buff[0], "%d: Buffer is not zeroed\n", i);
+    }
+
+    if (!us_kbd) skip("skipping test with inconsistent results on non-us keyboard\n");
+    else for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        winetest_push_context("scancode %04x", (unsigned int)tests[i].lparam >> 16);
+        len = GetKeyNameTextA(tests[i].lparam, buff, sizeof(buff));
+        todo_wine_if(tests[i].todo) ok(len, "No key name\n");
+        todo_wine_if(tests[i].todo_value)
+        ok(!strcmp(buff, tests[i].expected_name), "Unexpected key name %s\n", debugstr_a(buff));
+        trace("name %s\n", debugstr_a(buff));
+        winetest_pop_context();
     }
 }
 
@@ -3192,10 +3268,65 @@ static void test_DefRawInputProc(void)
     ok(GetLastError() == 0xdeadbeef, "got %ld\n", GetLastError());
 }
 
+static const char *debug_map_type(UINT map_type)
+{
+#define MAP_TO_STR(x) case x: return #x
+    switch (map_type)
+    {
+        MAP_TO_STR(MAPVK_VK_TO_VSC);
+        MAP_TO_STR(MAPVK_VSC_TO_VK);
+        MAP_TO_STR(MAPVK_VK_TO_CHAR);
+        MAP_TO_STR(MAPVK_VSC_TO_VK_EX);
+        MAP_TO_STR(MAPVK_VK_TO_VSC_EX);
+    default:
+        return "<unknown>";
+    }
+#undef MAP_TO_STR
+}
+
 static void test_key_map(void)
 {
+    static const struct
+    {
+        UINT input;
+        UINT map_type;
+        UINT expected;
+        BOOL todo;
+    } tests[] =
+    {
+        {0x136, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe036, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe136, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0x37, MAPVK_VSC_TO_VK_EX, VK_MULTIPLY, TRUE},
+        {0x137, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0x237, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe037, MAPVK_VSC_TO_VK_EX, VK_SNAPSHOT},
+        {0xe137, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0x45, MAPVK_VSC_TO_VK_EX, VK_NUMLOCK},
+        {0x145, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe045, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe145, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0x1d, MAPVK_VSC_TO_VK_EX, VK_LCONTROL},
+        {0x011d, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0x021d, MAPVK_VSC_TO_VK_EX, 0, TRUE},
+        {0xe01d, MAPVK_VSC_TO_VK_EX, VK_RCONTROL, TRUE},
+        {0xe11d, MAPVK_VSC_TO_VK_EX, VK_PAUSE, TRUE},
+        {0x46, MAPVK_VSC_TO_VK_EX, VK_SCROLL},
+        {0xe046, MAPVK_VSC_TO_VK_EX, VK_CANCEL, TRUE},
+
+        {VK_RSHIFT, MAPVK_VK_TO_VSC_EX, 0x36},
+        {VK_MULTIPLY, MAPVK_VK_TO_VSC_EX, 0x37},
+        {VK_NUMLOCK, MAPVK_VK_TO_VSC_EX, 0x45},
+        {VK_UP, MAPVK_VK_TO_VSC_EX, 0x48},
+        {VK_LCONTROL, MAPVK_VK_TO_VSC_EX, 0x1d},
+        {VK_RCONTROL, MAPVK_VK_TO_VSC_EX, 0xe01d},
+        {VK_PAUSE, MAPVK_VK_TO_VSC_EX, 0xe11d, TRUE},
+        {VK_SCROLL, MAPVK_VK_TO_VSC_EX, 0x46},
+        {VK_CANCEL, MAPVK_VK_TO_VSC_EX, 0xe046, TRUE},
+        {VK_SNAPSHOT, MAPVK_VK_TO_VSC_EX, 0x54},
+    };
     HKL kl = GetKeyboardLayout(0);
-    UINT kL, kR, s, sL;
+    UINT kL, kR, s, sL, r;
     int i;
     static const UINT numpad_collisions[][2] = {
         { VK_NUMPAD0, VK_INSERT },
@@ -3252,6 +3383,13 @@ static void test_key_map(void)
     ok(s >> 8 == 0xE0 || broken(s == 0), "Scan code prefix for VK_RMENU should be 0xE0 when MAPVK_VK_TO_VSC_EX is set, was %#1x\n", s >> 8);
     s = MapVirtualKeyExA(VK_RSHIFT, MAPVK_VK_TO_VSC_EX, kl);
     ok(s >> 8 == 0x00 || broken(s == 0), "The scan code shouldn't have a prefix, got %#1x\n", s >> 8);
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        r = MapVirtualKeyExA(tests[i].input, tests[i].map_type, kl);
+        todo_wine_if(tests[i].todo) ok(r == tests[i].expected, "Unexpected %s %x -> %x\n",
+                                       debug_map_type(tests[i].map_type), tests[i].input, r);
+    }
 }
 
 #define shift 1
@@ -4531,293 +4669,465 @@ static LRESULT WINAPI MsgCheckProcA(HWND hwnd, UINT message, WPARAM wParam, LPAR
     return DefWindowProcA(hwnd, message, wParam, lParam);
 }
 
-struct wnd_event
+struct test_AttachThreadInput_params
 {
     HWND hwnd;
     HANDLE wait_event;
     HANDLE start_event;
     DWORD attach_from;
     DWORD attach_to;
-    BOOL setWindows;
+    DWORD attach_count;
+    BOOL activate;
+    HWND active_hwnd;
 };
 
-static DWORD WINAPI thread_proc(void *param)
+static DWORD WINAPI test_AttachThreadInput_thread(void *param)
 {
+    struct test_AttachThreadInput_params *args = param;
     MSG msg;
-    struct wnd_event *wnd_event = param;
-    BOOL ret;
 
-    if (wnd_event->wait_event)
+    if (args->wait_event)
     {
-        ok(WaitForSingleObject(wnd_event->wait_event, INFINITE) == WAIT_OBJECT_0,
-           "WaitForSingleObject failed\n");
-        CloseHandle(wnd_event->wait_event);
+        ok_ret( 0, WaitForSingleObject( args->wait_event, 1000 ) );
+        CloseHandle( args->wait_event );
     }
 
-    if (wnd_event->attach_from)
+    for (UINT i = 0; i < max( 1, args->attach_count ); i++)
     {
-        ret = AttachThreadInput(wnd_event->attach_from, GetCurrentThreadId(), TRUE);
-        ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+        if (args->attach_from) ok_ret( 1, AttachThreadInput( args->attach_from, GetCurrentThreadId(), TRUE ) );
+        if (args->attach_to) ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), args->attach_to, TRUE ) );
     }
 
-    if (wnd_event->attach_to)
+    args->hwnd = CreateWindowExA( 0, "TestWindowClass", "window caption text", WS_OVERLAPPEDWINDOW,
+                                       100, 100, 200, 200, 0, 0, 0, NULL );
+    ok_ptr( args->hwnd, !=, NULL );
+
+    if (args->activate)
     {
-        ret = AttachThreadInput(GetCurrentThreadId(), wnd_event->attach_to, TRUE);
-        ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+        SetFocus( args->hwnd );
+        SetActiveWindow( args->hwnd );
+    }
+    else if (args->active_hwnd)
+    {
+        SetFocus( args->active_hwnd );
+        SetActiveWindow( args->active_hwnd );
+        ok_ptr( GetActiveWindow(), ==, args->active_hwnd );
+        ok_ptr( GetFocus(), ==, args->active_hwnd );
     }
 
-    wnd_event->hwnd = CreateWindowExA(0, "TestWindowClass", "window caption text", WS_OVERLAPPEDWINDOW,
-                                      100, 100, 200, 200, 0, 0, 0, NULL);
-    ok(wnd_event->hwnd != 0, "Failed to create overlapped window\n");
+    SetEvent( args->start_event );
 
-    if (wnd_event->setWindows)
+    while (GetMessageA( &msg, 0, 0, 0 ))
     {
-        SetFocus(wnd_event->hwnd);
-        SetActiveWindow(wnd_event->hwnd);
-    }
-
-    SetEvent(wnd_event->start_event);
-
-    while (GetMessageA(&msg, 0, 0, 0))
-    {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        TranslateMessage( &msg );
+        DispatchMessageA( &msg );
     }
 
     return 0;
 }
 
-static void test_attach_input(void)
+static void test_AttachThreadInput(void)
 {
-    HANDLE hThread;
-    HWND ourWnd, Wnd2;
-    DWORD ret, tid;
-    struct wnd_event wnd_event;
-    WNDCLASSA cls;
-
-    cls.style = 0;
-    cls.lpfnWndProc = MsgCheckProcA;
-    cls.cbClsExtra = 0;
-    cls.cbWndExtra = 0;
-    cls.hInstance = GetModuleHandleA(0);
-    cls.hIcon = 0;
-    cls.hCursor = LoadCursorW( NULL, (LPCWSTR)IDC_ARROW);
-    cls.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    cls.lpszMenuName = NULL;
-    cls.lpszClassName = "TestWindowClass";
-    if(!RegisterClassA(&cls)) return;
-
-    wnd_event.wait_event = NULL;
-    wnd_event.start_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.attach_from = 0;
-    wnd_event.attach_to = 0;
-    wnd_event.setWindows = FALSE;
-    if (!wnd_event.start_event)
+    HANDLE thread1, thread2, thread3;
+    HWND hwnd, hwnd2;
+    DWORD tid1, tid2, tid3;
+    struct test_AttachThreadInput_params args1, args2, args3;
+    const WNDCLASSA cls =
     {
-        win_skip("skipping interthread message test under win9x\n");
-        return;
+        .lpfnWndProc = MsgCheckProcA,
+        .hInstance = GetModuleHandleA( 0 ),
+        .hCursor = LoadCursorW( NULL, (LPCWSTR)IDC_ARROW ),
+        .hbrBackground = (HBRUSH)(COLOR_WINDOW + 1),
+        .lpszClassName = "TestWindowClass",
+    };
+
+    ok_ret( 1, !!RegisterClassA( &cls ) );
+
+
+    memset( &args1, 0, sizeof(args1) );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    thread1 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1 );
+    ok_ptr( thread1, !=, NULL );
+
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 1000 ) );
+    CloseHandle( args1.start_event );
+
+    hwnd = CreateWindowExA( 0, "TestWindowClass", NULL, WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, 0, 0, 0, NULL );
+    ok_ptr( hwnd, !=, NULL );
+    hwnd2 = CreateWindowExA( 0, "TestWindowClass", NULL, WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, 0, 0, 0, NULL );
+    ok_ptr( hwnd2, !=, NULL );
+
+    SetFocus( hwnd );
+    SetActiveWindow( hwnd );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+    ok_ptr( GetActiveWindow(), ==, hwnd );
+    ok_ptr( GetFocus(), ==, hwnd );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)hwnd );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, hwnd );
+    ok_ptr( GetFocus(), ==, hwnd );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, 0 );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+
+    ok_ptr( GetActiveWindow(), ==, hwnd );
+    ok_ptr( GetFocus(), ==, hwnd );
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)hwnd );
+
+    SetActiveWindow( hwnd2 );
+    SetFocus( hwnd2 );
+    ok_ptr( GetActiveWindow(), ==, hwnd2 );
+    ok_ptr( GetFocus(), ==, hwnd2 );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)hwnd2 );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, hwnd2 );
+    ok_ptr( GetFocus(), ==, hwnd2 );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, 0 );
+
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 1000 ) );
+    CloseHandle( thread1 );
+
+
+    memset( &args1, 0, sizeof(args1) );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.activate = TRUE;
+
+    thread1 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1 );
+    ok_ptr( thread1, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 1000 ) );
+    CloseHandle( args1.start_event );
+
+    SetFocus( hwnd );
+    SetActiveWindow( hwnd );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+
+    ok( GetActiveWindow() == args1.hwnd, "expected active %p, got %p\n", args1.hwnd, GetActiveWindow() );
+    ok( GetFocus() == args1.hwnd, "expected focus %p, got %p\n", args1.hwnd, GetFocus() );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)args1.hwnd );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, FALSE ) );
+
+    ok( GetActiveWindow() == 0, "expected active 0, got %p\n", GetActiveWindow() );
+    ok( GetFocus() == 0, "expected focus 0, got %p\n", GetFocus() );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)args1.hwnd );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+
+    ok( GetActiveWindow() == args1.hwnd, "expected active %p, got %p\n", args1.hwnd, GetActiveWindow() );
+    ok( GetFocus() == args1.hwnd, "expected focus %p, got %p\n", args1.hwnd, GetFocus() );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)args1.hwnd );
+
+    SetFocus( hwnd2 );
+    SetActiveWindow( hwnd2 );
+    ok_ptr( GetActiveWindow(), ==, hwnd2 );
+    ok_ptr( GetFocus(), ==, hwnd2 );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, (LPARAM)hwnd2 );
+
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, FALSE ) );
+
+    ok_ptr( GetActiveWindow(), ==, hwnd2 );
+    ok_ptr( GetFocus(), ==, hwnd2 );
+
+    SendMessageA( args1.hwnd, WM_USER + 1, 0, 0 );
+
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 1000 ) );
+    CloseHandle( thread1 );
+
+
+    memset( &args1, 0, sizeof(args1) );
+    args1.wait_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.activate = TRUE;
+
+    thread1 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1 );
+    ok_ptr( thread1, !=, NULL );
+
+    SetLastError( 0xdeadbeef );
+    ok_ret( 0, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+    ok_ret( ERROR_INVALID_PARAMETER, GetLastError() );
+
+    SetLastError( 0xdeadbeef );
+    ok_ret( 0, AttachThreadInput( tid1, GetCurrentThreadId(), TRUE ) );
+    ok_ret( ERROR_INVALID_PARAMETER, GetLastError() );
+
+    SetEvent( args1.wait_event );
+
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 1000 ) );
+    CloseHandle( args1.start_event );
+
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 1000 ) );
+    CloseHandle( thread1 );
+
+
+    memset( &args1, 0, sizeof(args1) );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.attach_from = GetCurrentThreadId();
+
+    SetFocus( hwnd );
+    SetActiveWindow( hwnd );
+
+    thread1 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1 );
+    ok_ptr( thread1, !=, NULL );
+
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 1000 ) );
+    CloseHandle( args1.start_event );
+
+    ok_ptr( GetActiveWindow(), ==, hwnd );
+    ok_ptr( GetFocus(), ==, hwnd );
+
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 1000 ) );
+    CloseHandle( thread1 );
+
+
+    memset( &args1, 0, sizeof(args1) );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.attach_to = GetCurrentThreadId();
+
+    SetFocus( hwnd );
+    SetActiveWindow( hwnd );
+
+    thread1 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1 );
+    ok_ptr( thread1, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 1000 ) );
+    CloseHandle( args1.start_event );
+
+    ok_ptr( GetActiveWindow(), ==, hwnd );
+    ok_ptr( GetFocus(), ==, hwnd );
+
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 1000 ) );
+    CloseHandle( thread1 );
+
+
+    /* thread input attachments are refcounted */
+    memset( &args1, 0, sizeof(args1) );
+    args1.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args1.attach_from = GetCurrentThreadId();
+
+    thread1 = CreateThread(  NULL, 0, test_AttachThreadInput_thread, &args1, 0, &tid1  );
+    ok_ptr( thread1, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args1.start_event, 5000 ) );
+    ok_ret( 1, CloseHandle( args1.start_event ) );
+    SetFocus( args1.hwnd );
+    SetActiveWindow( args1.hwnd );
+
+    for (UINT i = 0; i < 2; i++)
+    {
+        ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+        ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+        ok_ptr( GetFocus(), ==, args1.hwnd );
     }
 
-    hThread = CreateThread(NULL, 0, thread_proc, &wnd_event, 0, &tid);
-    ok(hThread != NULL, "CreateThread failed, error %ld\n", GetLastError());
+    for (UINT i = 0; i < 2; i++)
+    {
+        ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), TRUE ) );
+        ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+        ok_ptr( GetFocus(), ==, args1.hwnd );
+    }
 
-    ok(WaitForSingleObject(wnd_event.start_event, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(wnd_event.start_event);
+    /* from / to parameters order don't really matter wrt. refcounting */
+    for (UINT i = 0; i < 1; i++)
+    {
+        ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, FALSE ) );
+        ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+        ok_ptr( GetFocus(), ==, args1.hwnd );
+    }
 
-    ourWnd = CreateWindowExA(0, "TestWindowClass", NULL, WS_OVERLAPPEDWINDOW,
-                            0, 0, 0, 0, 0, 0, 0, NULL);
-    ok(ourWnd!= 0, "failed to create ourWnd window\n");
+    for (UINT i = 0; i < 3; i++)
+    {
+        ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), FALSE ) );
+        ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+        ok_ptr( GetFocus(), ==, args1.hwnd );
+    }
 
-    Wnd2 = CreateWindowExA(0, "TestWindowClass", NULL, WS_OVERLAPPEDWINDOW,
-                            0, 0, 0, 0, 0, 0, 0, NULL);
-    ok(Wnd2!= 0, "failed to create Wnd2 window\n");
+    ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, NULL );
+    ok_ptr( GetFocus(), ==, NULL );
 
-    SetFocus(ourWnd);
-    SetActiveWindow(ourWnd);
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, TRUE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    /* attaching from/to another thread while attached shares the thread input between every thread */
 
-    ok(GetActiveWindow() == ourWnd, "expected active %p, got %p\n", ourWnd, GetActiveWindow());
-    ok(GetFocus() == ourWnd, "expected focus %p, got %p\n", ourWnd, GetFocus());
+    /* attach main -> thread1 once */
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)ourWnd);
+    memset( &args2, 0, sizeof(args2) );
+    args2.start_event = CreateEventW( NULL, 0, 0, NULL );
+    /* attach main -> thread2 two times */
+    args2.attach_from = GetCurrentThreadId();
+    args2.attach_count = 2;
+    args2.active_hwnd = args1.hwnd;
+    thread2 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args2, 0, &tid2 );
+    ok_ptr( thread2, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args2.start_event, 5000 ) );
+    ok_ret( 1, CloseHandle( args2.start_event ) );
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, FALSE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
-    ok(GetActiveWindow() == ourWnd, "expected active %p, got %p\n", ourWnd, GetActiveWindow());
-    ok(GetFocus() == ourWnd, "expected focus %p, got %p\n", ourWnd, GetFocus());
+    SetFocus( args2.hwnd );
+    SetActiveWindow( args2.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args2.hwnd );
+    ok_ptr( GetFocus(), ==, args2.hwnd );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, 0);
+    SetFocus( args1.hwnd );
+    SetActiveWindow( args1.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, TRUE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    ok_ret( 1, PostMessageA( args2.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread2, 5000 ) );
+    ok_ret( 1, CloseHandle( thread2 ) );
 
-    ok(GetActiveWindow() == ourWnd, "expected active %p, got %p\n", ourWnd, GetActiveWindow());
-    ok(GetFocus() == ourWnd, "expected focus %p, got %p\n", ourWnd, GetFocus());
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)ourWnd);
+    /* thread2 destruction releases all its references on the thread input, we only have one left */
+    ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, NULL );
+    ok_ptr( GetFocus(), ==, NULL );
 
-    SetActiveWindow(Wnd2);
-    SetFocus(Wnd2);
-    ok(GetActiveWindow() == Wnd2, "expected active %p, got %p\n", Wnd2, GetActiveWindow());
-    ok(GetFocus() == Wnd2, "expected focus %p, got %p\n", Wnd2, GetFocus());
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)Wnd2);
+    /* attach thread1 -> main two times */
+    for (UINT i = 0; i < 2; i++)
+    {
+        ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), TRUE ) );
+        ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+        ok_ptr( GetFocus(), ==, args1.hwnd );
+    }
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, FALSE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
-    ok(GetActiveWindow() == Wnd2, "expected active %p, got %p\n", Wnd2, GetActiveWindow());
-    ok(GetFocus() == Wnd2, "expected focus %p, got %p\n", Wnd2, GetFocus());
+    memset( &args2, 0, sizeof(args2) );
+    args2.start_event = CreateEventW( NULL, 0, 0, NULL );
+    /* attach thread2 -> main two times */
+    args2.attach_to = GetCurrentThreadId();
+    args2.attach_count = 2;
+    args2.active_hwnd = args1.hwnd;
+    thread2 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args2, 0, &tid2 );
+    ok_ptr( thread2, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args2.start_event, 5000 ) );
+    ok_ret( 1, CloseHandle( args2.start_event ) );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, 0);
+    SetFocus( args2.hwnd );
+    SetActiveWindow( args2.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args2.hwnd );
+    ok_ptr( GetFocus(), ==, args2.hwnd );
 
-    ret = PostMessageA(wnd_event.hwnd, WM_QUIT, 0, 0);
-    ok(ret, "PostMessageA(WM_QUIT) error %ld\n", GetLastError());
+    SetFocus( args1.hwnd );
+    SetActiveWindow( args1.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    ok(WaitForSingleObject(hThread, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(hThread);
+    ok_ret( 1, PostMessageA( args2.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread2, 5000 ) );
+    ok_ret( 1, CloseHandle( thread2 ) );
 
-    wnd_event.wait_event = NULL;
-    wnd_event.start_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.attach_from = 0;
-    wnd_event.attach_to = 0;
-    wnd_event.setWindows = TRUE;
+    /* need to detach thread1 -> main two times */
+    ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    hThread = CreateThread(NULL, 0, thread_proc, &wnd_event, 0, &tid);
-    ok(hThread != NULL, "CreateThread failed, error %ld\n", GetLastError());
+    ok_ret( 1, AttachThreadInput( tid1, GetCurrentThreadId(), FALSE ) );
+    ok_ptr( GetActiveWindow(), ==, NULL );
+    ok_ptr( GetFocus(), ==, NULL );
 
-    ok(WaitForSingleObject(wnd_event.start_event, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(wnd_event.start_event);
 
-    SetFocus(ourWnd);
-    SetActiveWindow(ourWnd);
+    /* test cyclic and complex attachment graph */
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, TRUE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    memset( &args2, 0, sizeof(args2) );
+    args2.start_event = CreateEventW( NULL, 0, 0, NULL );
+    thread2 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args2, 0, &tid2 );
+    ok_ptr( thread2, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args2.start_event, 5000 ) );
+    ok_ret( 1, CloseHandle( args2.start_event ) );
 
-    ok(GetActiveWindow() == wnd_event.hwnd, "expected active %p, got %p\n", wnd_event.hwnd, GetActiveWindow());
-    ok(GetFocus() == wnd_event.hwnd, "expected focus %p, got %p\n", wnd_event.hwnd, GetFocus());
+    memset( &args3, 0, sizeof(args3) );
+    args3.start_event = CreateEventW( NULL, 0, 0, NULL );
+    args3.attach_from = tid2; /* attach thread2 -> thread3 */
+    args3.activate = TRUE;
+    thread3 = CreateThread( NULL, 0, test_AttachThreadInput_thread, &args3, 0, &tid3 );
+    ok_ptr( thread3, !=, NULL );
+    ok_ret( 0, WaitForSingleObject( args3.start_event, 5000 ) );
+    ok_ret( 1, CloseHandle( args3.start_event ) );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)wnd_event.hwnd);
+    /* attach main -> thread1 */
+    ok_ret( 1, AttachThreadInput( GetCurrentThreadId(), tid1, TRUE ) );
+    SetFocus( args1.hwnd );
+    SetActiveWindow( args1.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, FALSE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    /* attach thread1 -> thread2 */
+    ok_ret( 1, AttachThreadInput( tid1, tid2, TRUE ) );
+    ok_ptr( GetActiveWindow(), ==, args3.hwnd );
+    ok_ptr( GetFocus(), ==, args3.hwnd );
 
-    ok(GetActiveWindow() == 0, "expected active 0, got %p\n", GetActiveWindow());
-    ok(GetFocus() == 0, "expected focus 0, got %p\n", GetFocus());
+    /* attach thread3 -> thread1 */
+    ok_ret( 1, AttachThreadInput( tid3, tid1, TRUE ) );
+    ok_ptr( GetActiveWindow(), ==, args3.hwnd );
+    ok_ptr( GetFocus(), ==, args3.hwnd );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)wnd_event.hwnd);
+    /* all threads are attached */
+    SetFocus( args1.hwnd );
+    SetActiveWindow( args1.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args1.hwnd );
+    ok_ptr( GetFocus(), ==, args1.hwnd );
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, TRUE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    SetFocus( args2.hwnd );
+    SetActiveWindow( args2.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args2.hwnd );
+    ok_ptr( GetFocus(), ==, args2.hwnd );
 
-    ok(GetActiveWindow() == wnd_event.hwnd, "expected active %p, got %p\n", wnd_event.hwnd, GetActiveWindow());
-    ok(GetFocus() == wnd_event.hwnd, "expected focus %p, got %p\n", wnd_event.hwnd, GetFocus());
+    SetFocus( args3.hwnd );
+    SetActiveWindow( args3.hwnd );
+    ok_ptr( GetActiveWindow(), ==, args3.hwnd );
+    ok_ptr( GetFocus(), ==, args3.hwnd );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)wnd_event.hwnd);
+    ok_ret( 1, PostMessageA( args2.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread2, 5000 ) );
+    ok_ret( 1, CloseHandle( thread2 ) );
 
-    SetFocus(Wnd2);
-    SetActiveWindow(Wnd2);
-    ok(GetActiveWindow() == Wnd2, "expected active %p, got %p\n", Wnd2, GetActiveWindow());
-    ok(GetFocus() == Wnd2, "expected focus %p, got %p\n", Wnd2, GetFocus());
+    /* we are still attached to thread3 from its attachment to thread1 */
+    ok_ptr( GetActiveWindow(), ==, args3.hwnd );
+    ok_ptr( GetFocus(), ==, args3.hwnd );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, (LPARAM)Wnd2);
+    /* we are not attached to thread3 directly and cannot detach */
+    SetLastError( 0xdeadbeef );
+    ok_ret( 0, AttachThreadInput( tid3, GetCurrentThreadId(), FALSE ) );
+    ok_ret( ERROR_INVALID_PARAMETER, GetLastError() );
+    SetLastError( 0xdeadbeef );
+    ok_ret( 0, AttachThreadInput( GetCurrentThreadId(), tid3, FALSE ) );
+    ok_ret( ERROR_INVALID_PARAMETER, GetLastError() );
 
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, FALSE);
-    ok(ret, "AttachThreadInput error %ld\n", GetLastError());
+    ok_ptr( GetActiveWindow(), ==, args3.hwnd );
+    ok_ptr( GetFocus(), ==, args3.hwnd );
 
-    ok(GetActiveWindow() == Wnd2, "expected active %p, got %p\n", Wnd2, GetActiveWindow());
-    ok(GetFocus() == Wnd2, "expected focus %p, got %p\n", Wnd2, GetFocus());
+    /* we lose our attachment to thread3 after thread1 exits */
+    ok_ret( 1, PostMessageA( args1.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread1, 5000 ) );
+    ok_ret( 1, CloseHandle( thread1 ) );
 
-    SendMessageA(wnd_event.hwnd, WM_USER+1, 0, 0);
+    todo_wine ok_ptr( GetActiveWindow(), ==, NULL );
+    todo_wine ok_ptr( GetFocus(), ==, NULL );
 
-    ret = PostMessageA(wnd_event.hwnd, WM_QUIT, 0, 0);
-    ok(ret, "PostMessageA(WM_QUIT) error %ld\n", GetLastError());
+    ok_ret( 1, PostMessageA( args3.hwnd, WM_QUIT, 0, 0 ) );
+    ok_ret( 0, WaitForSingleObject( thread3, 5000 ) );
+    ok_ret( 1, CloseHandle( thread3 ) );
 
-    ok(WaitForSingleObject(hThread, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(hThread);
 
-    wnd_event.wait_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.start_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.attach_from = 0;
-    wnd_event.attach_to = 0;
-    wnd_event.setWindows = TRUE;
-
-    hThread = CreateThread(NULL, 0, thread_proc, &wnd_event, 0, &tid);
-    ok(hThread != NULL, "CreateThread failed, error %ld\n", GetLastError());
-
-    SetLastError(0xdeadbeef);
-    ret = AttachThreadInput(GetCurrentThreadId(), tid, TRUE);
-    ok(!ret, "AttachThreadInput succeeded\n");
-    ok(GetLastError() == ERROR_INVALID_PARAMETER || broken(GetLastError() == 0xdeadbeef) /* <= Win XP */,
-       "expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
-
-    SetLastError(0xdeadbeef);
-    ret = AttachThreadInput(tid, GetCurrentThreadId(), TRUE);
-    ok(!ret, "AttachThreadInput succeeded\n");
-    ok(GetLastError() == ERROR_INVALID_PARAMETER || broken(GetLastError() == 0xdeadbeef) /* <= Win XP */,
-       "expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
-
-    SetEvent(wnd_event.wait_event);
-
-    ok(WaitForSingleObject(wnd_event.start_event, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(wnd_event.start_event);
-
-    ret = PostMessageA(wnd_event.hwnd, WM_QUIT, 0, 0);
-    ok(ret, "PostMessageA(WM_QUIT) error %ld\n", GetLastError());
-
-    ok(WaitForSingleObject(hThread, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(hThread);
-
-    wnd_event.wait_event = NULL;
-    wnd_event.start_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.attach_from = GetCurrentThreadId();
-    wnd_event.attach_to = 0;
-    wnd_event.setWindows = FALSE;
-
-    SetFocus(ourWnd);
-    SetActiveWindow(ourWnd);
-
-    hThread = CreateThread(NULL, 0, thread_proc, &wnd_event, 0, &tid);
-    ok(hThread != NULL, "CreateThread failed, error %ld\n", GetLastError());
-
-    ok(WaitForSingleObject(wnd_event.start_event, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(wnd_event.start_event);
-
-    ok(GetActiveWindow() == ourWnd, "expected active %p, got %p\n", ourWnd, GetActiveWindow());
-    ok(GetFocus() == ourWnd, "expected focus %p, got %p\n", ourWnd, GetFocus());
-
-    ret = PostMessageA(wnd_event.hwnd, WM_QUIT, 0, 0);
-    ok(ret, "PostMessageA(WM_QUIT) error %ld\n", GetLastError());
-
-    ok(WaitForSingleObject(hThread, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(hThread);
-
-    wnd_event.wait_event = NULL;
-    wnd_event.start_event = CreateEventW(NULL, 0, 0, NULL);
-    wnd_event.attach_from = 0;
-    wnd_event.attach_to = GetCurrentThreadId();
-    wnd_event.setWindows = FALSE;
-
-    SetFocus(ourWnd);
-    SetActiveWindow(ourWnd);
-
-    hThread = CreateThread(NULL, 0, thread_proc, &wnd_event, 0, &tid);
-    ok(hThread != NULL, "CreateThread failed, error %ld\n", GetLastError());
-
-    ok(WaitForSingleObject(wnd_event.start_event, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(wnd_event.start_event);
-
-    ok(GetActiveWindow() == ourWnd, "expected active %p, got %p\n", ourWnd, GetActiveWindow());
-    ok(GetFocus() == ourWnd, "expected focus %p, got %p\n", ourWnd, GetFocus());
-
-    ret = PostMessageA(wnd_event.hwnd, WM_QUIT, 0, 0);
-    ok(ret, "PostMessageA(WM_QUIT) error %ld\n", GetLastError());
-
-    ok(WaitForSingleObject(hThread, INFINITE) == WAIT_OBJECT_0, "WaitForSingleObject failed\n");
-    CloseHandle(hThread);
-    DestroyWindow(ourWnd);
-    DestroyWindow(Wnd2);
+    DestroyWindow( hwnd );
+    DestroyWindow( hwnd2 );
+    UnregisterClassA( cls.lpszClassName, cls.hInstance );
 }
 
 struct get_key_state_test_desc
@@ -5149,24 +5459,87 @@ static LRESULT WINAPI msg_source_proc( HWND hwnd, UINT message, WPARAM wp, LPARA
         ok( source.originId == expect_src.originId ||
             (message == WM_MOUSEMOVE && source.originId == IMO_SYSTEM),
             "%x: wrong originId %x/%x\n", message, source.originId, expect_src.originId );
+        ok( !PeekMessageW( &msg, hwnd, WM_USER, WM_USER, PM_REMOVE ), "got pending WM_USER\n" );
+        ok( source.deviceType == expect_src.deviceType || /* also accept system-generated WM_MOUSEMOVE */
+            (message == WM_MOUSEMOVE && source.deviceType == IMDT_UNAVAILABLE),
+            "%x: wrong deviceType %x/%x\n", message, source.deviceType, expect_src.deviceType );
+        ok( source.originId == expect_src.originId ||
+            (message == WM_MOUSEMOVE && source.originId == IMO_SYSTEM),
+            "%x: wrong originId %x/%x\n", message, source.originId, expect_src.originId );
         break;
     default:
         ok( source.deviceType == IMDT_UNAVAILABLE, "%x: wrong deviceType %x\n",
             message, source.deviceType );
-        ok( source.originId == 0, "%x: wrong originId %x\n", message, source.originId );
+        ok( source.originId == IMO_UNAVAILABLE, "%x: wrong originId %x\n", message, source.originId );
         break;
     }
 
     return DefWindowProcA( hwnd, message, wp, lp );
 }
 
+static LRESULT WINAPI get_message_hook( int code, WPARAM wp, LPARAM lp )
+{
+    INPUT_MESSAGE_SOURCE source;
+    MSG *msg = (MSG *)lp;
+    UINT message = msg->message;
+
+    if (code < 0) return CallNextHookEx( 0, code, wp, lp );
+
+    ok( pGetCurrentInputMessageSource( &source ), "GetCurrentInputMessageSource failed\n" );
+    switch (message)
+    {
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+        ok( source.deviceType == expect_src.deviceType || /* also accept system-generated WM_MOUSEMOVE */
+            (message == WM_MOUSEMOVE && source.deviceType == IMDT_UNAVAILABLE),
+            "%x: wrong deviceType %x/%x\n", message, source.deviceType, expect_src.deviceType );
+        ok( source.originId == expect_src.originId ||
+            (message == WM_MOUSEMOVE && source.originId == IMO_SYSTEM),
+            "%x: wrong originId %x/%x\n", message, source.originId, expect_src.originId );
+        break;
+    default:
+        ok( source.deviceType == IMDT_UNAVAILABLE, "%x: wrong deviceType %x\n",
+            message, source.deviceType );
+        ok( source.originId == IMO_UNAVAILABLE, "%x: wrong originId %x\n",
+            message, source.originId );
+        break;
+    }
+    return CallNextHookEx( 0, code, wp, lp );
+}
+
+static LRESULT WINAPI keyboard_hook( int code, WPARAM wp, LPARAM lp )
+{
+    INPUT_MESSAGE_SOURCE source;
+
+    if (code < 0) return CallNextHookEx( 0, code, wp, lp );
+
+    ok( pGetCurrentInputMessageSource( &source ), "GetCurrentInputMessageSource failed\n" );
+    ok( source.deviceType == expect_src.deviceType ||
+        broken( source.deviceType == IMDT_UNAVAILABLE ), /* <= win10 1507 */
+        "wrong deviceType %x/%x\n", source.deviceType, expect_src.deviceType );
+    ok( source.originId == expect_src.originId ||
+        broken( source.originId == IMO_UNAVAILABLE), /* <= win10 1507 */
+        "wrong originId %x/%x\n", source.originId, expect_src.originId );
+
+    return CallNextHookEx( 0, code, wp, lp );
+}
+
 static void test_input_message_source(void)
 {
+    INPUT_MESSAGE_SOURCE source;
     WNDCLASSA cls;
     INPUT inputs[2];
     HWND hwnd;
     RECT rc;
     MSG msg;
+    HHOOK msg_hook, kbd_hook;
 
     cls.style = 0;
     cls.lpfnWndProc = msg_source_proc;
@@ -5186,6 +5559,11 @@ static void test_input_message_source(void)
     SetForegroundWindow( hwnd );
     SetFocus( hwnd );
 
+    msg_hook = SetWindowsHookExW( WH_GETMESSAGE, get_message_hook, NULL, GetCurrentThreadId() );
+    ok( msg_hook != NULL, "SetWindowsHookEx failed\n" );
+    kbd_hook = SetWindowsHookExW( WH_KEYBOARD, keyboard_hook, NULL, GetCurrentThreadId() );
+    ok( kbd_hook != NULL, "SetWindowsHookEx failed\n" );
+
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.dwExtraInfo = 0;
     inputs[0].ki.time = 0;
@@ -5200,24 +5578,28 @@ static void test_input_message_source(void)
     SendMessageA( hwnd, WM_KEYDOWN, 0, 0 );
     SendMessageA( hwnd, WM_MOUSEMOVE, 0, 0 );
 
+    expect_src.deviceType = IMDT_KEYBOARD;
+    expect_src.originId = IMO_INJECTED;
     SendInput( 2, inputs, sizeof(INPUT) );
     while (PeekMessageW( &msg, hwnd, 0, 0, PM_REMOVE ))
     {
-        expect_src.deviceType = IMDT_KEYBOARD;
-        expect_src.originId = IMO_INJECTED;
         TranslateMessage( &msg );
         DispatchMessageW( &msg );
     }
     GetWindowRect( hwnd, &rc );
     simulate_click( TRUE, (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 );
     simulate_click( FALSE, (rc.left + rc.right) / 2 + 1, (rc.top + rc.bottom) / 2 + 1 );
+    expect_src.deviceType = IMDT_MOUSE;
+    expect_src.originId = IMO_INJECTED;
     while (PeekMessageW( &msg, hwnd, 0, 0, PM_REMOVE ))
     {
-        expect_src.deviceType = IMDT_MOUSE;
-        expect_src.originId = IMO_INJECTED;
         TranslateMessage( &msg );
         DispatchMessageW( &msg );
     }
+
+    ok( pGetCurrentInputMessageSource( &source ), "GetCurrentInputMessageSource failed\n" );
+    ok( source.deviceType == IMDT_UNAVAILABLE, "wrong type %x\n", source.deviceType );
+    ok( source.originId == IMO_UNAVAILABLE, "wrong origin %x\n", source.originId );
 
     expect_src.deviceType = IMDT_UNAVAILABLE;
     expect_src.originId = IMO_UNAVAILABLE;
@@ -5231,6 +5613,10 @@ static void test_input_message_source(void)
         DispatchMessageW( &msg );
     }
 
+    ok( pGetCurrentInputMessageSource( &source ), "GetCurrentInputMessageSource failed\n" );
+    ok( source.deviceType == IMDT_UNAVAILABLE, "wrong type %x\n", source.deviceType );
+    ok( source.originId == IMO_UNAVAILABLE, "wrong origin %x\n", source.originId );
+
     expect_src.deviceType = IMDT_UNAVAILABLE;
     expect_src.originId = IMO_SYSTEM;
     SetCursorPos( (rc.left + rc.right) / 2 - 1, (rc.top + rc.bottom) / 2 - 1 );
@@ -5240,14 +5626,38 @@ static void test_input_message_source(void)
         DispatchMessageW( &msg );
     }
 
+    ok( pGetCurrentInputMessageSource( &source ), "GetCurrentInputMessageSource failed\n" );
+    ok( source.deviceType == IMDT_UNAVAILABLE, "wrong type %x\n", source.deviceType );
+    ok( source.originId == IMO_UNAVAILABLE, "wrong origin %x\n", source.originId );
+
     DestroyWindow( hwnd );
     UnregisterClassA( cls.lpszClassName, GetModuleHandleA(0) );
+    UnhookWindowsHookEx( msg_hook );
+    UnhookWindowsHookEx( kbd_hook );
 }
 
 static void test_UnregisterDeviceNotification(void)
 {
-    BOOL ret = UnregisterDeviceNotification(NULL);
-    ok(ret == FALSE, "Unregistering NULL Device Notification returned: %d\n", ret);
+    const char *not_a_devnotify = "this is a valid but garbage pointer";
+    BOOL ret;
+
+    /* NULL gives ERROR_INVALID_HANDLE */
+    SetLastError( 0xdeadbeef );
+    ret = UnregisterDeviceNotification( NULL );
+    ok( ret == FALSE, "Unregistering NULL Device Notification returned: %d\n", ret );
+    ok_ret( ERROR_INVALID_HANDLE, GetLastError() );
+
+    /* A valid pointer that isn't an HDEVNOTIFY gives ERROR_INVALID_HANDLE */
+    SetLastError( 0xdeadbeef );
+    ret = UnregisterDeviceNotification( (HDEVNOTIFY)not_a_devnotify );
+    ok( ret == FALSE, "Unregistering invalid HDEVNOTIFY returned: %d\n", ret );
+    ok_ret( ERROR_INVALID_HANDLE, GetLastError() );
+
+    /* A non-null faulting pointer gives ERROR_SERVICE_SPECIFIC_ERROR */
+    SetLastError( 0xdeadbeef );
+    ret = UnregisterDeviceNotification( (HDEVNOTIFY)0xdeadbeef );
+    ok( ret == FALSE, "Unregistering invalid HDEVNOTIFY returned: %d\n", ret );
+    ok_ret( ERROR_SERVICE_SPECIFIC_ERROR, GetLastError() );
 }
 
 static void test_SendInput( WORD vkey, WCHAR wch, HKL hkl )
@@ -5408,6 +5818,7 @@ static DWORD CALLBACK test_GetPointerInfo_thread( void *arg )
 
     hwnd = CreateWindowW( L"test", L"test name", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 200,
                           200, 0, 0, NULL, 0 );
+    empty_message_queue();
 
     memset( &pointer_info, 0xcd, sizeof(pointer_info) );
     ret = pGetPointerInfo( 1, &pointer_info );
@@ -5419,8 +5830,77 @@ static DWORD CALLBACK test_GetPointerInfo_thread( void *arg )
     return 0;
 }
 
+static BOOL accept_pointer_messages( UINT msg )
+{
+    if (is_mouse_message( msg )) return TRUE;
+    return msg >= WM_TOUCH && msg <= WM_POINTERROUTEDRELEASED;
+}
+
 static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
 {
+#define WIN_MSG(m, h, w, l, ...) {.func = MSG_TEST_WIN, .message = {.msg = m, .hwnd = h, .wparam = w, .lparam = l}, ## __VA_ARGS__}
+    UINT down_flags = POINTER_MESSAGE_FLAG_FIRSTBUTTON|POINTER_MESSAGE_FLAG_INCONTACT;
+    struct user_call button_down_seq[] =
+    {
+        WIN_MSG(WM_LBUTTONDOWN, 0, 1, 0/*rel*/),
+        {0},
+    };
+    struct user_call pointer_down_seq[] =
+    {
+        WIN_MSG(WM_POINTERDOWN, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_PRIMARY|POINTER_MESSAGE_FLAG_INRANGE|down_flags), 0/*abs*/),
+        WIN_MSG(WM_LBUTTONDOWN, 0, 1, 0/*rel*/),
+        {0},
+    };
+    struct user_call button_up_seq[] =
+    {
+        WIN_MSG(WM_LBUTTONUP, 0, 0, 0/*rel*/),
+        {0},
+    };
+    struct user_call pointer_up_seq[] =
+    {
+        WIN_MSG(WM_POINTERUP, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE), 0/*abs*/),
+        WIN_MSG(WM_LBUTTONUP, 0, 0, 0/*rel*/),
+        {0},
+    };
+    struct user_call mouse_move_seq[] =
+    {
+        WIN_MSG(WM_MOUSEMOVE, 0, 0, 0/*rel*/),
+        {0},
+    };
+    struct user_call pointer_move_seq[] =
+    {
+        WIN_MSG(WM_POINTERUPDATE, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_PRIMARY|POINTER_MESSAGE_FLAG_INRANGE), 0/*abs*/),
+        WIN_MSG(WM_MOUSEMOVE, 0, 0, 0/*rel*/),
+        {0},
+    };
+    struct user_call mouse_drag_seq[] =
+    {
+        WIN_MSG(WM_LBUTTONDOWN, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_MOUSEMOVE, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_RBUTTONDOWN, 0, 3, 0/*rel*/),
+        WIN_MSG(WM_MOUSEMOVE, 0, 3, 0/*rel*/),
+        WIN_MSG(WM_RBUTTONUP, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_LBUTTONUP, 0, 0, 0/*rel*/),
+        {0},
+    };
+    struct user_call pointer_drag_seq[] =
+    {
+        WIN_MSG(WM_POINTERDOWN, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_PRIMARY|POINTER_MESSAGE_FLAG_INRANGE|down_flags), 0/*abs*/),
+        WIN_MSG(WM_LBUTTONDOWN, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_POINTERUPDATE, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE|down_flags), 0/*abs*/),
+        WIN_MSG(WM_MOUSEMOVE, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_POINTERUPDATE, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE|POINTER_MESSAGE_FLAG_SECONDBUTTON|down_flags), 0/*abs*/),
+        WIN_MSG(WM_RBUTTONDOWN, 0, 3, 0/*rel*/),
+        WIN_MSG(WM_POINTERUPDATE, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE|POINTER_MESSAGE_FLAG_SECONDBUTTON|down_flags), 0/*abs*/),
+        WIN_MSG(WM_MOUSEMOVE, 0, 3, 0/*rel*/),
+        WIN_MSG(WM_POINTERUPDATE, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE|down_flags), 0/*abs*/),
+        WIN_MSG(WM_RBUTTONUP, 0, 1, 0/*rel*/),
+        WIN_MSG(WM_POINTERUP, 0, MAKELONG(1, POINTER_MESSAGE_FLAG_INRANGE), 0/*abs*/),
+        WIN_MSG(WM_LBUTTONUP, 0, 0, 0/*rel*/),
+        {0},
+    };
+#undef WIN_MSG
+
     POINTER_INFO pointer_info[4], expect_pointer;
     void *invalid_ptr = (void *)0xdeadbeef;
     UINT32 entry_count, pointer_count;
@@ -5432,10 +5912,12 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
         .hbrBackground = GetStockObject( WHITE_BRUSH ),
         .lpszClassName = L"test",
     };
+    LONG_PTR old_proc;
     HANDLE thread;
     ATOM class;
     DWORD res;
     HWND hwnd;
+    POINT pt[3];
     BOOL ret;
 
     if (!pGetPointerType)
@@ -5451,9 +5933,7 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError() );
     SetLastError( 0xdeadbeef );
     ret = pGetPointerType( 0xdead, &type );
-    todo_wine
     ok( !ret, "GetPointerType succeeded\n" );
-    todo_wine
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError() );
     ret = pGetPointerType( 1, &type );
     ok( ret, "GetPointerType failed, error %lu\n", GetLastError() );
@@ -5470,6 +5950,7 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
     ok( class, "RegisterClassW failed: %lu\n", GetLastError() );
 
     ret = pGetPointerInfo( 1, invalid_ptr );
+    todo_wine_if( ret == STATUS_ACCESS_VIOLATION )
     ok( !ret, "GetPointerInfo succeeded\n" );
     todo_wine
     ok( GetLastError() == ERROR_NOACCESS || broken(GetLastError() == ERROR_INVALID_PARAMETER) /* w10 32bit */,
@@ -5482,7 +5963,7 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
 
     SetCursorPos( 500, 500 );  /* avoid generating mouse message on window creation */
 
-    hwnd = CreateWindowW( L"test", L"test name", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 200,
+    hwnd = CreateWindowW( L"test", L"test name", WS_POPUP | WS_VISIBLE, 100, 100, 200,
                           200, 0, 0, NULL, 0 );
     empty_message_queue();
 
@@ -5492,13 +5973,84 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError() );
 
     SetCursorPos( 200, 200 );
-    empty_message_queue();
+    wait_messages( 100, FALSE );
+    ok_seq( empty_sequence );
+
+    old_proc = SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
+    ok_ne( 0, old_proc, LONG_PTR, "%#Ix" );
+    p_accept_message = accept_pointer_messages;
+
     mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
-    empty_message_queue();
+    wait_messages( 100, FALSE );
+
+    /* fixup flaky windows mouse position */
+    GetCursorPos( pt );
+    button_down_seq[0].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+    pointer_down_seq[0].message.lparam = MAKELONG(pt->x, pt->y);
+    pointer_down_seq[1].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+
+    if (mouse_in_pointer_enabled) ok_seq( pointer_down_seq );
+    else ok_seq( button_down_seq );
+
     mouse_event( MOUSEEVENTF_LEFTUP, 0, 0, 0, 0 );
-    empty_message_queue();
-    mouse_event( MOUSEEVENTF_MOVE, 10, 10, 0, 0 );
-    empty_message_queue();
+    wait_messages( 100, FALSE );
+
+    /* fixup flaky windows mouse position */
+    GetCursorPos( pt );
+    button_up_seq[0].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+    pointer_up_seq[0].message.lparam = MAKELONG(pt->x, pt->y);
+    pointer_up_seq[1].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+
+    if (mouse_in_pointer_enabled) ok_seq( pointer_up_seq );
+    else ok_seq( button_up_seq );
+
+    mouse_event( MOUSEEVENTF_MOVE, 20, 20, 0, 0 );
+    wait_messages( 100, FALSE );
+
+    /* fixup flaky windows mouse position */
+    GetCursorPos( pt );
+    mouse_move_seq[0].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+    pointer_move_seq[0].message.lparam = MAKELONG(pt->x, pt->y);
+    pointer_move_seq[1].message.lparam = MAKELONG(pt->x - 100, pt->y - 100);
+
+    if (mouse_in_pointer_enabled) ok_seq( pointer_move_seq );
+    else ok_seq( mouse_move_seq );
+
+    GetCursorPos( pt );
+    mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
+    mouse_event( MOUSEEVENTF_MOVE, 20, 20, 0, 0 );
+    GetCursorPos( pt + 1 );
+    mouse_event( MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0 );
+    mouse_event( MOUSEEVENTF_MOVE, -10, -10, 0, 0 );
+    GetCursorPos( pt + 2 );
+    mouse_event( MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0 );
+    mouse_event( MOUSEEVENTF_LEFTUP, 0, 0, 0, 0 );
+    wait_messages( 100, FALSE );
+
+    /* fixup flaky windows mouse position */
+    mouse_drag_seq[0].message.lparam = MAKELONG(pt[0].x - 100, pt[0].y - 100);
+    mouse_drag_seq[1].message.lparam = MAKELONG(pt[1].x - 100, pt[1].y - 100);
+    mouse_drag_seq[2].message.lparam = MAKELONG(pt[1].x - 100, pt[1].y - 100);
+    mouse_drag_seq[3].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+    mouse_drag_seq[4].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+    mouse_drag_seq[5].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+    pointer_drag_seq[0].message.lparam = MAKELONG(pt[0].x, pt[0].y);
+    pointer_drag_seq[1].message.lparam = MAKELONG(pt[0].x - 100, pt[0].y - 100);
+    pointer_drag_seq[2].message.lparam = MAKELONG(pt[1].x, pt[1].y);
+    pointer_drag_seq[3].message.lparam = MAKELONG(pt[1].x - 100, pt[1].y - 100);
+    pointer_drag_seq[4].message.lparam = MAKELONG(pt[1].x, pt[1].y);
+    pointer_drag_seq[5].message.lparam = MAKELONG(pt[1].x - 100, pt[1].y - 100);
+    pointer_drag_seq[6].message.lparam = MAKELONG(pt[2].x, pt[2].y);
+    pointer_drag_seq[7].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+    pointer_drag_seq[8].message.lparam = MAKELONG(pt[2].x, pt[2].y);
+    pointer_drag_seq[9].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+    pointer_drag_seq[10].message.lparam = MAKELONG(pt[2].x, pt[2].y);
+    pointer_drag_seq[11].message.lparam = MAKELONG(pt[2].x - 100, pt[2].y - 100);
+
+    if (mouse_in_pointer_enabled) ok_seq( pointer_drag_seq );
+    else ok_seq( mouse_drag_seq );
+
+    p_accept_message = NULL;
 
     memset( pointer_info, 0xcd, sizeof(pointer_info) );
     ret = pGetPointerInfo( 0xdead, pointer_info );
@@ -5507,7 +6059,6 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
 
     memset( pointer_info, 0xcd, sizeof(pointer_info) );
     ret = pGetPointerInfo( 1, pointer_info );
-    todo_wine_if(mouse_in_pointer_enabled)
     ok( ret == mouse_in_pointer_enabled, "GetPointerInfo failed, error %lu\n", GetLastError() );
     if (!mouse_in_pointer_enabled)
     {
@@ -5515,18 +6066,13 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
         return;
     }
 
-    todo_wine
     ok( pointer_info[0].pointerType == PT_MOUSE, "got pointerType %lu\n", pointer_info[0].pointerType );
-    todo_wine
     ok( pointer_info[0].pointerId == 1, "got pointerId %u\n", pointer_info[0].pointerId );
     ok( !!pointer_info[0].frameId, "got frameId %u\n", pointer_info[0].frameId );
-    todo_wine
-    ok( pointer_info[0].pointerFlags == (0x20000 | POINTER_MESSAGE_FLAG_INRANGE | POINTER_MESSAGE_FLAG_PRIMARY),
+    ok( pointer_info[0].pointerFlags == (0x40000 | POINTER_MESSAGE_FLAG_INRANGE),
         "got pointerFlags %#x\n", pointer_info[0].pointerFlags );
-    todo_wine
     ok( pointer_info[0].sourceDevice == INVALID_HANDLE_VALUE || broken(!!pointer_info[0].sourceDevice) /* < w10 & 32bit */,
         "got sourceDevice %p\n", pointer_info[0].sourceDevice );
-    todo_wine
     ok( pointer_info[0].hwndTarget == hwnd, "got hwndTarget %p\n", pointer_info[0].hwndTarget );
     ok( !!pointer_info[0].ptPixelLocation.x, "got ptPixelLocation %s\n", wine_dbgstr_point( &pointer_info[0].ptPixelLocation ) );
     ok( !!pointer_info[0].ptPixelLocation.y, "got ptPixelLocation %s\n", wine_dbgstr_point( &pointer_info[0].ptPixelLocation ) );
@@ -5537,15 +6083,11 @@ static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
     ok( !!pointer_info[0].ptHimetricLocationRaw.x, "got ptHimetricLocationRaw %s\n", wine_dbgstr_point( &pointer_info[0].ptHimetricLocationRaw ) );
     ok( !!pointer_info[0].ptHimetricLocationRaw.y, "got ptHimetricLocationRaw %s\n", wine_dbgstr_point( &pointer_info[0].ptHimetricLocationRaw ) );
     ok( !!pointer_info[0].dwTime, "got dwTime %lu\n", pointer_info[0].dwTime );
-    todo_wine
     ok( pointer_info[0].historyCount == 1, "got historyCount %u\n", pointer_info[0].historyCount );
-    todo_wine
     ok( pointer_info[0].InputData == 0, "got InputData %u\n", pointer_info[0].InputData );
-    todo_wine
     ok( pointer_info[0].dwKeyStates == 0, "got dwKeyStates %lu\n", pointer_info[0].dwKeyStates );
     ok( !!pointer_info[0].PerformanceCount, "got PerformanceCount %I64u\n", pointer_info[0].PerformanceCount );
-    todo_wine
-    ok( pointer_info[0].ButtonChangeType == 0, "got ButtonChangeType %u\n", pointer_info[0].ButtonChangeType );
+    ok( pointer_info[0].ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_UP, "got ButtonChangeType %u\n", pointer_info[0].ButtonChangeType );
 
     thread = CreateThread( NULL, 0, test_GetPointerInfo_thread, NULL, 0, NULL );
     res = WaitForSingleObject( thread, 5000 );
@@ -5600,23 +6142,18 @@ static void test_EnableMouseInPointer( const char *arg )
     winetest_push_context( "enable %lu", enable );
 
     ret = pEnableMouseInPointer( enable );
-    todo_wine
     ok( ret, "EnableMouseInPointer failed, error %lu\n", GetLastError() );
 
     SetLastError( 0xdeadbeef );
     ret = pEnableMouseInPointer( !enable );
     ok( !ret, "EnableMouseInPointer succeeded\n" );
-    todo_wine
     ok( GetLastError() == ERROR_ACCESS_DENIED, "got error %lu\n", GetLastError() );
     ret = pIsMouseInPointerEnabled();
-    todo_wine_if(enable)
     ok( ret == enable, "IsMouseInPointerEnabled returned %u, error %lu\n", ret, GetLastError() );
 
     ret = pEnableMouseInPointer( enable );
-    todo_wine
     ok( ret, "EnableMouseInPointer failed, error %lu\n", GetLastError() );
     ret = pIsMouseInPointerEnabled();
-    todo_wine_if(enable)
     ok( ret == enable, "IsMouseInPointerEnabled returned %u, error %lu\n", ret, GetLastError() );
 
     test_GetPointerInfo( enable );
@@ -6334,6 +6871,23 @@ static void test_ScheduleDispatchNotification(void)
     DestroyWindow(hwnd);
 }
 
+static void test_DelegateInput(void)
+{
+    UINT_PTR ret;
+
+    if (!pDelegateInput || !pUndelegateInput)
+    {
+        win_skip("DelegateInput or UndelegateInput is unavailable.\n");
+        return;
+    }
+
+    ret = pDelegateInput(0, 0, 0, 0, 0, 0);
+    todo_wine
+    ok(ret == 0, "Got unexpected ret %Ix.\n", ret);
+
+    pUndelegateInput(0, 0);
+}
+
 START_TEST(input)
 {
     char **argv;
@@ -6373,12 +6927,13 @@ START_TEST(input)
     test_keyboard_layout_name();
     test_ActivateKeyboardLayout( argv );
     test_key_names();
-    test_attach_input();
+    test_AttachThreadInput();
     test_GetKeyState();
     test_OemKeyScan();
     test_rawinput(argv[0]);
     test_DefRawInputProc();
     test_ScheduleDispatchNotification();
+    test_DelegateInput();
 
     if(pGetMouseMovePointsEx)
         test_GetMouseMovePointsEx( argv );

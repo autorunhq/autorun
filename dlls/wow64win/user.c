@@ -21,7 +21,6 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "ntuser.h"
@@ -339,12 +338,47 @@ typedef struct
     ULONG  hIconSm;
 } WNDCLASSEXW32;
 
-struct client_menu_name32
+typedef struct
 {
-    ULONG nameA;
-    ULONG nameW;
-    ULONG nameUS;
-};
+    DWORD pointerType;
+    UINT32 pointerId;
+    UINT32 frameId;
+    UINT32 pointerFlags;
+    ULONG sourceDevice;
+    ULONG hwndTarget;
+    POINT ptPixelLocation;
+    POINT ptHimetricLocation;
+    POINT ptPixelLocationRaw;
+    POINT ptHimetricLocationRaw;
+    DWORD dwTime;
+    UINT32 historyCount;
+    INT32 InputData;
+    DWORD dwKeyStates;
+    UINT64 PerformanceCount;
+    INT32 ButtonChangeType;
+} POINTER_INFO32;
+
+typedef struct
+{
+    POINTER_INFO32 pointerInfo;
+    PEN_FLAGS penFlags;
+    PEN_MASK penMask;
+    UINT32 pressure;
+    UINT32 rotation;
+    INT32 tiltX;
+    INT32 tiltY;
+} POINTER_PEN_INFO32;
+
+typedef struct
+{
+    POINTER_INFO32 pointerInfo;
+    TOUCH_FLAGS touchFlags;
+    TOUCH_MASK touchMask;
+    RECT rcContact;
+    RECT rcContactRaw;
+    UINT32 orientation;
+    UINT32 pressure;
+} POINTER_TOUCH_INFO32;
 
 struct win_proc_params32
 {
@@ -434,30 +468,6 @@ static MSG32 *msg_64to32( const MSG *msg64, MSG32 *msg32 )
     msg.pt      = msg64->pt;
     memcpy( msg32, &msg, sizeof(msg) );
     return msg32;
-}
-
-static struct client_menu_name *client_menu_name_32to64( struct client_menu_name *name,
-                                                         const struct client_menu_name32 *name32 )
-{
-    if (!name32) return NULL;
-    name->nameA = UlongToPtr( name32->nameA );
-    name->nameW = UlongToPtr( name32->nameW );
-    name->nameUS = UlongToPtr( name32->nameUS );
-    return name;
-}
-
-static struct client_menu_name32 *client_menu_name_64to32( const struct client_menu_name *name64,
-                                                           struct client_menu_name32 *name32 )
-{
-    if (name32)
-    {
-        struct client_menu_name32 name;
-        name.nameA = PtrToUlong( name64->nameA );
-        name.nameW = PtrToUlong( name64->nameW );
-        name.nameUS = PtrToUlong( name64->nameUS );
-        memcpy( name32, &name, sizeof(name) );
-    }
-    return name32;
 }
 
 static void win_proc_params_64to32( const struct win_proc_params *src, struct win_proc_params32 *dst )
@@ -2373,17 +2383,17 @@ NTSTATUS WINAPI wow64_NtUserGetClassInfoEx( UINT *args )
     HINSTANCE instance = get_ptr( &args );
     UNICODE_STRING32 *name32 = get_ptr( &args );
     WNDCLASSEXW32 *wc32 = get_ptr( &args );
-    struct client_menu_name32 *client_name32 = get_ptr( &args );
+    ULONG *menu_name32 = get_ptr( &args );
     BOOL ansi = get_ulong( &args );
 
-    struct client_menu_name client_name;
+    struct client_menu_name *menu_name;
     UNICODE_STRING name;
     WNDCLASSEXW wc;
     ATOM ret;
 
     wc.cbSize = sizeof(wc);
     if (!(ret = NtUserGetClassInfoEx( instance, unicode_str_32to64( &name, name32 ), &wc,
-                                      &client_name, ansi )))
+                                      &menu_name, ansi )))
         return 0;
 
     wc32->style = wc.style;
@@ -2397,7 +2407,7 @@ NTSTATUS WINAPI wow64_NtUserGetClassInfoEx( UINT *args )
     wc32->lpszMenuName = PtrToUlong( wc.lpszMenuName );
     wc32->lpszClassName = PtrToUlong( wc.lpszClassName );
     wc32->hIconSm = HandleToUlong( wc.hIconSm );
-    client_menu_name_64to32( &client_name, client_name32 );
+    *menu_name32 = PtrToUlong( menu_name );
     return ret;
 }
 
@@ -2781,6 +2791,18 @@ NTSTATUS WINAPI wow64_NtUserGetMessage( UINT *args )
     return ret;
 }
 
+NTSTATUS WINAPI wow64_NtUserGetMessagePos( UINT *args )
+{
+    return NtUserGetMessagePos();
+}
+
+NTSTATUS WINAPI wow64_NtUserSetMessageExtraInfo( UINT *args )
+{
+    LONG lparam = get_ulong( &args );
+
+    return NtUserSetMessageExtraInfo( lparam );
+}
+
 NTSTATUS WINAPI wow64_NtUserGetMouseMovePointsEx( UINT *args )
 {
     UINT size = get_ulong( &args );
@@ -2841,18 +2863,123 @@ NTSTATUS WINAPI wow64_NtUserGetOpenClipboardWindow( UINT *args )
     return HandleToUlong( NtUserGetOpenClipboardWindow() );
 }
 
+static void pointer_info_64to32( POINTER_INFO32 *out, const POINTER_INFO *in )
+{
+    out->pointerType = in->pointerType;
+    out->pointerId = in->pointerId;
+    out->frameId = in->frameId;
+    out->pointerFlags = in->pointerFlags;
+    out->sourceDevice = HandleToUlong( in->sourceDevice );
+    out->hwndTarget = HandleToUlong( in->hwndTarget );
+    out->ptPixelLocation = in->ptPixelLocation;
+    out->ptHimetricLocation = in->ptHimetricLocation;
+    out->ptPixelLocationRaw = in->ptPixelLocationRaw;
+    out->ptHimetricLocationRaw = in->ptHimetricLocationRaw;
+    out->dwTime = in->dwTime;
+    out->historyCount = in->historyCount;
+    out->InputData = in->InputData;
+    out->dwKeyStates = in->dwKeyStates;
+    out->PerformanceCount = in->PerformanceCount;
+    out->ButtonChangeType = in->ButtonChangeType;
+}
+
+static void pointer_pen_info_64to32( POINTER_PEN_INFO32 *out, const POINTER_PEN_INFO *in )
+{
+    pointer_info_64to32( &out->pointerInfo, &in->pointerInfo );
+    out->penFlags = in->penFlags;
+    out->penMask = in->penMask;
+    out->pressure = in->pressure;
+    out->rotation = in->rotation;
+    out->tiltX = in->tiltX;
+    out->tiltY = in->tiltY;
+}
+
+static void pointer_touch_info_64to32( POINTER_TOUCH_INFO32 *out, const POINTER_TOUCH_INFO *in )
+{
+    pointer_info_64to32( &out->pointerInfo, &in->pointerInfo );
+    out->touchFlags = in->touchFlags;
+    out->touchMask = in->touchMask;
+    out->rcContact = in->rcContact;
+    out->rcContactRaw = in->rcContactRaw;
+    out->orientation = in->orientation;
+    out->pressure = in->pressure;
+}
+
+static void pointer_info_list_64to32( UINT size, UINT count, void *out, const void *in )
+{
+    for (UINT i = 0; i < count; i++)
+    {
+        switch (size)
+        {
+        case sizeof(POINTER_INFO32): pointer_info_64to32( (POINTER_INFO32 *)out + i, (POINTER_INFO *)in + i ); break;
+        case sizeof(POINTER_PEN_INFO32): pointer_pen_info_64to32( (POINTER_PEN_INFO32 *)out + i, (POINTER_PEN_INFO *)in + i ); break;
+        case sizeof(POINTER_TOUCH_INFO32): pointer_touch_info_64to32( (POINTER_TOUCH_INFO32 *)out + i, (POINTER_TOUCH_INFO *)in + i ); break;
+        }
+    }
+}
+
 NTSTATUS WINAPI wow64_NtUserGetPointerInfoList( UINT *args )
 {
+    NTSTATUS ret;
     UINT id = get_ulong( &args );
     UINT type = get_ulong( &args );
     UINT unk0 = get_ulong( &args );
     UINT unk1 = get_ulong( &args );
     UINT size = get_ulong( &args );
-    void *entry_count = get_ptr( &args );
-    void *pointer_count = get_ptr( &args );
-    void *pointer_info = get_ptr( &args );
+    UINT32 *entry_count = get_ptr( &args );
+    UINT32 *pointer_count = get_ptr( &args );
+    void *pointer_info = get_ptr( &args ), *pointer_info64 = NULL;
+    size_t target_size = 0;
 
-    return NtUserGetPointerInfoList( id, type, unk0, unk1, size, entry_count, pointer_count, pointer_info );
+    /* same checks in NtUserGetPointerInfoList */
+    switch (type)
+    {
+    case PT_MOUSE:
+    case PT_PEN: target_size = sizeof(POINTER_PEN_INFO32); break;
+    case PT_POINTER: target_size = sizeof(POINTER_INFO32); break;
+    case PT_TOUCHPAD:
+    case PT_TOUCH: target_size = sizeof(POINTER_TOUCH_INFO32); break;
+    }
+
+    if (type == PT_MOUSE || size != target_size)
+    {
+        set_last_error32( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    switch (size)
+    {
+    case sizeof(POINTER_INFO32): target_size = sizeof(POINTER_INFO); break;
+    case sizeof(POINTER_PEN_INFO32): target_size = sizeof(POINTER_PEN_INFO); break;
+    case sizeof(POINTER_TOUCH_INFO32): target_size = sizeof(POINTER_TOUCH_INFO); break;
+    }
+
+    if (pointer_info && !(pointer_info64 = Wow64AllocateTemp( target_size * (*entry_count) * (*pointer_count) )))
+    {
+        set_last_error32( ERROR_NOT_ENOUGH_MEMORY );
+        return FALSE;
+    }
+
+    ret = NtUserGetPointerInfoList( id, type, unk0, unk1, target_size, entry_count, pointer_count, pointer_info64 );
+    if (pointer_info64) pointer_info_list_64to32( size, (*entry_count) * (*pointer_count), pointer_info, pointer_info64 );
+    return ret;
+}
+
+NTSTATUS WINAPI wow64_NtUserGetPointerType( UINT *args )
+{
+    UINT id = get_ulong( &args );
+    POINTER_INPUT_TYPE *type = get_ptr( &args );
+
+    return NtUserGetPointerType( id, type );
+}
+
+NTSTATUS WINAPI wow64_NtUserGetPointerDeviceRects( UINT *args )
+{
+    HANDLE device = get_handle( &args );
+    RECT *device_rect = get_ptr( &args );
+    RECT *display_rect = get_ptr( &args );
+
+    return NtUserGetPointerDeviceRects( device, device_rect, display_rect );
 }
 
 NTSTATUS WINAPI wow64_NtUserGetPriorityClipboardFormat( UINT *args )
@@ -3077,12 +3204,11 @@ NTSTATUS WINAPI wow64_NtUserRegisterClassExWOW( UINT *args )
     const WNDCLASSEXW32 *wc32 = get_ptr( &args );
     UNICODE_STRING32 *name32 = get_ptr( &args );
     UNICODE_STRING32 *version32 = get_ptr( &args );
-    struct client_menu_name32 *client_name32 = get_ptr( &args );
+    struct client_menu_name *menu_name = get_ptr( &args );
     DWORD fnid = get_ulong( &args );
     DWORD flags = get_ulong( &args );
     DWORD *wow = get_ptr( &args );
 
-    struct client_menu_name client_name;
     UNICODE_STRING name, version;
     WNDCLASSEXW wc;
 
@@ -3105,11 +3231,9 @@ NTSTATUS WINAPI wow64_NtUserRegisterClassExWOW( UINT *args )
     wc.lpszClassName = UlongToPtr( wc32->lpszClassName );
     wc.hIconSm = LongToHandle( wc32->hIconSm );
 
-    return NtUserRegisterClassExWOW( &wc,
-                                     unicode_str_32to64( &name, name32 ),
+    return NtUserRegisterClassExWOW( &wc, unicode_str_32to64( &name, name32 ),
                                      unicode_str_32to64( &version, version32 ),
-                                     client_menu_name_32to64( &client_name, client_name32 ),
-                                     fnid, flags, wow );
+                                     menu_name, fnid, flags, wow );
 }
 
 NTSTATUS WINAPI wow64_NtUserGetRegisteredRawInputDevices( UINT *args )
@@ -3199,16 +3323,6 @@ NTSTATUS WINAPI wow64_NtUserGetTitleBarInfo( UINT *args )
     return NtUserGetTitleBarInfo( hwnd, info );
 }
 
-NTSTATUS WINAPI wow64_NtUserGetTouchInputInfo( UINT *args )
-{
-    HTOUCHINPUT handle = get_handle( &args );
-    UINT count = get_ulong( &args );
-    TOUCHINPUT *ptr = get_ptr( &args );
-    int size = get_ulong( &args );
-
-    return NtUserGetTouchInputInfo( handle, count, ptr, size );
-}
-
 NTSTATUS WINAPI wow64_NtUserGetUpdateRect( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -3294,6 +3408,14 @@ NTSTATUS WINAPI wow64_NtUserInitializeClientPfnArrays( UINT *args )
     return NtUserInitializeClientPfnArrays( procsA, procsW, workers, user_module );
 }
 
+NTSTATUS WINAPI wow64_NtUserInitializeTouchInjection( UINT *args )
+{
+    UINT max_count = get_ulong( &args );
+    UINT mode = get_ulong( &args );
+
+    return NtUserInitializeTouchInjection( max_count, mode );
+}
+
 NTSTATUS WINAPI wow64_NtUserInternalGetWindowIcon( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -3346,14 +3468,6 @@ NTSTATUS WINAPI wow64_NtUserIsClipboardFormatAvailable( UINT *args )
 NTSTATUS WINAPI wow64_NtUserIsMouseInPointerEnabled( UINT *args )
 {
     return NtUserIsMouseInPointerEnabled();
-}
-
-NTSTATUS WINAPI wow64_NtUserIsTouchWindow( UINT *args )
-{
-    HWND hwnd = get_handle( &args );
-    ULONG *flags = get_ptr( &args );
-
-    return NtUserIsTouchWindow( hwnd, flags );
 }
 
 NTSTATUS WINAPI wow64_NtUserKillSystemTimer( UINT *args )
@@ -4304,16 +4418,6 @@ NTSTATUS WINAPI wow64_NtUserSetClassLongPtr( UINT *args )
     LONG_PTR newval = get_ulong( &args );
     BOOL ansi = get_ulong( &args );
 
-    if (offset == GCLP_MENUNAME)
-    {
-        struct client_menu_name menu_name;
-        struct client_menu_name32 *menu_name32 = UlongToPtr( newval );
-        NtUserSetClassLongPtr( hwnd, offset,
-                               (UINT_PTR)client_menu_name_32to64( &menu_name, menu_name32 ), ansi );
-        client_menu_name_64to32( &menu_name, menu_name32 );
-        return 0;
-    }
-
     return NtUserSetClassLongPtr( hwnd, offset, newval, ansi );
 }
 
@@ -4642,6 +4746,14 @@ NTSTATUS WINAPI wow64_NtUserSetWindowContextHelpId( UINT *args )
     return NtUserSetWindowContextHelpId( hwnd, id );
 }
 
+NTSTATUS WINAPI wow64_NtUserSetWindowFNID( UINT *args )
+{
+    HWND hwnd = get_handle( &args );
+    WORD fnid = get_ulong( &args );
+
+    return NtUserSetWindowFNID( hwnd, fnid );
+}
+
 NTSTATUS WINAPI wow64_NtUserSetWindowLong( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -4872,6 +4984,17 @@ NTSTATUS WINAPI wow64_NtUserSystemParametersInfo( UINT *args )
             return TRUE;
         }
         break;
+
+    case SPI_GETDEFAULTINPUTLANG:
+        if (ptr)
+        {
+            HKL hkl = 0;
+
+            if (!NtUserSystemParametersInfo( action, val, &hkl, winini )) return FALSE;
+            *(ULONG *)ptr = PtrToUlong( hkl );
+            return TRUE;
+        }
+        break;
     }
 
     return NtUserSystemParametersInfo( action, val, ptr, winini );
@@ -5086,14 +5209,14 @@ NTSTATUS WINAPI wow64_NtUserUnregisterClass( UINT *args )
 {
     UNICODE_STRING32 *name32 = get_ptr( &args );
     HINSTANCE instance = get_ptr( &args );
-    struct client_menu_name32 *menu_name32 = get_ptr( &args );
+    ULONG *menu_name32 = get_ptr( &args );
 
+    struct client_menu_name *menu_name;
     UNICODE_STRING name;
-    struct client_menu_name menu_name;
     BOOL ret;
 
     ret = NtUserUnregisterClass( unicode_str_32to64( &name, name32 ), instance, &menu_name );
-    if (ret) client_menu_name_64to32( &menu_name, menu_name32 );
+    if (ret) *menu_name32 = PtrToUlong( menu_name );
     return ret;
 }
 

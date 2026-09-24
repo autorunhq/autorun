@@ -163,7 +163,7 @@ extern void FAudio_Log(char const *msg);
 
 #define FAudio_strlen(ptr) SDL_strlen(ptr)
 #define FAudio_strcmp(str1, str2) SDL_strcmp(str1, str2)
-#define FAudio_strncmp(str1, str2, size) SDL_strncmp(str1, str1, size)
+#define FAudio_strncmp(str1, str2, size) SDL_strncmp(str1, str2, size)
 #define FAudio_strlcpy(ptr1, ptr2, size) SDL_strlcpy(ptr1, ptr2, size)
 
 #define FAudio_pow(x, y) SDL_pow(x, y)
@@ -292,6 +292,8 @@ void LinkedList_RemoveEntry(
 
 /* Internal FAudio Types */
 
+#define MAX_CHANNELS 8
+
 typedef enum FAudioVoiceType
 {
 	FAUDIO_VOICE_SOURCE,
@@ -299,24 +301,26 @@ typedef enum FAudioVoiceType
 	FAUDIO_VOICE_MASTER
 } FAudioVoiceType;
 
-typedef struct FAudioBufferEntry FAudioBufferEntry;
-struct FAudioBufferEntry
+struct queued_buffer
 {
 	FAudioBuffer buffer;
 	FAudioBufferWMA bufferWMA;
-	FAudioBufferEntry *next;
+	uint32_t loop_bytes, play_bytes;
+	bool sent_OnStartBuffer;
+	bool internal;
+
+	/* Byte offset of the first block in this buffer. This is usually zero,
+	 * but will be nonzero if the previous buffer did not have an aligned
+	 * size. */
+	uint32_t first_block_offset;
 };
 
-typedef void (FAUDIOCALL * FAudioDecodeCallback)(
-	FAudioVoice *voice,
-	FAudioBuffer *buffer,	/* Buffer to decode */
-	float *decodeCache,	/* Decode into here */
-	uint32_t samples	/* Samples to decode */
-);
+typedef void (FAUDIOCALL * FAudioDecodeCallback)(FAudioVoice *voice,
+	const void *src, float *dst, uint32_t block_offset, uint32_t sample_count);
 
 typedef void (FAUDIOCALL * FAudioResampleCallback)(
-	float *restrict dCache,
-	float *restrict resampleCache,
+	float *restrict src,
+	float *restrict dst,
 	uint64_t *resampleOffset,
 	uint64_t resampleStep,
 	uint64_t toResample,
@@ -425,6 +429,7 @@ struct FAudio
 	LinkedList *sources;
 	LinkedList *submixes;
 	LinkedList *callbacks;
+	FAudioMutex refLock; // FIXME: refcount should be an SDL_AtomicInt instead -flibit
 	FAudioMutex sourceLock;
 	FAudioMutex submixLock;
 	FAudioMutex callbackLock;
@@ -442,9 +447,9 @@ struct FAudio
 	uint32_t decodeSamples;
 	uint32_t resampleSamples;
 	uint32_t effectChainSamples;
-	float *decodeCache;
-	float *resampleCache;
-	float *effectChainCache;
+	float *decoded_audio;
+	float *resampled_audio;
+	float *effect_output;
 
 	/* Allocator callbacks */
 	FAudioMallocFunc pMalloc;
@@ -508,9 +513,9 @@ struct FAudioVoice
 			/* Resampler */
 			float resampleFreq;
 			uint64_t resampleStep;
-			uint64_t resampleOffset;
-			uint64_t curBufferOffsetDec;
+			int64_t resampleOffset;
 			uint32_t curBufferOffset;
+			float resample_taps[2][MAX_CHANNELS];
 
 			/* WMA decoding */
 #ifdef HAVE_WMADEC
@@ -524,13 +529,29 @@ struct FAudioVoice
 			FAudioResampleCallback resample;
 			FAudioVoiceCallback *callback;
 
+			/* Number of samples in a block, where the byte size of
+			 * a block is format->nBlockAlign.
+			 *
+			 * This is 1 for PCM formats, but depends on the format
+			 * for ADPCM. For WMV it is not used. */
+			uint32_t samples_per_block;
+
 			/* Dynamic */
 			uint8_t active;
+			bool eos;
 			float freqRatio;
-			uint8_t newBuffer;
 			uint64_t totalSamples;
-			FAudioBufferEntry *bufferList;
-			FAudioBufferEntry *flushList;
+
+			struct queued_buffer *queued_buffers;
+			size_t queued_buffer_count, queued_buffers_capacity;
+			struct queued_buffer *flush_buffers;
+			size_t flush_buffer_count, flush_buffers_capacity;
+
+			/* Data left over from one or more buffers whose size
+			 * was unaligned. */
+			uint8_t *unaligned_data;
+			uint32_t unaligned_size;
+
 			FAudioMutex bufferLock;
 		} src;
 		struct
@@ -538,7 +559,7 @@ struct FAudioVoice
 			/* Sample storage */
 			uint32_t inputSamples;
 			uint32_t outputSamples;
-			float *inputCache;
+			float *input;
 			uint64_t resampleStep;
 			FAudioResampleCallback resample;
 
@@ -553,7 +574,7 @@ struct FAudioVoice
 			float *output;
 
 			/* Needed when inputChannels != outputChannels */
-			float *effectCache;
+			float *effect_input;
 
 			/* Read-only */
 			uint32_t inputChannels;
@@ -570,7 +591,7 @@ void FAudio_INTERNAL_InsertSubmixSorted(
 	FAudioMallocFunc pMalloc
 );
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output);
-void FAudio_INTERNAL_ResizeDecodeCache(FAudio *audio, uint32_t size);
+void resize_decoded_audio_buffer(FAudio *audio, uint32_t size);
 void FAudio_INTERNAL_AllocEffectChain(
 	FAudioVoice *voice,
 	const FAudioEffectChain *pEffectChain
@@ -580,7 +601,9 @@ uint32_t FAudio_INTERNAL_VoiceOutputFrequency(
 	FAudioVoice *voice,
 	const FAudioVoiceSends *pSendList
 );
-extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64];
+extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[MAX_CHANNELS][MAX_CHANNELS][64];
+
+bool array_reserve(FAudio *audio, void **elements, size_t *capacity, size_t count, size_t size);
 
 /* Debug */
 
@@ -723,8 +746,8 @@ extern void (*FAudio_INTERNAL_Convert_S32_To_F32)(
 extern FAudioResampleCallback FAudio_INTERNAL_ResampleMono;
 extern FAudioResampleCallback FAudio_INTERNAL_ResampleStereo;
 extern void FAudio_INTERNAL_ResampleGeneric(
-	float *restrict dCache,
-	float *restrict resampleCache,
+	float *restrict src,
+	float *restrict dst,
 	uint64_t *resampleOffset,
 	uint64_t resampleStep,
 	uint64_t toResample,
@@ -763,13 +786,8 @@ void FAudio_INTERNAL_InitSIMDFunctions(uint8_t hasSSE2, uint8_t hasNEON);
 
 /* Decoders */
 
-#define DECODE_FUNC(type) \
-	extern void FAudio_INTERNAL_Decode##type( \
-		FAudioVoice *voice, \
-		FAudioBuffer *buffer, \
-		float *decodeCache, \
-		uint32_t samples \
-	);
+#define DECODE_FUNC(type) extern void FAudio_INTERNAL_Decode##type(FAudioVoice *voice, \
+	const void *src, float *dst, uint32_t block_offset, uint32_t sample_count);
 DECODE_FUNC(PCM8)
 DECODE_FUNC(PCM16)
 DECODE_FUNC(PCM24)
@@ -782,6 +800,7 @@ DECODE_FUNC(WMAERROR)
 
 /* WMA decoding */
 
+void decode_wma(FAudioVoice *voice, struct queued_buffer *buffer, float *dst, uint32_t sample_count);
 #ifdef HAVE_WMADEC
 uint32_t FAudio_WMADEC_init(FAudioSourceVoice *pSourceVoice, uint32_t type);
 void FAudio_WMADEC_free(FAudioSourceVoice *voice);
@@ -912,16 +931,22 @@ static inline void WriteWaveFormatExtensible(
 #define FIXED_INTEGER_MASK	~FIXED_FRACTION_MASK
 
 /* Helper macros to convert fixed to float */
-#define DOUBLE_TO_FIXED(dbl) \
-	((uint64_t) (dbl * FIXED_ONE + 0.5))
-#define FIXED_TO_DOUBLE(fxd) ( \
-	(double) (fxd >> FIXED_PRECISION) + /* Integer part */ \
-	((fxd & FIXED_FRACTION_MASK) * (1.0 / FIXED_ONE)) /* Fraction part */ \
-)
-#define FIXED_TO_FLOAT(fxd) ( \
-	(float) (fxd >> FIXED_PRECISION) + /* Integer part */ \
-	((fxd & FIXED_FRACTION_MASK) * (1.0f / FIXED_ONE)) /* Fraction part */ \
-)
+static inline uint64_t double_to_fixed(double dbl)
+{
+	return (dbl * FIXED_ONE + 0.5);
+}
+
+static inline float fixed_to_float(uint64_t fxd)
+{
+	return (float)(fxd >> FIXED_PRECISION) + /* Integer part */
+		((fxd & FIXED_FRACTION_MASK) * (1.0f / FIXED_ONE)); /* Fraction part */
+}
+
+/* 0 = first, 1 = second */
+static inline float lerp(float first, float second, float coef)
+{
+	return first + (second - first) * coef;
+}
 
 #ifdef FAUDIO_DUMP_VOICES
 /* File writing structure */

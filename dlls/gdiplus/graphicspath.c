@@ -403,7 +403,7 @@ GpStatus WINGDIPAPI GdipAddPathArc(GpPath *path, REAL x, REAL y, REAL width,
 }
 
 /*******************************************************************************
- * GdipAddPathArcI   [GDUPLUS.2]
+ * GdipAddPathArcI   [GDIPLUS.2]
  *
  * See GdipAddPathArc
  */
@@ -1929,6 +1929,10 @@ GpStatus WINGDIPAPI GdipWarpPath(GpPath *path, GpMatrix* matrix,
     FIXME("(%p,%s,%p,%i,%0.2f,%0.2f,%0.2f,%0.2f,%i,%0.2f)\n", path, debugstr_matrix(matrix),
         points, count, x, y, width, height, warpmode, flatness);
 
+    if (!path || !points || count < 1) {
+        return InvalidParameter;
+    }
+
     return NotImplemented;
 }
 
@@ -2897,7 +2901,7 @@ GpStatus WINGDIPAPI GdipClearPathMarkers(GpPath* path)
 
     count = path->pathdata.Count;
 
-    for(i = 0; i < count - 1; i++){
+    for(i = 0; i < count; i++){
         path->pathdata.Types[i] &= ~PathPointTypePathMarker;
     }
 

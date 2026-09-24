@@ -86,7 +86,6 @@ target_include_directories(wine-server-real PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES
 
 add_library(wine-sync-real OBJECT
     ../dlls/ntdll/unix/sync.c
-    ../dlls/ntdll/unix/fsync.c
 )
 
 target_compile_definitions(wine-sync-real PRIVATE ${WINE_SWITCH_NTDLL_DEFS})
@@ -154,7 +153,9 @@ target_compile_options(wine-virtual-real PRIVATE
 target_include_directories(wine-virtual-real PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES})
 
 add_library(wine-signal-arm64-real OBJECT
+    ../dlls/ntdll/unix/alpc.c
     ../dlls/ntdll/unix/signal_arm64.c
+    ../dlls/ntdll/unix/syscall.c
 )
 
 target_compile_definitions(wine-signal-arm64-real PRIVATE ${WINE_SWITCH_NTDLL_DEFS})

@@ -18,13 +18,31 @@
 
 #define COBJMACROS
 #include "initguid.h"
-#include "wincodec.h"
 #include "d3d11.h"
 #include "d3dx11.h"
 #include "wine/wined3d.h"
 #include "wine/test.h"
 #include <stdint.h>
 #include <assert.h>
+#include <math.h>
+
+static const char *debug_d3dx11_filter(uint32_t filter_flags)
+{
+    static const char *filter_types[] = { "", "D3DX11_FILTER_NONE", "D3DX11_FILTER_POINT", "D3DX11_FILTER_LINEAR",
+                                          "D3DX11_FILTER_TRIANGLE", "D3DX11_FILTER_BOX", "", "" };
+    static const char *srgb_types[] = { "", "|D3DX11_FILTER_SRGB_IN", "|D3DX11_FILTER_SRGB_OUT", "|D3DX11_FILTER_SRGB" };
+    static const char *dither_types[] = { "", "|D3DX11_FILTER_DITHER", "|D3DX11_FILTER_DITHER_DIFFUSION", ""};
+    static const char *mirror_types[] = { "", "|D3DX11_FILTER_MIRROR_U", "|D3DX11_FILTER_MIRROR_V",
+                                          "|D3DX11_FILTER_MIRROR_U|D3DX11_FILTER_MIRROR_V", "|D3DX11_FILTER_MIRROR_W",
+                                          "|D3DX11_FILTER_MIRROR_U|D3DX11_FILTER_MIRROR_W",
+                                          "|D3DX11_FILTER_MIRROR_V|D3DX11_FILTER_MIRROR_W", "|D3DX11_FILTER_MIRROR", };
+    const uint8_t mirror = ((filter_flags >> 16) & 0x7);
+    const uint8_t dither = ((filter_flags >> 19) & 0x3);
+    const uint8_t srgb = ((filter_flags >> 21) & 0x3);
+    const uint8_t filter = (filter_flags & 0x7);
+
+    return wine_dbg_sprintf("%s%s%s%s", filter_types[filter], mirror_types[mirror], dither_types[dither], srgb_types[srgb]);
+}
 
 static const D3DX11_IMAGE_LOAD_INFO d3dx11_default_load_info =
 {
@@ -54,7 +72,6 @@ static const D3DX11_IMAGE_LOAD_INFO d3dx11_default_load_info =
 #define DDSCAPS_ALPHA    0x00000002
 #define DDS_CAPS_COMPLEX 0x00000008
 #define DDS_CAPS_TEXTURE 0x00001000
-#define DDSCAPS_MIPMAP   0x00400000
 
 /* dds_header.caps2 */
 #define DDS_CAPS2_VOLUME  0x00200000
@@ -806,6 +823,64 @@ static const uint8_t dds_cube_map_4_4[] =
     0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,
     0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x80,0x00,0x00,0x00,
     0x00,0x80,0x80,0x00,0x00,0x80,0x80,0x00,0x00,0x80,0x80,0x00,0x00,0x80,0x80,0x00,
+};
+
+/* 4x4 DXT10 DDS file with a format of DXGI_FORMAT_R8G8B8A8_UNORM. */
+static const uint8_t dds_dxt10_4_4[] =
+{
+    0x44,0x44,0x53,0x20,0x7c,0x00,0x00,0x00,0x01,0x10,0x00,0x00,0x04,0x00,0x00,0x00,
+    0x04,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+    0x04,0x00,0x00,0x00,0x44,0x58,0x31,0x30,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x1c,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10,0x10,0x10,0x10,0x20,0x20,0x20,0x20,
+    0x30,0x30,0x30,0x30,0x40,0x40,0x40,0x40,0x50,0x50,0x50,0x50,0x60,0x60,0x60,0x60,
+    0x70,0x70,0x70,0x70,0x80,0x80,0x80,0x80,0x90,0x90,0x90,0x90,0xa0,0xa0,0xa0,0xa0,
+    0xb0,0xb0,0xb0,0xb0,0xc0,0xc0,0xc0,0xc0,0xd0,0xd0,0xd0,0xd0,0xe0,0xe0,0xe0,0xe0,
+    0xf0,0xf0,0xf0,0xf0,
+};
+
+/* A 4x4 2D texture array with 2 elements and 2 mips. */
+static const uint8_t dds_2d_array_4_4[] =
+{
+    0x44,0x44,0x53,0x20,0x7c,0x00,0x00,0x00,0x01,0x10,0x00,0x00,0x04,0x00,0x00,0x00,
+    0x04,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x02,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+    0x04,0x00,0x00,0x00,0x44,0x58,0x31,0x30,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x1c,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
+    0x00,0xff,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
+    0x00,0xff,0xff,0xff,
+};
+
+static const uint8_t dds_2d_array_4_4_data[] =
+{
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
+    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
+    0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
 };
 
 /* 1x1 wmp image */
@@ -1615,164 +1690,142 @@ static const struct test_image
     unsigned int size;
     const uint8_t *expected_data;
     D3DX11_IMAGE_INFO expected_info;
-    D3D11_SRV_DIMENSION expected_srv_dimension;
 }
 test_image[] =
 {
     {
         test_bmp_1bpp,       sizeof(test_bmp_1bpp),          test_bmp_1bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_bmp_4bpp,       sizeof(test_bmp_4bpp),          test_bmp_4bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_bmp_8bpp,       sizeof(test_bmp_8bpp),          test_bmp_8bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_bmp_16bpp,      sizeof(test_bmp_16bpp),         test_bmp_16bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_bmp_24bpp,      sizeof(test_bmp_24bpp),         test_bmp_24bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
+    /* 5. */
     {
         test_bmp_32bpp_xrgb, sizeof(test_bmp_32bpp_xrgb),    test_bmp_32bpp_xrgb_data,
-        {2, 2, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {2, 2, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_bmp_32bpp_argb, sizeof(test_bmp_32bpp_argb),    test_bmp_32bpp_argb_data,
-        {2, 2, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {2, 2, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_BMP}
     },
     {
         test_png_8bpp_gray,  sizeof(test_png_8bpp_gray),     test_png_8bpp_gray_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_PNG},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_PNG}
     },
     {
         test_jpg,            sizeof(test_jpg),               test_jpg_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_JPG},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_JPG}
     },
     {
         test_gif,            sizeof(test_gif),               test_gif_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_GIF},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_GIF}
     },
+    /* 10. */
     {
         test_tiff,           sizeof(test_tiff),              test_tiff_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_TIFF},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_TIFF}
     },
     {
         test_dds_alpha,      sizeof(test_dds_alpha),         test_dds_alpha_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_A8_UNORM,           D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_A8_UNORM,           D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_luminance,  sizeof(test_dds_luminance),     test_dds_luminance_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_16bpp,      sizeof(test_dds_16bpp),         test_dds_16bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_24bpp,      sizeof(test_dds_24bpp),         test_dds_24bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
+    /* 15. */
     {
         test_dds_32bpp,      sizeof(test_dds_32bpp),         test_dds_32bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_64bpp,      sizeof(test_dds_64bpp),         test_dds_64bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_96bpp,      sizeof(test_dds_96bpp),         test_dds_96bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R32G32B32_FLOAT,    D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R32G32B32_FLOAT,    D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_128bpp,     sizeof(test_dds_128bpp),        test_dds_128bpp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_dxt1,       sizeof(test_dds_dxt1),          test_dds_dxt1_data,
-        {4, 4, 1, 1, 1, 0,   DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 4, 1, 1, 1, 0,   DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
+    /* 20. */
     {
         test_dds_dxt1_4x8,   sizeof(test_dds_dxt1_4x8),      test_dds_dxt1_4x8_data,
-        {4, 8, 1, 1, 4, 0,   DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 8, 1, 1, 4, 0,   DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_dxt2,       sizeof(test_dds_dxt2),          test_dds_dxt2_data,
-        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_dxt3,       sizeof(test_dds_dxt3),          test_dds_dxt3_data,
-        {1, 3, 1, 1, 2, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 3, 1, 1, 2, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_dxt4,       sizeof(test_dds_dxt4),          test_dds_dxt4_data,
-        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_dxt5,       sizeof(test_dds_dxt5),          test_dds_dxt5_data,
-        {4, 2, 1, 1, 1, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 2, 1, 1, 1, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
+    /* 25. */
     {
         test_dds_dxt5_8x8,   sizeof(test_dds_dxt5_8x8),      test_dds_dxt5_8x8_data,
-        {8, 8, 1, 1, 4, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {8, 8, 1, 1, 4, 0,   DXGI_FORMAT_BC3_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_bc4,        sizeof(test_dds_bc4),           test_dds_bc4_data,
-        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC4_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {4, 4, 1, 1, 3, 0,   DXGI_FORMAT_BC4_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_bc5,        sizeof(test_dds_bc5),           test_dds_bc5_data,
-        {6, 3, 1, 1, 3, 0,   DXGI_FORMAT_BC5_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {6, 3, 1, 1, 3, 0,   DXGI_FORMAT_BC5_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_cube,       sizeof(test_dds_cube),          test_dds_cube_data,
-        {4, 4, 1, 6, 3, 0x4, DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURECUBE
+        {4, 4, 1, 6, 3, 0x4, DXGI_FORMAT_BC1_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_dds_volume,     sizeof(test_dds_volume),        test_dds_volume_data,
-        {4, 4, 2, 1, 3, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE3D, D3DX11_IFF_DDS},
-        D3D11_SRV_DIMENSION_TEXTURE3D
+        {4, 4, 2, 1, 3, 0,   DXGI_FORMAT_BC2_UNORM,          D3D11_RESOURCE_DIMENSION_TEXTURE3D, D3DX11_IFF_DDS}
+    },
+    /* 30. */
+    {
+        dds_2d_array_4_4,    sizeof(dds_2d_array_4_4),       dds_2d_array_4_4_data,
+        {4, 4, 1, 2, 2, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS}
     },
     {
         test_wmp,            sizeof(test_wmp),               test_wmp_data,
-        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_WMP},
-        D3D11_SRV_DIMENSION_TEXTURE2D
+        {1, 1, 1, 1, 1, 0,   DXGI_FORMAT_R8G8B8A8_UNORM,     D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_WMP}
     },
 };
 
@@ -1783,7 +1836,6 @@ static const struct test_image_load_info
     D3DX11_IMAGE_LOAD_INFO load_info;
     HRESULT expected_hr;
 
-    D3D11_SRV_DIMENSION expected_srv_dimension;
     D3D11_RESOURCE_DIMENSION expected_type;
     union
     {
@@ -1805,7 +1857,7 @@ static const struct test_image_load_info
             (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET),        D3DX11_DEFAULT, D3D11_RESOURCE_MISC_GENERATE_MIPS,
             D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT
         },
-        S_OK, D3D11_SRV_DIMENSION_TEXTURECUBE, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
+        S_OK, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
         {
             .desc_2d =
             {
@@ -1825,11 +1877,29 @@ static const struct test_image_load_info
             D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT, DXGI_FORMAT_R8G8B8A8_UNORM, D3DX11_DEFAULT,
             D3DX11_DEFAULT
         },
-        S_OK, D3D11_SRV_DIMENSION_TEXTURE2D, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
+        S_OK, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
         {
             .desc_2d =
             {
                 8, 8, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0
+            }
+        }
+    },
+    /*
+     * Pass in invalid filter flags. Ignored if the dimensions and format of the
+     * destination texture match the source image.
+     */
+    {
+        dds_dxt10_4_4, sizeof(dds_dxt10_4_4),
+        {
+            D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT, 1, (D3D11_USAGE)D3DX11_DEFAULT,
+            D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT, D3DX11_DEFAULT, 7, D3DX11_DEFAULT
+        },
+        S_OK, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
+        {
+            .desc_2d =
+            {
+                4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0
             }
         }
     },
@@ -1953,6 +2023,24 @@ static BOOL is_block_compressed(DXGI_FORMAT format)
             return TRUE;
 
     return FALSE;
+}
+
+static BOOL is_srgb_format(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        case DXGI_FORMAT_BC1_UNORM_SRGB:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:
+        case DXGI_FORMAT_BC7_UNORM_SRGB:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
 }
 
 static unsigned int get_bpp_from_format(DXGI_FORMAT format)
@@ -2185,11 +2273,17 @@ static BOOL compare_uint(unsigned int x, unsigned int y, unsigned int max_diff)
     return diff <= max_diff;
 }
 
-static BOOL compare_int(int x, int y, unsigned int max_diff)
+static BOOL compare_float(float f, float g, unsigned int ulps)
 {
-    int diff = x > y ? x - y : y - x;
+    int x = *(int *)&f;
+    int y = *(int *)&g;
 
-    return diff <= max_diff;
+    if (x < 0)
+        x = INT_MIN - x;
+    if (y < 0)
+        y = INT_MIN - y;
+
+    return compare_uint(x, y, ulps);
 }
 
 static char *get_str_a(const WCHAR *wstr)
@@ -2654,49 +2748,13 @@ static inline BOOL check_readback_pixel_4bpp_rgba(const void *got, const void *e
             && compare_uint((c1 >> 24) & 0xff, (c2 >> 24) & 0xff, max_diff);
 }
 
-static inline BOOL check_readback_pixel_4bpp_rgba_signed(const void *got, const void *expected, uint32_t max_diff)
+static inline BOOL check_readback_pixel_float4_rgba(const void *got, const void *expected, uint32_t max_diff)
 {
-    const uint32_t c1 = *(const uint32_t *)got;
-    const uint32_t c2 = *(const uint32_t *)expected;
+    const float *a = got;
+    const float *b = expected;
 
-    return compare_int((int8_t)(c1 & 0xff), (int8_t)(c2 & 0xff), max_diff)
-            && compare_int((int8_t)((c1 >> 8) & 0xff), (int8_t)((c2 >> 8) & 0xff), max_diff)
-            && compare_int((int8_t)((c1 >> 16) & 0xff), (int8_t)((c2 >> 16) & 0xff), max_diff)
-            && compare_int((int8_t)((c1 >> 24) & 0xff), (int8_t)((c2 >> 24) & 0xff), max_diff);
-}
-
-static inline BOOL check_readback_pixel_2bpp_rg(const void *got, const void *expected, uint32_t max_diff)
-{
-    const uint32_t c1 = *(const uint32_t *)got;
-    const uint32_t c2 = *(const uint32_t *)expected;
-
-    return compare_uint(c1 & 0xff, c2 & 0xff, max_diff)
-            && compare_uint((c1 >> 8) & 0xff, (c2 >> 8) & 0xff, max_diff);
-}
-
-static inline BOOL check_readback_pixel_2bpp_rg_signed(const void *got, const void *expected, uint32_t max_diff)
-{
-    const uint16_t c1 = *(const uint16_t *)got;
-    const uint16_t c2 = *(const uint16_t *)expected;
-
-    return compare_int((int8_t)(c1 & 0xff), (int8_t)(c2 & 0xff), max_diff)
-            && compare_int((int8_t)((c1 >> 8) & 0xff), (int8_t)((c2 >> 8) & 0xff), max_diff);
-}
-
-static inline BOOL check_readback_pixel_1bpp_r(const void *got, const void *expected, uint32_t max_diff)
-{
-    const uint8_t c1 = *(const uint8_t *)got;
-    const uint8_t c2 = *(const uint8_t *)expected;
-
-    return compare_uint(c1, c2, max_diff);
-}
-
-static inline BOOL check_readback_pixel_1bpp_r_signed(const void *got, const void *expected, uint32_t max_diff)
-{
-    const int8_t c1 = *(const int8_t *)got;
-    const int8_t c2 = *(const int8_t *)expected;
-
-    return compare_int(c1, c2, max_diff);
+    return (compare_float(a[0], b[0], max_diff) && compare_float(a[1], b[1], max_diff)
+        && compare_float(a[2], b[2], max_diff) && compare_float(a[3], b[3], max_diff));
 }
 
 typedef BOOL (*check_readback_pixel_func)(const void *, const void *, uint32_t);
@@ -2707,24 +2765,10 @@ static inline check_readback_pixel_func get_readback_pixel_func_for_dxgi_format(
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
         case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_B8G8R8A8_UNORM:
-        case DXGI_FORMAT_R8G8B8A8_UINT:
             return check_readback_pixel_4bpp_rgba;
 
-        case DXGI_FORMAT_R8G8B8A8_SNORM:
-        case DXGI_FORMAT_R8G8B8A8_SINT:
-            return check_readback_pixel_4bpp_rgba_signed;
-
-        case DXGI_FORMAT_R8G8_UNORM:
-            return check_readback_pixel_2bpp_rg;
-
-        case DXGI_FORMAT_R8G8_SNORM:
-            return check_readback_pixel_2bpp_rg_signed;
-
-        case DXGI_FORMAT_R8_UNORM:
-            return check_readback_pixel_1bpp_r;
-
-        case DXGI_FORMAT_R8_SNORM:
-            return check_readback_pixel_1bpp_r_signed;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            return check_readback_pixel_float4_rgba;
 
         default:
             assert(0 && "Need to add format to get_readback_pixel_func_for_dxgi_format().");
@@ -2850,71 +2894,6 @@ static void check_test_image_load_info_resource_(uint32_t line, ID3D11Resource *
 
         default:
             break;
-    }
-}
-
-#define check_test_image_load_info_srv(srv, image_load_info) \
-    check_test_image_load_info_srv_(__LINE__, srv, image_load_info)
-static void check_test_image_load_info_srv_(uint32_t line, ID3D11ShaderResourceView *srv,
-        const struct test_image_load_info *image_load_info)
-{
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
-    ID3D11Resource *resource;
-
-    ID3D11ShaderResourceView_GetDesc(srv, &srv_desc);
-    ok_(__FILE__, line)(srv_desc.ViewDimension == image_load_info->expected_srv_dimension, "Got unexpected ViewDimension %u, expected %u.\n",
-            srv_desc.ViewDimension, image_load_info->expected_srv_dimension);
-    if (srv_desc.ViewDimension != image_load_info->expected_srv_dimension)
-        return;
-
-    ID3D11ShaderResourceView_GetResource(srv, &resource);
-    check_test_image_load_info_resource_(line, resource, image_load_info);
-    ID3D11Resource_Release(resource);
-    switch (srv_desc.ViewDimension)
-    {
-    case D3D11_SRV_DIMENSION_TEXTURE2D:
-        ok_(__FILE__, line)(srv_desc.Format == image_load_info->expected_resource_desc.desc_2d.Format,
-                "Got unexpected Format %u, expected %u.\n", srv_desc.Format, image_load_info->expected_resource_desc.desc_2d.Format);
-        ok_(__FILE__, line)(!srv_desc.Texture2D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture2D.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture2D.MipLevels == image_load_info->expected_resource_desc.desc_2d.MipLevels,
-                "Unexpected MipLevels %u.\n", srv_desc.Texture2D.MipLevels);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
-        ok_(__FILE__, line)(srv_desc.Format == image_load_info->expected_resource_desc.desc_2d.Format,
-                "Got unexpected Format %u, expected %u.\n", srv_desc.Format, image_load_info->expected_resource_desc.desc_2d.Format);
-        ok_(__FILE__, line)(!srv_desc.Texture2DArray.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture2DArray.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture2DArray.MipLevels == image_load_info->expected_resource_desc.desc_2d.MipLevels,
-                "Unexpected MipLevels %u.\n", srv_desc.Texture2DArray.MipLevels);
-        ok_(__FILE__, line)(!srv_desc.Texture2DArray.FirstArraySlice, "Unexpected FirstArraySlice %u.\n",
-                srv_desc.Texture2DArray.FirstArraySlice);
-        ok_(__FILE__, line)(srv_desc.Texture2DArray.ArraySize == image_load_info->expected_resource_desc.desc_2d.ArraySize,
-                "Unexpected ArraySize %u.\n", srv_desc.Texture2DArray.ArraySize);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURECUBE:
-        ok_(__FILE__, line)(srv_desc.Format == image_load_info->expected_resource_desc.desc_2d.Format,
-                "Got unexpected Format %u, expected %u.\n", srv_desc.Format, image_load_info->expected_resource_desc.desc_2d.Format);
-        ok_(__FILE__, line)(!srv_desc.TextureCube.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.TextureCube.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.TextureCube.MipLevels == image_load_info->expected_resource_desc.desc_2d.MipLevels,
-                "Unexpected MipLevels %u.\n", srv_desc.TextureCube.MipLevels);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURE3D:
-        ok_(__FILE__, line)(srv_desc.Format == image_load_info->expected_resource_desc.desc_3d.Format,
-                "Got unexpected Format %u, expected %u.\n", srv_desc.Format, image_load_info->expected_resource_desc.desc_3d.Format);
-        ok_(__FILE__, line)(!srv_desc.Texture3D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture3D.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture3D.MipLevels == image_load_info->expected_resource_desc.desc_3d.MipLevels,
-                "Unexpected MipLevels %u.\n", srv_desc.Texture3D.MipLevels);
-        break;
-
-    default:
-        ok_(__FILE__, line)(0, "Unexpected ViewDimension %u.\n", srv_desc.ViewDimension);
-        break;
     }
 }
 
@@ -3082,80 +3061,6 @@ static void check_resource_data(ID3D11Resource *resource, const struct test_imag
     }
 }
 
-static void check_shader_resource_view_info(ID3D11ShaderResourceView *srv, const struct test_image *image, uint32_t line)
-{
-    uint32_t expected_mip_levels, expected_width, expected_height, max_dimension;
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
-    ID3D11Resource *resource;
-
-    expected_width = image->expected_info.Width;
-    expected_height = image->expected_info.Height;
-    if (is_block_compressed(image->expected_info.Format))
-    {
-        expected_width = (expected_width + 3) & ~3;
-        expected_height = (expected_height + 3) & ~3;
-    }
-    expected_mip_levels = 0;
-    max_dimension = max(max(expected_width, expected_height), image->expected_info.Depth);
-    while (max_dimension)
-    {
-        ++expected_mip_levels;
-        max_dimension >>= 1;
-    }
-
-    ID3D11ShaderResourceView_GetDesc(srv, &srv_desc);
-    ok_(__FILE__, line)(srv_desc.Format == image->expected_info.Format, "Got unexpected Format %u, expected %u.\n",
-            srv_desc.Format, image->expected_info.Format);
-    ok_(__FILE__, line)(srv_desc.ViewDimension == image->expected_srv_dimension, "Got unexpected ViewDimension %u, expected %u.\n",
-            srv_desc.ViewDimension, image->expected_srv_dimension);
-    if (srv_desc.ViewDimension != image->expected_srv_dimension)
-        return;
-
-    ID3D11ShaderResourceView_GetResource(srv, &resource);
-    check_resource_info(resource, image, line);
-    check_resource_data(resource, image, line);
-    ID3D11Resource_Release(resource);
-
-    switch (srv_desc.ViewDimension)
-    {
-    case D3D11_SRV_DIMENSION_TEXTURE2D:
-        ok_(__FILE__, line)(!srv_desc.Texture2D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture2D.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture2D.MipLevels == expected_mip_levels, "Unexpected MipLevels %u.\n",
-                srv_desc.Texture2D.MipLevels);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
-        ok_(__FILE__, line)(!srv_desc.Texture2DArray.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture2DArray.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture2DArray.MipLevels == expected_mip_levels, "Unexpected MipLevels %u.\n",
-                srv_desc.Texture2DArray.MipLevels);
-        ok_(__FILE__, line)(!srv_desc.Texture2DArray.FirstArraySlice, "Unexpected FirstArraySlice %u.\n",
-                srv_desc.Texture2DArray.FirstArraySlice);
-        ok_(__FILE__, line)(srv_desc.Texture2DArray.ArraySize == image->expected_info.ArraySize, "Unexpected ArraySize %u.\n",
-                srv_desc.Texture2DArray.ArraySize);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURECUBE:
-        ok_(__FILE__, line)(!srv_desc.TextureCube.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.TextureCube.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.TextureCube.MipLevels == expected_mip_levels, "Unexpected MipLevels %u.\n",
-                srv_desc.TextureCube.MipLevels);
-        break;
-
-    case D3D11_SRV_DIMENSION_TEXTURE3D:
-        ok_(__FILE__, line)(!srv_desc.Texture3D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n",
-                srv_desc.Texture3D.MostDetailedMip);
-        ok_(__FILE__, line)(srv_desc.Texture3D.MipLevels == expected_mip_levels, "Unexpected MipLevels %u.\n",
-                srv_desc.Texture3D.MipLevels);
-        break;
-
-    default:
-        ok_(__FILE__, line)(0, "Unexpected ViewDimension %u.\n", srv_desc.ViewDimension);
-        break;
-    }
-}
-
 static void test_D3DX11CreateAsyncMemoryLoader(void)
 {
     ID3DX11DataLoader *loader;
@@ -3316,665 +3221,6 @@ static void test_D3DX11CreateAsyncResourceLoader(void)
 
     hr = D3DX11CreateAsyncResourceLoaderW(NULL, L"noname", &loader);
     ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-}
-
-static void test_D3DX11CreateAsyncTextureInfoProcessor(void)
-{
-    ID3DX11DataProcessor *dp;
-    D3DX11_IMAGE_INFO info;
-    HRESULT hr;
-    int i;
-
-    CoInitialize(NULL);
-
-    hr = D3DX11CreateAsyncTextureInfoProcessor(NULL, NULL);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncTextureInfoProcessor(&info, NULL);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncTextureInfoProcessor(NULL, &dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    if (0)
-    {
-        /* Crashes on native. */
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[0].data, test_image[0].size);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    }
-
-    hr = ID3DX11DataProcessor_Destroy(dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncTextureInfoProcessor(&info, &dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[0].data, 0);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Process(dp, NULL, test_image[0].size);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[i].data, test_image[i].size);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-            check_image_info(&info, test_image + i, __LINE__);
-
-        winetest_pop_context();
-    }
-
-    hr = ID3DX11DataProcessor_CreateDeviceObject(dp, NULL);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    hr = ID3DX11DataProcessor_Destroy(dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    CoUninitialize();
-}
-
-static void test_D3DX11CreateAsyncTextureProcessor(void)
-{
-    ID3DX11DataProcessor *dp;
-    ID3D11Resource *resource;
-    ID3D11Device *device;
-    HRESULT hr;
-    int i;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-
-    hr = D3DX11CreateAsyncTextureProcessor(device, NULL, NULL);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncTextureProcessor(NULL, NULL, &dp);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncTextureProcessor(device, NULL, &dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[0].data, 0);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Process(dp, NULL, test_image[0].size);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Destroy(dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        D3DX11_IMAGE_LOAD_INFO load_info;
-        D3DX11_IMAGE_INFO info;
-
-        winetest_push_context("Test %u", i);
-
-        hr = D3DX11CreateAsyncTextureProcessor(device, NULL, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[i].data, test_image[i].size);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource);
-            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-            check_resource_info(resource, test_image + i, __LINE__);
-            check_resource_data(resource, test_image + i, __LINE__);
-            ID3D11Resource_Release(resource);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        /* Test behavior with load_info structure values set to defaults. */
-        load_info = d3dx11_default_load_info;
-
-        hr = D3DX11CreateAsyncTextureProcessor(device, &load_info, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[i].data, test_image[i].size);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource);
-            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-            check_resource_info(resource, test_image + i, __LINE__);
-            check_resource_data(resource, test_image + i, __LINE__);
-            ID3D11Resource_Release(resource);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        /* Check that passed in D3DX11_IMAGE_INFO structure is filled. */
-        memset(&info, 0, sizeof(info));
-        load_info = d3dx11_default_load_info;
-        load_info.pSrcInfo = &info;
-
-        hr = D3DX11CreateAsyncTextureProcessor(device, &load_info, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[i].data, test_image[i].size);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            ok(!memcmp(&test_image[i].expected_info, &info, sizeof(info)), "Unexpected image info.\n");
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource);
-            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-            check_resource_info(resource, test_image + i, __LINE__);
-            check_resource_data(resource, test_image + i, __LINE__);
-            ID3D11Resource_Release(resource);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_invalid_image_load_info); ++i)
-    {
-        const struct test_invalid_image_load_info *test = &test_invalid_image_load_info[i];
-        D3DX11_IMAGE_LOAD_INFO load_info = test->load_info;
-
-        winetest_push_context("Test %u", i);
-
-        hr = D3DX11CreateAsyncTextureProcessor(device, &load_info, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test->data, test->size);
-        todo_wine_if(test->todo_process_hr)
-            ok(hr == test->expected_process_hr, "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            resource = NULL;
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource);
-            todo_wine_if(test->todo_create_device_object_hr)
-                ok(hr == test->expected_create_device_object_hr, "Got unexpected hr %#lx.\n", hr);
-            if (SUCCEEDED(hr))
-                ID3D11Resource_Release(resource);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        winetest_pop_context();
-    }
-
-    CoUninitialize();
-
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static void test_D3DX11CreateAsyncShaderResourceViewProcessor(void)
-{
-    ID3D11ShaderResourceView *resource_view;
-    ID3DX11DataProcessor *dp;
-    ID3D11Device *device;
-    HRESULT hr;
-    int i;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-
-    hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, NULL, NULL);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncShaderResourceViewProcessor(NULL, NULL, &dp);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, NULL, &dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[0].data, 0);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Process(dp, NULL, test_image[0].size);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11DataProcessor_Destroy(dp);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-
-        hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, NULL, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_image[i].data, test_image[i].size);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource_view);
-            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-            check_shader_resource_view_info(resource_view, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(resource_view);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_invalid_image_load_info); ++i)
-    {
-        const struct test_invalid_image_load_info *test_load_info = &test_invalid_image_load_info[i];
-        D3DX11_IMAGE_LOAD_INFO load_info = test_load_info->load_info;
-
-        winetest_push_context("Test %u", i);
-
-        hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, &load_info, &dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        hr = ID3DX11DataProcessor_Process(dp, (void *)test_load_info->data, test_load_info->size);
-        todo_wine_if(test_load_info->todo_process_hr)
-            ok(hr == test_load_info->expected_process_hr, "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            resource_view = NULL;
-            hr = ID3DX11DataProcessor_CreateDeviceObject(dp, (void **)&resource_view);
-            todo_wine_if(test_load_info->todo_create_device_object_hr)
-                ok(hr == test_load_info->expected_create_device_object_hr, "Got unexpected hr %#lx.\n", hr);
-            if (SUCCEEDED(hr))
-                ID3D11ShaderResourceView_Release(resource_view);
-        }
-
-        hr = ID3DX11DataProcessor_Destroy(dp);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        winetest_pop_context();
-    }
-
-    CoUninitialize();
-
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static DWORD main_tid;
-static DWORD io_tid;
-
-struct data_object
-{
-    ID3DX11DataLoader ID3DX11DataLoader_iface;
-    ID3DX11DataProcessor ID3DX11DataProcessor_iface;
-
-    HANDLE load_started;
-    HANDLE load_done;
-    HANDLE decompress_done;
-    HRESULT load_ret;
-
-    DWORD process_tid;
-};
-
-static struct data_object *data_object_from_ID3DX11DataLoader(ID3DX11DataLoader *iface)
-{
-    return CONTAINING_RECORD(iface, struct data_object, ID3DX11DataLoader_iface);
-}
-
-static LONG data_loader_load_count;
-static WINAPI HRESULT data_loader_Load(ID3DX11DataLoader *iface)
-{
-    struct data_object *data_object = data_object_from_ID3DX11DataLoader(iface);
-    DWORD ret;
-
-    ok(InterlockedDecrement(&data_loader_load_count) >= 0, "Got unexpected call.\n");
-
-    if (!io_tid)
-        io_tid = GetCurrentThreadId();
-    ok(io_tid != main_tid, "Load called in main thread.\n");
-    ok(io_tid == GetCurrentThreadId(), "Load called in wrong thread.\n");
-
-    SetEvent(data_object->load_started);
-    ret = WaitForSingleObject(data_object->load_done, INFINITE);
-    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx.\n", ret);
-    return data_object->load_ret;
-}
-
-static LONG data_loader_decompress_count;
-static WINAPI HRESULT data_loader_Decompress(ID3DX11DataLoader *iface, void **data, SIZE_T *bytes)
-{
-    struct data_object *data_object = data_object_from_ID3DX11DataLoader(iface);
-    DWORD ret;
-
-    ok(InterlockedDecrement(&data_loader_decompress_count) >= 0, "Got unexpected call.\n");
-    ok(!!data, "Got unexpected data %p.\n", data);
-    ok(!!bytes, "Got unexpected bytes %p.\n", bytes);
-
-    data_object->process_tid = GetCurrentThreadId();
-    ok(data_object->process_tid != main_tid, "Decompress called in main thread.\n");
-    ok(data_object->process_tid != io_tid, "Decompress called in IO thread.\n");
-
-    *data = (void *)0xdeadbeef;
-    *bytes = 0xdead;
-    ret = WaitForSingleObject(data_object->decompress_done, INFINITE);
-    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx.\n", ret);
-    return S_OK;
-}
-
-static LONG data_loader_destroy_count;
-static WINAPI HRESULT data_loader_Destroy(ID3DX11DataLoader *iface)
-{
-    ok(InterlockedDecrement(&data_loader_destroy_count) >= 0, "Got unexpected call.\n");
-    return S_OK;
-}
-
-static ID3DX11DataLoaderVtbl D3DX11DataLoaderVtbl =
-{
-    data_loader_Load,
-    data_loader_Decompress,
-    data_loader_Destroy
-};
-
-static struct data_object* data_object_from_ID3DX11DataProcessor(ID3DX11DataProcessor *iface)
-{
-    return CONTAINING_RECORD(iface, struct data_object, ID3DX11DataProcessor_iface);
-}
-
-static LONG data_processor_process_count;
-static HRESULT WINAPI data_processor_Process(ID3DX11DataProcessor *iface, void *data, SIZE_T bytes)
-{
-    struct data_object *data_object = data_object_from_ID3DX11DataProcessor(iface);
-
-    ok(InterlockedDecrement(&data_processor_process_count) >= 0, "Got unexpected call.\n");
-    ok(data_object->process_tid == GetCurrentThreadId(), "Process called in unexpected thread.\n");
-
-    ok(data == (void *)0xdeadbeef, "Got unexpected data %p.\n", data);
-    ok(bytes == 0xdead, "Got unexpected bytes %Iu.\n", bytes);
-    return S_OK;
-}
-
-static LONG data_processor_create_count;
-static HRESULT WINAPI data_processor_CreateDeviceObject(ID3DX11DataProcessor *iface, void **object)
-{
-    ok(InterlockedDecrement(&data_processor_create_count) >= 0, "Got unexpected call.\n");
-    ok(main_tid == GetCurrentThreadId(), "CreateDeviceObject not called in main thread.\n");
-
-    *object = (void *)0xdeadf00d;
-    return S_OK;
-}
-
-static LONG data_processor_destroy_count;
-static HRESULT WINAPI data_processor_Destroy(ID3DX11DataProcessor *iface)
-{
-    struct data_object *data_object = data_object_from_ID3DX11DataProcessor(iface);
-
-    ok(InterlockedDecrement(&data_processor_destroy_count) >= 0, "Got unexpected call.\n");
-
-    CloseHandle(data_object->load_started);
-    CloseHandle(data_object->load_done);
-    CloseHandle(data_object->decompress_done);
-    free(data_object);
-    return S_OK;
-}
-
-static ID3DX11DataProcessorVtbl D3DX11DataProcessorVtbl =
-{
-    data_processor_Process,
-    data_processor_CreateDeviceObject,
-    data_processor_Destroy
-};
-
-static struct data_object *create_data_object(HRESULT load_ret)
-{
-    struct data_object *data_object = malloc(sizeof(*data_object));
-
-    data_object->ID3DX11DataLoader_iface.lpVtbl = &D3DX11DataLoaderVtbl;
-    data_object->ID3DX11DataProcessor_iface.lpVtbl = &D3DX11DataProcessorVtbl;
-
-    data_object->load_started = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!data_object->load_started, "CreateEvent failed, error %lu.\n", GetLastError());
-    data_object->load_done = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!data_object->load_done, "CreateEvent failed, error %lu.\n", GetLastError());
-    data_object->decompress_done = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!data_object->decompress_done, "CreateEvent failed, error %lu.\n", GetLastError());
-    data_object->load_ret = load_ret;
-
-    return data_object;
-}
-
-static void test_D3DX11CreateThreadPump(void)
-{
-    UINT io_count, process_count, device_count, count;
-    struct data_object *data_object[2];
-    ID3DX11DataProcessor *processor;
-    D3DX11_IMAGE_INFO image_info;
-    ID3DX11DataLoader *loader;
-    HRESULT hr, work_item_hr;
-    ID3D11Resource *resource;
-    ID3DX11ThreadPump *pump;
-    ID3D11Device *device;
-    SYSTEM_INFO info;
-    void *object;
-    DWORD ret;
-    int i;
-
-    main_tid = GetCurrentThreadId();
-
-    hr = D3DX11CreateThreadPump(1024, 0, &pump);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    hr = D3DX11CreateThreadPump(0, 1024, &pump);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-
-    GetSystemInfo(&info);
-    if (info.dwNumberOfProcessors > 1)
-        hr = D3DX11CreateThreadPump(0, 0, &pump);
-    else
-        hr = D3DX11CreateThreadPump(0, 2, &pump);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-    count = ID3DX11ThreadPump_GetWorkItemCount(pump);
-    ok(!count, "GetWorkItemCount returned %u.\n", count);
-    hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!io_count, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(!device_count, "Got unexpected device_count %u.\n", device_count);
-
-    data_object[0] = create_data_object(E_NOTIMPL);
-    data_object[1] = create_data_object(S_OK);
-
-    data_loader_load_count = 1;
-    hr = ID3DX11ThreadPump_AddWorkItem(pump, &data_object[0]->ID3DX11DataLoader_iface,
-            &data_object[0]->ID3DX11DataProcessor_iface, &work_item_hr, NULL);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ret = WaitForSingleObject(data_object[0]->load_started, INFINITE);
-    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx.\n", ret);
-    ok(!data_loader_load_count, "Got unexpected data_loader_load_count %ld.\n",
-            data_loader_load_count);
-    count = ID3DX11ThreadPump_GetWorkItemCount(pump);
-    ok(count == 1, "GetWorkItemCount returned %u.\n", count);
-    hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!io_count, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(!device_count, "Got unexpected device_count %u.\n", device_count);
-
-    hr = ID3DX11ThreadPump_AddWorkItem(pump, &data_object[1]->ID3DX11DataLoader_iface,
-            &data_object[1]->ID3DX11DataProcessor_iface, NULL, &object);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ret = WaitForSingleObject(data_object[0]->load_started, 50);
-    ok(ret == WAIT_TIMEOUT, "WaitForSingleObject returned %#lx.\n", ret);
-    count = ID3DX11ThreadPump_GetWorkItemCount(pump);
-    ok(count == 2, "GetWorkItemCount returned %u.\n", count);
-    hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(io_count == 1, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(!device_count, "Got unexpected device_count %u.\n", device_count);
-
-    data_loader_load_count = 1;
-    data_loader_destroy_count = 1;
-    data_processor_destroy_count = 1;
-    SetEvent(data_object[0]->load_done);
-    ret = WaitForSingleObject(data_object[1]->load_started, INFINITE);
-    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx.\n", ret);
-    ok(work_item_hr == E_NOTIMPL, "Got unexpected work_item_hr %#lx.\n", work_item_hr);
-    ok(!data_loader_destroy_count, "Got unexpected data_loader_destroy_count %ld.\n",
-            data_loader_destroy_count);
-    ok(!data_processor_destroy_count, "Got unexpected data_processor_destroy_count %ld.\n",
-            data_processor_destroy_count);
-    ok(!data_loader_load_count, "Got unexpected data_loader_load_count %ld.\n",
-            data_loader_load_count);
-
-    data_loader_decompress_count = 1;
-    data_processor_process_count = 1;
-    SetEvent(data_object[1]->load_done);
-    SetEvent(data_object[1]->decompress_done);
-
-    data_processor_create_count = 1;
-    data_loader_destroy_count = 1;
-    data_processor_destroy_count = 1;
-    hr = ID3DX11ThreadPump_WaitForAllItems(pump);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(object == (void *)0xdeadf00d, "Got unexpected object %p.\n", object);
-    ok(!data_loader_decompress_count, "Got unexpected data_loader_decompress_count %ld.\n",
-            data_loader_decompress_count);
-    ok(!data_processor_process_count, "Got unexpected data_processor_process_count %ld.\n",
-            data_processor_process_count);
-    ok(!data_processor_create_count, "Got unexpected data_processor_create_count %ld.\n",
-            data_processor_create_count);
-    ok(!data_loader_destroy_count, "Got unexpected data_loader_destroy_count %ld.\n",
-            data_loader_destroy_count);
-    ok(!data_processor_destroy_count, "Got unexpected data_processor_destroy_count %ld.\n",
-            data_processor_destroy_count);
-
-    data_object[0] = create_data_object(S_OK);
-    data_object[1] = create_data_object(S_OK);
-    SetEvent(data_object[0]->load_done);
-    SetEvent(data_object[1]->load_done);
-    SetEvent(data_object[1]->decompress_done);
-
-    data_loader_load_count = 2;
-    data_loader_decompress_count = 2;
-    data_processor_process_count = 1;
-    hr = ID3DX11ThreadPump_AddWorkItem(pump, &data_object[0]->ID3DX11DataLoader_iface,
-            &data_object[0]->ID3DX11DataProcessor_iface, NULL, &object);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11ThreadPump_AddWorkItem(pump, &data_object[1]->ID3DX11DataLoader_iface,
-            &data_object[1]->ID3DX11DataProcessor_iface, NULL, &object);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    for (;;)
-    {
-        hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-        if (hr != S_OK || device_count)
-            break;
-        Sleep(1);
-    }
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!io_count, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(device_count == 1, "Got unexpected device_count %u.\n", device_count);
-    ok(!data_loader_load_count, "Got unexpected data_loader_load_count %ld.\n",
-            data_loader_load_count);
-    ok(!data_loader_decompress_count, "Got unexpected data_loader_decompress_count %ld.\n",
-            data_loader_decompress_count);
-    ok(!data_processor_process_count, "Got unexpected data_processor_process_count %ld.\n",
-            data_processor_process_count);
-
-    hr = ID3DX11ThreadPump_ProcessDeviceWorkItems(pump, 0);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!io_count, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(device_count == 1, "Got unexpected device_count %u.\n", device_count);
-
-    data_processor_create_count = 1;
-    data_loader_destroy_count = 1;
-    data_processor_destroy_count = 1;
-    hr = ID3DX11ThreadPump_ProcessDeviceWorkItems(pump, 1);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    hr = ID3DX11ThreadPump_GetQueueStatus(pump, &io_count, &process_count, &device_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!io_count, "Got unexpected io_count %u.\n", io_count);
-    ok(!process_count, "Got unexpected process_count %u.\n", process_count);
-    ok(!device_count, "Got unexpected device_count %u.\n", device_count);
-    ok(!data_processor_create_count, "Got unexpected data_processor_create_count %ld.\n",
-            data_processor_create_count);
-    ok(!data_loader_destroy_count, "Got unexpected data_loader_destroy_count %ld.\n",
-            data_loader_destroy_count);
-    ok(!data_processor_destroy_count, "Got unexpected data_processor_destroy_count %ld.\n",
-            data_processor_destroy_count);
-
-    data_processor_process_count = 1;
-    data_loader_destroy_count = 1;
-    data_processor_destroy_count = 1;
-    SetEvent(data_object[0]->decompress_done);
-    hr = ID3DX11ThreadPump_PurgeAllItems(pump);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    data_processor_process_count = 0;
-    ok(!data_loader_destroy_count, "Got unexpected data_loader_destroy_count %ld.\n",
-            data_loader_destroy_count);
-    ok(!data_processor_destroy_count, "Got unexpected data_processor_destroy_count %ld.\n",
-            data_processor_destroy_count);
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        ID3DX11ThreadPump_Release(pump);
-        return;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-
-        hr = D3DX11CreateAsyncMemoryLoader(test_image[i].data, test_image[i].size, &loader);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = D3DX11CreateAsyncTextureInfoProcessor(&image_info, &processor);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, &work_item_hr, NULL);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = ID3DX11ThreadPump_WaitForAllItems(pump);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        ok(work_item_hr == S_OK || (work_item_hr == E_FAIL
-                    && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", work_item_hr);
-        if (work_item_hr == S_OK)
-            check_image_info(&image_info, test_image + i, __LINE__);
-
-        hr = D3DX11CreateAsyncMemoryLoader(test_image[i].data, test_image[i].size, &loader);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = D3DX11CreateAsyncTextureProcessor(device, NULL, &processor);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, &work_item_hr, (void **)&resource);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        hr = ID3DX11ThreadPump_WaitForAllItems(pump);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        ok(work_item_hr == S_OK || (work_item_hr == E_FAIL
-                    && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", work_item_hr);
-        if (work_item_hr == S_OK)
-        {
-            check_resource_info(resource, test_image + i, __LINE__);
-            check_resource_data(resource, test_image + i, __LINE__);
-            ID3D11Resource_Release(resource);
-        }
-
-        winetest_pop_context();
-    }
-
-    ok(!ID3D11Device_Release(device), "Got unexpected refcount.\n");
-
-    ret = ID3DX11ThreadPump_Release(pump);
-    ok(!ret, "Got unexpected refcount %lu.\n", ret);
 }
 
 static void check_dds_pixel_format_image_info(unsigned int line, DWORD flags, DWORD fourcc, DWORD bpp,
@@ -4318,21 +3564,19 @@ static void test_dxt10_dds_header_image_info(void)
                 D3D11_RESOURCE_DIMENSION_TEXTURE2D
             }
         },
-        /* Resource dimension is validated for cube textures. */
-        {
-            0, 4, 4, 1, (4 * 4), 1, 0, 0,
-            { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, DDS_RESOURCE_MISC_TEXTURECUBE, 2, 0, },
-            (4 * 4 * 4 * 12), { E_FAIL }
-        },
-        /*
-         * 10.
-         * 1D Texture cube, invalid.
-         */
-        {
-            0, 4, 4, 1, (4 * 4), 1, 0, 0,
-            { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, DDS_RESOURCE_MISC_TEXTURECUBE, 2, 0, },
-            (4 * 4 * 4 * 12), { E_FAIL }
-        },
+        /* Resource dimension is not necessarily validated for cube textures,
+         * it sporadically crashes on Windows. */
+        /* { */
+        /*     0, 4, 4, 1, (4 * 4), 1, 0, 0, */
+        /*     { DXGI_FORMAT_R8G8B8A8_UNORM, D3D10_RESOURCE_DIMENSION_TEXTURE3D, DDS_RESOURCE_MISC_TEXTURECUBE, 2, 0, }, */
+        /*     (4 * 4 * 4 * 12), { E_FAIL } */
+        /* }, */
+        /* 1D Texture cube, invalid. */
+        /* { */
+        /*     0, 4, 4, 1, (4 * 4), 1, 0, 0, */
+        /*     { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, DDS_RESOURCE_MISC_TEXTURECUBE, 2, 0, }, */
+        /*     (4 * 4 * 4 * 12), { E_FAIL } */
+        /* }, */
     };
     D3DX11_IMAGE_INFO info;
     unsigned int i;
@@ -4456,7 +3700,7 @@ static void test_get_image_info(void)
     hr2 = 0xdeadbeef;
     add_work_item_count = 0;
     hr = D3DX11GetImageInfoFromMemory(test_image[0].data, test_image[0].size, &thread_pump, &image_info, &hr2);
-    ok(add_work_item_count == 1, "Got unexpected add_work_item_count %u.\n", add_work_item_count);
+    todo_wine ok(add_work_item_count == 1, "Got unexpected add_work_item_count %u.\n", add_work_item_count);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
     check_image_info(&image_info, test_image, __LINE__);
@@ -4576,7 +3820,6 @@ static void test_get_image_info(void)
     check_dds_dxt10_format(DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8_UNORM, FALSE);
     check_dds_dxt10_format(DXGI_FORMAT_B8G8R8X8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM, FALSE);
     check_dds_dxt10_format(DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, FALSE);
-    check_dds_dxt10_format(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, FALSE);
 
     /* D3DX11GetImageInfoFromResource tests */
 
@@ -4871,7 +4114,7 @@ static void test_create_texture(void)
     add_work_item_count = 0;
     hr = D3DX11CreateTextureFromMemory(device, test_image[0].data, test_image[0].size,
             NULL, &thread_pump, &resource, &hr2);
-    ok(add_work_item_count == 1, "Got unexpected add_work_item_count %u.\n", add_work_item_count);
+    todo_wine ok(add_work_item_count == 1, "Got unexpected add_work_item_count %u.\n", add_work_item_count);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
     check_resource_info(resource, test_image, __LINE__);
@@ -5115,386 +4358,6 @@ static void test_create_texture(void)
     ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
 }
 
-static void test_create_shader_resource_view(void)
-{
-    static const uint32_t dds_24bit_8_8_mip_level_expected[] = { 0xff0000ff, 0xff00ff00, 0xffff0000, 0xff000000 };
-    static const WCHAR test_resource_name[] = L"resource.data";
-    static const WCHAR test_filename[] = L"image.data";
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
-    D3D11_TEXTURE2D_DESC tex_2d_desc;
-    D3DX11_IMAGE_LOAD_INFO load_info;
-    ID3D11ShaderResourceView *srv;
-    D3DX11_IMAGE_INFO img_info;
-    ID3D11Resource *resource;
-    ID3D11Texture2D *tex_2d;
-    HMODULE resource_module;
-    ID3D11Device *device;
-    WCHAR path[MAX_PATH];
-    uint32_t i, mip_level;
-    HRESULT hr, hr2;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-
-    /* D3DX11CreateShaderResourceViewFromMemory tests. */
-    srv = (ID3D11ShaderResourceView *)0xdeadbeef;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(NULL, test_bmp_1bpp, sizeof(test_bmp_1bpp), NULL, NULL, &srv, &hr2);
-    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(srv == (ID3D11ShaderResourceView *)0xdeadbeef, "Got unexpected srv %p.\n", srv);
-
-    srv = (ID3D11ShaderResourceView *)0xdeadbeef;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, NULL, 0, NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(srv == (ID3D11ShaderResourceView *)0xdeadbeef, "Got unexpected srv %p.\n", srv);
-
-    srv = (ID3D11ShaderResourceView *)0xdeadbeef;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, NULL, sizeof(test_bmp_1bpp), NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(srv == (ID3D11ShaderResourceView *)0xdeadbeef, "Got unexpected srv %p.\n", srv);
-
-    srv = (ID3D11ShaderResourceView *)0xdeadbeef;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, test_bmp_1bpp, 0, NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(srv == (ID3D11ShaderResourceView *)0xdeadbeef, "Got unexpected srv %p.\n", srv);
-
-    srv = (ID3D11ShaderResourceView *)0xdeadbeef;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, test_bmp_1bpp, sizeof(test_bmp_1bpp) - 1, NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(srv == (ID3D11ShaderResourceView *)0xdeadbeef, "Got unexpected srv %p.\n", srv);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromMemory(device, test_image[i].data, test_image[i].size, NULL, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            check_shader_resource_view_info(srv, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_invalid_image_load_info); ++i)
-    {
-        const struct test_invalid_image_load_info *test_load_info = &test_invalid_image_load_info[i];
-
-        winetest_push_context("Test %u", i);
-
-        hr2 = 0xdeadbeef;
-        load_info = test_load_info->load_info;
-        hr = D3DX11CreateShaderResourceViewFromMemory(device, test_load_info->data, test_load_info->size, &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        todo_wine_if(test_load_info->todo_hr) ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-            ID3D11ShaderResourceView_Release(srv);
-
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_image_load_info); ++i)
-    {
-        const struct test_image_load_info *test_load_info = &test_image_load_info[i];
-
-        winetest_push_context("Test %u", i);
-
-        load_info = test_load_info->load_info;
-        load_info.pSrcInfo = &img_info;
-
-        srv = NULL;
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromMemory(device, test_load_info->data, test_load_info->size, &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-        {
-            check_test_image_load_info_srv(srv, test_load_info);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        winetest_pop_context();
-    }
-
-    /* Check behavior of the FirstMipLevel argument. */
-    for (i = 0; i < 2; ++i)
-    {
-        winetest_push_context("FirstMipLevel %u", i);
-        memset(&img_info, 0, sizeof(img_info));
-        load_info = d3dx11_default_load_info;
-        load_info.FirstMipLevel = i;
-        load_info.MipLevels = D3DX11_FROM_FILE;
-        load_info.pSrcInfo = &img_info;
-
-        srv = NULL;
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromMemory(device, dds_24bit_8_8, sizeof(dds_24bit_8_8), &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
-                D3DX11_IFF_DDS, FALSE);
-
-        ID3D11ShaderResourceView_GetDesc(srv, &srv_desc);
-        ok(srv_desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D, "Got unexpected ViewDimension %u.\n", srv_desc.ViewDimension);
-        ok(srv_desc.Format == img_info.Format, "Got unexpected Format %#x.\n", srv_desc.Format);
-        ok(!srv_desc.Texture2D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n", srv_desc.Texture2D.MostDetailedMip);
-        ok(srv_desc.Texture2D.MipLevels == img_info.MipLevels, "Unexpected MipLevels %u.\n", srv_desc.Texture2D.MipLevels);
-
-        ID3D11ShaderResourceView_GetResource(srv, &resource);
-        hr = ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&tex_2d);
-        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-
-        ID3D11Texture2D_GetDesc(tex_2d, &tex_2d_desc);
-        check_texture2d_desc_values(&tex_2d_desc, 8, 8, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-                D3D11_BIND_SHADER_RESOURCE, 0, 0, FALSE);
-        for (mip_level = 0; mip_level < 4; ++mip_level)
-        {
-            winetest_push_context("MipLevel %u", mip_level);
-            check_texture_sub_resource_u32(tex_2d, mip_level, NULL,
-                    dds_24bit_8_8_mip_level_expected[min(3, mip_level + i)]);
-            winetest_pop_context();
-        }
-
-        ID3D11Texture2D_Release(tex_2d);
-        ID3D11Resource_Release(resource);
-        ID3D11ShaderResourceView_Release(srv);
-        winetest_pop_context();
-    }
-
-    /*
-     * If FirstMipLevel is set to a value that is larger than the total number
-     * of mip levels in the image, it falls back to 0.
-     */
-    memset(&img_info, 0, sizeof(img_info));
-    load_info = d3dx11_default_load_info;
-    load_info.FirstMipLevel = 5;
-    load_info.MipLevels = D3DX11_FROM_FILE;
-    load_info.pSrcInfo = &img_info;
-
-    resource = NULL;
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, dds_24bit_8_8, sizeof(dds_24bit_8_8), &load_info, NULL, &srv, &hr2);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
-            D3DX11_IFF_DDS, FALSE);
-
-    ID3D11ShaderResourceView_GetDesc(srv, &srv_desc);
-    ok(srv_desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D, "Got unexpected ViewDimension %u.\n", srv_desc.ViewDimension);
-    ok(srv_desc.Format == img_info.Format, "Got unexpected Format %#x.\n", srv_desc.Format);
-    ok(!srv_desc.Texture2D.MostDetailedMip, "Unexpected MostDetailedMip %u.\n", srv_desc.Texture2D.MostDetailedMip);
-    ok(srv_desc.Texture2D.MipLevels == img_info.MipLevels, "Unexpected MipLevels %u.\n", srv_desc.Texture2D.MipLevels);
-
-    ID3D11ShaderResourceView_GetResource(srv, &resource);
-    hr = ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&tex_2d);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ID3D11Texture2D_GetDesc(tex_2d, &tex_2d_desc);
-    check_texture2d_desc_values(&tex_2d_desc, 8, 8, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0, FALSE);
-    for (mip_level = 0; mip_level < 4; ++mip_level)
-    {
-        winetest_push_context("MipLevel %u", mip_level);
-        check_texture_sub_resource_u32(tex_2d, mip_level, NULL, dds_24bit_8_8_mip_level_expected[mip_level]);
-        winetest_pop_context();
-    }
-
-    ID3D11Texture2D_Release(tex_2d);
-    ID3D11Resource_Release(resource);
-    ID3D11ShaderResourceView_Release(srv);
-
-    hr2 = 0xdeadbeef;
-    add_work_item_count = 0;
-    hr = D3DX11CreateShaderResourceViewFromMemory(device, test_image[0].data, test_image[0].size,
-            NULL, &thread_pump, &srv, &hr2);
-    ok(add_work_item_count == 1, "Got unexpected add_work_item_count %u.\n", add_work_item_count);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-    check_shader_resource_view_info(srv, test_image, __LINE__);
-    ID3D11ShaderResourceView_Release(srv);
-
-    /* D3DX11CreateShaderResourceViewFromFile tests */
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromFileW(device, NULL, NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromFileW(device, L"deadbeef", NULL, NULL, &srv, &hr2);
-    ok(hr == D3D11_ERROR_FILE_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromFileA(device, NULL, NULL, NULL, &srv, &hr2);
-    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromFileA(device, "deadbeef", NULL, NULL, &srv, &hr2);
-    ok(hr == D3D11_ERROR_FILE_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
-    ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-        create_file(test_filename, test_image[i].data, test_image[i].size, path);
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromFileW(device, path, NULL, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            check_shader_resource_view_info(srv, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromFileA(device, get_str_a(path), NULL, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        if (hr == S_OK)
-        {
-            check_shader_resource_view_info(srv, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        delete_file(test_filename);
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_invalid_image_load_info); ++i)
-    {
-        const struct test_invalid_image_load_info *test_load_info = &test_invalid_image_load_info[i];
-
-        winetest_push_context("Test %u", i);
-        create_file(test_filename, test_image[i].data, test_image[i].size, path);
-        load_info = test_load_info->load_info;
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromFileW(device, path, &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        todo_wine_if(test_load_info->todo_hr) ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-            ID3D11ShaderResourceView_Release(srv);
-
-        hr = D3DX11CreateShaderResourceViewFromFileA(device, get_str_a(path), &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        todo_wine_if(test_load_info->todo_hr) ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-            ID3D11ShaderResourceView_Release(srv);
-
-        delete_file(test_filename);
-        winetest_pop_context();
-    }
-
-    /* D3DX11CreateShaderResourceViewFromResource tests */
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromResourceW(device, NULL, NULL, NULL, NULL, &srv, &hr2);
-    ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromResourceW(device, NULL, L"deadbeef", NULL, NULL, &srv, &hr2);
-    ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromResourceA(device, NULL, NULL, NULL, NULL, &srv, &hr2);
-    ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-    hr2 = 0xdeadbeef;
-    hr = D3DX11CreateShaderResourceViewFromResourceA(device, NULL, "deadbeef", NULL, NULL, &srv, &hr2);
-    ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-    ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-
-    for (i = 0; i < ARRAY_SIZE(test_image); ++i)
-    {
-        winetest_push_context("Test %u", i);
-        resource_module = create_resource_module(test_resource_name, test_image[i].data, test_image[i].size);
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromResourceW(device, resource_module, L"deadbeef", NULL, NULL, &srv, &hr2);
-        ok(hr == D3DX11_ERR_INVALID_DATA, "Got unexpected hr %#lx.\n", hr);
-        ok(hr2 == 0xdeadbeef, "Got unexpected hr2 %#lx.\n", hr2);
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromResourceW(device, resource_module,
-                test_resource_name, NULL, NULL, &srv, &hr2);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        if (hr == S_OK)
-        {
-            check_shader_resource_view_info(srv, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromResourceA(device, resource_module,
-                get_str_a(test_resource_name), NULL, NULL, &srv, &hr2);
-        ok(hr == S_OK || broken(hr == E_FAIL && test_image[i].expected_info.ImageFileFormat == D3DX11_IFF_WMP),
-                "Got unexpected hr %#lx.\n", hr);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        if (hr == S_OK)
-        {
-            check_shader_resource_view_info(srv, test_image + i, __LINE__);
-            ID3D11ShaderResourceView_Release(srv);
-        }
-
-        delete_resource_module(test_resource_name, resource_module);
-        winetest_pop_context();
-    }
-
-    for (i = 0; i < ARRAY_SIZE(test_invalid_image_load_info); ++i)
-    {
-        const struct test_invalid_image_load_info *test_load_info = &test_invalid_image_load_info[i];
-
-        winetest_push_context("Test %u", i);
-        resource_module = create_resource_module(test_resource_name, test_load_info->data, test_load_info->size);
-        load_info = test_load_info->load_info;
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromResourceW(device, resource_module,
-                test_resource_name, &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        todo_wine_if(test_load_info->todo_hr) ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-            ID3D11ShaderResourceView_Release(srv);
-
-        hr2 = 0xdeadbeef;
-        hr = D3DX11CreateShaderResourceViewFromResourceA(device, resource_module,
-                get_str_a(test_resource_name), &load_info, NULL, &srv, &hr2);
-        ok(hr == hr2, "Got unexpected hr2 %#lx.\n", hr2);
-        todo_wine_if(test_load_info->todo_hr) ok(hr == test_load_info->expected_hr, "Got unexpected hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
-            ID3D11ShaderResourceView_Release(srv);
-
-        delete_resource_module(test_resource_name, resource_module);
-        winetest_pop_context();
-    }
-
-    CoUninitialize();
-
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
 static void test_image_filters(void)
 {
     static const struct
@@ -5704,2472 +4567,216 @@ static void test_image_filters(void)
 }
 
 /*
- * 4x4 RGBA cubemap with faces in the following order: blue, green, red,
- * green/blue, red/blue, red/green.
+ * DXT2 and DXT4 are decoded without taking premultiplied alpha
+ * into account on d3dx10/d3dx11.
  */
-static const uint8_t rgba_4_4_cubemap[] =
+static void test_dxt_formats(void)
 {
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
-    0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
-    0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
-    0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,
-    0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,
-    0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,
-    0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,
-    0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,
-    0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,
-    0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,
-    0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,
-    0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,0xff,0xff,0x00,0xff,
-};
-
-/*
- * 8x8 (BC1-BC3) image data, four 4x4 blocks:
- * +-----+-----+
- * |Blue |Green|
- * |     |     |
- * +-----+-----+
- * |Red  |Black|
- * |     |     |
- * +-----+-----+
- */
-static const uint8_t bc1_8_8[] =
-{
-    0x1f,0x00,0x1f,0x00,0xaa,0xaa,0xaa,0xaa,0xe0,0x07,0xe0,0x07,0xaa,0xaa,0xaa,0xaa,
-    0x00,0xf8,0x00,0xf8,0xaa,0xaa,0xaa,0xaa,0x00,0x00,0x00,0x00,0xaa,0xaa,0xaa,0xaa,
-};
-
-static const uint8_t bc2_8_8[] =
-{
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x1f,0x00,0x1f,0x00,0xaa,0xaa,0xaa,0xaa,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xe0,0x07,0xe0,0x07,0xaa,0xaa,0xaa,0xaa,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0xf8,0x00,0xf8,0xaa,0xaa,0xaa,0xaa,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xaa,0xaa,0xaa,0xaa,
-};
-
-static const uint8_t bc3_8_8[] =
-{
-    0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0x00,0x1f,0x00,0x00,0x00,0x00,0x00,
-    0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xe0,0x07,0xe0,0x07,0x00,0x00,0x00,0x00,
-    0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xf8,0x00,0xf8,0x00,0x00,0x00,0x00,
-    0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-};
-
-static const uint8_t bc1_to_bc3_8_8_decompressed[] =
-{
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,
-    0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,
-    0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,0xff,0x00,0x00,0xff,
-    0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,
-};
-
-static const uint8_t bc4_unorm_8_8[] =
-{
-    0xff,0xff,0x49,0x92,0x24,0x49,0x92,0x24,0x80,0x80,0x49,0x92,0x24,0x49,0x92,0x24,
-    0x00,0x00,0x49,0x92,0x24,0x49,0x92,0x24,0x40,0x40,0x49,0x92,0x24,0x49,0x92,0x24,
-};
-
-static const uint8_t r8_unorm_8_8_decompressed[] =
-{
-    0xff,0xff,0xff,0xff,0x80,0x80,0x80,0x80,0xff,0xff,0xff,0xff,0x80,0x80,0x80,0x80,
-    0xff,0xff,0xff,0xff,0x80,0x80,0x80,0x80,0xff,0xff,0xff,0xff,0x80,0x80,0x80,0x80,
-    0x00,0x00,0x00,0x00,0x40,0x40,0x40,0x40,0x00,0x00,0x00,0x00,0x40,0x40,0x40,0x40,
-    0x00,0x00,0x00,0x00,0x40,0x40,0x40,0x40,0x00,0x00,0x00,0x00,0x40,0x40,0x40,0x40,
-};
-
-static const uint8_t bc5_unorm_8_8[] =
-{
-    0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xdf,0xdf,0x00,0x00,0x00,0x00,0x00,0x00,
-    0xbf,0xbf,0x00,0x00,0x00,0x00,0x00,0x00,0x9f,0x9f,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x7f,0x7f,0x00,0x00,0x00,0x00,0x00,0x00,0x5f,0x5f,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x3f,0x3f,0x00,0x00,0x00,0x00,0x00,0x00,0x1f,0x1f,0x00,0x00,0x00,0x00,0x00,0x00,
-};
-
-static const uint8_t r8g8_unorm_8_8_decompressed[] =
-{
-    0xff,0xdf,0xff,0xdf,0xff,0xdf,0xff,0xdf,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,
-    0xff,0xdf,0xff,0xdf,0xff,0xdf,0xff,0xdf,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,
-    0xff,0xdf,0xff,0xdf,0xff,0xdf,0xff,0xdf,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,
-    0xff,0xdf,0xff,0xdf,0xff,0xdf,0xff,0xdf,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,0xbf,0x9f,
-    0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,
-    0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,
-    0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,
-    0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x7f,0x5f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,0x3f,0x1f,
-};
-
-/*
- * DXGI_FORMAT_BC{4,5}_SNORM compression/decompression is bugged in
- * native D3DX10/D3DX11. When decompressing, it seems to read the decompressed
- * 8-bit channel values as signed normalized integers, but then clamps them to the
- * unsigned normalized integer range. That means 0x00-0x7f present unique values,
- * but anything from 0x80-0xff just gives the equivalent of 0x00. When this gets
- * converted to an SNORM format such as DXGI_FORMAT_R8_SNORM, it gets mapped
- * to the SNORM range, where 0x00 is -1.0f, and 0x7f is 1.0f. So effectively,
- * it ends up with half of the range.
- */
-static const uint8_t bc4_snorm_8_8[] =
-{
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x20,0x20,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x7f,0x7f,0x00,0x00,0x00,0x00,0x00,0x00,0x5f,0x5f,0x00,0x00,0x00,0x00,0x00,0x00,
-};
-
-static const uint8_t r8_snorm_8_8_decompressed[] =
-{
-    0x81,0x81,0x81,0x81,0xc1,0xc1,0xc1,0xc1,0x81,0x81,0x81,0x81,0xc1,0xc1,0xc1,0xc1,
-    0x81,0x81,0x81,0x81,0xc1,0xc1,0xc1,0xc1,0x81,0x81,0x81,0x81,0xc1,0xc1,0xc1,0xc1,
-    0x7F,0x7F,0x7F,0x7F,0x3F,0x3F,0x3F,0x3F,0x7F,0x7F,0x7F,0x7F,0x3F,0x3F,0x3F,0x3F,
-    0x7F,0x7F,0x7F,0x7F,0x3F,0x3F,0x3F,0x3F,0x7F,0x7F,0x7F,0x7F,0x3F,0x3F,0x3F,0x3F,
-};
-
-static const uint8_t bc5_snorm_8_8[] =
-{
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10,0x10,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x1f,0x1f,0x00,0x00,0x00,0x00,0x00,0x00,0x2f,0x2f,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x3e,0x3e,0x00,0x00,0x00,0x00,0x00,0x00,0x4e,0x4e,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x5d,0x5d,0x00,0x00,0x00,0x00,0x00,0x00,0x6d,0x6d,0x00,0x00,0x00,0x00,0x00,0x00,
-};
-
-static const uint8_t r8g8_snorm_8_8_decompressed[] =
-{
-    0x81,0xa1,0x81,0xa1,0x81,0xa1,0x81,0xa1,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,
-    0x81,0xa1,0x81,0xa1,0x81,0xa1,0x81,0xa1,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,
-    0x81,0xa1,0x81,0xa1,0x81,0xa1,0x81,0xa1,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,
-    0x81,0xa1,0x81,0xa1,0x81,0xa1,0x81,0xa1,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,0xbf,0xdf,
-    0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,
-    0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,
-    0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,
-    0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0xfd,0x1d,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,0x3b,0x5b,
-};
-
-static const uint8_t rgba_unorm_4_4[] =
-{
-    0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0x90,0xa0,0xb0,0xc0,0xd0,0xe0,0xf0,0xff,
-    0x14,0x24,0x34,0x44,0x54,0x64,0x74,0x84,0x94,0xa4,0xb4,0xc4,0xd4,0xe4,0xf4,0xff,
-    0x18,0x28,0x38,0x48,0x58,0x68,0x78,0x88,0x98,0xa8,0xb8,0xc8,0xd8,0xe8,0xf8,0xff,
-    0x1c,0x2c,0x3c,0x4c,0x5c,0x6c,0x7c,0x8c,0x9c,0xac,0xbc,0xcc,0xdc,0xec,0xfc,0xff,
-};
-
-static const uint8_t rgba_snorm_4_4[] =
-{
-    0x91,0xa1,0xb1,0xc1,0xd1,0xe1,0xf1,0x00,0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x7f,
-    0x95,0xa5,0xb5,0xc5,0xd5,0xe5,0xf5,0x04,0x14,0x24,0x34,0x44,0x54,0x64,0x74,0x7f,
-    0x99,0xa9,0xb9,0xc9,0xd9,0xe9,0xf9,0x08,0x18,0x28,0x38,0x48,0x58,0x68,0x78,0x7f,
-    0x9d,0xad,0xbd,0xcd,0xdd,0xed,0xfd,0x0c,0x1c,0x2c,0x3c,0x4c,0x5c,0x6c,0x7c,0x7f,
-};
-
-/* Conversion to/from uint/sint. */
-static const uint8_t rgba_uint_4_4[] =
-{
-    0x00,0x04,0x08,0x0c,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x30,0x34,0x38,0x3c,
-    0x40,0x44,0x48,0x4c,0x50,0x54,0x58,0x5c,0x60,0x64,0x68,0x6c,0x70,0x74,0x78,0x7c,
-    0x80,0x84,0x88,0x8c,0x90,0x94,0x98,0x9c,0xa0,0xa4,0xa8,0xac,0xb0,0xb4,0xb8,0xbc,
-    0xc0,0xc4,0xc8,0xcc,0xd0,0xd4,0xd8,0xdc,0xe0,0xe4,0xe8,0xec,0xf0,0xf4,0xf8,0xfc,
-};
-
-static const uint8_t rgba_uint_to_sint_4_4[] =
-{
-    0x00,0x04,0x08,0x0c,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x30,0x34,0x38,0x3c,
-    0x40,0x44,0x48,0x4c,0x50,0x54,0x58,0x5c,0x60,0x64,0x68,0x6c,0x70,0x74,0x78,0x7c,
-    0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,
-    0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,0x7f,
-};
-
-static const uint8_t rgba_sint_4_4[] =
-{
-    0x80,0x84,0x88,0x8c,0x90,0x94,0x98,0x9c,0xa0,0xa4,0xa8,0xac,0xb0,0xb4,0xb8,0xbc,
-    0xc0,0xc4,0xc8,0xcc,0xd0,0xd4,0xd8,0xdc,0xe0,0xe4,0xe8,0xec,0xf0,0xf4,0xf8,0xfc,
-    0x00,0x04,0x08,0x0c,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x30,0x34,0x38,0x3c,
-    0x40,0x44,0x48,0x4c,0x50,0x54,0x58,0x5c,0x60,0x64,0x68,0x6c,0x70,0x74,0x78,0x7c,
-};
-
-static const uint8_t rgba_sint_to_uint_4_4[] =
-{
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x04,0x08,0x0c,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x30,0x34,0x38,0x3c,
-    0x40,0x44,0x48,0x4c,0x50,0x54,0x58,0x5c,0x60,0x64,0x68,0x6c,0x70,0x74,0x78,0x7c,
-};
-
-/* Conversion to/from SRGB. */
-static const uint8_t rgba_unorm_srgb_4_4[] =
-{
-    0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0x90,0xa0,0xb0,0xc0,0xd0,0xe0,0xf0,0xff,
-    0x14,0x24,0x34,0x44,0x54,0x64,0x74,0x84,0x94,0xa4,0xb4,0xc4,0xd4,0xe4,0xf4,0xff,
-    0x18,0x28,0x38,0x48,0x58,0x68,0x78,0x88,0x98,0xa8,0xb8,0xc8,0xd8,0xe8,0xf8,0xff,
-    0x1c,0x2c,0x3c,0x4c,0x5c,0x6c,0x7c,0x8c,0x9c,0xac,0xbc,0xcc,0xdc,0xec,0xfc,0xff,
-};
-
-static const uint8_t rgba_unorm_srgb_to_unorm_non_srgb_4_4[] =
-{
-    0x01,0x03,0x06,0x40,0x14,0x1e,0x2a,0x80,0x49,0x5b,0x71,0xc0,0xa3,0xc0,0xdf,0xff,
-    0x01,0x03,0x08,0x44,0x16,0x21,0x2d,0x84,0x4d,0x61,0x77,0xc4,0xaa,0xc7,0xe7,0xff,
-    0x01,0x04,0x09,0x48,0x19,0x23,0x31,0x88,0x52,0x66,0x7c,0xc8,0xb1,0xcf,0xf0,0xff,
-    0x02,0x05,0x0b,0x4c,0x1b,0x27,0x34,0x8c,0x57,0x6b,0x82,0xcc,0xb8,0xd7,0xf8,0xff,
-};
-
-static const uint8_t rgba_unorm_non_srgb_4_4[] =
-{
-    0x00,0x20,0x50,0x40,0x50,0x60,0x70,0x80,0x90,0xa0,0xb0,0xc0,0xd0,0xe0,0xf0,0xff,
-    0x00,0x24,0x54,0x44,0x54,0x64,0x74,0x84,0x94,0xa4,0xb4,0xc4,0xd4,0xe4,0xf4,0xff,
-    0x00,0x28,0x58,0x48,0x58,0x68,0x78,0x88,0x98,0xa8,0xb8,0xc8,0xd8,0xe8,0xf8,0xff,
-    0x00,0x2c,0x5c,0x4c,0x5c,0x6c,0x7c,0x8c,0x9c,0xac,0xbc,0xcc,0xdc,0xec,0xfc,0xff,
-};
-
-static const uint8_t rgba_unorm_non_srgb_to_unorm_srgb_4_4[] =
-{
-    0x00,0x63,0x97,0x40,0x97,0xa4,0xaf,0x80,0xc5,0xce,0xd7,0xc0,0xe8,0xf0,0xf8,0xff,
-    0x00,0x69,0x9a,0x44,0x9a,0xa7,0xb2,0x84,0xc7,0xd1,0xda,0xc4,0xea,0xf2,0xfa,0xff,
-    0x00,0x6e,0x9d,0x48,0x9d,0xaa,0xb5,0x88,0xca,0xd3,0xdc,0xc8,0xec,0xf4,0xfc,0xff,
-    0x00,0x73,0xa0,0x4c,0xa0,0xad,0xb8,0x8c,0xcc,0xd5,0xde,0xcc,0xee,0xf6,0xfe,0xff,
-};
-
-static const struct test_texture_format_conversion
-{
-    D3D11_TEXTURE2D_DESC src_desc;
-    const uint8_t *src_data;
-
-    DXGI_FORMAT dst_format;
-    const uint8_t *expected_dst_data;
-
-    uint8_t max_diff;
-    BOOL todo_hr;
-    BOOL todo_data;
-}
-test_texture_format_conversion[] =
-{
+    static const uint8_t expected_dst[] =
     {
-        { 8, 8, 1, 1, DXGI_FORMAT_BC1_UNORM,      { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc1_8_8,      DXGI_FORMAT_R8G8B8A8_UNORM, bc1_to_bc3_8_8_decompressed
-    },
+        0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,
+        0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,
+        0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,
+        0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,0x21,0x20,0x21,0x88,0x31,0x31,0x31,0x88,
+    };
+    static const uint8_t test_dxt2_dxt3_data[] =
     {
-        { 8, 8, 1, 1, DXGI_FORMAT_BC2_UNORM,      { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc2_8_8,      DXGI_FORMAT_R8G8B8A8_UNORM, bc1_to_bc3_8_8_decompressed
-    },
+        0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x88,0x86,0x31,0x04,0x21,0x11,0x11,0x11,0x11,
+    };
+    static const uint8_t test_dxt4_dxt5_data[] =
     {
-        { 8, 8, 1, 1, DXGI_FORMAT_BC3_UNORM,      { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc3_8_8,      DXGI_FORMAT_R8G8B8A8_UNORM, bc1_to_bc3_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1,  DXGI_FORMAT_BC4_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc4_unorm_8_8, DXGI_FORMAT_R8_UNORM,  r8_unorm_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1,  DXGI_FORMAT_BC4_SNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc4_snorm_8_8, DXGI_FORMAT_R8_SNORM,  r8_snorm_8_8_decompressed, .todo_data = TRUE
-    },
-    {
-        { 8, 8, 1, 1,  DXGI_FORMAT_BC5_UNORM,  { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc5_unorm_8_8, DXGI_FORMAT_R8G8_UNORM, r8g8_unorm_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1,  DXGI_FORMAT_BC5_SNORM,      { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        bc5_snorm_8_8, DXGI_FORMAT_R8G8_SNORM,  r8g8_snorm_8_8_decompressed, .todo_data = TRUE
-    },
-    {
-        { 4, 4, 1, 1,   DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        /*
-         * Wine's UNORM->SNORM conversion doesn't always match Window's,
-         * worst case is a difference of +/- 1.
-         */
-        rgba_unorm_4_4, DXGI_FORMAT_R8G8B8A8_SNORM, rgba_snorm_4_4, .max_diff = 1
-    },
-    {
-        { 4, 4, 1, 1,  DXGI_FORMAT_R8G8B8A8_UINT, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        rgba_uint_4_4, DXGI_FORMAT_R8G8B8A8_SINT, rgba_uint_to_sint_4_4, .todo_hr = TRUE
-    },
-    {
-        { 4, 4, 1, 1,  DXGI_FORMAT_R8G8B8A8_SINT, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        rgba_sint_4_4, DXGI_FORMAT_R8G8B8A8_UINT, rgba_sint_to_uint_4_4, .todo_hr = TRUE
-    },
-    {
-        { 4, 4, 1, 1,        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        rgba_unorm_srgb_4_4, DXGI_FORMAT_R8G8B8A8_UNORM,      rgba_unorm_srgb_to_unorm_non_srgb_4_4
-    },
-    {
-        { 4, 4, 1, 1,            DXGI_FORMAT_R8G8B8A8_UNORM,      { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        rgba_unorm_non_srgb_4_4, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, rgba_unorm_non_srgb_to_unorm_srgb_4_4
-    },
-};
-
-static const struct test_texture_compression
-{
-    D3D11_TEXTURE2D_DESC src_desc;
-    DXGI_FORMAT compressed_format;
-    const BYTE *src_data;
-}
-test_texture_compression[] =
-{
-    {
-        { 8, 8, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        DXGI_FORMAT_BC1_UNORM, bc1_to_bc3_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        DXGI_FORMAT_BC2_UNORM, bc1_to_bc3_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        DXGI_FORMAT_BC3_UNORM, bc1_to_bc3_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1, DXGI_FORMAT_R8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        DXGI_FORMAT_BC4_UNORM, r8_unorm_8_8_decompressed
-    },
-    {
-        { 8, 8, 1, 1, DXGI_FORMAT_R8G8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 },
-        DXGI_FORMAT_BC5_UNORM, r8g8_unorm_8_8_decompressed
-    },
-};
-
-static void set_d3dx11_texture_load_info(D3DX11_TEXTURE_LOAD_INFO *load_info, D3D11_BOX *src_box, D3D11_BOX *dst_box,
-        uint32_t src_first_mip, uint32_t dst_first_mip, uint32_t num_mips, uint32_t src_first_element,
-        uint32_t dst_first_element, uint32_t num_elems, uint32_t filter, uint32_t mip_filter)
-{
-    load_info->pSrcBox = src_box;
-    load_info->pDstBox = dst_box;
-    load_info->SrcFirstMip = src_first_mip;
-    load_info->DstFirstMip = dst_first_mip;
-    load_info->NumMips = num_mips;
-    load_info->SrcFirstElement = src_first_element;
-    load_info->DstFirstElement = dst_first_element;
-    load_info->NumElements = num_elems;
-    load_info->Filter = filter;
-    load_info->MipFilter = mip_filter;
-}
-
-static void set_d3d11_2d_texture_desc(D3D11_TEXTURE2D_DESC *desc, uint32_t width, uint32_t height, uint32_t mip_levels,
-        uint32_t array_size, DXGI_FORMAT format, uint32_t sample_count, uint32_t sample_quality, uint32_t usage,
-        uint32_t bind_flags, uint32_t cpu_access_flags, uint32_t misc_flags)
-{
-    desc->Width = width;
-    desc->Height = height;
-    desc->MipLevels = mip_levels;
-    desc->ArraySize = array_size;
-    desc->Format = format;
-    desc->SampleDesc.Count = sample_count;
-    desc->SampleDesc.Quality = sample_quality;
-    desc->Usage = usage;
-    desc->BindFlags = bind_flags;
-    desc->CPUAccessFlags = cpu_access_flags;
-    desc->MiscFlags = misc_flags;
-}
-
-static void init_subresource_data(D3D11_SUBRESOURCE_DATA *subresources, const void *data, uint32_t width, uint32_t height,
-        uint32_t depth, uint32_t mip_levels, uint32_t array_size, DXGI_FORMAT format)
-{
-    const uint8_t *pixel_ptr = data;
-    uint32_t i, j;
-
-    for (i = 0; i < array_size; ++i)
-    {
-        uint32_t tmp_width, tmp_height, tmp_depth;
-
-        tmp_width = width;
-        tmp_height = height;
-        tmp_depth = depth;
-        for (j = 0; j < mip_levels; ++j)
-        {
-            D3D11_SUBRESOURCE_DATA *subresource = &subresources[(i * mip_levels) + j];
-
-            subresource->pSysMem = pixel_ptr;
-            subresource->SysMemPitch = (tmp_width * get_bpp_from_format(format) + 7) / 8;
-            subresource->SysMemSlicePitch = subresource->SysMemPitch * tmp_height;
-            if (is_block_compressed(format))
-                subresource->SysMemPitch *= 4;
-            pixel_ptr += (subresource->SysMemSlicePitch * tmp_depth);
-
-            tmp_width  = max(tmp_width  / 2, 1);
-            tmp_height = max(tmp_height / 2, 1);
-            tmp_depth  = max(tmp_depth  / 2, 1);
-        }
-    }
-}
-
-static uint8_t *init_buffer_color(uint8_t *buf, uint32_t color, uint32_t width, uint32_t height, uint32_t depth)
-{
-    uint32_t i, total_pixels = width * height * depth;
-    uint32_t *color_buf = (uint32_t *)buf;
-
-    for (i = 0; i < total_pixels; ++i)
-        color_buf[i] = color;
-    return buf + (total_pixels * 4);
-}
-
-static void set_texture_sub_resource_color(ID3D11DeviceContext *context, ID3D11Resource *rsrc, uint32_t idx, uint32_t color,
-        uint32_t width, uint32_t height, uint32_t depth)
-{
-    uint8_t tmp_buf[1024];
-
-    init_buffer_color(tmp_buf, color, width, height, depth);
-    ID3D11DeviceContext_UpdateSubresource(context, rsrc, idx, NULL, (const void *)tmp_buf, width * sizeof(color),
-            width * height * sizeof(color));
-}
-
-static void test_D3DX11LoadTextureFromTexture(void)
-{
-    static const uint32_t test_cubemap_face_colors[] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff, 0xff00ffff };
-    static const uint32_t test_tex_2d_array_colors[] = { 0xff0000ff, 0xff00ff00, 0xffff0000, 0xff000000 };
-    D3D11_SUBRESOURCE_DATA sub_resource_data[6] = { 0 };
-    D3DX11_TEXTURE_LOAD_INFO load_info;
-    ID3D11Texture2D *tex_2d, *tex2_2d;
-    D3D11_TEXTURE2D_DESC tex_2d_desc;
-    uint8_t tmp_buf[1024], *tmp_ptr;
-    ID3D11DeviceContext *context;
-    struct resource_readback rb;
-    ID3D11Device *device;
-    RECT tmp_rect;
-    uint32_t i;
-    HRESULT hr;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-    ID3D11Device_GetImmediateContext(device, &context);
-
-    /*
-     * Tests that still need to be written:
-     * -pSrcBox/pDstBox, how they behave WRT mip levels, too large, too small.
-     * -3D texture test.
-     */
-
-    /* 8x8 2D texture array with 2 elements and 2 mip levels. */
-    tmp_ptr = tmp_buf;
-    for (i = 0; i < ARRAY_SIZE(test_tex_2d_array_colors); ++i)
-        tmp_ptr = init_buffer_color(tmp_ptr, test_tex_2d_array_colors[i], !(i & 0x1) ? 8 : 4, !(i & 0x1) ? 8 : 4, 1);
-
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 8, 8, 2, 2, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-    init_subresource_data(sub_resource_data, (const void *)tmp_buf, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < ARRAY_SIZE(test_tex_2d_array_colors); ++i)
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_tex_2d_array_colors[i]);
-
-    /* 8x8 2D texture with 4 mip levels. */
-    memset(tmp_buf, 0xff, sizeof(tmp_buf));
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 8, 8, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-    init_subresource_data(sub_resource_data, (const void *)tmp_buf, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 4; ++i)
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, 0xffffffff);
-
-    /*
-     * If a NULL load info argument is supplied, the default D3DX11_TEXTURE_LOAD_INFO
-     * values are used. The first 2 mip levels from tex_2d are loaded, and
-     * the last 2 mip levels of tex2_2d are generated from mip level 1.
-     */
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, NULL, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 4; ++i)
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, test_tex_2d_array_colors[min(i, 1)]);
-
-    /* Invalid Filter argument. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, 0, 0, 0, 9, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    /* Filter argument of 0 is invalid. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    /* Invalid MipFilter argument. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, 0, 0, 0, D3DX11_DEFAULT, 9);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    /* MipFilter argument is only validated if mip levels are generated. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 2, 0, 0, 0, D3DX11_DEFAULT, 9);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    /*
-     * Cannot use the same source/destination texture with matching first mip
-     * level and array element.
-     */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    /* Same first mip level, different first element. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, 0, 1, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 2; ++i)
-        check_texture_sub_resource_u32(tex_2d, 2 + i, NULL, test_tex_2d_array_colors[i]);
-
-    /* Restore values. */
-    for (i = 0; i < ARRAY_SIZE(test_tex_2d_array_colors); ++i)
-    {
-        set_texture_sub_resource_color(context, (ID3D11Resource *)tex_2d, i, test_tex_2d_array_colors[i], !(i & 0x1) ? 8 : 4,
-                !(i & 0x1) ? 8 : 4, 1);
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_tex_2d_array_colors[i]);
-    }
-
-    /* Same first array element, but different FirstMips. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 1, 0, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 4; ++i)
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_tex_2d_array_colors[(i < 2) ? 0 : 2]);
-
-    for (i = 0; i < ARRAY_SIZE(test_tex_2d_array_colors); ++i)
-    {
-        set_texture_sub_resource_color(context, (ID3D11Resource *)tex_2d, i, test_tex_2d_array_colors[i], !(i & 0x1) ? 8 : 4,
-                !(i & 0x1) ? 8 : 4, 1);
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_tex_2d_array_colors[i]);
-    }
-
-    /*
-     * If SrcFirstElement/DstFirstElement are greater than the total number of
-     * elements, element 0 is used.
-     */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 2, 2, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 2; ++i)
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, test_tex_2d_array_colors[i]);
-
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 2, 1, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 2; ++i)
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, test_tex_2d_array_colors[2 + i]);
-
-    for (i = 0; i < 4; ++i)
-    {
-        set_texture_sub_resource_color(context, (ID3D11Resource *)tex2_2d, i, 0xff000000 | (0xff << (8 * i)), 8 >> i, 8 >> i, 1);
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, 0xff000000 | (0xff << (8 * i)));
-    }
-
-    /* DstFirstElement value tests. */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 2, 0, 2, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex2_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 2; ++i)
-        check_texture_sub_resource_u32(tex_2d, i, NULL, 0xff000000 | (0xff << (8 * i)));
-    for (i = 0; i < 2; ++i)
-        check_texture_sub_resource_u32(tex_2d, 2 + i, NULL, test_tex_2d_array_colors[2 + i]);
-
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 2, 0, 1, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex2_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 4; ++i)
-        check_texture_sub_resource_u32(tex_2d, i, NULL, !(i & 0x01) ? 0xff0000ff : 0xff00ff00);
-
-    for (i = 0; i < 4; ++i)
-    {
-        set_texture_sub_resource_color(context, (ID3D11Resource *)tex_2d, i, test_tex_2d_array_colors[i], !(i & 0x1) ? 8 : 4,
-                !(i & 0x1) ? 8 : 4, 1);
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_tex_2d_array_colors[i]);
-
-        set_texture_sub_resource_color(context, (ID3D11Resource *)tex2_2d, i, 0xff000000 | (0xff << (8 * i)), 8 >> i, 8 >> i, 1);
-        check_texture_sub_resource_u32(tex2_2d, i, NULL, 0xff000000 | (0xff << (8 * i)));
-    }
-
-    /*
-     * If SrcFirstMip is greater than the total number of mip levels, the
-     * final mip level is used, E.g, if SrcFirstMip is set to 3, but the
-     * texture only has 2 mip levels, mip level 2 is used.
-     */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 2, 0, 1, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex2_2d, 0, NULL, test_tex_2d_array_colors[1]);
-
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 1, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex2_2d, 0, NULL, test_tex_2d_array_colors[0]);
-
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 1, 0, 1, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex2_2d, 0, NULL, test_tex_2d_array_colors[1]);
-
-    /*
-     * If DstFirstMip is greater than the total number of mips, nothing is
-     * loaded.
-     */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 5, 1, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex2_2d, 0, NULL, test_tex_2d_array_colors[1]);
-    check_texture_sub_resource_u32(tex2_2d, 3, NULL, 0xff000000);
-
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 3, 1, 0, 0, 0, D3DX11_DEFAULT, D3DX11_DEFAULT);
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex2_2d, 3, NULL, test_tex_2d_array_colors[0]);
-
-    ID3D11Texture2D_Release(tex2_2d);
-    ID3D11Texture2D_Release(tex_2d);
-
-    for (i = 0; i < ARRAY_SIZE(test_texture_format_conversion); ++i)
-    {
-        const struct test_texture_format_conversion *test = &test_texture_format_conversion[i];
-        const D3D11_TEXTURE2D_DESC *src_desc = &test->src_desc;
-        D3D11_TEXTURE2D_DESC tmp_desc = test->src_desc;
-        ID3D11Texture2D *src_texture, *dst_texture;
-
-        winetest_push_context("Texture format conversion test %u", i);
-        src_texture = dst_texture = NULL;
-
-        memset(&rb, 0, sizeof(rb));
-        init_subresource_data(sub_resource_data, test->src_data, src_desc->Width, src_desc->Height, 1,
-                src_desc->MipLevels, src_desc->ArraySize, src_desc->Format);
-        hr = ID3D11Device_CreateTexture2D(device, src_desc, sub_resource_data, &src_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_texture;
-
-        tmp_desc.Format = test->dst_format;
-        hr = ID3D11Device_CreateTexture2D(device, &tmp_desc, NULL, &dst_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_texture;
-
-        hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)src_texture, NULL, (ID3D11Resource *)dst_texture);
-        todo_wine_if(test->todo_hr) ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_texture;
-
-        get_resource_readback((ID3D11Resource *)dst_texture, 0, &rb);
-        if (!rb.resource)
-            goto cleanup_next_texture;
-
-        todo_wine_if(test->todo_data)
-            check_test_readback(&rb, test->expected_dst_data, src_desc->Width, src_desc->Height, 1, test->dst_format, test->max_diff);
-cleanup_next_texture:
-        if (src_texture)
-            ID3D11Texture2D_Release(src_texture);
-        if (rb.resource)
-            release_resource_readback(&rb);
-        if (dst_texture)
-            ID3D11Texture2D_Release(dst_texture);
-        winetest_pop_context();
-    }
-
-    /*
-     * Texture compression tests. Rather than checking against compressed values
-     * (which we're unlikely to match due to differences in compression
-     * algorithms), we'll:
-     * Load our uncompressed source texture into a compressed destination texture.
-     * Load our compressed destination texture into a new decompressed destination texture.
-     * Check that the data in the new decompressed texture matches the
-     * original data.
-     */
-    for (i = 0; i < ARRAY_SIZE(test_texture_compression); ++i)
-    {
-        const struct test_texture_compression *test = &test_texture_compression[i];
-        const D3D11_TEXTURE2D_DESC *src_desc = &test->src_desc;
-        ID3D11Texture2D *src_texture, *dst_texture;
-        D3D11_TEXTURE2D_DESC tmp_desc = *src_desc;
-
-        winetest_push_context("Texture compression test %u", i);
-        src_texture = dst_texture = NULL;
-
-        /* Create the uncompressed source texture. */
-        memset(&rb, 0, sizeof(rb));
-        init_subresource_data(sub_resource_data, (const void *)test->src_data, src_desc->Width, src_desc->Height, 1,
-                src_desc->MipLevels, src_desc->ArraySize, src_desc->Format);
-        hr = ID3D11Device_CreateTexture2D(device, src_desc, sub_resource_data, &src_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_compressed_texture;
-
-        /* Create the compressed destination texture. */
-        tmp_desc.Format = test->compressed_format;
-        hr = ID3D11Device_CreateTexture2D(device, &tmp_desc, NULL, &dst_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_compressed_texture;
-
-        /* Load the uncompressed source into the compressed destination. */
-        hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)src_texture, NULL, (ID3D11Resource *)dst_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_compressed_texture;
-
-        ID3D11Texture2D_Release(src_texture);
-        src_texture = dst_texture;
-
-        /* Now create the uncompressed destination texture to decompress into. */
-        tmp_desc = *src_desc;
-        memset(tmp_buf, 0, sizeof(tmp_buf));
-        init_subresource_data(sub_resource_data, (const void *)tmp_buf, src_desc->Width, src_desc->Height, 1,
-                src_desc->MipLevels, src_desc->ArraySize, src_desc->Format);
-        hr = ID3D11Device_CreateTexture2D(device, &tmp_desc, sub_resource_data, &dst_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_compressed_texture;
-
-        hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)src_texture, NULL, (ID3D11Resource *)dst_texture);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            goto cleanup_next_compressed_texture;
-
-        get_resource_readback((ID3D11Resource *)dst_texture, 0, &rb);
-        if (!rb.resource)
-            goto cleanup_next_texture;
-
-        check_test_readback(&rb, test->src_data, tmp_desc.Width, tmp_desc.Height, 1, tmp_desc.Format, 0);
-
-cleanup_next_compressed_texture:
-        if (src_texture)
-            ID3D11Texture2D_Release(src_texture);
-        if (rb.resource)
-            release_resource_readback(&rb);
-        if (dst_texture)
-            ID3D11Texture2D_Release(dst_texture);
-        winetest_pop_context();
-    }
-
-    /*
-     * Use D3DX11LoadTextureFromTexture to generate mip levels. Some games
-     * (Total War: Shogun 2) do this instead of using D3DX11FilterTexture.
-     */
-    set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 1, 2, 0, 0, 1, D3DX11_FILTER_POINT, D3DX11_FILTER_NONE);
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 8, 8, 3, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-
-    memset(tmp_buf, 0, sizeof(tmp_buf));
-    memcpy(tmp_buf, bc1_to_bc3_8_8_decompressed, sizeof(bc1_to_bc3_8_8_decompressed));
-    init_subresource_data(sub_resource_data, (const void *)tmp_buf, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex_2d, 1, NULL, 0x00000000);
-    check_texture_sub_resource_u32(tex_2d, 2, NULL, 0x00000000);
-
-    hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    SetRect(&tmp_rect, 0, 0, 2, 2);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xffff0000);
-    SetRect(&tmp_rect, 2, 0, 4, 2);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff00ff00);
-    SetRect(&tmp_rect, 0, 2, 2, 4);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff0000ff);
-    SetRect(&tmp_rect, 2, 2, 4, 4);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff000000);
-
-    SetRect(&tmp_rect, 0, 0, 1, 1);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xffff0000);
-    SetRect(&tmp_rect, 1, 0, 2, 1);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff00ff00);
-    SetRect(&tmp_rect, 0, 1, 1, 2);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff0000ff);
-    SetRect(&tmp_rect, 1, 1, 2, 2);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff000000);
-
-    ID3D11Texture2D_Release(tex_2d);
-
-    /* Cubemap. */
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 4, 4, 1, 6, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE);
-    init_subresource_data(sub_resource_data, (const void *)rgba_4_4_cubemap, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    for (i = 0; i < 6; ++i)
-        check_texture_sub_resource_u32(tex_2d, i, NULL, test_cubemap_face_colors[i]);
-
-    /* Load individual faces of a cubemap texture into a non-cubemap texture. */
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 4, 4, 3, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, NULL, &tex2_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    for (i = 0; i < 6; ++i)
-    {
-        /* On top of loading individual faces, we'll also generate mips. */
-        set_d3dx11_texture_load_info(&load_info, NULL, NULL, 0, 0, 0, i, 0, 1, D3DX11_FILTER_POINT, D3DX11_FILTER_POINT);
-        hr = D3DX11LoadTextureFromTexture(context, (ID3D11Resource *)tex_2d, &load_info, (ID3D11Resource *)tex2_2d);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-        check_texture_sub_resource_u32(tex2_2d, 0, NULL, test_cubemap_face_colors[i]);
-        check_texture_sub_resource_u32(tex2_2d, 1, NULL, test_cubemap_face_colors[i]);
-        check_texture_sub_resource_u32(tex2_2d, 2, NULL, test_cubemap_face_colors[i]);
-    }
-
-    ID3D11Texture2D_Release(tex2_2d);
-    ID3D11Texture2D_Release(tex_2d);
-
-    ID3D11DeviceContext_Release(context);
-    CoUninitialize();
-
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static void test_D3DX11FilterTexture(void)
-{
-    D3D11_SUBRESOURCE_DATA sub_resource_data[4] = { 0 };
-    D3D11_TEXTURE2D_DESC tex_2d_desc;
-    ID3D11DeviceContext *context;
-    ID3D11Texture2D *tex_2d;
-    uint8_t tmp_buf[1024];
-    ID3D11Device *device;
-    RECT tmp_rect;
-    HRESULT hr;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-    ID3D11Device_GetImmediateContext(device, &context);
-
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 8, 8, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-    memset(tmp_buf, 0, sizeof(tmp_buf));
-    memcpy(tmp_buf, bc1_to_bc3_8_8_decompressed, sizeof(bc1_to_bc3_8_8_decompressed));
-    init_subresource_data(sub_resource_data, (const void *)tmp_buf, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_texture_sub_resource_u32(tex_2d, 1, NULL, 0x00000000);
-    check_texture_sub_resource_u32(tex_2d, 2, NULL, 0x00000000);
-    check_texture_sub_resource_u32(tex_2d, 3, NULL, 0x00000000);
-
-    /* Invalid filter arguments. */
-    hr = D3DX11FilterTexture(context, (ID3D11Resource *)tex_2d, 0, 0);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11FilterTexture(context, (ID3D11Resource *)tex_2d, 0, 9);
-    ok(hr == D3DERR_INVALIDCALL, "Unexpected hr %#lx.\n", hr);
-
-    /*
-     * Filter argument isn't validated if src_level argument is greater than
-     * total mip levels.
-     */
-    hr = D3DX11FilterTexture(context, (ID3D11Resource *)tex_2d, 5, 9);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11FilterTexture(context, (ID3D11Resource *)tex_2d, 0, D3DX11_FILTER_POINT);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    SetRect(&tmp_rect, 0, 0, 2, 2);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xffff0000);
-    SetRect(&tmp_rect, 2, 0, 4, 2);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff00ff00);
-    SetRect(&tmp_rect, 0, 2, 2, 4);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff0000ff);
-    SetRect(&tmp_rect, 2, 2, 4, 4);
-    check_texture_sub_resource_u32(tex_2d, 1, &tmp_rect, 0xff000000);
-
-    SetRect(&tmp_rect, 0, 0, 1, 1);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xffff0000);
-    SetRect(&tmp_rect, 1, 0, 2, 1);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff00ff00);
-    SetRect(&tmp_rect, 0, 1, 1, 2);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff0000ff);
-    SetRect(&tmp_rect, 1, 1, 2, 2);
-    check_texture_sub_resource_u32(tex_2d, 2, &tmp_rect, 0xff000000);
-
-    check_texture_sub_resource_u32(tex_2d, 3, NULL, 0xffff0000);
-
-    ID3D11Texture2D_Release(tex_2d);
-
-    ID3D11DeviceContext_Release(context);
-    CoUninitialize();
-
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static HRESULT d3d11_create_texture_1d(ID3D11Device *device, uint32_t width, uint32_t mip_levels, uint32_t array_size,
-        DXGI_FORMAT format, D3D11_USAGE usage, uint32_t bind_flags, uint32_t cpu_access_flags, uint32_t misc_flags,
-        ID3D11Texture1D **tex)
-{
-    const D3D11_TEXTURE1D_DESC desc = { width, mip_levels, array_size, format, usage, bind_flags, cpu_access_flags,
-                                        misc_flags };
-
-    return ID3D11Device_CreateTexture1D(device, &desc, NULL, tex);
-}
-
-static HRESULT d3d11_create_texture_2d(ID3D11Device *device, uint32_t width, uint32_t height, uint32_t mip_levels,
-        uint32_t array_size, DXGI_FORMAT format, uint32_t sample_count, uint32_t sample_quality, D3D11_USAGE usage,
-        uint32_t bind_flags, uint32_t cpu_access_flags, uint32_t misc_flags, ID3D11Texture2D **tex)
-{
-    const D3D11_TEXTURE2D_DESC desc = { width, height, mip_levels, array_size, format, { sample_count, sample_quality },
-                                        usage, bind_flags, cpu_access_flags, misc_flags };
-
-    return ID3D11Device_CreateTexture2D(device, &desc, NULL, tex);
-}
-
-static HRESULT d3d11_create_texture_3d(ID3D11Device *device, uint32_t width, uint32_t height, uint32_t depth,
-        uint32_t mip_levels, DXGI_FORMAT format, D3D11_USAGE usage, uint32_t bind_flags, uint32_t cpu_access_flags,
-        uint32_t misc_flags, ID3D11Texture3D **tex)
-{
-    const D3D11_TEXTURE3D_DESC desc = { width, height, depth, mip_levels, format, usage, bind_flags, cpu_access_flags,
-                                        misc_flags };
-
-    return ID3D11Device_CreateTexture3D(device, &desc, NULL, tex);
-}
-
-enum texture_type
-{
-    TEXTURE_2D,
-    TEXTURE_2D_ARRAY,
-    TEXTURE_3D,
-    TEXTURE_CUBE,
-    TEXTURE_1D,
-    TEXTURE_1D_ARRAY,
-    TEXTURE_TYPE_COUNT,
-};
-
-static void test_save_texture_to_dds(void)
-{
-    struct dds_expected
-    {
-        struct dds_header header;
-        struct dds_header_dxt10 dxt10;
-        BOOL todo;
+        0x88,0x88,0x00,0x00,0x00,0x00,0x00,0x00,0x86,0x31,0x04,0x21,0x11,0x11,0x11,0x11,
     };
     static const struct
     {
-        DXGI_FORMAT format;
-        struct dds_expected dds_expected[TEXTURE_TYPE_COUNT];
-    } save_tests[] =
+        DWORD format;
+        const void *data;
+        unsigned int size;
+    } tests[] =
     {
-        { DXGI_FORMAT_R8G8B8A8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0xff, 0xff00, 0xff0000, 0xff000000 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0xff, 0xff00, 0xff0000, 0xff000000 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0xff, 0xff00, 0xff0000, 0xff000000 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        { MAKEFOURCC('D','X','T','2'), test_dxt2_dxt3_data, sizeof(test_dxt2_dxt3_data) },
+        { MAKEFOURCC('D','X','T','3'), test_dxt2_dxt3_data, sizeof(test_dxt2_dxt3_data) },
+        { MAKEFOURCC('D','X','T','4'), test_dxt4_dxt5_data, sizeof(test_dxt4_dxt5_data) },
+        { MAKEFOURCC('D','X','T','5'), test_dxt4_dxt5_data, sizeof(test_dxt4_dxt5_data) },
+    };
+    struct
+    {
+        DWORD magic;
+        struct dds_header header;
+        BYTE data[256];
+    } dds;
+    D3DX11_IMAGE_LOAD_INFO load_info;
+    struct resource_readback rb;
+    ID3D11Resource *resource;
+    ID3D11Device *device;
+    unsigned int i;
+    HRESULT hr;
+
+    device = create_device();
+    if (!device)
+    {
+        skip("Failed to create device, skipping tests.\n");
+        return;
+    }
+
+    CoInitialize(NULL);
+
+    dds.magic = MAKEFOURCC('D','D','S',' ');
+    fill_dds_header(&dds.header);
+    dds.header.pixel_format.flags = DDS_PF_FOURCC;
+    dds.header.pixel_format.bpp = 0;
+    dds.header.pixel_format.rmask = 0;
+    dds.header.pixel_format.gmask = 0;
+    dds.header.pixel_format.bmask = 0;
+    dds.header.pixel_format.amask = 0;
+
+    memset(dds.data, 0, sizeof(dds.data));
+    load_info = d3dx11_default_load_info;
+    load_info.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    load_info.Filter = load_info.MipFilter = D3DX11_FILTER_NONE;
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("Test %u (%s)", i, debugstr_fourcc(tests[i].format));
+        memcpy(dds.data, tests[i].data, tests[i].size);
+        dds.header.pixel_format.fourcc = tests[i].format;
+
+        hr = D3DX11CreateTextureFromMemory(device, &dds, sizeof(dds), &load_info, NULL, &resource, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        get_resource_readback(resource, 0, &rb);
+        check_test_readback(&rb, expected_dst, 4, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+        release_resource_readback(&rb);
+        ID3D11Resource_Release(resource);
+        winetest_pop_context();
+    }
+
+    CoUninitialize();
+    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
+}
+
+static void test_srgb_filter_flags(void)
+{
+    /*
+     * An input value > 1.0f being converted from SRGB to linear produces
+     * quite a few different values depending on the SDK version, and
+     * sometimes changes run to run. Presumably it's reading beyond the end of
+     * a LUT, values above ~106.0f will cause a crash on all versions and
+     * bitnesses.
+     */
+    static const float test_float4_srgb_in[] =
+    {
+        0.09f, 0.1f,  0.2f, 1.0f,
+        0.30f, 0.4f,  0.5f, 2.0f,
+        0.60f, 0.7f,  0.8f, 3.0f,
+        0.90f, 1.0f, -1.0f, 4.0f,
+    };
+    static const float test_float4_srgb_in_expected[] =
+    {
+        5.00732847e-003,  6.27983455e-003, 2.89932229e-002, 1.00000000e+000,
+        7.07391128e-002,  1.33206353e-001, 2.17635408e-001, 2.00000000e+000,
+        3.25037479e-001,  4.56263810e-001, 6.12064898e-001, 3.00000000e+000,
+        7.93109715e-001,  1.00000000e+000, 1.00000000e+000, 4.00000000e+000,
+    };
+    static const float test_float4_srgb_in_expected_32[] =
+    {
+        5.00732893e-003, 6.27983361e-003, 2.89932191e-002, 1.00000000e+000,
+        7.07391202e-002, 1.33206338e-001, 2.17635408e-001, 2.00000000e+000,
+        3.25037509e-001, 4.56263840e-001, 6.12064838e-001, 3.00000000e+000,
+        7.93109715e-001, 1.00000000e+000, 1.00000000e+000, 4.00000000e+000
+    };
+    static const float test_float4_srgb_out[] =
+    {
+        0.001f, 0.1f, 0.2f, 1.0f,
+        0.300f, 0.4f, 0.5f, 2.0f,
+        0.600f, 0.7f, 0.8f, 3.0f,
+        0.900f, 1.5f, 1.0f, 4.0f,
+    };
+    /* 32-bit can handle a -1.0f input, 64-bit will crash. */
+    static const float test_float4_srgb_out_32[] =
+    {
+        0.001f, 0.1f,  0.2f, 1.0f,
+        0.300f, 0.4f,  0.5f, 2.0f,
+        0.600f, 0.7f,  0.8f, 3.0f,
+        0.900f, 1.5f, -1.0f, 4.0f,
+    };
+    static const float test_float4_srgb_out_expected[] =
+    {
+        4.32867892e-002, 3.51118684e-001, 4.81157422e-001, 1.00000000e+000,
+        5.78532457e-001, 6.59353793e-001, 7.29740620e-001, 2.00000000e+000,
+        7.92793036e-001, 8.50335538e-001, 9.03545380e-001, 3.00000000e+000,
+        9.53237593e-001, 1.86132386e-001, 1.00000000e+000, 4.00000000e+000,
+    };
+    static const float test_float4_srgb_out_expected_32[] =
+    {
+        4.32868190e-002, 3.51118833e-001, 4.81157631e-001, 1.00000000e+000,
+        5.78532815e-001, 6.59354091e-001, 7.29740679e-001, 2.00000000e+000,
+        7.92793512e-001, 8.50336075e-001, 9.03545797e-001, 3.00000000e+000,
+        9.53237832e-001, 1.86132386e-001, -INFINITY,       4.00000000e+000,
+    };
+    static const uint32_t test_a8r8g8b8[] = { 0x00102030, 0x40506070, 0x8090a0b0, 0xc0d0e0ff };
+    static const uint32_t test_a8r8g8b8_srgb_in_expected[] = { 0x00010306, 0x40141e2a, 0x80495b71, 0xc0a3c0ff };
+    static const uint32_t test_a8r8g8b8_srgb_out_expected[] = { 0x00486377, 0x4097a4af, 0x80c5ced7, 0xc0e8f0ff };
+    static const struct
+    {
+        unsigned int width;
+        unsigned int height;
+        const void *src_data;
+        const void *src_data_32;
+        DXGI_FORMAT src_format;
+        DWORD flags;
+
+        const void *expected_dst_data;
+        const void *expected_dst_data_32;
+        DXGI_FORMAT dst_format;
+        BOOL todo;
+    } tests[] =
+    {
+        /* Both IN and OUT flags, nothing changes. */
+        {
+            2, 2, test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3DX11_FILTER_NONE | D3DX11_FILTER_SRGB,
+            test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM
         },
-        { DXGI_FORMAT_R10G10B10A2_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0x3ff00000, 0xffc00, 0x3ff, 0xc0000000 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0x3ff00000, 0xffc00, 0x3ff, 0xc0000000 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB | DDS_PF_ALPHA, 0, 32, 0x3ff00000, 0xffc00, 0x3ff, 0xc0000000 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3DX11_FILTER_NONE | D3DX11_FILTER_SRGB_IN,
+            test_a8r8g8b8_srgb_in_expected, NULL, DXGI_FORMAT_R8G8B8A8_UNORM
         },
-        { DXGI_FORMAT_R16G16B16A16_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x24, 64, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 64, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x24, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x24, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3DX11_FILTER_NONE,
+            test_a8r8g8b8_srgb_in_expected, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, .todo = TRUE
         },
-        { DXGI_FORMAT_R16G16_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB, 0, 32, 0xffff, 0xffff0000, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_RGB, 0, 32, 0xffff, 0xffff0000, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_RGB, 0, 32, 0xffff, 0xffff0000, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3DX11_FILTER_NONE | D3DX11_FILTER_SRGB_OUT,
+            test_a8r8g8b8_srgb_out_expected, NULL, DXGI_FORMAT_R8G8B8A8_UNORM
         },
-        { DXGI_FORMAT_A8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_ALPHA_ONLY, 0, 8, 0, 0, 0, 0xff },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 8, 8, 4, { 0 },
-                { 32, DDS_PF_ALPHA_ONLY, 0, 8, 0, 0, 0, 0xff },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_ALPHA_ONLY, 0, 8, 0, 0, 0, 0xff },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_a8r8g8b8, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3DX11_FILTER_NONE,
+            test_a8r8g8b8_srgb_out_expected, NULL, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, .todo = TRUE
         },
         /* 5. */
-        { DXGI_FORMAT_R16_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6f, 16, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6f, 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6f, 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_float4_srgb_in, NULL, DXGI_FORMAT_R32G32B32A32_FLOAT, D3DX11_FILTER_NONE | D3DX11_FILTER_SRGB_IN,
+            test_float4_srgb_in_expected, test_float4_srgb_in_expected_32, DXGI_FORMAT_R32G32B32A32_FLOAT, .todo = TRUE
         },
-        { DXGI_FORMAT_R16G16_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x70, 32, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x70, 32, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x70, 32, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R16G16B16A16_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x71, 64, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 64, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x71, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x71, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R32_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x72, 32, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x72, 32, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x72, 32, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R32G32_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x73, 64, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 64, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x73, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x73, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        /* 10. */
-        { DXGI_FORMAT_R32G32B32A32_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 128, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x74, 128, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 128, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 128, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x74, 128, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 128, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x74, 128, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 128, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 128, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_G8R8_G8B8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('G','R','G','B'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_G8R8_G8B8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('G','R','G','B'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('G','R','G','B'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_G8R8_G8B8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_G8R8_G8B8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R8G8_B8G8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('R','G','B','G'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_B8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('R','G','B','G'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('R','G','B','G'), 16, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_B8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_B8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_BC1_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','1'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC1_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','1'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','1'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC2_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','3'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC2_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','3'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','3'), 4, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        /* 15. */
-        { DXGI_FORMAT_BC3_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','5'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC3_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','5'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','T','5'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC4_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','U'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC4_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','U'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','U'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC4_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC4_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','4','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC5_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('A','T','I','2'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC5_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('A','T','I','2'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('A','T','I','2'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC5_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','5','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC5_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','5','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('B','C','5','S'), 8, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-          }
-        },
-        /* 20. */
-        { DXGI_FORMAT_R16G16B16A16_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6e, 64, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 64, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6e, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 64, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, 0x6e, 64, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 64, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16B16A16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 8, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R8_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 8, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 8, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 8, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        /* 25. */
-        { DXGI_FORMAT_R8G8_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R16_UNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R32G32B32_FLOAT,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 96, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 96, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 96, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 96, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 96, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 96, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R32G32B32_FLOAT, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_BC1_UNORM_SRGB,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC1_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC1_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_BC1_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_BC1_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-          }
-        },
-        { DXGI_FORMAT_BC2_UNORM_SRGB,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC2_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC2_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_BC2_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_BC2_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-          }
-        },
-        /* 30. */
-        { DXGI_FORMAT_BC3_UNORM_SRGB,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC3_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_BC3_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_BC3_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_BC3_UNORM_SRGB, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-          }
-        },
-        { DXGI_FORMAT_R8G8B8A8_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8B8A8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R8G8_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 16, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 16, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 16, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R8G8_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
-        },
-        { DXGI_FORMAT_R16G16_SNORM,
-          { { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, 0, 2, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH | DDS_DEPTH, 8, 8, 32, 8, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_VOLUME, 0, 0
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE3D, 0, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 8, 8, 32, 0, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_COMPLEX | DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-                DDS_CAPS2_CUBEMAP | DDS_CAPS2_CUBEMAP_ALL_FACES, 0, 0
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D, DDS_RESOURCE_MISC_TEXTURECUBE, 1, 0 },
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 1, 0 },
-              .todo = TRUE
-            },
-            { { 124, DDS_HEIGHT | DDS_WIDTH, 1, 8, 32, 1, 4, { 0 },
-                { 32, DDS_PF_FOURCC, MAKEFOURCC('D','X','1','0'), 0, 0, 0, 0, 0 },
-                DDS_CAPS_TEXTURE | DDSCAPS_MIPMAP,
-              },
-              { DXGI_FORMAT_R16G16_SNORM, D3D11_RESOURCE_DIMENSION_TEXTURE1D, 0, 2, 0 },
-              .todo = TRUE
-            },
-          }
+        {
+            2, 2, test_float4_srgb_out, test_float4_srgb_out_32, DXGI_FORMAT_R32G32B32A32_FLOAT,
+            D3DX11_FILTER_NONE | D3DX11_FILTER_SRGB_OUT, test_float4_srgb_out_expected, test_float4_srgb_out_expected_32,
+            DXGI_FORMAT_R32G32B32A32_FLOAT, .todo = TRUE
         },
     };
-    ID3D11Device *device = create_device();
-    ID3D11DeviceContext *context;
-    D3DX11_IMAGE_INFO img_info;
-    ID3D11Resource *tex;
-    ID3D10Blob *buffer;
-    unsigned int i, j;
-    HRESULT hr;
     struct
     {
         DWORD magic;
         struct dds_header header;
         struct dds_header_dxt10 dxt10;
-    } *dds;
-
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-    ID3D11Device_GetImmediateContext(device, &context);
-
-    for (i = 0; i < ARRAY_SIZE(save_tests); ++i)
-    {
-        if (!strcmp(winetest_platform, "wine") && (save_tests[i].format == DXGI_FORMAT_G8R8_G8B8_UNORM
-                    || save_tests[i].format == DXGI_FORMAT_R8G8_B8G8_UNORM))
-        {
-            skip("Skipping unsupported texture format on Wine.\n");
-            continue;
-        }
-
-        winetest_push_context("Test %u", i);
-        for (j = 0; j < TEXTURE_TYPE_COUNT; ++j)
-        {
-            const struct dds_expected *dds_expected = &save_tests[i].dds_expected[j];
-
-            /* Cannot create a block compressed 1D texture. */
-            if (is_block_compressed(save_tests[i].format) && (j >= TEXTURE_1D))
-                continue;
-
-            switch (j)
-            {
-                case TEXTURE_1D:
-                    hr = d3d11_create_texture_1d(device, 8, 4, 1, save_tests[i].format, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture1D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-
-                case TEXTURE_1D_ARRAY:
-                    hr = d3d11_create_texture_1d(device, 8, 4, 2, save_tests[i].format, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture1D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-
-                case TEXTURE_2D:
-                    hr = d3d11_create_texture_2d(device, 8, 8, 4, 1, save_tests[i].format, 1, 0, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture2D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-
-                case TEXTURE_2D_ARRAY:
-                    hr = d3d11_create_texture_2d(device, 8, 8, 4, 2, save_tests[i].format, 1, 0, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture2D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-
-                case TEXTURE_3D:
-                    if (wined3d_opengl && is_block_compressed(save_tests[i].format))
-                    {
-                        skip("Skipping compressed format 3D texture saving test.\n");
-                        continue;
-                    }
-                    hr = d3d11_create_texture_3d(device, 8, 8, 8, 4, save_tests[i].format, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture3D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-
-                case TEXTURE_CUBE:
-                    hr = d3d11_create_texture_2d(device, 8, 8, 4, 6, save_tests[i].format, 1, 0, D3D11_USAGE_DEFAULT,
-                            D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TEXTURECUBE, (ID3D11Texture2D **)&tex);
-                    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                    break;
-            }
-
-            if (FAILED(hr))
-                continue;
-
-            winetest_push_context("Texture type %u", j);
-            hr = D3DX11SaveTextureToMemory(context, tex, D3DX11_IFF_DDS, &buffer, 0);
-            todo_wine_if(dds_expected->todo) ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-            if (SUCCEEDED(hr))
-            {
-                dds = ID3D10Blob_GetBufferPointer(buffer);
-
-                hr = D3DX11GetImageInfoFromMemory(ID3D10Blob_GetBufferPointer(buffer), ID3D10Blob_GetBufferSize(buffer), NULL,
-                        &img_info, NULL);
-                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-                ok(!memcmp(&dds_expected->header, &dds->header, sizeof(dds->header)), "Header mismatch.\n");
-                if (dds->header.pixel_format.fourcc == MAKEFOURCC('D','X','1','0'))
-                    ok(!memcmp(&dds_expected->dxt10, &dds->dxt10, sizeof(dds->dxt10)), "DXT10 header mismatch.\n");
-                switch (j)
-                {
-                    case TEXTURE_1D:
-                        check_image_info_values(&img_info, 8, 1, 1, 1, 4, 0, save_tests[i].format,
-                                D3D11_RESOURCE_DIMENSION_TEXTURE1D, D3DX11_IFF_DDS, FALSE);
-                        break;
-
-                    case TEXTURE_1D_ARRAY:
-                        check_image_info_values(&img_info, 8, 1, 1, 2, 4, 0, save_tests[i].format,
-                                D3D11_RESOURCE_DIMENSION_TEXTURE1D, D3DX11_IFF_DDS, FALSE);
-                        break;
-
-                    case TEXTURE_2D:
-                        check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, save_tests[i].format,
-                                D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS, FALSE);
-                        break;
-
-                    case TEXTURE_2D_ARRAY:
-                        check_image_info_values(&img_info, 8, 8, 1, 2, 4, 0, save_tests[i].format,
-                                D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS, FALSE);
-                        break;
-
-                    case TEXTURE_3D:
-                        check_image_info_values(&img_info, 8, 8, 8, 1, 4, 0, save_tests[i].format,
-                                D3D11_RESOURCE_DIMENSION_TEXTURE3D, D3DX11_IFF_DDS, FALSE);
-                        break;
-
-                    case TEXTURE_CUBE:
-                        check_image_info_values(&img_info, 8, 8, 1, 6, 4, D3D11_RESOURCE_MISC_TEXTURECUBE,
-                                save_tests[i].format, D3D11_RESOURCE_DIMENSION_TEXTURE2D, D3DX11_IFF_DDS, FALSE);
-                        break;
-                }
-
-                ID3D10Blob_Release(buffer);
-            }
-            ID3D11Resource_Release(tex);
-            winetest_pop_context();
-        }
-        winetest_pop_context();
-    }
-
-    ID3D11DeviceContext_Release(context);
-    CoUninitialize();
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static void check_image_wic_pixel_format(IWICImagingFactory *factory, const void *data, unsigned int size,
-        const GUID *expected_fmt, BOOL todo)
-{
-    IWICBitmapFrameDecode *frame = NULL;
-    IWICBitmapDecoder *decoder = NULL;
-    IWICStream *stream = NULL;
-    HRESULT hr;
-    GUID fmt;
-
-    hr = IWICImagingFactory_CreateStream(factory, &stream);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = IWICStream_InitializeFromMemory(stream, (BYTE *)data, size);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = IWICImagingFactory_CreateDecoderFromStream(factory, (IStream *)stream, NULL, 0, &decoder);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = IWICBitmapFrameDecode_GetPixelFormat(frame, &fmt);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    todo_wine_if(todo) ok(IsEqualGUID(expected_fmt, &fmt), "Unexpected WIC format %s.\n", debugstr_guid(&fmt));
-
-    IWICBitmapFrameDecode_Release(frame);
-    IWICBitmapDecoder_Release(decoder);
-    IWICStream_Release(stream);
-}
-
-static void test_save_texture_to_iffs(void)
-{
-    static const enum D3DX11_IMAGE_FILE_FORMAT test_iffs[] = { D3DX11_IFF_BMP, D3DX11_IFF_JPG, D3DX11_IFF_PNG,
-                                                               D3DX11_IFF_TIFF, D3DX11_IFF_GIF, D3DX11_IFF_WMP };
-    static const char *test_iff_str[] = { "D3DX11_IFF_BMP", "D3DX11_IFF_JPG", "D3DX11_IFF_PNG",
-                                          "D3DX11_IFF_TIFF", "D3DX11_IFF_GIF", "D3DX11_IFF_WMP" };
-    struct wic_expected
-    {
-        const GUID *fmt;
-        BOOL todo;
-    };
-    static const struct
-    {
-        DXGI_FORMAT format;
-        BOOL supported;
-        struct wic_expected wic_expected[ARRAY_SIZE(test_iffs)];
-    } save_tests[] =
-    {
-        { DXGI_FORMAT_R8G8B8A8_UNORM, TRUE,
-          { { &GUID_WICPixelFormat32bppBGR,  FALSE },
-            { &GUID_WICPixelFormat24bppBGR,  FALSE },
-            { &GUID_WICPixelFormat32bppBGRA, FALSE },
-            { &GUID_WICPixelFormat32bppBGRA, FALSE },
-            { NULL },
-            { &GUID_WICPixelFormat32bppBGRA, FALSE },
-          },
-        },
-        { DXGI_FORMAT_R16G16B16A16_FLOAT, TRUE,
-          { { &GUID_WICPixelFormat64bppRGBAFixedPoint, TRUE },
-            { &GUID_WICPixelFormat24bppBGR,  FALSE },
-            { &GUID_WICPixelFormat64bppRGBA, FALSE },
-            { &GUID_WICPixelFormat64bppRGBA, FALSE },
-            { NULL },
-            { &GUID_WICPixelFormat64bppRGBAHalf, FALSE },
-          },
-        },
-        { DXGI_FORMAT_R32G32B32A32_FLOAT, TRUE,
-          { { &GUID_WICPixelFormat64bppRGBAFixedPoint, TRUE },
-            { &GUID_WICPixelFormat24bppBGR,  FALSE },
-            { &GUID_WICPixelFormat64bppRGBA, FALSE },
-            { &GUID_WICPixelFormat64bppRGBA, FALSE },
-            { NULL },
-            { &GUID_WICPixelFormat128bppRGBAFloat, FALSE },
-          },
-        },
-        { DXGI_FORMAT_R16_UNORM, TRUE,
-          { { &GUID_WICPixelFormat64bppRGBAFixedPoint, TRUE },
-            { &GUID_WICPixelFormat8bppGray,  FALSE },
-            { &GUID_WICPixelFormat16bppGray, FALSE },
-            { &GUID_WICPixelFormat16bppGray, FALSE },
-            { NULL },
-            { &GUID_WICPixelFormat16bppGrayFixedPoint, FALSE },
-          },
-        },
-        { DXGI_FORMAT_R10G10B10A2_UNORM, FALSE },
-        { DXGI_FORMAT_R16G16B16A16_UNORM, FALSE },
-        { DXGI_FORMAT_R16G16_UNORM, FALSE },
-        { DXGI_FORMAT_A8_UNORM, FALSE },
-        { DXGI_FORMAT_R16_FLOAT, FALSE },
-        { DXGI_FORMAT_R16G16_FLOAT, FALSE },
-        { DXGI_FORMAT_R32_FLOAT, FALSE },
-        { DXGI_FORMAT_R32G32_FLOAT, FALSE },
-        { DXGI_FORMAT_G8R8_G8B8_UNORM, FALSE },
-        { DXGI_FORMAT_R8G8_B8G8_UNORM, FALSE },
-        { DXGI_FORMAT_BC1_UNORM, FALSE },
-        { DXGI_FORMAT_BC2_UNORM, FALSE },
-        { DXGI_FORMAT_BC3_UNORM, FALSE },
-        { DXGI_FORMAT_BC4_UNORM, FALSE },
-        { DXGI_FORMAT_BC4_SNORM, FALSE },
-        { DXGI_FORMAT_BC5_UNORM, FALSE },
-        { DXGI_FORMAT_BC5_SNORM, FALSE },
-        { DXGI_FORMAT_R16G16B16A16_SNORM, FALSE },
-        { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, FALSE },
-        { DXGI_FORMAT_R8_UNORM, FALSE },
-        { DXGI_FORMAT_R8_SNORM, FALSE },
-        { DXGI_FORMAT_R8G8_UNORM, FALSE },
-        { DXGI_FORMAT_R32G32B32_FLOAT, FALSE },
-        { DXGI_FORMAT_BC1_UNORM_SRGB, FALSE },
-        { DXGI_FORMAT_BC2_UNORM_SRGB, FALSE },
-        { DXGI_FORMAT_BC3_UNORM_SRGB, FALSE },
-        { DXGI_FORMAT_R8G8B8A8_SNORM, FALSE },
-        { DXGI_FORMAT_R8G8_SNORM, FALSE },
-        { DXGI_FORMAT_R16G16_SNORM, FALSE },
-    };
-    IWICImagingFactory *factory = NULL;
-    ID3D11DeviceContext *context;
-    D3DX11_IMAGE_INFO img_info;
+        BYTE data[8192];
+    } dds;
+    const BOOL is_32 = (sizeof(void *) == 4);
+    D3DX11_IMAGE_LOAD_INFO load_info;
+    struct resource_readback rb;
+    ID3D11Resource *resource;
     ID3D11Device *device;
-    ID3D11Resource *tex;
-    ID3D10Blob *buffer;
-    unsigned int i, j;
+    unsigned int i;
     HRESULT hr;
 
     device = create_device();
@@ -8180,132 +4787,47 @@ static void test_save_texture_to_iffs(void)
     }
 
     CoInitialize(NULL);
-    ID3D11Device_GetImmediateContext(device, &context);
 
-    hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-            &IID_IWICImagingFactory, (void **)&factory);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    for (i = 0; i < ARRAY_SIZE(save_tests); ++i)
+    dds.magic = MAKEFOURCC('D','D','S',' ');
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
     {
-        if (!strcmp(winetest_platform, "wine") && (save_tests[i].format == DXGI_FORMAT_G8R8_G8B8_UNORM
-                    || save_tests[i].format == DXGI_FORMAT_R8G8_B8G8_UNORM))
+        const unsigned int fmt_bpp = (get_bpp_from_format(tests[i].src_format) + 7) / 8;
+        unsigned int src_pitch = fmt_bpp * tests[i].width;
+        const uint8_t *src_data, *expected_dst;
+
+        winetest_push_context("Test %u (%s)", i, debug_d3dx11_filter(tests[i].flags));
+
+        load_info = d3dx11_default_load_info;
+        load_info.Height = tests[i].height;
+        load_info.Width = tests[i].width;
+        load_info.Filter = tests[i].flags;
+        load_info.Format = tests[i].dst_format;
+        load_info.MipLevels = 1;
+
+        expected_dst = (is_32 && tests[i].expected_dst_data_32) ? tests[i].expected_dst_data_32 : tests[i].expected_dst_data;
+        src_data = (is_32 && tests[i].src_data_32) ? tests[i].src_data_32 : tests[i].src_data;
+
+        /* Height + 1 to make sure filter flags aren't ignored. */
+        set_dxt10_dds_header(&dds.header, 0, tests[i].width, tests[i].height + 1, 0, 1, src_pitch, 0, 0);
+        set_dds_header_dxt10(&dds.dxt10, tests[i].src_format, D3D10_RESOURCE_DIMENSION_TEXTURE2D, 0, 1, 0);
+        memcpy(dds.data, src_data, src_pitch * tests[i].height);
+
+        hr = D3DX11CreateTextureFromMemory(device, &dds, sizeof(dds), &load_info, NULL, &resource, NULL);
+        todo_wine_if(is_srgb_format(tests[i].src_format) || is_srgb_format(tests[i].dst_format))
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
         {
-            skip("Skipping unsupported format on Wine.\n");
-            continue;
+            get_resource_readback(resource, 0, &rb);
+            todo_wine_if(tests[i].todo) check_test_readback(&rb, expected_dst, tests[i].width, tests[i].height, 1,
+                    tests[i].dst_format, 0);
+            release_resource_readback(&rb);
+            ID3D11Resource_Release(resource);
         }
 
-        hr = d3d11_create_texture_2d(device, 8, 8, 4, 1, save_tests[i].format, 1, 0, D3D11_USAGE_DEFAULT,
-                D3D11_BIND_SHADER_RESOURCE, 0, 0, (ID3D11Texture2D **)&tex);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        if (FAILED(hr))
-            continue;
-
-        winetest_push_context("Test %u", i);
-        for (j = 0; j < ARRAY_SIZE(test_iffs); ++j)
-        {
-            const HRESULT expected_hr = save_tests[i].supported ? S_OK : E_FAIL;
-
-            winetest_push_context("Image format %s", test_iff_str[j]);
-            hr = D3DX11SaveTextureToMemory(context, tex, test_iffs[j], &buffer, 0);
-
-            /* GIF saving is never supported, regardless of texture format. */
-            if (test_iffs[j] == D3DX11_IFF_GIF)
-                ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
-            else
-                todo_wine_if(test_iffs[j] == D3DX11_IFF_WMP) ok(hr == expected_hr, "Unexpected hr %#lx.\n", hr);
-            if (SUCCEEDED(hr))
-            {
-                check_image_wic_pixel_format(factory, ID3D10Blob_GetBufferPointer(buffer), ID3D10Blob_GetBufferSize(buffer),
-                        save_tests[i].wic_expected[j].fmt, save_tests[i].wic_expected[j].todo);
-
-                hr = D3DX11GetImageInfoFromMemory(ID3D10Blob_GetBufferPointer(buffer), ID3D10Blob_GetBufferSize(buffer), NULL,
-                        &img_info, NULL);
-                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-                check_image_info_values(&img_info, 8, 8, 1, 1, 1, 0, DXGI_FORMAT_R8G8B8A8_UNORM,
-                        D3D11_RESOURCE_DIMENSION_TEXTURE2D, test_iffs[j], FALSE);
-                ID3D10Blob_Release(buffer);
-            }
-            winetest_pop_context();
-        }
-
-        ID3D11Resource_Release(tex);
         winetest_pop_context();
     }
 
-    IWICImagingFactory_Release(factory);
-    ID3D11DeviceContext_Release(context);
     CoUninitialize();
-    ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
-}
-
-static void test_save_texture(void)
-{
-    D3D11_SUBRESOURCE_DATA sub_resource_data[4] = { 0 };
-    D3D11_TEXTURE2D_DESC tex_2d_desc;
-    ID3D11DeviceContext *context;
-    D3DX11_IMAGE_INFO img_info;
-    ID3D11Texture2D *tex_2d;
-    uint8_t tmp_buf[1024];
-    ID3D11Device *device;
-    ID3D10Blob *buffer;
-    HRESULT hr;
-
-    device = create_device();
-    if (!device)
-    {
-        skip("Failed to create device, skipping tests.\n");
-        return;
-    }
-
-    CoInitialize(NULL);
-    ID3D11Device_GetImmediateContext(device, &context);
-
-    set_d3d11_2d_texture_desc(&tex_2d_desc, 8, 8, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 0, D3D11_USAGE_DEFAULT,
-            D3D11_BIND_SHADER_RESOURCE, 0, 0);
-    memset(tmp_buf, 0, sizeof(tmp_buf));
-    memcpy(tmp_buf, bc1_to_bc3_8_8_decompressed, sizeof(bc1_to_bc3_8_8_decompressed));
-    init_subresource_data(sub_resource_data, (const void *)tmp_buf, tex_2d_desc.Width, tex_2d_desc.Height, 1,
-            tex_2d_desc.MipLevels, tex_2d_desc.ArraySize, tex_2d_desc.Format);
-
-    hr = ID3D11Device_CreateTexture2D(device, &tex_2d_desc, sub_resource_data, &tex_2d);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11SaveTextureToMemory(context, (ID3D11Resource *)tex_2d, D3DX11_IFF_DDS, &buffer, 0);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11GetImageInfoFromMemory(ID3D10Blob_GetBufferPointer(buffer), ID3D10Blob_GetBufferSize(buffer), NULL,
-            &img_info, NULL);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
-            D3DX11_IFF_DDS, FALSE);
-
-    ID3D10Blob_Release(buffer);
-
-    hr = D3DX11SaveTextureToFileA(context, (ID3D11Resource *)tex_2d, D3DX11_IFF_DDS, "test_a.dds");
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11GetImageInfoFromFileA("test_a.dds", NULL, &img_info, NULL);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
-            D3DX11_IFF_DDS, FALSE);
-    DeleteFileA("test_a.dds");
-
-    hr = D3DX11SaveTextureToFileW(context, (ID3D11Resource *)tex_2d, D3DX11_IFF_DDS, L"test_w.dds");
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-
-    hr = D3DX11GetImageInfoFromFileW(L"test_w.dds", NULL, &img_info, NULL);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_image_info_values(&img_info, 8, 8, 1, 1, 4, 0, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_RESOURCE_DIMENSION_TEXTURE2D,
-            D3DX11_IFF_DDS, FALSE);
-    DeleteFileW(L"test_w.dds");
-
-    ID3D11Texture2D_Release(tex_2d);
-
-    ID3D11DeviceContext_Release(context);
-    CoUninitialize();
-
     ok(!ID3D11Device_Release(device), "Unexpected refcount.\n");
 }
 
@@ -8336,9 +4858,6 @@ static HRESULT WINAPI test_d3dinclude_open(ID3DInclude *iface, D3D_INCLUDE_TYPE 
         "#include \"include1.h\"\n"
         "float4 light_color = LIGHT;\n";
     char *buffer;
-
-    trace("filename %s.\n", filename);
-    trace("parent_data %p: %s.\n", parent_data, parent_data ? (char *)parent_data : "(null)");
 
     if (!strcmp(filename, "include1.h"))
     {
@@ -8475,20 +4994,12 @@ START_TEST(d3dx11)
     test_D3DX11CreateAsyncMemoryLoader();
     test_D3DX11CreateAsyncFileLoader();
     test_D3DX11CreateAsyncResourceLoader();
-    test_D3DX11CreateAsyncTextureInfoProcessor();
-    test_D3DX11CreateAsyncTextureProcessor();
-    test_D3DX11CreateAsyncShaderResourceViewProcessor();
-    test_D3DX11CreateThreadPump();
     test_D3DX11CompileFromFile();
     test_get_image_info();
     test_create_texture();
-    test_create_shader_resource_view();
-    test_save_texture_to_dds();
-    test_save_texture_to_iffs();
-    test_save_texture();
     test_legacy_dds_header_image_info();
     test_dxt10_dds_header_image_info();
     test_image_filters();
-    test_D3DX11LoadTextureFromTexture();
-    test_D3DX11FilterTexture();
+    test_dxt_formats();
+    test_srgb_filter_flags();
 }

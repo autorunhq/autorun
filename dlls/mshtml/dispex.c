@@ -868,6 +868,7 @@ static HRESULT dispex_value(DispatchEx *This, LCID lcid, WORD flags, DISPPARAMS 
         return This->info->vtbl->value(This, lcid, flags, params, res, ei, caller);
 
     switch(flags) {
+    case DISPATCH_PROPERTYGET | DISPATCH_METHOD:
     case DISPATCH_PROPERTYGET:
         V_VT(res) = VT_BSTR;
         hres = dispex_to_string(This, &V_BSTR(res));
@@ -2872,30 +2873,6 @@ static HRESULT WINAPI JSDispatchHost_ToString(IWineJSDispatchHost *iface, BSTR *
     return dispex_to_string(This, str);
 }
 
-static BOOL __cdecl is_full_cc(void)
-{
-    thread_data_t *thread_data = get_thread_data(FALSE);
-    return thread_data ? thread_data->full_cc_in_progress : FALSE;
-}
-
-static void __cdecl describe_node(ULONG ref, const char *obj_name, nsCycleCollectionTraversalCallback *cb)
-{
-    nsCycleCollectingAutoRefCnt ccref;
-
-    ccref_init(&ccref, ref);
-    describe_cc_node(&ccref, obj_name, cb);
-}
-
-static void WINAPI JSDispatchHost_InitCC(IWineJSDispatchHost *iface, struct jshost_cc_api *cc_api, const CCObjCallback *callback)
-{
-    ccp_init(&cc_api->participant, callback);
-    cc_api->is_full_cc = is_full_cc;
-    cc_api->collect = cc_api_collect;
-    cc_api->describe_node = describe_node;
-    cc_api->note_edge = (note_edge_t)note_cc_edge;
-    list_add_tail(&cc_api_list, &cc_api->entry);
-}
-
 static IWineJSDispatchHostVtbl JSDispatchHostVtbl = {
     DispatchEx_QueryInterface,
     DispatchEx_AddRef,
@@ -2923,18 +2900,15 @@ static IWineJSDispatchHostVtbl JSDispatchHostVtbl = {
     JSDispatchHost_FillProperties,
     JSDispatchHost_GetOuterDispatch,
     JSDispatchHost_ToString,
-    JSDispatchHost_InitCC
 };
 
 struct EnumVARIANT {
     IEnumVARIANT IEnumVARIANT_iface;
-    nsCycleCollectingAutoRefCnt ccref;
+    LONG ref;
 
     DispatchEx *collection;
     ULONG iter;
 };
-
-static ExternalCycleCollectionParticipant enum_ccp;
 
 static inline struct EnumVARIANT *impl_from_IEnumVARIANT(IEnumVARIANT *iface)
 {
@@ -2947,15 +2921,9 @@ static HRESULT WINAPI EnumVARIANT_QueryInterface(IEnumVARIANT *iface, REFIID rii
 
     TRACE("(%p)->(%s %p)\n", This, debugstr_mshtml_guid(riid), ppv);
 
-    if(IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IEnumVARIANT)) {
+    if(IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IEnumVARIANT))
         *ppv = &This->IEnumVARIANT_iface;
-    }else if(IsEqualGUID(&IID_nsXPCOMCycleCollectionParticipant, riid)) {
-        *ppv = &enum_ccp;
-        return S_OK;
-    }else if(IsEqualGUID(&IID_nsCycleCollectionISupports, riid)) {
-        *ppv = &This->IEnumVARIANT_iface;
-        return S_OK;
-    }else {
+    else {
         FIXME("Unsupported iface %s\n", debugstr_mshtml_guid(riid));
         *ppv = NULL;
         return E_NOINTERFACE;
@@ -2968,7 +2936,7 @@ static HRESULT WINAPI EnumVARIANT_QueryInterface(IEnumVARIANT *iface, REFIID rii
 static ULONG WINAPI EnumVARIANT_AddRef(IEnumVARIANT *iface)
 {
     struct EnumVARIANT *This = impl_from_IEnumVARIANT(iface);
-    LONG ref = ccref_incr(&This->ccref, (nsISupports*)&This->IEnumVARIANT_iface);
+    LONG ref = InterlockedIncrement(&This->ref);
 
     TRACE("(%p) ref=%ld\n", This, ref);
 
@@ -2978,9 +2946,14 @@ static ULONG WINAPI EnumVARIANT_AddRef(IEnumVARIANT *iface)
 static ULONG WINAPI EnumVARIANT_Release(IEnumVARIANT *iface)
 {
     struct EnumVARIANT *This = impl_from_IEnumVARIANT(iface);
-    LONG ref = ccref_decr(&This->ccref, (nsISupports*)&This->IEnumVARIANT_iface, &enum_ccp);
+    LONG ref = InterlockedDecrement(&This->ref);
 
     TRACE("(%p) ref=%ld\n", This, ref);
+
+    if(!ref) {
+        DispatchEx_Release(&This->collection->IWineJSDispatchHost_iface);
+        free(This);
+    }
 
     return ref;
 }
@@ -3060,37 +3033,6 @@ static const IEnumVARIANTVtbl EnumVARIANTVtbl = {
     EnumVARIANT_Clone
 };
 
-static nsresult NSAPI EnumVARIANT_traverse(void *ccp, void *p, nsCycleCollectionTraversalCallback *cb)
-{
-    struct EnumVARIANT *This = impl_from_IEnumVARIANT(p);
-
-    describe_cc_node(&This->ccref, "EnumVARIANT", cb);
-
-    if(This->collection)
-        note_cc_edge((nsISupports*)&This->collection->IWineJSDispatchHost_iface, "collection", cb);
-    return NS_OK;
-}
-
-static nsresult NSAPI EnumVARIANT_unlink(void *p)
-{
-    struct EnumVARIANT *This = impl_from_IEnumVARIANT(p);
-
-    if(This->collection) {
-        DispatchEx *col = This->collection;
-        This->collection = NULL;
-        DispatchEx_Release(&col->IWineJSDispatchHost_iface);
-    }
-    return NS_OK;
-}
-
-static void NSAPI EnumVARIANT_delete_cycle_collectable(void *p)
-{
-    struct EnumVARIANT *This = impl_from_IEnumVARIANT(p);
-
-    EnumVARIANT_unlink(p);
-    free(This);
-}
-
 HRESULT create_enum_variant(DispatchEx *collection, IUnknown **ret)
 {
     struct EnumVARIANT *enumvar = malloc(sizeof(*enumvar));
@@ -3099,23 +3041,13 @@ HRESULT create_enum_variant(DispatchEx *collection, IUnknown **ret)
         return E_OUTOFMEMORY;
 
     enumvar->IEnumVARIANT_iface.lpVtbl = &EnumVARIANTVtbl;
+    enumvar->ref = 1;
     enumvar->iter = 0;
     enumvar->collection = collection;
-    ccref_init(&enumvar->ccref, 1);
     DispatchEx_AddRef(&collection->IWineJSDispatchHost_iface);
 
     *ret = (IUnknown*)&enumvar->IEnumVARIANT_iface;
     return S_OK;
-}
-
-void init_enum_cc(void)
-{
-    static const CCObjCallback ccp_callback = {
-        EnumVARIANT_traverse,
-        EnumVARIANT_unlink,
-        EnumVARIANT_delete_cycle_collectable
-    };
-    ccp_init(&enum_ccp, &ccp_callback);
 }
 
 HRESULT dispex_builtin_props_to_json(DispatchEx *dispex, HTMLInnerWindow *window, VARIANT *ret)
@@ -3164,9 +3096,6 @@ static nsresult NSAPI dispex_traverse(void *ccp, void *p, nsCycleCollectionTrave
 
     if(This->info->vtbl->traverse)
         This->info->vtbl->traverse(This, cb);
-
-    if(This->jsdisp)
-        IWineJSDispatch_Traverse(This->jsdisp, cb);
 
     if(!This->dynamic_data)
         return NS_OK;
@@ -3222,9 +3151,6 @@ static nsresult NSAPI dispex_unlink(void *p)
 
     if(This->info->vtbl->unlink)
         This->info->vtbl->unlink(This);
-
-    if(This->jsdisp)
-        IWineJSDispatch_Unlink(This->jsdisp);
 
     dispex_props_unlink(This);
     return NS_OK;

@@ -31,7 +31,6 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "winbase.h"
@@ -47,7 +46,7 @@
   extern char **environ;
 #endif
 
-WINE_DECLARE_DEBUG_CHANNEL(ntlm);
+WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 #define INITIAL_BUFFER_SIZE 200
 
@@ -58,7 +57,7 @@ struct com_buf
     unsigned int offset;
 };
 
-static SECURITY_STATUS read_line( struct ntlm_ctx *ctx, unsigned int *offset )
+static SECURITY_STATUS read_line( struct ntlm_auth_ctx *ctx, unsigned int *offset )
 {
     char *newline;
     struct com_buf *com_buf = (struct com_buf *)(ULONG_PTR)ctx->com_buf;
@@ -105,13 +104,16 @@ static SECURITY_STATUS read_line( struct ntlm_ctx *ctx, unsigned int *offset )
 static NTSTATUS ntlm_chat( void *args )
 {
     const struct chat_params *params = args;
-    struct ntlm_ctx *ctx = params->ctx;
+    struct ntlm_auth_ctx *ctx = params->ctx;
     struct com_buf *com_buf;
     SECURITY_STATUS status = SEC_E_OK;
     unsigned int offset;
 
-    write( ctx->pipe_out, params->buf, strlen(params->buf) );
-    write( ctx->pipe_out, "\n", 1 );
+    if (params->buf[0])
+    {
+        write( ctx->pipe_out, params->buf, strlen(params->buf) );
+        write( ctx->pipe_out, "\n", 1 );
+    }
 
     if ((status = read_line( ctx, &offset )) != SEC_E_OK) return status;
     com_buf = (struct com_buf *)(ULONG_PTR)ctx->com_buf;
@@ -135,11 +137,8 @@ static NTSTATUS ntlm_chat( void *args )
 
 static NTSTATUS ntlm_cleanup( void *args )
 {
-    struct ntlm_ctx *ctx = args;
+    struct ntlm_auth_ctx *ctx = args;
     struct com_buf *com_buf = (struct com_buf *)(ULONG_PTR)ctx->com_buf;
-
-    if (!ctx || (ctx->mode != MODE_CLIENT && ctx->mode != MODE_SERVER)) return STATUS_INVALID_HANDLE;
-    ctx->mode = MODE_INVALID;
 
     /* closing stdin will terminate ntlm_auth */
     close( ctx->pipe_out );
@@ -161,7 +160,7 @@ static NTSTATUS ntlm_cleanup( void *args )
 static NTSTATUS ntlm_fork( void *args )
 {
     const struct fork_params *params = args;
-    struct ntlm_ctx *ctx = params->ctx;
+    struct ntlm_auth_ctx *ctx = params->ctx;
     posix_spawn_file_actions_t file_actions;
     int pipe_in[2], pipe_out[2], err;
     NTSTATUS status = STATUS_SUCCESS;
@@ -202,7 +201,7 @@ static NTSTATUS ntlm_fork( void *args )
     {
         ctx->pid = -1;
         write( pipe_in[1], "BH\n", 3 );
-        WARN_(ntlm)( "Can't start ntlm_auth (%s). "
+        ERR_(winediag)( "Can't start ntlm_auth (%s). "
                         "Usually you can find it in the winbind package of your distribution.\n",
                         strerror(err) );
         status = STATUS_UNSUCCESSFUL;

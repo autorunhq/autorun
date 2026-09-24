@@ -308,63 +308,6 @@ static ID3DX10DataProcessorVtbl texture_processor_vtbl =
     texture_processor_Destroy
 };
 
-struct srv_processor
-{
-    ID3DX10DataProcessor ID3DX10DataProcessor_iface;
-    ID3DX10DataProcessor *texture_processor;
-};
-
-static inline struct srv_processor *srv_processor_from_ID3DX10DataProcessor(ID3DX10DataProcessor *iface)
-{
-    return CONTAINING_RECORD(iface, struct srv_processor, ID3DX10DataProcessor_iface);
-}
-
-static HRESULT WINAPI srv_processor_Process(ID3DX10DataProcessor *iface, void *data, SIZE_T size)
-{
-    struct srv_processor *processor = srv_processor_from_ID3DX10DataProcessor(iface);
-
-    TRACE("iface %p, data %p, size %Iu.\n", iface, data, size);
-
-    return ID3DX10DataProcessor_Process(processor->texture_processor, data, size);
-}
-
-static HRESULT WINAPI srv_processor_CreateDeviceObject(ID3DX10DataProcessor *iface, void **object)
-{
-    struct srv_processor *processor = srv_processor_from_ID3DX10DataProcessor(iface);
-    struct texture_processor *tex_processor = texture_processor_from_ID3DX10DataProcessor(processor->texture_processor);
-    ID3D10Resource *texture_resource;
-    HRESULT hr;
-
-    TRACE("iface %p, object %p.\n", iface, object);
-
-    hr = ID3DX10DataProcessor_CreateDeviceObject(processor->texture_processor, (void **)&texture_resource);
-    if (FAILED(hr))
-        return hr;
-
-    hr = ID3D10Device_CreateShaderResourceView(tex_processor->device, texture_resource, NULL,
-            (ID3D10ShaderResourceView **)object);
-    ID3D10Resource_Release(texture_resource);
-    return hr;
-}
-
-static HRESULT WINAPI srv_processor_Destroy(ID3DX10DataProcessor *iface)
-{
-    struct srv_processor *processor = srv_processor_from_ID3DX10DataProcessor(iface);
-
-    TRACE("iface %p.\n", iface);
-
-    ID3DX10DataProcessor_Destroy(processor->texture_processor);
-    free(processor);
-    return S_OK;
-}
-
-static ID3DX10DataProcessorVtbl srv_processor_vtbl =
-{
-    srv_processor_Process,
-    srv_processor_CreateDeviceObject,
-    srv_processor_Destroy
-};
-
 HRESULT WINAPI D3DX10CompileFromMemory(const char *data, SIZE_T data_size, const char *filename,
         const D3D10_SHADER_MACRO *defines, ID3D10Include *include, const char *entry_point,
         const char *target, UINT sflags, UINT eflags, ID3DX10ThreadPump *pump, ID3D10Blob **shader,
@@ -442,6 +385,9 @@ HRESULT WINAPI D3DX10CreateAsyncFileLoaderA(const char *filename, ID3DX10DataLoa
 
     len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
     filename_w = malloc(len * sizeof(*filename_w));
+    if (!filename_w)
+        return E_OUTOFMEMORY;
+
     MultiByteToWideChar(CP_ACP, 0, filename, -1, filename_w, len);
 
     hr = D3DX10CreateAsyncFileLoaderW(filename_w, loader);
@@ -586,32 +532,6 @@ HRESULT WINAPI D3DX10CreateAsyncTextureProcessor(ID3D10Device *device,
     init_load_info(load_info, &object->load_info);
     object->load_info.pSrcInfo = &object->img_info;
 
-    *processor = &object->ID3DX10DataProcessor_iface;
-    return S_OK;
-}
-
-HRESULT WINAPI D3DX10CreateAsyncShaderResourceViewProcessor(ID3D10Device *device,
-        D3DX10_IMAGE_LOAD_INFO *load_info, ID3DX10DataProcessor **processor)
-{
-    struct srv_processor *object;
-    HRESULT hr;
-
-    TRACE("device %p, load_info %p, processor %p.\n", device, load_info, processor);
-
-    if (!device || !processor)
-        return E_INVALIDARG;
-
-    object = calloc(1, sizeof(*object));
-    if (!object)
-        return E_OUTOFMEMORY;
-
-    hr = D3DX10CreateAsyncTextureProcessor(device, load_info, &object->texture_processor);
-    if (FAILED(hr))
-    {
-        free(object);
-        return hr;
-    }
-    object->ID3DX10DataProcessor_iface.lpVtbl = &srv_processor_vtbl;
     *processor = &object->ID3DX10DataProcessor_iface;
     return S_OK;
 }

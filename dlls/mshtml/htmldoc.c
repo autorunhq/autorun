@@ -649,6 +649,11 @@ static HRESULT WINAPI HTMLDocument_put_title(IHTMLDocument2 *iface, BSTR v)
     if(NS_FAILED(nsres))
         ERR("SetTitle failed: %08lx\n", nsres);
 
+    if(This->doc_obj)
+        call_property_onchanged(&This->doc_obj->cp_container, DISPID_IHTMLDOCUMENT2_TITLE);
+    else
+        call_property_onchanged(&This->cp_container, DISPID_IHTMLDOCUMENT2_TITLE);
+
     return S_OK;
 }
 
@@ -708,7 +713,7 @@ static HRESULT WINAPI HTMLDocument_get_scripts(IHTMLDocument2 *iface, IHTMLEleme
 
     nsres = nsIDOMHTMLDocument_GetScripts(This->html_document, &nscoll);
     if(NS_FAILED(nsres)) {
-        ERR("GetImages failed: %08lx\n", nsres);
+        ERR("GetScripts failed: %08lx\n", nsres);
         return E_FAIL;
     }
 
@@ -2718,7 +2723,7 @@ static HRESULT WINAPI HTMLDocument3_getElementsByTagName(IHTMLDocument3 *iface, 
         nsres = nsIDOMDocument_GetElementsByTagName(This->dom_document, &id_str, &nslist);
         nsAString_Finish(&id_str);
         if(FAILED(nsres)) {
-            ERR("GetElementByName failed: %08lx\n", nsres);
+            ERR("GetElementsByTagName failed: %08lx\n", nsres);
             return E_FAIL;
         }
     }else {
@@ -3120,7 +3125,7 @@ static HRESULT WINAPI HTMLDocument5_createComment(IHTMLDocument5 *iface, BSTR bs
     nsres = nsIDOMDocument_CreateComment(This->dom_document, &str, &nscomment);
     nsAString_Finish(&str);
     if(NS_FAILED(nsres)) {
-        ERR("CreateTextNode failed: %08lx\n", nsres);
+        ERR("CreateComment failed: %08lx\n", nsres);
         return E_FAIL;
     }
 

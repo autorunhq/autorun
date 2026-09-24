@@ -37,7 +37,6 @@
 #include <dlfcn.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "android.h"
 #include "winternl.h"
 
@@ -48,7 +47,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(android);
 
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
-static const struct client_surface_funcs android_client_surface_funcs;
 static const struct opengl_drawable_funcs android_drawable_funcs;
 
 struct gl_drawable
@@ -83,11 +81,11 @@ void update_gl_drawable( HWND hwnd )
     NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE );
 }
 
-static BOOL android_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+static BOOL android_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
     struct gl_drawable *gl;
 
-    TRACE( "hwnd %p, format %d, drawable %p\n", hwnd, format, drawable );
+    TRACE( "hwnd %p, format %d, drawable %p\n", client->hwnd, format, drawable );
 
     if (*drawable)
     {
@@ -107,14 +105,10 @@ static BOOL android_surface_create( HWND hwnd, int format, struct opengl_drawabl
     {
         static const int attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
         EGLConfig config = egl_config_for_format( format );
-        struct client_surface *client;
 
-        if (!(client = client_surface_create( sizeof(*client), &android_client_surface_funcs, hwnd ))) return FALSE;
-        gl = opengl_drawable_create( sizeof(*gl), &android_drawable_funcs, format, client );
-        client_surface_release( client );
-        if (!gl) return FALSE;
-
+        if (!(gl = opengl_drawable_create( &android_drawable_funcs, format, client, NULL ))) return FALSE;
         gl->window = get_client_window( client->hwnd );
+
         if (!has_client_surface( client->hwnd )) gl->base.surface = funcs->p_eglCreatePbufferSurface( egl->display, config, attribs );
         else gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, config, gl->window, NULL );
 
@@ -157,16 +151,16 @@ static void android_drawable_flush( struct opengl_drawable *base, UINT flags )
     if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
 }
 
-static const char *android_init_wgl_extensions( struct opengl_funcs *funcs )
+static void android_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )
 {
-    return "WGL_EXT_framebuffer_sRGB";
+    extensions[WGL_EXT_framebuffer_sRGB] = 1;
 }
 
 static struct opengl_driver_funcs android_driver_funcs =
 {
     .p_init_egl_platform = android_init_egl_platform,
     .p_get_proc_address = android_get_proc_address,
-    .p_init_wgl_extensions = android_init_wgl_extensions,
+    .p_init_extensions = android_init_extensions,
     .p_surface_create = android_surface_create,
 };
 
@@ -189,14 +183,21 @@ static void android_client_surface_present( struct client_surface *client, HDC h
 
 static const struct client_surface_funcs android_client_surface_funcs =
 {
+    .size = sizeof(struct client_surface),
     .destroy = android_client_surface_destroy,
     .detach = android_client_surface_detach,
     .update = android_client_surface_update,
     .present = android_client_surface_present,
 };
 
+struct client_surface *ANDROID_CreateClientSurface( HWND hwnd, int pixel_format, BOOL raw )
+{
+    return client_surface_create( &android_client_surface_funcs, hwnd, pixel_format, raw );
+}
+
 static const struct opengl_drawable_funcs android_drawable_funcs =
 {
+    .size = sizeof(struct gl_drawable),
     .destroy = android_drawable_destroy,
     .flush = android_drawable_flush,
     .swap = android_drawable_swap,
@@ -224,7 +225,7 @@ UINT ANDROID_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, 
     android_driver_funcs.p_describe_pixel_format = (*driver_funcs)->p_describe_pixel_format;
     android_driver_funcs.p_context_create = (*driver_funcs)->p_context_create;
     android_driver_funcs.p_context_destroy = (*driver_funcs)->p_context_destroy;
-    android_driver_funcs.p_make_current = (*driver_funcs)->p_make_current;
+    android_driver_funcs.p_context_activate = (*driver_funcs)->p_context_activate;
 
     *driver_funcs = &android_driver_funcs;
     return STATUS_SUCCESS;

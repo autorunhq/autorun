@@ -63,7 +63,6 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 python3 "$probe/tools/make-embed.py" "$build/forwarder-icon.c" wine_nx_icon_any "$probe/assets/autorun.jpg"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$probe/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
-    -DLTC_NOTHING -DLTC_SHA256 -DLTC_NO_TEST -DARGTYPE=4 -I "$root/libs/tomcrypt/src/headers" \
     "$probe/tests/launcher_host.c" "$probe/source/launcher.c" "$probe/source/launcher_catalog.c" "$probe/source/launcher_ui.c" "$probe/source/launcher_audio.c" \
     "$probe/source/launcher_graphics.c" "$probe/source/launcher_forwarder.c" "$probe/source/launcher_image.c" \
     "$probe/source/launcher_setup.c" "$probe/source/setup_boot.c" \
@@ -71,7 +70,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     "$probe/source/steamgriddb.c" \
     "$probe/source/launcher_svg.c" \
     "$build/forwarder-icon.c" \
-    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lturbojpeg -lcurl -lm -o "$build/launcher_host"
+    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lturbojpeg -lcurl -lcrypto -lm -o "$build/launcher_host"
 # sdl2-compat looks for SDL3 next to the program, not in Homebrew's lib folder.
 ln -s /opt/homebrew/lib/libSDL3.0.dylib "$build/libSDL3.dylib"
 

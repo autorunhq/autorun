@@ -22,15 +22,17 @@
 #define __WINE_NTOSKRNL_PRIVATE_H
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winioctl.h"
 #include "winbase.h"
 #include "winsvc.h"
 #include "winternl.h"
+#include "winreg.h"
 #include "ddk/ntifs.h"
 #include "ddk/wdm.h"
+#include "cfgmgr32.h"
 
 #include "wine/asm.h"
 #include "wine/debug.h"
@@ -54,7 +56,10 @@ struct _EPROCESS
 {
     DISPATCHER_HEADER header;
     PROCESS_BASIC_INFORMATION info;
+    KERNEL_USER_TIMES times;
     BOOL wow64;
+    ULONG session_id;
+    char image_name[15];
 };
 
 struct _KTHREAD
@@ -119,7 +124,18 @@ static const WCHAR servicesW[] = {'\\','R','e','g','i','s','t','r','y',
 struct wine_device
 {
     DEVICE_OBJECT device_obj;
+    DEVOBJ_EXTENSION devobj_ext;
     DEVICE_RELATIONS *children;
     HKEY dyn_data_key;
+
+    /* Combination of device_id and instance_id. Only set on PDO devices. */
+    WCHAR device_instance_id[MAX_DEVICE_ID_LEN];
+    /*
+     * Position in the device tree, starting at 1 for the root device. This
+     * value is used to construct device instance IDs for children without
+     * unique IDs of their own.
+     * Only set on PDO devices.
+     */
+    unsigned int level;
 };
 #endif

@@ -70,7 +70,7 @@ HRESULT wg_sample_queue_create(struct wg_sample_queue **out);
 void wg_sample_queue_destroy(struct wg_sample_queue *queue);
 void wg_sample_queue_flush(struct wg_sample_queue *queue, bool all);
 
-wg_parser_t wg_parser_create(bool output_compressed, bool use_opengl);
+wg_parser_t wg_parser_create(UINT32 flags); /* see wg_parser_create_flag */
 void wg_parser_destroy(wg_parser_t parser);
 
 HRESULT wg_parser_connect(wg_parser_t parser, uint64_t file_size, const WCHAR *uri);
@@ -138,8 +138,6 @@ HRESULT mpeg_splitter_create(IUnknown *outer, IUnknown **out);
 HRESULT wave_parser_create(IUnknown *outer, IUnknown **out);
 HRESULT wma_decoder_create(IUnknown *outer, IUnknown **out);
 HRESULT wmv_decoder_create(IUnknown *outer, IUnknown **out);
-HRESULT resampler_create(IUnknown *outer, IUnknown **out);
-HRESULT color_convert_create(IUnknown *outer, IUnknown **out);
 HRESULT mp3_sink_class_factory_create(IUnknown *outer, IUnknown **out);
 HRESULT mpeg4_sink_class_factory_create(IUnknown *outer, IUnknown **out);
 
@@ -181,12 +179,8 @@ unsigned int wg_format_get_stride(const struct wg_format *format);
 
 bool wg_video_format_is_rgb(enum wg_video_format format);
 
-HRESULT audio_decoder_create(REFIID riid, void **ret);
 HRESULT aac_decoder_create(REFIID riid, void **ret);
 HRESULT h264_decoder_create(REFIID riid, void **ret);
-HRESULT video_processor_create(REFIID riid, void **ret);
-HRESULT gstreamer_scheme_handler_create(REFIID riid, void **ret);
-
 HRESULT h264_encoder_create(REFIID riid, void **ret);
 
 extern const GUID MFAudioFormat_RAW_AAC;

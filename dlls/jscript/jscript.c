@@ -912,17 +912,6 @@ static HRESULT WINAPI JScript_AddNamedItem(IActiveScript *iface,
             WARN("object does not implement IDispatch\n");
             return hres;
         }
-
-        if(!cc_api.note_edge && This->ctx->html_mode) {
-            IWineJSDispatchHost *host;
-
-            /* Init CC API to get rid of cycles in IE8 and below as well */
-            hres = IDispatch_QueryInterface(disp, &IID_IWineJSDispatchHost, (void**)&host);
-            if(SUCCEEDED(hres) && host) {
-                init_cc_api(host);
-                IWineJSDispatchHost_Release(host);
-            }
-        }
     }
 
     item = malloc(sizeof(*item));
@@ -973,7 +962,7 @@ static HRESULT WINAPI JScript_GetScriptDispatch(IActiveScript *iface, LPCOLESTR 
     }
 
     script_obj = This->ctx->global;
-    if(pstrItemName) {
+    if(pstrItemName && *pstrItemName) {
         named_item_t *item = lookup_named_item(This->ctx, pstrItemName, 0);
         if(!item) return E_INVALIDARG;
         if(item->script_obj) script_obj = item->script_obj;

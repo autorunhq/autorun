@@ -90,9 +90,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2629"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2631"
 #elif defined(WINE_NX_FEX)
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2629"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2631"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
@@ -1671,6 +1671,11 @@ static unsigned int close_handle_object( HANDLE handle )
 static unsigned int runtime_init_process_done( BOOL *suspend )
 {
     unsigned int status;
+    struct teb_data *teb_data = get_teb_data( get_thread_data() );
+
+    teb_data->syscall_table = KeServiceDescriptorTable;
+    teb_data->syscall_trace = FALSE;
+    horizon_pin_current_thread( 0 );
 
     SERVER_START_REQ( init_process_done )
     {
@@ -1809,6 +1814,7 @@ static const char runtime_environment[] =
     "TEMP=C:\\windows\\temp\0"
     "TMP=C:\\windows\\temp\0"
     "USERNAME=steamuser\0"
+    "WINEUSERNAME=steamuser\0"
     "USERPROFILE=C:\\users\\steamuser\0"
     "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
     "windir=C:\\windows\0"
@@ -2051,6 +2057,7 @@ static void runtime_init_peb_process( TEB *teb, void *module,
 
     peb->ImageBaseAddress           = module;
     peb->ProcessParameters          = params;
+    peb->NumberOfProcessors         = cpu_count;
     peb->OSMajorVersion             = 10;
     peb->OSMinorVersion             = 0;
     peb->OSBuildNumber              = 19045;
@@ -2461,7 +2468,7 @@ extern void (*wine_nx_wow64_thread_start)( PRTL_THREAD_START_ROUTINE, void *, BO
 
 static NTSTATUS runtime_init_x86_context( TEB *teb, void *entry, void *arg )
 {
-    I386_CONTEXT *ctx = get_cpu_area( IMAGE_FILE_MACHINE_I386 );
+    I386_CONTEXT *ctx = get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 );
     XMM_SAVE_AREA32 fx = {0};
     if (!ctx || !get_wow_teb(teb) || !pLdrSystemDllInitBlock ||
         !pLdrSystemDllInitBlock->pRtlUserThreadStart || (ULONG_PTR)entry > 0xffffffff ||
@@ -2527,7 +2534,7 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
     if (status) return status;
     status = runtime_init_x86_context( teb, entry, wow_peb );
     if (status) return status;
-    ctx = get_cpu_area( IMAGE_FILE_MACHINE_I386 );
+    ctx = get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 );
     runtime_wow64_initialize = initialize;
     wine_nx_wow64_thread_start = runtime_start_x86_thread;
     log_line( "[WOW64] loader ready: TEB32=%p stack=%08x entry=%08x", get_wow_teb(teb), ctx->Esp, ctx->Eax );
@@ -3684,7 +3691,7 @@ int main( int argc, char **argv )
     void *module = NULL;
     void *entry = NULL;
     SIZE_T view_size = 0;
-    struct runtime_module *main_module;
+    struct runtime_module *registered_main;
     RTL_USER_PROCESS_PARAMETERS *params;
     UNICODE_STRING main_nt_name;
     char dos_path[512];
@@ -4156,10 +4163,20 @@ int main( int argc, char **argv )
     log_line( "[INIT] Wine paths/unix bridge ready" );
     virtual_init();
     log_line( "[INIT] virtual memory ready" );
+    server_init_process( virtual_alloc_first_thread_data() );
+    log_line( "[INIT] server process initialized" );
 
     wine_nx_runtime_environment_init();
     log_line( "[INIT] Wine NLS/environment ready" );
-    teb = virtual_alloc_first_teb();
+    status = map_pe_image( target, &module, &view_size );
+    if (status || !runtime_describe_image( module, view_size, &entry ))
+    {
+        log_line( "[FAIL] map target status=%08x", status );
+        park_forever();
+    }
+    main_module = module;
+    virtual_alloc_first_teb();
+    teb = NtCurrentTeb();
     if (!teb || NtCurrentTeb() != teb || !teb->Peb)
     {
         log_line( "[FAIL] virtual_alloc_first_teb" );
@@ -4168,6 +4185,7 @@ int main( int argc, char **argv )
     /* Upstream's start_main_thread does this; without it the PEB (and the
      * WoW64 PEB copied from it) reports zero processors to GetSystemInfo. */
     init_cpu_info();
+    teb->Peb->NumberOfProcessors = cpu_count;
     /* Upstream's dbg_init also copies the debug channels to the page after
      * the WoW64 PEB, where the Windows-side ntdlls look them up. Left zeroed,
      * every channel is off there, so loader errors such as a missing DLL never
@@ -4200,8 +4218,6 @@ int main( int argc, char **argv )
     wine_nx_start_user_shared_data_clock();
     log_line( "[INIT] shared data clock initialized" );
 
-    server_init_process();
-    log_line( "[INIT] server process initialized" );
 #ifdef WINE_NX_AMD64
     if (target_machine != IMAGE_FILE_MACHINE_AMD64)
 #endif
@@ -4214,17 +4230,9 @@ int main( int argc, char **argv )
         }
     }
 
-    status = map_pe_image( target, &module, &view_size );
-    if (status)
-    {
-        log_line( "[FAIL] map target status=%08x", status );
-        park_forever();
-    }
-
     /* With the image mapped, so no thread-local page can be put where it has
      * to go, and before the program runs or makes a thread of its own. */
     hold_thread_local_pages();
-    if (runtime_describe_image( module, view_size, &entry ))
     {
         params = runtime_create_process_params( target, &main_nt_name, dos_path, sizeof(dos_path) );
         if (!params)
@@ -4261,8 +4269,8 @@ int main( int argc, char **argv )
             park_forever();
         }
 #endif
-        main_module = register_module( target, module, view_size, 1 );
-        if (main_module)
+        registered_main = register_module( target, module, view_size, 1 );
+        if (registered_main)
         {
             status = wine_nx_loader_bootstrap( &main_nt_name );
             log_line( "[LDR] bootstrap status=%08x", status );

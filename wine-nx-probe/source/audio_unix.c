@@ -31,6 +31,7 @@ struct nx_audio_stream
     unsigned int frames[NX_BUFFERS];
     float volume[2];
     HANDLE event;
+    HANDLE timer_thread;
     DWORD flags;
     unsigned int source_rate, source_channels, source_bits, source_tag, source_frame_bytes;
     unsigned int scratch_bytes;
@@ -50,12 +51,6 @@ static NTSTATUS nx_test_connect(void *args)
     if (!initialized && R_SUCCEEDED(audoutInitialize())) initialized = TRUE;
     p->priority = initialized ? Priority_Preferred : Priority_Unavailable;
     pthread_mutex_unlock(&audio_lock);
-    return STATUS_SUCCESS;
-}
-static NTSTATUS nx_main_loop(void *args)
-{
-    struct main_loop_params *p = args;
-    NtSetEvent(p->event, NULL);
     return STATUS_SUCCESS;
 }
 static NTSTATUS nx_get_endpoint_ids(void *args)
@@ -244,9 +239,9 @@ static void nx_pump(struct nx_audio_stream *s)
         s->submitted += frames;
     }
 }
-static NTSTATUS nx_timer_loop(void *args)
+static void nx_timer_loop(void *args)
 {
-    struct nx_audio_stream *s = nx_stream(((struct timer_loop_params *)args)->stream);
+    struct nx_audio_stream *s = args;
     LARGE_INTEGER delay;
 
     /* Feeding audout must not wait behind the game's threads, which all run at
@@ -266,7 +261,6 @@ static NTSTATUS nx_timer_loop(void *args)
         pthread_mutex_unlock(&audio_lock);
         NtDelayExecution(FALSE, &delay);
     }
-    return STATUS_SUCCESS;
 }
 static NTSTATUS nx_release_stream(void *args)
 {
@@ -275,7 +269,7 @@ static NTSTATUS nx_release_stream(void *args)
     pthread_mutex_lock(&audio_lock);
     s->quit = TRUE;
     pthread_mutex_unlock(&audio_lock);
-    if (p->timer_thread) { NtWaitForSingleObject(p->timer_thread, FALSE, NULL); NtClose(p->timer_thread); }
+    if (s->timer_thread) { NtWaitForSingleObject(s->timer_thread, FALSE, NULL); NtClose(s->timer_thread); }
     pthread_mutex_lock(&audio_lock);
     audoutStopAudioOut();
     /* Closing the service guarantees DMA no longer owns any buffer. */
@@ -290,6 +284,7 @@ static NTSTATUS nx_release_stream(void *args)
 }
 static NTSTATUS nx_start(void *args)
 {
+    static const WCHAR name[] = {'a','u','d','o','u','t',0};
     struct start_params *p = args;
     struct nx_audio_stream *s = nx_stream(p->stream);
     pthread_mutex_lock(&audio_lock);
@@ -297,6 +292,12 @@ static NTSTATUS nx_start(void *args)
     else if ((s->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !s->event) p->result = AUDCLNT_E_EVENTHANDLE_NOT_SET;
     else
     {
+        if (!s->timer_thread && create_unix_thread(&s->timer_thread, name, nx_timer_loop, s))
+        {
+            p->result = AUDCLNT_E_DEVICE_INVALIDATED;
+            pthread_mutex_unlock(&audio_lock);
+            return STATUS_SUCCESS;
+        }
         nx_pump(s);
         p->result = !s->failed && R_SUCCEEDED(audoutStartAudioOut()) ? S_OK : AUDCLNT_E_DEVICE_INVALIDATED;
         if (SUCCEEDED(p->result)) s->running = TRUE;
@@ -503,8 +504,8 @@ static NTSTATUS nx_aux_message(void *args)
 
 const unixlib_entry_t wine_nx_audio_unix_funcs[] =
 {
-    nx_process_attach, nx_not_implemented, nx_main_loop, nx_get_endpoint_ids,
-    nx_create_stream, nx_release_stream, nx_start, nx_stop, nx_reset, nx_timer_loop,
+    nx_process_attach, nx_not_implemented, nx_process_attach, nx_process_attach, nx_get_endpoint_ids,
+    nx_create_stream, nx_release_stream, nx_start, nx_stop, nx_reset,
     nx_get_render_buffer, nx_release_render_buffer, nx_get_capture_buffer,
     nx_release_capture_buffer, nx_is_format_supported, nx_not_implemented,
     nx_get_mix_format, nx_get_device_period, nx_get_buffer_size, nx_get_latency,
@@ -534,19 +535,6 @@ static NTSTATUS nx_wow64_test_connect(void *args)
     nx_test_connect(&params);
     params32->priority = params.priority;
     return STATUS_SUCCESS;
-}
-
-static NTSTATUS nx_wow64_main_loop(void *args)
-{
-    struct
-    {
-        PTR32 event;
-    } *params32 = args;
-    struct main_loop_params params =
-    {
-        .event = ULongToHandle(params32->event)
-    };
-    return nx_main_loop(&params);
 }
 
 static NTSTATUS nx_wow64_get_endpoint_ids(void *args)
@@ -613,13 +601,11 @@ static NTSTATUS nx_wow64_release_stream(void *args)
     struct
     {
         stream_handle stream;
-        PTR32 timer_thread;
         HRESULT result;
     } *params32 = args;
     struct release_stream_params params =
     {
         .stream = params32->stream,
-        .timer_thread = ULongToHandle(params32->timer_thread)
     };
     nx_release_stream(&params);
     params32->result = params.result;
@@ -973,8 +959,8 @@ static NTSTATUS nx_wow64_aux_message(void *args)
 }
 const unixlib_entry_t wine_nx_audio_wow64_unix_funcs[] =
 {
-    nx_process_attach, nx_not_implemented, nx_wow64_main_loop, nx_wow64_get_endpoint_ids,
-    nx_wow64_create_stream, nx_wow64_release_stream, nx_start, nx_stop, nx_reset, nx_timer_loop,
+    nx_process_attach, nx_not_implemented, nx_process_attach, nx_process_attach, nx_wow64_get_endpoint_ids,
+    nx_wow64_create_stream, nx_wow64_release_stream, nx_start, nx_stop, nx_reset,
     nx_wow64_get_render_buffer, nx_release_render_buffer, nx_wow64_get_capture_buffer,
     nx_release_capture_buffer, nx_wow64_is_format_supported, nx_not_implemented,
     nx_wow64_get_mix_format, nx_wow64_get_device_period, nx_wow64_get_buffer_size,

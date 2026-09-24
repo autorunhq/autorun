@@ -18,9 +18,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <math.h>
-
 #include "hlsl.h"
+#include <math.h>
 
 static bool fold_abs(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
         const struct hlsl_type *dst_type, const struct hlsl_ir_constant *src)
@@ -142,6 +141,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
         const struct hlsl_type *dst_type, const struct hlsl_ir_constant *src)
 {
     unsigned int k;
+    bool b = false;
     uint32_t u = 0;
     double d = 0.0;
     float f = 0.0f;
@@ -157,6 +157,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 i = float_to_int(src->value.u[k].f);
                 f = src->value.u[k].f;
                 d = src->value.u[k].f;
+                b = src->value.u[k].f != 0.0f;
                 break;
 
             case HLSL_TYPE_DOUBLE:
@@ -164,6 +165,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 i = double_to_int(src->value.u[k].d);
                 f = src->value.u[k].d;
                 d = src->value.u[k].d;
+                b = src->value.u[k].d != 0.0;
                 break;
 
             case HLSL_TYPE_INT:
@@ -171,6 +173,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 i = src->value.u[k].i;
                 f = src->value.u[k].i;
                 d = src->value.u[k].i;
+                b = src->value.u[k].i;
                 break;
 
             case HLSL_TYPE_UINT:
@@ -179,6 +182,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 i = src->value.u[k].u;
                 f = src->value.u[k].u;
                 d = src->value.u[k].u;
+                b = src->value.u[k].u;
                 break;
 
             case HLSL_TYPE_BOOL:
@@ -186,6 +190,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 i = !!src->value.u[k].u;
                 f = !!src->value.u[k].u;
                 d = !!src->value.u[k].u;
+                b = !!src->value.u[k].u;
                 break;
         }
 
@@ -210,7 +215,7 @@ static bool fold_cast(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst,
                 break;
 
             case HLSL_TYPE_BOOL:
-                dst->u[k].u = u ? ~0u : 0u;
+                dst->u[k].u = b ? ~0u : 0u;
                 break;
         }
     }
@@ -1280,6 +1285,7 @@ static bool fold_mod(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst, cons
 {
     enum hlsl_base_type type = dst_type->e.numeric.type;
     unsigned int k;
+    float x, y;
 
     VKD3D_ASSERT(type == src1->node.data_type->e.numeric.type);
     VKD3D_ASSERT(type == src2->node.data_type->e.numeric.type);
@@ -1288,6 +1294,22 @@ static bool fold_mod(struct hlsl_ctx *ctx, struct hlsl_constant_value *dst, cons
     {
         switch (type)
         {
+            /* Explicitly disable floating-point contraction on Clang to
+             * prevent it from fusing the multiplication and the
+             * addition/subtraction below. Current versions of GCC
+             * unfortunately do no support the FP_CONTRACT pragma, but don't
+             * contract the expression either. */
+#ifdef __clang__
+#pragma STDC FP_CONTRACT OFF
+#endif
+            case HLSL_TYPE_FLOAT:
+            case HLSL_TYPE_HALF:
+                x = src1->value.u[k].f;
+                y = src2->value.u[k].f;
+                /* Explicit cast to float to avoid x87 excess precision. */
+                dst->u[k].f = x - (float)(truncf(x / y) * y);
+                break;
+
             case HLSL_TYPE_INT:
                 if (src2->value.u[k].i == 0)
                 {

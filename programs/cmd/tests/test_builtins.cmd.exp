@@ -581,14 +581,22 @@ FAILURE 255
 foo@space@
 SUCCESS 1024
 @todo_wine@SUCCESS 666
+0
 --- success/failure for TYPE command
 FAILURE 1
 SUCCESS 0
 FAILURE 1
-@todo_wine@a@space@
-@todo_wine@b@space@
-@todo_wine@FAILURE 1
-@todo_wine@---
+---
+a@space@
+b@space@
+FAILURE 1
+a@space@
+b@space@
+FAILURE 1
+a@space@
+b@space@
+FAILURE 1
+FAILURE 1
 FAILURE 1
 --- success/failure for COPY command
 FAILURE 1
@@ -642,6 +650,7 @@ SUCCESS 0
 FAILURE 1
 SUCCESS 666
 FAILURE 1
+SUCCESS 0
 ERRORLEVEL 666
 --- success/failure for DIR command
 FAILURE 1
@@ -1406,6 +1415,9 @@ b 1 3
 "h"
 --- basic wildcards
 bazbaz
+bazbaz
+bazbaz
+"notbaz"
 --- wildcards in subdirs
 pop\bar1@space@
 pop\bar2.txt@space@

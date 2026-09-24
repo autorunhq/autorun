@@ -29,7 +29,6 @@
 #include <sys/types.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "wine/debug.h"
 #include "windef.h"
 #include "winternl.h"
@@ -462,6 +461,16 @@ BOOLEAN WINAPI RtlWow64RequestCrossProcessHeavyFlush( CROSS_PROCESS_WORK_HDR *li
     } while (InterlockedCompareExchange64( &list->hdr, new.hdr, prev.hdr ) != prev.hdr);
 
     return TRUE;
+}
+
+
+/***********************************************************************
+ *              RtlWow64SuspendThread (NTDLL.@)
+ */
+NTSTATUS WINAPI RtlWow64SuspendThread( HANDLE thread, ULONG *count )
+{
+    /* FIXME: Use Wow64SuspendLocalThread when available */
+    return NtSuspendThread( thread, count );
 }
 
 #endif /* _WIN64 */

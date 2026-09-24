@@ -895,24 +895,11 @@ static BOOL add_instance_extension( const char *extension, size_t len, struct vu
     return FALSE;
 }
 
-static void parse_instance_extensions( struct vulkan_instance_extensions *extensions, const char *str )
-{
-    const char *next;
-    for (next = str; *next; next++)
-    {
-        if (*next != ' ') continue;
-        add_instance_extension( str, next - str, extensions );
-        str = next + 1;
-    }
-    if (next > str) add_instance_extension( str, next - str, extensions );
-}
-
 static VkResult win32u_vkCreateInstance( const VkInstanceCreateInfo *client_create_info, const VkAllocationCallbacks *allocator,
                                          VkInstance *client_instance_ptr )
 {
     VkInstanceCreateInfo *create_info = (VkInstanceCreateInfo *)client_create_info; /* cast away const, chain has been copied in the thunks */
     VkInstance host_instance = VK_NULL_HANDLE, client_instance = *client_instance_ptr;
-    const VkCreateInfoWineInstanceCallback *callback_info;
     struct vulkan_physical_device *physical_devices;
     struct mempool pool = {0};
     struct instance *instance;
@@ -926,21 +913,8 @@ static VkResult win32u_vkCreateInstance( const VkInstanceCreateInfo *client_crea
     list_init( &instance->utils_messengers );
     list_init( &instance->report_callbacks );
 
-    if (instance->obj.extensions.has_VK_WINE_openxr_instance_extensions)
-    {
-        parse_instance_extensions( &instance->obj.extensions, getenv( "__WINE_OPENXR_VK_INSTANCE_EXTENSIONS" ) );
-        instance->obj.extensions.has_VK_WINE_openxr_instance_extensions = 0;
-    }
-
-    pthread_key_create(&instance->obj.transient_object_handle, free);
-
     if ((res = convert_instance_create_info( &pool, create_info, instance ))) goto failed;
-    if ((callback_info = pop_next_struct( (VkBaseOutStructure **)&create_info->pNext, VK_STRUCTURE_TYPE_CREATE_INFO_WINE_INSTANCE_CALLBACK )))
-    {
-        PFN_vkCreateInstanceCallbackWINE callback = (void *)(UINT_PTR)callback_info->native_create_callback;
-        if ((res = callback( create_info, allocator, &host_instance, p_vkGetInstanceProcAddr, (void *)(UINT_PTR)callback_info->context ))) goto failed;
-    }
-    else if ((res = p_vkCreateInstance( create_info, NULL /* allocator */, &host_instance ))) goto failed;
+    if ((res = p_vkCreateInstance( create_info, NULL /* allocator */, &host_instance ))) goto failed;
 
     vulkan_object_init_ptr( &instance->obj.obj, (UINT_PTR)host_instance, &client_instance->obj );
     instance->obj.p_insert_object = vulkan_instance_insert_object;
@@ -993,35 +967,7 @@ static void win32u_vkDestroyInstance( VkInstance client_instance, const VkAlloca
     if (instance->objects.compare) pthread_rwlock_destroy( &instance->objects_lock );
     free_debug_utils_messengers( &instance->utils_messengers );
     free_debug_report_callbacks( &instance->report_callbacks );
-    pthread_key_delete(instance->obj.transient_object_handle);
     free( instance );
-}
-
-static BOOL add_device_extension( const char *extension, size_t len, struct vulkan_device_extensions *extensions )
-{
-#define USE_VK_EXT(x) \
-    if (len == sizeof(#x) - 1 && !strncmp( #x, extension, len ))    \
-    {                                                               \
-        if (!extensions->has_ ## x) TRACE( "Adding %s\n", #x );     \
-        return extensions->has_ ## x = 1;                           \
-    }
-    ALL_VK_DEVICE_EXTS
-#undef USE_VK_EXT
-    WARN( "Extension %s is not supported.\n", debugstr_a(extension) );
-    return FALSE;
-}
-
-static void parse_device_extensions( struct vulkan_device_extensions *extensions, const char *str )
-{
-    const char *next;
-
-    for (next = str; *next; next++)
-    {
-        if (*next != ' ') continue;
-        add_device_extension( str, next - str, extensions );
-        str = next + 1;
-    }
-    if (next > str) add_device_extension( str, next - str, extensions );
 }
 
 static VkResult convert_device_create_info( struct vulkan_physical_device *physical_device, VkDeviceCreateInfo *info,
@@ -1047,8 +993,6 @@ static VkResult convert_device_create_info( struct vulkan_physical_device *physi
     device->extensions.has_VK_KHR_external_memory_win32 = 0;
     device->extensions.has_VK_KHR_external_fence_win32 = 0;
     device->extensions.has_VK_KHR_external_semaphore_win32 = 0;
-    device->extensions.has_VK_WINE_openvr_device_extensions = 0;
-    device->extensions.has_VK_WINE_openxr_device_extensions = 0;
 
     if (device->extensions.has_VK_EXT_external_memory_dma_buf)
         device->extensions.has_VK_KHR_external_memory_fd = 1;
@@ -1127,7 +1071,6 @@ static VkResult win32u_vkCreateDevice( VkPhysicalDevice client_physical_device, 
     struct vulkan_physical_device *physical_device = vulkan_physical_device_from_handle( client_physical_device );
     struct vulkan_instance *instance = physical_device->instance;
     VkDevice host_device, client_device = *client_device_ptr;
-    const VkCreateInfoWineDeviceCallback *callback_info;
     unsigned int queue_count, props_count, i;
     /* create_info may point at this until the host device is created */
     VkPhysicalDeviceFeatures features = {0};
@@ -1150,7 +1093,6 @@ static VkResult win32u_vkCreateDevice( VkPhysicalDevice client_physical_device, 
 
     if (!(device = calloc( 1, sizeof(*device) + queue_count * sizeof(*device->queues) + props_count * sizeof(*device->queue_props) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
     device->extensions = client_device->extensions;
-    device->queues = (void *)(device + 1);
     device->queue_props = (void *)(device->queues + queue_count);
 
 {
@@ -1180,30 +1122,8 @@ static VkResult win32u_vkCreateDevice( VkPhysicalDevice client_physical_device, 
 #endif
 }
 
-    if (device->extensions.has_VK_WINE_openvr_device_extensions)
-    {
-        VkPhysicalDeviceProperties properties = {0};
-        const char *vr_exts;
-        char name[64];
-        instance->p_vkGetPhysicalDeviceProperties( physical_device->host.physical_device, &properties );
-        sprintf( name, "VK_WINE_OPENVR_DEVICE_EXTS_PCIID_%04x_%04x", properties.vendorID, (uint16_t)properties.deviceID );
-        if (!(vr_exts = getenv( name ))) vr_exts = getenv( "VK_WINE_OPENVR_DEVICE_EXTS" );
-        if (vr_exts) parse_device_extensions( &device->extensions, vr_exts );
-        device->extensions.has_VK_WINE_openvr_device_extensions = 0;
-    }
-    if (device->extensions.has_VK_WINE_openxr_device_extensions)
-    {
-        parse_device_extensions( &device->extensions, getenv( "__WINE_OPENXR_VK_DEVICE_EXTENSIONS" ) );
-        device->extensions.has_VK_WINE_openxr_device_extensions = 0;
-    }
-
     if ((res = convert_device_create_info( physical_device, create_info, &pool, device ))) goto failed;
-    if ((callback_info = pop_next_struct( (VkBaseOutStructure **)&create_info->pNext, VK_STRUCTURE_TYPE_CREATE_INFO_WINE_DEVICE_CALLBACK )))
-    {
-        PFN_vkCreateDeviceCallbackWINE callback = (void *)(UINT_PTR)callback_info->native_create_callback;
-        if ((res = callback( physical_device->host.physical_device, create_info, allocator, &host_device, p_vkGetDeviceProcAddr, (void *)(UINT_PTR)callback_info->context ))) goto failed;
-    }
-    else if ((res = instance->p_vkCreateDevice( physical_device->host.physical_device, create_info, NULL /* allocator */, &host_device ))) goto failed;
+    if ((res = instance->p_vkCreateDevice( physical_device->host.physical_device, create_info, NULL /* allocator */, &host_device ))) goto failed;
 
     vulkan_object_init_ptr( &device->obj, (UINT_PTR)host_device, &client_device->obj );
     device->physical_device = physical_device;
@@ -1291,17 +1211,6 @@ static void win32u_vkGetDeviceQueue2( VkDevice client_device, const VkDeviceQueu
     info.pNext = NULL;
 
     *client_queue = device_find_queue( client_device, &info );
-}
-
-static void set_transient_client_handle(struct vulkan_instance *instance, uint64_t client_handle)
-{
-    uint64_t *handle = pthread_getspecific(instance->transient_object_handle);
-    if (!handle)
-    {
-        handle = malloc(sizeof(uint64_t));
-        pthread_setspecific(instance->transient_object_handle, handle);
-    }
-    *handle = client_handle;
 }
 
 static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryAllocateInfo *client_alloc_info,
@@ -1475,7 +1384,6 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         /* Let the driver trim its BO cache before reclaiming guest pages. */
         if (reclaim_host_memory) horizon_swap_native_begin();
 #endif
-    set_transient_client_handle(instance, (uintptr_t)&memory->obj.obj);
 #if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
     if (native_shared_request)
         res = wine_nx_vk_allocate_shared_memory( device->host.device, alloc_info,
@@ -2112,14 +2020,20 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, cons
         surface->hwnd = dummy;
     }
 
-    if ((res = driver_funcs->p_vulkan_surface_create( surface->hwnd, fshack_enabled, instance,
-                                                      &host_surface, &surface->client )))
+    if (!(surface->client = get_unused_client_surface( surface->hwnd, 0, fshack_enabled )))
+        res = VK_ERROR_OUT_OF_HOST_MEMORY;
+    else
     {
+        res = driver_funcs->p_vulkan_surface_create( surface->client, instance, &host_surface );
+        use_window_client_surface( surface->client, !res );
+    }
+    if (res)
+    {
+        if (surface->client) client_surface_release( surface->client );
         if (dummy) NtUserDestroyWindow( dummy );
         free( surface );
         return res;
     }
-    add_window_client_surface( surface->hwnd, surface->client );
     set_window_pixel_format( surface->hwnd, -1, TRUE );
 
     vulkan_object_init( &surface->obj.obj, host_surface );
@@ -2144,6 +2058,13 @@ static void win32u_vkDestroySurfaceKHR( VkInstance client_instance, VkSurfaceKHR
     if (allocator) FIXME( "Support for allocation callbacks not implemented yet\n" );
 
     instance->p_vkDestroySurfaceKHR( instance->host.instance, surface->obj.host.surface, NULL /* allocator */ );
+#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
+    {
+        extern void wine_nx_gl_release_window(void);
+        wine_nx_gl_release_window();
+    }
+#endif
+    use_window_client_surface( surface->client, FALSE );
     client_surface_release( surface->client );
 
     instance->p_remove_object( instance, &surface->obj.obj );
@@ -2269,18 +2190,6 @@ static void *find_vk_struct( void *s, VkStructureType t )
     return NULL;
 }
 
-static void fixup_device_id_vulkan( UINT *vendor_id, UINT *device_id )
-{
-    struct pci_id id_real;
-    const struct pci_id *id = &id_real;
-
-    id_real.vendor = *vendor_id;
-    id_real.device = *device_id;
-    fixup_device_id( &id );
-    *vendor_id = id->vendor;
-    *device_id = id->device;
-}
-
 static void get_physical_device_properties2( struct vulkan_physical_device *physical_device, VkPhysicalDeviceProperties2 *properties2,
                                              PFN_vkGetPhysicalDeviceProperties2 p_vkGetPhysicalDeviceProperties2 )
 {
@@ -2327,7 +2236,6 @@ static void get_physical_device_properties2( struct vulkan_physical_device *phys
         vk11->deviceNodeMask = node_mask;
     }
 
-    fixup_device_id_vulkan( &properties2->properties.vendorID, &properties2->properties.deviceID );
 
     TRACE( "deviceName:%s deviceLUIDValid:%d LUID:%08x:%08x.\n",
            properties2->properties.deviceName, device_luid_valid, luid.HighPart, luid.LowPart );
@@ -3096,7 +3004,7 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
      * display mode change emulation), MoltenVK's vkQueuePresentKHR returns VK_SUBOPTIMAL_KHR.
      * Create the swapchain with VkSwapchainPresentScalingCreateInfoEXT to avoid this.
      */
-    if (get_surface_rect( surface->hwnd, &client_rect, NtUserGetWinMonitorDpi( surface->hwnd, MDT_WINE_RAW_DPI ) ) &&
+    if (get_surface_rect( surface->hwnd, &client_rect, NtUserGetWinMonitorDpi( surface->hwnd, MDT_RAW_DPI ) ) &&
         !extents_equals( &create_info_host.imageExtent, &client_rect ) &&
         instance->extensions.has_VK_EXT_surface_maintenance1 &&
         physical_device->extensions.has_VK_KHR_swapchain_maintenance1)
@@ -5069,20 +4977,11 @@ static struct vulkan_funcs vulkan_funcs =
     .p_vkUnmapMemory2KHR = win32u_vkUnmapMemory2KHR,
 };
 
-static VkResult nulldrv_vulkan_surface_create( HWND hwnd, BOOL raw, const struct vulkan_instance *instance,
-                                               VkSurfaceKHR *surface, struct client_surface **client )
+static VkResult nulldrv_vulkan_surface_create( struct client_surface *client, const struct vulkan_instance *instance,
+                                               VkSurfaceKHR *surface )
 {
     VkHeadlessSurfaceCreateInfoEXT create_info = {.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
-    VkResult res;
-
-    if (!(*client = nulldrv_client_surface_create( hwnd ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    if ((res = instance->p_vkCreateHeadlessSurfaceEXT( instance->host.instance, &create_info, NULL, surface )))
-    {
-        client_surface_release(*client);
-        *client = NULL;
-    }
-
-    return res;
+    return instance->p_vkCreateHeadlessSurfaceEXT( instance->host.instance, &create_info, NULL, surface );
 }
 
 static VkBool32 nulldrv_get_physical_device_presentation_support( struct vulkan_physical_device *physical_device, uint32_t queue )
@@ -5104,8 +5003,6 @@ static void nulldrv_map_device_extensions( struct vulkan_device_extensions *exte
     if (extensions->has_VK_KHR_external_semaphore_fd) extensions->has_VK_KHR_external_semaphore_win32 = 1;
     if (extensions->has_VK_KHR_external_fence_win32) extensions->has_VK_KHR_external_fence_fd = 1;
     if (extensions->has_VK_KHR_external_fence_fd) extensions->has_VK_KHR_external_fence_win32 = 1;
-    extensions->has_VK_WINE_openvr_device_extensions = 1;
-    extensions->has_VK_WINE_openxr_device_extensions = 1;
 }
 
 static const struct vulkan_driver_funcs nulldrv_funcs =
@@ -5136,11 +5033,11 @@ static void vulkan_driver_load(void)
     pthread_once( &init_once, vulkan_driver_init );
 }
 
-static VkResult lazydrv_vulkan_surface_create( HWND hwnd, BOOL raw, const struct vulkan_instance *instance,
-                                               VkSurfaceKHR *surface, struct client_surface **client )
+static VkResult lazydrv_vulkan_surface_create( struct client_surface *client, const struct vulkan_instance *instance,
+                                               VkSurfaceKHR *surface )
 {
     vulkan_driver_load();
-    return driver_funcs->p_vulkan_surface_create( hwnd, raw, instance, surface, client );
+    return driver_funcs->p_vulkan_surface_create( client, instance, surface );
 }
 
 static VkBool32 lazydrv_get_physical_device_presentation_support( struct vulkan_physical_device *physical_device, uint32_t queue )

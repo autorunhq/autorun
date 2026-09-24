@@ -445,7 +445,7 @@ TREEVIEW_GetNextListItem(const TREEVIEW_INFO *infoPtr, const TREEVIEW_ITEM *tvIt
 
 /***************************************************************************
  * This method returns the nth item starting at the given item.  It returns
- * the last item (or first) we we run out of items.
+ * the last item (or the first) when we run out of items.
  *
  * Will scroll backward if count is <0.
  *             forward if count is >0.
@@ -515,6 +515,55 @@ TREEVIEW_SendRealNotify(const TREEVIEW_INFO *infoPtr, UINT code, NMHDR *hdr)
     hdr->code = get_notifycode(infoPtr, code);
 
     return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, hdr->idFrom, (LPARAM)hdr);
+}
+
+static BOOL TREEVIEW_SendItemChanging(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item, UINT uChanged, UINT uStateOld, UINT uStateNew)
+{
+#if __WINE_COMCTL32_VERSION == 6
+    NMTVITEMCHANGE change;
+    change.uChanged = uChanged;
+    change.hItem = item;
+    change.uStateOld = uStateOld;
+    change.uStateNew = uStateNew;
+    change.lParam = item->lParam;
+    return TREEVIEW_SendRealNotify(infoPtr, TVN_ITEMCHANGINGW, &change.hdr);
+#endif
+    return FALSE;
+}
+
+static BOOL TREEVIEW_SendItemChanged(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item, UINT uChanged, UINT uStateOld, UINT uStateNew)
+{
+#if __WINE_COMCTL32_VERSION == 6
+    NMTVITEMCHANGE change;
+    change.uChanged = uChanged;
+    change.hItem = item;
+    change.uStateOld = uStateOld;
+    change.uStateNew = uStateNew;
+    change.lParam = item->lParam;
+    return TREEVIEW_SendRealNotify(infoPtr, TVN_ITEMCHANGEDW, &change.hdr);
+#endif
+    return FALSE;
+}
+
+/*
+ * Change state helper
+ * Returns a boolean value indicating whether the change was accepted (always TRUE for legacy commoncontrols)
+ */
+static BOOL TREEVIEW_ChangeItemState(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item, UINT stateNew)
+{
+    UINT state = item->state;
+    if (state != stateNew)
+    {
+        if (TREEVIEW_SendItemChanging(infoPtr, item, TVIF_STATE, state, stateNew)) return FALSE;
+        item->state = stateNew;
+        if (TREEVIEW_SendItemChanged(infoPtr, item, TVIF_STATE, state, stateNew))
+        {
+            /* roll back */
+            item->state = state;
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 /*
@@ -1212,10 +1261,11 @@ TREEVIEW_DoSetItemT(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item,
 
     if (tvItem->mask & TVIF_STATE)
     {
-	TRACE("prevstate 0x%x, state 0x%x, mask 0x%x\n", item->state, tvItem->state,
+        UINT stateNew;
+        TRACE("prevstate 0x%x, state 0x%x, mask 0x%x\n", item->state, tvItem->state,
 	      tvItem->stateMask);
-	item->state &= ~tvItem->stateMask;
-	item->state |= (tvItem->state & tvItem->stateMask);
+        stateNew = (item->state & ~tvItem->stateMask) | (tvItem->state & tvItem->stateMask);
+        TREEVIEW_ChangeItemState(infoPtr, item, stateNew);
     }
 
     if (tvItem->mask & TVIF_STATEEX)
@@ -2338,25 +2388,36 @@ TREEVIEW_GetCount(const TREEVIEW_INFO *infoPtr)
 }
 
 static VOID
-TREEVIEW_ToggleItemState(const TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item)
+TREEVIEW_ToggleItemState(TREEVIEW_INFO *infoPtr, TREEVIEW_ITEM *item)
 {
     if (infoPtr->dwStyle & TVS_CHECKBOXES)
     {
-	static const unsigned int state_table[] = { 0, 2, 1 };
+        unsigned int state, stateImage, numStates;
 
-	unsigned int state;
+        /* Toggle item state cycles through images other than zero, if image list with more state images is set */
+        numStates = 0;
+        if ( infoPtr->himlState ) numStates = ImageList_GetImageCount(infoPtr->himlState);
+        if ( numStates < 3 ) numStates = 3;
 
-	state = STATEIMAGEINDEX(item->state);
-	TRACE("state: 0x%x\n", state);
-	item->state &= ~TVIS_STATEIMAGEMASK;
+        state = item->state;
+        stateImage = STATEIMAGEINDEX(state);
+        TRACE("stateImage: 0x%x\n", stateImage);
+        state &= ~TVIS_STATEIMAGEMASK;
 
-	if (state < 3)
-	    state = state_table[state];
+        if ( stateImage > 0 )
+        {
+            ++ stateImage;
+            if ( stateImage >= numStates ) stateImage = 1;
+        }
 
-	item->state |= INDEXTOSTATEIMAGEMASK(state);
+        state |= INDEXTOSTATEIMAGEMASK(stateImage);
 
-	TRACE("state: 0x%x\n", state);
-	TREEVIEW_Invalidate(infoPtr, item);
+        TRACE("stateImage: 0x%x\n", stateImage);
+
+        if (state != item->state && TREEVIEW_ChangeItemState(infoPtr, item, state))
+        {
+            TREEVIEW_Invalidate(infoPtr, item);
+        }
     }
 }
 
@@ -2660,7 +2721,7 @@ TREEVIEW_DrawItem(const TREEVIEW_INFO *infoPtr, HDC hdc, TREEVIEW_ITEM *item)
      */
 
     /* Don't paint item's text if it's being edited */
-    if (!infoPtr->hwndEdit || (infoPtr->selectedItem != item))
+    if (!infoPtr->hwndEdit || (infoPtr->editItem != item))
     {
 	if (item->pszText)
 	{
@@ -4318,9 +4379,14 @@ TREEVIEW_LButtonDown(TREEVIEW_INFO *infoPtr, LPARAM lParam)
 
         if (do_focus)
         {
-            infoPtr->focusedItem = ht.hItem;
             TREEVIEW_InvalidateItem(infoPtr, infoPtr->focusedItem);
-            TREEVIEW_InvalidateItem(infoPtr, infoPtr->selectedItem);
+            if (infoPtr->focusedItem != ht.hItem)
+            {
+                infoPtr->focusedItem = ht.hItem;
+                TREEVIEW_InvalidateItem(infoPtr, infoPtr->focusedItem);
+            }
+            if (infoPtr->focusedItem != infoPtr->selectedItem)
+                TREEVIEW_InvalidateItem(infoPtr, infoPtr->selectedItem);
         }
     }
 
@@ -4584,10 +4650,11 @@ TREEVIEW_DoSelectItem(TREEVIEW_INFO *infoPtr, INT action, HTREEITEM newSelect,
 					newSelect))
 	    return FALSE;
 
-	if (prevSelect)
-	    prevSelect->state &= ~TVIS_SELECTED;
-	if (newSelect)
-	    newSelect->state |= TVIS_SELECTED;
+	if (prevSelect == NULL || TREEVIEW_ChangeItemState( infoPtr, prevSelect, prevSelect->state & ~TVIS_SELECTED))
+    {
+        /* deselected previous */
+        if (newSelect != NULL) TREEVIEW_ChangeItemState( infoPtr, newSelect, newSelect->state | TVIS_SELECTED);
+    }
 
 	infoPtr->selectedItem = newSelect;
 

@@ -261,6 +261,7 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
 static const struct opengl_drawable_funcs nx_drawable_funcs =
 {
+    .size = sizeof(struct nx_gl_drawable),
     .destroy = nx_drawable_destroy,
     .flush = nx_drawable_flush,
     .swap = nx_drawable_swap,
@@ -269,15 +270,14 @@ static const struct opengl_drawable_funcs nx_drawable_funcs =
 /* A window surface covers the whole screen: the Switch has one NWindow, and
  * window surfaces and EGL cannot share it. Programs drawing with OpenGL are
  * expected to be full screen; other windows are not shown meanwhile. */
-static BOOL nx_surface_create( HWND hwnd, BOOL raw, int format, struct opengl_drawable **drawable )
+static BOOL nx_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
+    HWND hwnd = client->hwnd;
     struct opengl_drawable *previous;
-    struct client_surface *client;
     struct nx_gl_drawable *gl;
     void *window;
 
-    TRACE( "hwnd %p, raw %u, format %d\n", hwnd, raw, format );
-    (void)raw;  /* win32u wraps the drawable in a framebuffer surface itself */
+    TRACE( "hwnd %p, format %d\n", hwnd, format );
 
     if ((previous = *drawable) && previous->format == format) return TRUE;
     /* A previous surface may hold the screen: let it go first. */
@@ -287,9 +287,7 @@ static BOOL nx_surface_create( HWND hwnd, BOOL raw, int format, struct opengl_dr
         *drawable = NULL;
     }
 
-    if (!(client = nulldrv_client_surface_create( hwnd ))) return FALSE;
-    gl = opengl_drawable_create( sizeof(*gl), &nx_drawable_funcs, format, client );
-    client_surface_release( client );
+    gl = opengl_drawable_create( &nx_drawable_funcs, format, client, NULL );
     if (!gl) return FALSE;
     gl->base.buffer_map[0] = GL_BACK_LEFT;
     gl->base.buffer_map[1] = GL_BACK_RIGHT;
@@ -347,7 +345,7 @@ static BOOL nx_surface_create( HWND hwnd, BOOL raw, int format, struct opengl_dr
 
         /* raw 0: win32u draws through its framebuffer surface (DPI scaling or gamma) */
         if (!logged) nx_log( "[NXGL] EGL %s %s, %u configs; window surface for format %d, raw %u",
-                             vendor ? vendor : "?", version ? version : "?", egl->config_count, format, raw );
+                             vendor ? vendor : "?", version ? version : "?", egl->config_count, format, client->raw );
         logged = TRUE;
     }
     *drawable = &gl->base;
@@ -363,9 +361,11 @@ err:
  * EGL_BAD_CONFIG) and EGL_KHR_create_context_no_error. A context gets the config
  * of its pixel format, the one this format's window surfaces and pbuffers use,
  * so EGL lets them be made current together. */
-static BOOL nx_context_create( int format, void *share, const int *attribs, void **context )
+static struct opengl_context *nx_context_create( int format, struct opengl_context *share,
+                                                  const int *attribs, BOOL *shared )
 {
     EGLint egl_attribs[16], *end = egl_attribs, error;
+    struct opengl_context *context;
 
     TRACE( "format %d, share %p, attribs %p\n", format, share, attribs );
 
@@ -388,7 +388,7 @@ static BOOL nx_context_create( int format, void *share, const int *attribs, void
             if (attribs[1] & WGL_CONTEXT_ES2_PROFILE_BIT_EXT)
             {
                 ERR( "OpenGL ES contexts are not supported\n" );
-                return FALSE;
+                return NULL;
             }
             name = EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR;
             break;
@@ -412,16 +412,19 @@ static BOOL nx_context_create( int format, void *share, const int *attribs, void
     }
     *end = EGL_NONE;
 
+    if (!(context = calloc( 1, sizeof(*context) ))) return NULL;
     funcs->p_eglBindAPI( EGL_OPENGL_API );
-    *context = funcs->p_eglCreateContext( egl->display, nx_config_for_format( format ), share,
-                                          end != egl_attribs ? egl_attribs : NULL );
-    if ((error = funcs->p_eglGetError()) != EGL_SUCCESS || !*context)
+    context->host_context = funcs->p_eglCreateContext( egl->display, nx_config_for_format( format ),
+                                                        share ? share->host_context : NULL,
+                                                        end != egl_attribs ? egl_attribs : NULL );
+    if ((error = funcs->p_eglGetError()) != EGL_SUCCESS || !context->host_context)
     {
         ERR( "context creation failed for format %d, share %p, error %#x\n", format, share, error );
-        return FALSE;
+        free( context );
+        return NULL;
     }
-    TRACE( "created context %p\n", *context );
-    return TRUE;
+    TRACE( "created context %p\n", context );
+    return context;
 }
 
 /* Mesa's Switch platform is the default display; its windows are NWindows. */
@@ -453,12 +456,14 @@ UINT wine_nx_drv_OpenGLInit( UINT version, const struct opengl_funcs *opengl_fun
     nx_driver_funcs.p_get_proc_address = (*driver_funcs)->p_get_proc_address;
     nx_driver_funcs.p_init_pixel_formats = (*driver_funcs)->p_init_pixel_formats;
     nx_driver_funcs.p_describe_pixel_format = (*driver_funcs)->p_describe_pixel_format;
-    nx_driver_funcs.p_init_wgl_extensions = (*driver_funcs)->p_init_wgl_extensions;
+    nx_driver_funcs.p_init_extensions = (*driver_funcs)->p_init_extensions;
     nx_driver_funcs.p_context_destroy = (*driver_funcs)->p_context_destroy;
-    nx_driver_funcs.p_make_current = (*driver_funcs)->p_make_current;
+    nx_driver_funcs.p_context_activate = (*driver_funcs)->p_context_activate;
     nx_driver_funcs.p_pbuffer_create = (*driver_funcs)->p_pbuffer_create;
     nx_driver_funcs.p_pbuffer_updated = (*driver_funcs)->p_pbuffer_updated;
     nx_driver_funcs.p_pbuffer_bind = (*driver_funcs)->p_pbuffer_bind;
+    nx_driver_funcs.p_null_surface_create = (*driver_funcs)->p_null_surface_create;
+    nx_driver_funcs.p_cleanup_thread = (*driver_funcs)->p_cleanup_thread;
 
     *driver_funcs = &nx_driver_funcs;
     return STATUS_SUCCESS;

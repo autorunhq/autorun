@@ -27,7 +27,6 @@
 #include <errno.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "dbghelp_private.h"
 #include "image_private.h"
 
@@ -1151,7 +1150,7 @@ static void macho_finish_stabs(struct module* module, struct hash_table* ht_symt
 
             if (ste->used) continue;
 
-            sym = symt_find_nearest(module, ste->addr);
+            sym = (struct symt_ht*)SYMT_SYMREF_TO_PTR(symt_find_nearest(module, ste->addr));
             if (sym)
                 symt_get_address(&sym->symt, &addr);
             if (sym && ste->addr == addr)
@@ -1188,7 +1187,7 @@ static void macho_finish_stabs(struct module* module, struct hash_table* ht_symt
         {
             if (ste->is_code)
             {
-                symt_new_function(module, ste->compiland, ste->ht_elt.name,
+                symt_new_function(module, symt_ptr_to_symref(&ste->compiland->symt), ste->ht_elt.name,
                                   ste->addr, 0, 0, 0);
             }
             else

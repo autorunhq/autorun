@@ -14,7 +14,7 @@
 #ifdef __SWITCH__
 #include <switch.h>
 #else
-#include <tomcrypt.h>
+#include <openssl/sha.h>
 #endif
 
 #define INI_LIMIT (256u * 1024u)
@@ -50,10 +50,7 @@ static void digest(const void *data, size_t size, unsigned char out[32])
 #ifdef __SWITCH__
     sha256CalculateHash(out, data, size);
 #else
-    hash_state state;
-    sha256_init(&state);
-    sha256_process(&state, data, size);
-    sha256_done(&state, out);
+    SHA256(data, size, out);
 #endif
 }
 

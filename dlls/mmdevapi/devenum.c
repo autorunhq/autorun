@@ -44,14 +44,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(mmdevapi);
 
 DEFINE_GUID(GUID_NULL,0,0,0,0,0,0,0,0,0,0,0);
 
-#define WINE_REG_PROP_MAGIC 0xbeef
-struct reg_prop_serialized {
-    VARTYPE vt;
-    WORD unk; /* Uninitialized memory on native, we store a magic value here. */
-    ULONG elems;
-    BYTE data[];
-};
-
 static HKEY key_render;
 static HKEY key_capture;
 
@@ -268,143 +260,6 @@ static HRESULT MMDevPropStore_OpenPropKey(const GUID *guid, DWORD flow, HKEY *pr
     return S_OK;
 }
 
-static BOOL is_vector_vt(VARTYPE vt)
-{
-    return !!(vt & VT_VECTOR);
-}
-
-static unsigned int get_vt_elem_size(VARTYPE vt)
-{
-    switch (vt & VT_TYPEMASK)
-    {
-        case VT_BOOL:
-            return sizeof(VARIANT_BOOL);
-
-        case VT_CLSID:
-            return sizeof(GUID);
-
-        default:
-            return 0;
-    }
-}
-
-static BOOL is_valid_serialized_reg_prop(BYTE *data, DWORD data_size)
-{
-    struct reg_prop_serialized *reg_prop;
-    unsigned int elem_size;
-
-    if (data_size <= sizeof(*reg_prop))
-        return FALSE;
-
-    reg_prop = (struct reg_prop_serialized *)data;
-    if (reg_prop->unk != WINE_REG_PROP_MAGIC)
-        return FALSE;
-
-    if (((reg_prop->vt & VT_TYPEMASK) > VT_CLSID))
-        return FALSE;
-
-    if (!!(reg_prop->vt & ~VT_TYPEMASK) && !is_vector_vt(reg_prop->vt))
-        return FALSE;
-
-    if (!reg_prop->elems || ((reg_prop->elems > 1) && !is_vector_vt(reg_prop->vt)))
-        return FALSE;
-
-    elem_size = get_vt_elem_size(reg_prop->vt);
-    if (elem_size && (((elem_size * reg_prop->elems) + sizeof(*reg_prop)) > data_size))
-        return FALSE;
-
-    return TRUE;
-}
-
-static void deserialize_reg_prop(BYTE *data, DWORD data_size, PROPVARIANT *pv)
-{
-    struct reg_prop_serialized *reg_prop = (struct reg_prop_serialized *)data;
-    unsigned int elems_size;
-
-    switch (reg_prop->vt)
-    {
-        case VT_BOOL:
-            pv->vt = reg_prop->vt;
-            pv->boolVal = ((VARIANT_BOOL *)reg_prop->data)[0];
-            break;
-
-        case VT_BOOL | VT_VECTOR:
-            pv->vt = reg_prop->vt;
-            pv->cabool.cElems = reg_prop->elems;
-            elems_size = sizeof(*pv->cabool.pElems) * reg_prop->elems;
-            pv->cabool.pElems = CoTaskMemAlloc(elems_size);
-            memcpy(pv->cabool.pElems, reg_prop->data, elems_size);
-            break;
-
-        case VT_CLSID:
-            pv->vt = reg_prop->vt;
-            pv->puuid = CoTaskMemAlloc(sizeof(*pv->puuid));
-            *pv->puuid = ((GUID *)reg_prop->data)[0];
-            break;
-
-        case VT_CLSID | VT_VECTOR:
-            pv->vt = reg_prop->vt;
-            pv->cauuid.cElems = reg_prop->elems;
-            elems_size = sizeof(*pv->cauuid.pElems) * reg_prop->elems;
-            pv->cauuid.pElems = CoTaskMemAlloc(elems_size);
-            memcpy(pv->cauuid.pElems, reg_prop->data, elems_size);
-            break;
-
-        default:
-            break;
-    }
-}
-
-static HRESULT serialize_reg_prop(HKEY reg_key, const WCHAR *prop_id, PROPVARIANT *pv)
-{
-    const struct reg_prop_serialized reg_prop_init = { pv->vt, WINE_REG_PROP_MAGIC };
-    struct reg_prop_serialized *reg_prop = NULL;
-    unsigned int size = sizeof(reg_prop_init);
-    unsigned int elems_size = 0, elem_count = 1;
-    void *elems_val = NULL;
-    LONG ret;
-
-    switch (pv->vt)
-    {
-        case VT_BOOL:
-            elems_size = get_vt_elem_size(pv->vt);
-            elems_val = &pv->boolVal;
-            break;
-
-        case VT_BOOL | VT_VECTOR:
-            elem_count = pv->cabool.cElems;
-            elems_size = elem_count * get_vt_elem_size(pv->vt);
-            elems_val = pv->cabool.pElems;
-            break;
-
-        case VT_CLSID:
-            elems_size = get_vt_elem_size(pv->vt);
-            elems_val = pv->puuid;
-            break;
-
-        case VT_CLSID | VT_VECTOR:
-            elem_count = pv->cauuid.cElems;
-            elems_size = elem_count * get_vt_elem_size(pv->vt);
-            elems_val = pv->cauuid.pElems;
-            break;
-
-        default:
-            assert(0);
-            break;
-    }
-
-    size += elems_size;
-    if (!(reg_prop = malloc(size)))
-        return E_OUTOFMEMORY;
-
-    *reg_prop = reg_prop_init;
-    reg_prop->elems = elem_count;
-    memcpy(reg_prop->data, elems_val, elems_size);
-    ret = RegSetValueExW(reg_key, prop_id, 0, REG_BINARY, (BYTE *)reg_prop, size);
-    free(reg_prop);
-    return !ret ? S_OK : E_FAIL;
-}
-
 static HRESULT MMDevice_GetPropValue(const GUID *devguid, DWORD flow, REFPROPERTYKEY key, PROPVARIANT *pv)
 {
     WCHAR buffer[80];
@@ -449,27 +304,13 @@ static HRESULT MMDevice_GetPropValue(const GUID *devguid, DWORD flow, REFPROPERT
         }
         case REG_BINARY:
         {
-            BYTE *data = CoTaskMemAlloc(size);
-
-            if (!data)
-            {
+            pv->vt = VT_BLOB;
+            pv->blob.cbSize = size;
+            pv->blob.pBlobData = CoTaskMemAlloc(size);
+            if (!pv->blob.pBlobData)
                 hr = E_OUTOFMEMORY;
-                break;
-            }
-
-            RegGetValueW(regkey, NULL, buffer, RRF_RT_REG_BINARY, NULL, data, &size);
-            if (is_valid_serialized_reg_prop(data, size))
-            {
-                TRACE("do_deserialize().\n");
-                deserialize_reg_prop(data, size, pv);
-                CoTaskMemFree(data);
-            }
             else
-            {
-                pv->vt = VT_BLOB;
-                pv->blob.cbSize = size;
-                pv->blob.pBlobData = data;
-            }
+                RegGetValueW(regkey, NULL, buffer, RRF_RT_REG_BINARY, NULL, (BYTE*)pv->blob.pBlobData, &size);
             break;
         }
         default:
@@ -502,17 +343,6 @@ static HRESULT MMDevice_SetPropValue(const GUID *devguid, DWORD flow, REFPROPERT
             ret = RegSetValueExW(regkey, buffer, 0, REG_DWORD, (const BYTE*)&pv->ulVal, sizeof(DWORD));
             break;
         }
-
-        case VT_BOOL:
-        case VT_BOOL | VT_VECTOR:
-        case VT_CLSID:
-        case VT_CLSID | VT_VECTOR:
-        {
-            hr = serialize_reg_prop(regkey, buffer, (PROPVARIANT *)pv);
-            ret = 0;
-            break;
-        }
-
         case VT_BLOB:
         {
             ret = RegSetValueExW(regkey, buffer, 0, REG_BINARY, pv->blob.pBlobData, pv->blob.cbSize);
@@ -673,6 +503,8 @@ static MMDevice *MMDevice_Create(const WCHAR *name, GUID *id, EDataFlow flow, DW
             pv.vt = VT_LPWSTR;
             pv.pwszVal = cur->drv_id;
 
+            set_driver_prop_value(id, flow, (const PROPERTYKEY*)&DEVPKEY_Device_InstanceId);
+
             if (SUCCEEDED(set_driver_prop_value(id, flow, &devicepath_key))) {
                 PROPVARIANT pv2;
 
@@ -701,8 +533,6 @@ static MMDevice *MMDevice_Create(const WCHAR *name, GUID *id, EDataFlow flow, DW
 
             pv.pwszVal = guidstr;
             MMDevice_SetPropValue(id, flow, &deviceinterface_key, &pv);
-
-            set_driver_prop_value(id, flow, (const PROPERTYKEY*)&DEVPKEY_Device_ContainerId);
 
             if (FAILED(set_driver_prop_value(id, flow, &PKEY_AudioEndpoint_FormFactor)))
             {
@@ -809,7 +639,6 @@ static HRESULT set_format(MMDevice *dev)
     HRESULT hr;
     IAudioClient *client;
     WAVEFORMATEX *fmt;
-    WAVEFORMATEXTENSIBLE *fmtex;
     PROPVARIANT pv = { VT_EMPTY };
 
     hr = AudioClient_Create(&dev->devguid, &dev->IMMDevice_iface, &client);
@@ -823,24 +652,6 @@ static HRESULT set_format(MMDevice *dev)
     }
 
     IAudioClient_Release(client);
-
-    /* for most devices, native Windows only allows PCM formats for
-     * DeviceFormat. GetMixFormat often returns float. */
-    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
-        fmtex = (WAVEFORMATEXTENSIBLE *)fmt;
-        if(IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)){
-            fmt->wBitsPerSample = 16;
-            fmt->nBlockAlign = fmt->wBitsPerSample * fmt->nChannels / 8;
-            fmt->nAvgBytesPerSec = fmt->nSamplesPerSec * fmt->nBlockAlign;
-            fmtex->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-            fmtex->Samples.wValidBitsPerSample = fmt->wBitsPerSample;
-        }
-    }else if(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT){
-        fmt->wFormatTag = WAVE_FORMAT_PCM;
-        fmt->wBitsPerSample = 16;
-        fmt->nBlockAlign = fmt->wBitsPerSample * fmt->nChannels / 8;
-        fmt->nAvgBytesPerSec = fmt->nSamplesPerSec * fmt->nBlockAlign;
-    }
 
     pv.vt = VT_BLOB;
     pv.blob.cbSize = sizeof(WAVEFORMATEX) + fmt->cbSize;

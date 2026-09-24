@@ -23,7 +23,6 @@
 #include <assert.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
@@ -47,9 +46,6 @@ DEFINE_GUID(GUID_NULL,0,0,0,0,0,0,0,0,0,0,0);
 WINE_DEFAULT_DEBUG_CHANNEL(hid);
 
 static DRIVER_OBJECT *driver_obj;
-
-static DEVICE_OBJECT *mouse_obj;
-static DEVICE_OBJECT *keyboard_obj;
 
 /* The root-enumerated device stack. */
 static DEVICE_OBJECT *bus_pdo;
@@ -263,16 +259,44 @@ static WCHAR *get_compatible_ids(DEVICE_OBJECT *device)
     static const WCHAR xinput_compat[] = L"WINEBUS\\WINE_COMP_XINPUT";
     static const WCHAR hid_compat[] = L"WINEBUS\\WINE_COMP_HID";
     struct device_extension *ext = (struct device_extension *)device->DeviceExtension;
-    DWORD size = sizeof(hid_compat);
-    WCHAR *dst;
+    WCHAR usb_compat[71];
+    DWORD usb_len = 0, size;
+    WCHAR *dst, *pos;
 
+    /* A real Windows USB-HID device exposes the USB class compatible IDs on its USB
+       interface parent. winebus has no separate interface device, so report them on
+       the HID device, where an application reaches them from the HID node through
+       CM_Get_Parent. desc.bus_id stays -1 for backends that read no USB interface,
+       which leaves them unchanged. */
+    if (ext->desc.bus_type == BUS_TYPE_USB && ext->desc.bus_id != -1)
+    {
+        UINT class = (ext->desc.bus_id >> 16) & 0xff, subclass = (ext->desc.bus_id >> 8) & 0xff,
+             protocol = ext->desc.bus_id & 0xff;
+
+        usb_len += swprintf(usb_compat + usb_len, ARRAY_SIZE(usb_compat) - usb_len,
+                            L"USB\\Class_%02x&SubClass_%02x&Prot_%02x", class, subclass, protocol) + 1;
+        usb_len += swprintf(usb_compat + usb_len, ARRAY_SIZE(usb_compat) - usb_len,
+                            L"USB\\Class_%02x&SubClass_%02x", class, subclass) + 1;
+        usb_len += swprintf(usb_compat + usb_len, ARRAY_SIZE(usb_compat) - usb_len,
+                            L"USB\\Class_%02x", class) + 1;
+    }
+
+    size = sizeof(hid_compat) + usb_len * sizeof(WCHAR);
     if (ext->desc.is_gamepad) size += sizeof(xinput_compat);
 
     if ((dst = ExAllocatePool(PagedPool, size + sizeof(WCHAR))))
     {
-        if (ext->desc.is_gamepad) memcpy(dst, xinput_compat, sizeof(xinput_compat));
-        memcpy((char *)dst + size - sizeof(hid_compat), hid_compat, sizeof(hid_compat));
-        dst[size / sizeof(WCHAR)] = 0;
+        pos = dst;
+        if (ext->desc.is_gamepad)
+        {
+            memcpy(pos, xinput_compat, sizeof(xinput_compat));
+            pos += sizeof(xinput_compat) / sizeof(WCHAR);
+        }
+        memcpy(pos, hid_compat, sizeof(hid_compat));
+        pos += sizeof(hid_compat) / sizeof(WCHAR);
+        memcpy(pos, usb_compat, usb_len * sizeof(WCHAR));
+        pos += usb_len;
+        *pos = 0;
     }
 
     return dst;
@@ -300,8 +324,6 @@ static WCHAR *get_container_id(DEVICE_OBJECT *device)
     GUID *guid = &ext->container_id;
     WCHAR *dst;
 
-    /* Check if we have a bus provided container ID override. */
-    if (!IsEqualGUID(&ext->desc.bus_container_id, &GUID_NULL)) guid = &ext->desc.bus_container_id;
     if ((dst = ExAllocatePool(PagedPool, GUID_STRING_LENGTH * sizeof(WCHAR))))
     {
         swprintf(dst, GUID_STRING_LENGTH, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
@@ -443,25 +465,6 @@ static DEVICE_OBJECT *bus_find_unix_device(UINT64 unix_device)
     return NULL;
 }
 
-static USAGE_AND_PAGE get_device_usages(UINT64 unix_device, UINT *buttons);
-
-static DEVICE_OBJECT *bus_find_device_from_vid_pid(const BOOL is_hidraw, struct device_desc *desc, USAGE_AND_PAGE *usages)
-{
-    struct device_extension *ext;
-    UINT buttons;
-    USAGE_AND_PAGE found_usages;
-
-    LIST_FOR_EACH_ENTRY(ext, &device_list, struct device_extension, entry)
-    {
-        found_usages = get_device_usages(ext->unix_device, &buttons);
-        if (ext->desc.is_hidraw == is_hidraw && ext->desc.vid == desc->vid &&
-            ext->desc.pid == desc->pid && found_usages.UsagePage == usages->UsagePage &&
-            found_usages.Usage == usages->Usage) return ext->device;
-    }
-
-    return NULL;
-}
-
 static void bus_unlink_hid_device(DEVICE_OBJECT *device)
 {
     struct device_extension *ext = (struct device_extension *)device->DeviceExtension;
@@ -526,48 +529,17 @@ static DWORD check_bus_option(const WCHAR *option, DWORD default_value)
     return default_value;
 }
 
-static const WCHAR *wcscasestr(const WCHAR *search, const WCHAR *needle)
-{
-    UNICODE_STRING search_str, needle_str;
-
-    RtlInitUnicodeString(&search_str, search);
-    RtlInitUnicodeString(&needle_str, needle);
-
-    while (needle_str.Length <= search_str.Length)
-    {
-        UNICODE_STRING tmp;
-
-        tmp.Buffer = search_str.Buffer;
-        tmp.Length = tmp.MaximumLength = needle_str.Length;
-
-        if (!RtlCompareUnicodeString(&tmp, &needle_str, TRUE)) return search_str.Buffer;
-        search_str.Length -= sizeof(WCHAR);
-        search_str.Buffer += 1;
-    }
-
-    return NULL;
-}
-
 static BOOL is_hidraw_enabled(WORD vid, WORD pid, const USAGE_AND_PAGE *usages, UINT buttons)
 {
     char buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[1024])];
     KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
     struct device_options *device;
-    WCHAR vidpid[MAX_PATH], *tmp, value[1024];
+    WCHAR vidpid[MAX_PATH], *tmp;
     BOOL prefer_hidraw = FALSE;
     UNICODE_STRING str;
-    SIZE_T len;
     DWORD size;
 
     if (options.disable_hidraw) return FALSE;
-
-    if (!RtlQueryEnvironmentVariable(NULL, L"PROTON_DISABLE_HIDRAW", 21, value, ARRAY_SIZE(value) - 1, &len))
-    {
-        value[len] = 0;
-        if (!wcscmp(value, L"1")) return FALSE;
-        swprintf(vidpid, ARRAY_SIZE(vidpid), L"0x%04X/0x%04X", vid, pid);
-        if (wcscasestr(value, vidpid)) return FALSE;
-    }
 
     LIST_FOR_EACH_ENTRY(device, &options.devices, struct device_options, entry)
     {
@@ -575,20 +547,6 @@ static BOOL is_hidraw_enabled(WORD vid, WORD pid, const USAGE_AND_PAGE *usages, 
         if (device->pid != -1 && device->pid != pid) continue;
         if (device->hidraw == -1) continue;
         return !!device->hidraw;
-    }
-
-    if (usages->UsagePage == HID_USAGE_PAGE_DIGITIZER)
-    {
-        WARN("Ignoring unsupported %04X:%04X hidraw touchscreen\n", vid, pid);
-        return FALSE;
-    }
-
-    if (!RtlQueryEnvironmentVariable(NULL, L"PROTON_ENABLE_HIDRAW", 20, value, ARRAY_SIZE(value) - 1, &len))
-    {
-        value[len] = 0;
-        if (!wcscmp(value, L"1")) return TRUE;
-        swprintf(vidpid, ARRAY_SIZE(vidpid), L"0x%04X/0x%04X", vid, pid);
-        if (wcscasestr(value, vidpid)) return TRUE;
     }
 
     if (usages->UsagePage == HID_USAGE_PAGE_DIGITIZER)
@@ -624,24 +582,10 @@ static BOOL is_hidraw_enabled(WORD vid, WORD pid, const USAGE_AND_PAGE *usages, 
     case 0x0eb7:
         if (pid == 0x183b) prefer_hidraw = TRUE; /* Fanatec ClubSport Pedals v3 */
         if (pid == 0x1839) prefer_hidraw = TRUE; /* Fanatec ClubSport Pedals v1/v2 */
-        if (pid == 0x0e03) prefer_hidraw = TRUE; /* Fanatec CSL Elite */
-        if (pid == 0x0005) prefer_hidraw = TRUE; /* Fanatec CSL Elite PS4 */
-        if (pid == 0x0020) prefer_hidraw = TRUE; /* Fanatec CSL DD / DD Pro / ClubSport DD */
-        if (pid == 0x0001) prefer_hidraw = TRUE; /* Fanatec ClubSport V2 */
-        if (pid == 0x0004) prefer_hidraw = TRUE; /* Fanatec ClubSport V2.5 */
-        if (pid == 0x0006) prefer_hidraw = TRUE; /* Fanatec Podium DD1 */
-        if (pid == 0x0007) prefer_hidraw = TRUE; /* Fanatec Podium DD2 */
-        if (pid == 0x0011) prefer_hidraw = TRUE; /* Fanatec CSR Elite / Forza Motorsport */
-        if (pid == 0xe0fe) prefer_hidraw = TRUE; /* CS-WB-DD (FW update mode) */
         break;
     case 0x231d:
-        /* comes with 128 buttons in the default configuration */
-        if (buttons == 128) prefer_hidraw = TRUE;
-        /* if customized, less than 128 buttons may be shown, decide by PID */
-        if (pid == 0x0200) prefer_hidraw = TRUE; /* VKBsim Gladiator EVO Right Grip */
-        if (pid == 0x0201) prefer_hidraw = TRUE; /* VKBsim Gladiator EVO Left Grip */
-        if (pid == 0x0126) prefer_hidraw = TRUE; /* VKB-Sim Space Gunfighter */
-        if (pid == 0x0127) prefer_hidraw = TRUE; /* VKB-Sim Space Gunfighter L */
+        /* all vkb devices require hidraw, vkb pid & button/axis count are variable by user & modular hardware config */
+        prefer_hidraw = TRUE;
         break;
     case 0x3344:
         /* all VPC devices require hidraw, have variable numbers of axis/buttons, & in many cases
@@ -653,6 +597,16 @@ static BOOL is_hidraw_enabled(WORD vid, WORD pid, const USAGE_AND_PAGE *usages, 
         /* users may have configured button limits, usually 32/50/64 */
         if ((buttons == 32) || (buttons == 50) || (buttons == 64)) prefer_hidraw = TRUE;
         if (pid == 0x2055) prefer_hidraw = TRUE; /* ATMEL/VIRPIL/200325 VPC Throttle MT-50 CM2 */
+        break;
+    case 0x4098:
+        if (pid == 0xbea8) prefer_hidraw = TRUE; /* Winwing Orion Joystick Base Metal 2 */
+        if (pid == 0xbd64) prefer_hidraw = TRUE; /* Winwing Orion Throttle Base II */
+        if (pid == 0xbef0) prefer_hidraw = TRUE; /* Winwing Orion Combat Rudder Pedals */
+        break;
+    case 0x057e:
+        if (pid == 0x057e) prefer_hidraw = TRUE; /* Joy-Con L */
+        if (pid == 0x2007) prefer_hidraw = TRUE; /* Joy-Con R */
+        if (pid == 0x2009) prefer_hidraw = TRUE; /* Pro Controller */
         break;
     }
 
@@ -709,13 +663,43 @@ static BOOL deliver_next_report(struct device_extension *ext, IRP *irp)
 static void process_hid_report(DEVICE_OBJECT *device, BYTE *report_buf, DWORD report_len)
 {
     struct device_extension *ext = (struct device_extension *)device->DeviceExtension;
-    ULONG size = offsetof(struct hid_report, buffer[report_len]);
     struct hid_report *report, *last_report;
+    ULONG size;
     IRP *irp;
 
     TRACE("device %p report_buf %p (%#x), report_len %#lx\n", device, report_buf, *report_buf, report_len);
 
-    if (!(report = RtlAllocateHeap(GetProcessHeap(), 0, size))) return;
+    RtlEnterCriticalSection(&ext->cs);
+
+    if (ext->state != DEVICE_STATE_STARTED)
+    {
+        RtlLeaveCriticalSection(&ext->cs);
+        return;
+    }
+
+    if (!ext->collection_desc.ReportIDs[0].ReportID) last_report = ext->last_reports[0];
+    else last_report = ext->last_reports[report_buf[0]];
+    if (!last_report)
+    {
+        WARN("Ignoring report with unexpected id %#x\n", *report_buf);
+        RtlLeaveCriticalSection(&ext->cs);
+        return;
+    }
+
+    /* Devices may send more data than their report declares, but the cached report
+     * and hidclass.sys buffers are only sized to hold the declared size. */
+    if (report_len > last_report->length)
+    {
+        WARN("overlong report %#x length %lu truncated to declared length %lu\n", *report_buf, report_len, last_report->length);
+        report_len = last_report->length;
+    }
+
+    size = offsetof(struct hid_report, buffer[report_len]);
+    if (!(report = RtlAllocateHeap(GetProcessHeap(), 0, size)))
+    {
+        RtlLeaveCriticalSection(&ext->cs);
+        return;
+    }
     memcpy(report->buffer, report_buf, report_len);
     report->length = report_len;
 
@@ -770,23 +754,6 @@ static void process_hid_report(DEVICE_OBJECT *device, BYTE *report_buf, DWORD re
             report->buffer[8] = trigger[0]; /* TriggerLeft */
             report->buffer[9] = trigger[1]; /* TirggerRight */
         }
-    }
-
-    RtlEnterCriticalSection(&ext->cs);
-
-    if (ext->state != DEVICE_STATE_STARTED)
-    {
-        RtlLeaveCriticalSection(&ext->cs);
-        return;
-    }
-
-    if (!ext->collection_desc.ReportIDs[0].ReportID) last_report = ext->last_reports[0];
-    else last_report = ext->last_reports[report_buf[0]];
-    if (!last_report)
-    {
-        WARN("Ignoring report with unexpected id %#x\n", *report_buf);
-        RtlLeaveCriticalSection(&ext->cs);
-        return;
     }
 
     list_add_tail(&ext->reports, &report->entry);
@@ -894,7 +861,7 @@ static void mouse_device_create(void)
     struct device_create_params params = {{0}};
 
     if (winebus_call(mouse_create, &params)) return;
-    mouse_obj = bus_create_hid_device(&params.desc, params.device);
+    bus_create_hid_device(&params.desc, params.device);
     IoInvalidateDeviceRelations(bus_pdo, BusRelations);
 }
 
@@ -903,7 +870,7 @@ static void keyboard_device_create(void)
     struct device_create_params params = {{0}};
 
     if (winebus_call(keyboard_create, &params)) return;
-    keyboard_obj = bus_create_hid_device(&params.desc, params.device);
+    bus_create_hid_device(&params.desc, params.device);
     IoInvalidateDeviceRelations(bus_pdo, BusRelations);
 }
 
@@ -1034,11 +1001,9 @@ static DWORD CALLBACK bus_main_thread(void *args)
             struct device_desc desc = event->device_created.desc;
             USAGE_AND_PAGE usages;
             UINT buttons;
-            BOOL hidraw_enabled;
 
             usages = get_device_usages(event->device, &buttons);
-            hidraw_enabled = is_hidraw_enabled(desc.vid, desc.pid, &usages, buttons);
-            if (desc.is_hidraw && !hidraw_enabled)
+            if (!desc.is_hidraw != !is_hidraw_enabled(desc.vid, desc.pid, &usages, buttons))
             {
                 struct device_remove_params params = {.device = event->device};
                 WARN("ignoring %shidraw device %04x:%04x with usages %04x:%04x\n", desc.is_hidraw ? "" : "non-",
@@ -1046,27 +1011,11 @@ static DWORD CALLBACK bus_main_thread(void *args)
                 winebus_call(device_remove, &params);
                 break;
             }
-            else if (desc.is_hidraw && hidraw_enabled)
-            {
-                RtlEnterCriticalSection(&device_list_cs);
-                if ((device = bus_find_device_from_vid_pid(FALSE, &event->device_created.desc, &usages)))
-                    bus_unlink_hid_device(device);
-                device = bus_create_hid_device(&event->device_created.desc, event->device);
-                RtlLeaveCriticalSection(&device_list_cs);
-            }
-            else /* desc.is_hidraw == FALSE */
-            {
-                RtlEnterCriticalSection(&device_list_cs);
-                if (hidraw_enabled && bus_find_device_from_vid_pid(TRUE, &event->device_created.desc, &usages)) device = NULL;
-                else device = bus_create_hid_device(&event->device_created.desc, event->device);
-                RtlLeaveCriticalSection(&device_list_cs);
-            }
 
+            TRACE("creating %shidraw device %04x:%04x with usages %04x:%04x\n", desc.is_hidraw ? "" : "non-",
+                  desc.vid, desc.pid, usages.UsagePage, usages.Usage);
 
-            if (device)
-                TRACE("creating %shidraw device %04x:%04x with usages %04x:%04x\n", desc.is_hidraw ? "" : "non-",
-                      desc.vid, desc.pid, usages.UsagePage, usages.Usage);
-
+            device = bus_create_hid_device(&event->device_created.desc, event->device);
             if (device) IoInvalidateDeviceRelations(bus_pdo, BusRelations);
             else
             {
@@ -1293,7 +1242,7 @@ static void bus_options_init(void)
     options.disable_sdl = !check_bus_option(L"Enable SDL", 1);
     if (options.disable_sdl) TRACE("SDL devices disabled in registry\n");
     options.disable_hidraw = check_bus_option(L"DisableHidraw", 0);
-    if (options.disable_hidraw) TRACE("UDEV hidraw devices disabled in registry\n");
+    if (options.disable_hidraw) TRACE("IOHID and UDEV hidraw devices disabled in registry\n");
     options.disable_input = check_bus_option(L"DisableInput", 0);
     if (options.disable_input) TRACE("UDEV input devices disabled in registry\n");
     options.disable_udevd = check_bus_option(L"DisableUdevd", 0);
@@ -1381,8 +1330,8 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
         mouse_device_create();
         keyboard_device_create();
 
+        if (!sdl_driver_init()) options.disable_input = TRUE;
         udev_driver_init();
-        sdl_driver_init();
         iohid_driver_init();
 
         irp->IoStatus.Status = STATUS_SUCCESS;
@@ -1542,6 +1491,7 @@ static NTSTATUS hid_get_device_string(DEVICE_OBJECT *device, DWORD index, WCHAR 
         else memcpy(buffer, ext->desc.product, len);
         return STATUS_SUCCESS;
     case HID_STRING_ID_ISERIALNUMBER:
+        if (!*ext->desc.serialnumber) return STATUS_INVALID_PARAMETER;
         len = (wcslen(ext->desc.serialnumber) + 1) * sizeof(WCHAR);
         if (len > buffer_len) return STATUS_BUFFER_TOO_SMALL;
         else memcpy(buffer, ext->desc.serialnumber, len);

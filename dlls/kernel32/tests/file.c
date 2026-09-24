@@ -1859,7 +1859,15 @@ static void test_GetTempFileNameA(void)
     expected[0] = '\0';
     strcat(expected, windowsdir);
     strcat(expected, "abc2.tmp");
-    ok(lstrcmpiA(out, expected) == 0, "GetTempFileNameA: Unexpected output \"%s\" vs \"%s\"\n",
+    ok(lstrcmpA(out, expected) == 0, "GetTempFileNameA: Unexpected output \"%s\" vs \"%s\"\n",
+       out, expected);
+
+    result = GetTempFileNameA(windowsdir, "abc", 0xA, out);
+    ok(result != 0, "GetTempFileNameA: error %ld\n", GetLastError());
+    expected[0] = '\0';
+    strcat(expected, windowsdir);
+    strcat(expected, "abcA.tmp");
+    ok(lstrcmpA(out, expected) == 0, "GetTempFileNameA: Unexpected output \"%s\" vs \"%s\"\n",
        out, expected);
 }
 
@@ -2316,7 +2324,7 @@ static void test_LockFile(void)
     ok( status == STATUS_ACCESS_VIOLATION, "got %#lx.\n", status );
     memset( &iosb, 0xcc, sizeof(iosb) );
     status = NtUnlockFile( handle, &iosb, &count, &offset, NULL );
-    todo_wine_if(NT_ERROR(status)) ok( status == STATUS_RANGE_NOT_LOCKED, "got %#lx.\n", status );
+    ok( status == STATUS_RANGE_NOT_LOCKED, "got %#lx.\n", status );
     ok( iosb.Status == status, "got %lu.\n", iosb.Status);
     ok( !iosb.Information, "got %Iu.\n", iosb.Information);
 
@@ -2345,6 +2353,14 @@ static void test_LockFile(void)
 
     ret = LockFile( handle, 5, 0, 5, 0 );
     ok( ret, "got error %lu.\n", GetLastError() );
+    count.QuadPart = 5;
+    offset.QuadPart = 4;
+    status = NtUnlockFile( handle, &iosb, &count, &offset, NULL );
+    ok( status == STATUS_RANGE_NOT_LOCKED, "got %#lx.\n", status );
+    count.QuadPart = 4;
+    offset.QuadPart = 5;
+    status = NtUnlockFile( handle, &iosb, &count, &offset, NULL );
+    ok( status == STATUS_RANGE_NOT_LOCKED, "got %#lx.\n", status );
     count.QuadPart = 5;
     offset.QuadPart = 5;
     memset( &iosb, 0xcc, sizeof(iosb) );
@@ -2740,12 +2756,8 @@ static void test_FindFirstFileA(void)
     int err;
     char buffer[5] = "C:\\";
     char buffer2[100];
-    FILE_FULL_EA_INFORMATION *ea_info = (void *)buffer2;
-    char nonexistent[MAX_PATH], temp[MAX_PATH];
-    IO_STATUS_BLOCK io;
+    char nonexistent[MAX_PATH];
     BOOL found = FALSE;
-    NTSTATUS status;
-    BOOL ret;
 
     /* try FindFirstFileA on "C:\" */
     buffer[0] = get_windows_drive();
@@ -2935,33 +2947,6 @@ static void test_FindFirstFileA(void)
     err = GetLastError();
     ok ( handle == INVALID_HANDLE_VALUE, "FindFirstFile on %s should fail\n", buffer2 );
     ok ( err == ERROR_PATH_NOT_FOUND, "Bad Error number %d\n", err );
-
-    /* Test a file with EA. */
-    GetTempPathA(ARRAY_SIZE(temp), temp);
-    strcat(temp, "winetest_ea");
-    handle = CreateFileA(temp, GENERIC_ALL, 0, NULL, CREATE_ALWAYS, 0, 0);
-    ok(handle != INVALID_HANDLE_VALUE, "failed to create %s, error %lu\n",
-            debugstr_a(temp), GetLastError());
-
-    ea_info->NextEntryOffset = 0;
-    ea_info->Flags = 0;
-    ea_info->EaNameLength = 3;
-    ea_info->EaValueLength = 3;
-    strcpy(ea_info->EaName, "foo");
-    strcpy(ea_info->EaName + 4, "bar");
-    status = NtSetEaFile(handle, &io, ea_info, offsetof(FILE_FULL_EA_INFORMATION, EaName[8]));
-    todo_wine ok(!status, "got %#lx\n", status);
-    CloseHandle(handle);
-
-    handle = FindFirstFileA(temp, &data);
-    ok(handle != INVALID_HANDLE_VALUE, "got error %lu\n", GetLastError());
-    ok((data.dwFileAttributes & ~FILE_ATTRIBUTE_NOT_CONTENT_INDEXED) == FILE_ATTRIBUTE_ARCHIVE,
-            "got attributes %#lx\n", data.dwFileAttributes);
-    ok(!data.dwReserved0, "got reserved0 %#lx\n", data.dwReserved0);
-    FindClose(handle);
-
-    ret = DeleteFileA(temp);
-    ok(ret == TRUE, "got error %lu\n", GetLastError());
 }
 
 static void test_FindNextFileA(void)
@@ -4497,6 +4482,18 @@ static void test_ReplaceFileW(void)
         "ReplaceFileW: unexpected error %ld\n", GetLastError());
     DeleteFileW( replacement );
 
+    ret = GetTempFileNameW(temp_path, prefix, 0, replacement);
+    ok(ret, "GetTempFileNameW error (replacement) %ld\n", GetLastError());
+    ret = CreateDirectoryW(replaced, NULL);
+    ok(ret, "CreateDirectoryW error %ld\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = pReplaceFileW(replaced, replacement, NULL, 0, 0, 0);
+    ok(!ret, "expected failure\n");
+    ok(GetLastError() == ERROR_ACCESS_DENIED, "got error %lu\n", GetLastError());
+    ret = RemoveDirectoryW(replaced);
+    ok(ret, "RemoveDirectoryW error %ld\n", GetLastError());
+    DeleteFileW(replacement);
+
     if (removeBackup)
     {
         ret = DeleteFileW(backup);
@@ -5770,6 +5767,93 @@ static void test_GetFinalPathNameByHandleW(void)
     ok(lstrcmpiW(test_path, result_path) == 0, "Expected %s, got %s\n",
        wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
     CloseHandle(file);
+
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"Test.Dat");
+    DeleteFileW(test_path);
+    file = CreateFileW(test_path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW error %lu\n", GetLastError());
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    CloseHandle(file);
+
+    wcscpy(result_path, temp_path);
+    wcscat(result_path, L"test.dat");
+    file = CreateFileW(result_path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, 0);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW error %lu\n", GetLastError());
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    todo_wine ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    CloseHandle(file);
+
+    wcscpy(result_path, temp_path);
+    wcscat(result_path, L"test.dat");
+    file = CreateFileW(result_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, 0, 0);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW error %lu\n", GetLastError());
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    todo_wine ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"test_renamed.dat");
+    success = MoveFileW(result_path + 4, test_path);
+    ok(success, "got error %ld.\n", GetLastError());
+
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    todo_wine ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    todo_wine ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    CloseHandle(file);
+
+    success = DeleteFileW(test_path);
+    ok(success, "got error %ld.\n", GetLastError());
+
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"link");
+    success = CreateSymbolicLinkW(test_path, temp_path, SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+    if (!success && GetLastError() == ERROR_PRIVILEGE_NOT_HELD)
+    {
+        win_skip("Insufficient permissions to perform symlink tests.\n");
+        return;
+    }
+    if (!success && GetLastError() == ERROR_INVALID_PARAMETER /* <= Win10v1607 */)
+    {
+        win_skip("Flag SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE not supported, skipping test.\n");
+        return;
+    }
+    ok(success, "got error %ld.\n", GetLastError());
+
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"LINK");
+    file = CreateFileW(test_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW error %lu\n", GetLastError());
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"link");
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    todo_wine ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    CloseHandle(file);
+
+    wcscat(test_path, L"\\Test.Dat");
+    file = CreateFileW(test_path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW error %lu\n", GetLastError());
+    count = pGetFinalPathNameByHandleW(file, result_path, ARRAY_SIZE(result_path), 0);
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"Test.Dat");
+    ok(count == lstrlenW(test_path) + 4, "Expected length %u, got %lu\n", lstrlenW(test_path), count);
+    ok(wcscmp(test_path, result_path + 4) == 0, "Expected %s, got %s\n",
+       wine_dbgstr_w(test_path), wine_dbgstr_w(result_path));
+    CloseHandle(file);
+
+    wcscpy(test_path, temp_path);
+    wcscat(test_path, L"LINK");
+    success = RemoveDirectoryW(test_path);
+    ok(success, "got error %ld.\n", GetLastError());
 }
 
 static void test_SetFileInformationByHandle(void)

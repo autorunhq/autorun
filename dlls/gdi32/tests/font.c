@@ -7890,136 +7890,121 @@ static void test_font_weight(void)
     DeleteObject(hfont2);
     bret = RemoveFontResourceExA(ttf_name, 0, NULL);
     ok(bret, "got error %ld\n", GetLastError());
+
+    bret = DeleteFileA(ttf_name);
+    ok(bret, "got error %ld\n", GetLastError());
 }
 
-static void test_text_out_fill(void)
+static WCHAR *get_font_path( const char *face )
 {
-    HBRUSH black = GetStockObject(GRAY_BRUSH);
-    RECT r = {0, 0, 256, 256};
-    HBITMAP hbmp, hbmpprev;
-    int i, j, ystart, yend;
-    ABC neg_a, neg_c, abc;
-    BITMAPINFO bmi;
-    char str[3];
-    HFONT hfont;
-    LOGFONTA lf;
-    DWORD *data;
-    BOOL bret;
-    SIZE sz;
-    HDC hdc;
-    int w;
+    DWORD buffer[32];
+    struct font_realization_info *realization_info = (void *)buffer;
+    struct file_info file_info;
+    LOGFONTA lf = {0};
+    HFONT font, prev;
+    SIZE_T size;
+    WCHAR *path;
+    BOOL ret;
+    HDC dc;
 
-    hdc = CreateCompatibleDC(0);
-    ok(!!hdc, "CreateCompatibleDC failed.\n");
+    dc = GetDC( 0 );
 
-    memset(&bmi, 0, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biWidth = r.right;
-    bmi.bmiHeader.biHeight = r.bottom;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    hbmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (void **)&data, NULL, 0);
-    ok(!!hbmp, "failed, err %lu.\n", GetLastError());
-    hbmpprev = SelectObject(hdc, hbmp);
-
-    memset(&lf, 0, sizeof(lf));
-    strcpy(lf.lfFaceName, "Arial");
-    lf.lfQuality = NONANTIALIASED_QUALITY;
+    strcpy( lf.lfFaceName, face );
     lf.lfHeight = 90;
+    lf.lfWeight = FW_BOLD;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    font = CreateFontIndirectA( &lf );
+    prev = SelectObject( dc, font );
 
-    hfont = CreateFontIndirectA(&lf);
-    ok(!!hfont, "failed, err %lu.\n", GetLastError());
-    hfont = SelectObject(hdc, hfont);
+    buffer[0] = 24;
+    ret = pGetFontRealizationInfo( dc, buffer );
+    ok( ret == TRUE, "got %d\n", ret );
+    ret = pGetFontFileInfo( realization_info->instance_id, 0,  &file_info, sizeof(file_info), &size );
+    ok( ret == TRUE, "got %d\n", ret );
+    path = wcsdup( file_info.path );
 
-    FillRect(hdc, &r, black);
+    DeleteObject( SelectObject( dc, prev ));
+    ReleaseDC( 0, dc );
 
-    str[2] = 0;
-    memset(&neg_a, 0, sizeof(neg_a));
-    memset(&neg_c, 0, sizeof(neg_c));
-    for (i = 'A'; i <= 'z'; ++i)
+    return path;
+}
+
+/* Test the path search order by AddFontResource(). */
+static void test_add_font_path(void)
+{
+    static const char system32_path[] = "C:\\windows\\system32\\winetest_font.ttf";
+    static const char fonts_path[] = "C:\\windows\\fonts\\winetest_font.ttf";
+    WCHAR cwd[MAX_PATH], temp_path[MAX_PATH];
+    const void *rsrc_data;
+    DWORD rsrc_size;
+    WCHAR *path;
+    BOOL wow64;
+    int count;
+    BOOL ret;
+    FILE *f;
+
+    IsWow64Process( GetCurrentProcess(), &wow64 );
+
+    rsrc_data = get_res_data( "wine_heavy.ttf", &rsrc_size );
+    if (!(f = fopen( fonts_path, "wb" )))
     {
-        if (!GetCharABCWidthsW(hdc, i, i, &abc)) continue;
-        if (abc.abcA < neg_a.abcA)
-        {
-            str[0] = i;
-            neg_a = abc;
-        }
-        if (abc.abcC < neg_c.abcC)
-        {
-            str[1] = i;
-            neg_c = abc;
-        }
+        skip( "not enough permissions to create fonts in C:\\windows\n" );
+        return;
     }
-    if (neg_a.abcA >= 0 || neg_c.abcC >= 0)
+    fwrite( rsrc_data, rsrc_size, 1, f );
+    fclose( f );
+
+    GetCurrentDirectoryW( ARRAY_SIZE(cwd), cwd );
+    GetTempPathW( ARRAY_SIZE(temp_path), temp_path );
+    SetCurrentDirectoryW( temp_path );
+
+    ret = CopyFileA( fonts_path, "winetest_font.ttf", FALSE );
+    ok( ret, "got error %lu\n", GetLastError() );
+    ret = CopyFileA( fonts_path, system32_path, FALSE );
+    ok( ret, "got error %lu\n", GetLastError() );
+
+    count = AddFontResourceExA( "winetest_font.ttf", 0, NULL );
+    ok( count == 1, "got %d\n", count );
+    path = get_font_path( "wine_heavy" );
+    todo_wine ok( !wcscmp( path, L"C:\\WINDOWS\\FONTS\\WINETEST_FONT.TTF" ),
+                  "got %s\n", debugstr_w( path ));
+    ret = RemoveFontResourceExA( "winetest_font.ttf", 0, NULL );
+    ok( ret, "got error %lu\n", GetLastError() );
+
+    ret = DeleteFileA( fonts_path );
+    ok( ret == TRUE, "got error %lu\n", GetLastError() );
+
+    count = AddFontResourceExA( "winetest_font.ttf", 0, NULL );
+    ok( count == 1, "got %d\n", count );
+    path = get_font_path( "wine_heavy" );
+    wcscat( temp_path, L"winetest_font.ttf" );
+    wcsupr( temp_path );
+    todo_wine ok( !wcscmp( path, temp_path ), "expected %s, got %s\n",
+                  debugstr_w( temp_path ), debugstr_w( path ));
+    ret = RemoveFontResourceExA( "winetest_font.ttf", 0, NULL );
+    ok( ret, "got error %lu\n", GetLastError() );
+
+    ret = DeleteFileA( "winetest_font.ttf" );
+    ok( ret == TRUE, "failed to delete %s, error %lu\n", debugstr_w( temp_path ), GetLastError() );
+
+    /* Windows is broken and doesn't redirect this path.
+     * Stratego (1997) depends on it being redirected,
+     * and fails on 64-bit Windows */
+    count = AddFontResourceExA( "winetest_font.ttf", 0, NULL );
+    ok( count == 1 || broken( wow64 ), "got %d\n", count );
+    if (count == 1)
     {
-        skip("Could not find suitable characters.\n");
-        goto done;
+        path = get_font_path( "wine_heavy" );
+        todo_wine ok( !wcscmp( path, L"C:\\WINDOWS\\SYSTEM32\\WINETEST_FONT.TTF" ),
+            "got %s\n", debugstr_w( path ));
+        ret = RemoveFontResourceExA( "winetest_font.ttf", 0, NULL );
+        ok( ret, "got error %lu\n", GetLastError() );
     }
-    trace("Found %s.\n", debugstr_a(str));
 
-    for (i = 0; i < r.bottom; ++i)
-    {
-        for (j = 0; j < r.right; ++j)
-        {
-            if (data[i * r.right + j] != 0x808080)
-                break;
-        }
-        if (j != r.right)
-            break;
-    }
-    ok(i == r.bottom, "got %d.\n", i);
+    ret = DeleteFileA( system32_path );
+    ok( ret == TRUE, "got error %lu\n", GetLastError() );
 
-    bret = GetTextExtentExPointA(hdc, str, strlen(str), 32767, NULL, NULL, &sz);
-    ok(bret, "got error %lu.\n", GetLastError());
-    w = neg_a.abcA + neg_a.abcB + neg_a.abcC + neg_c.abcA + neg_c.abcB + neg_c.abcC;
-    ok(sz.cx == w, "got %ld, expected %d.\n", sz.cx, w);
-
-    bret = ExtTextOutA(hdc, 10, 0, ETO_OPAQUE, NULL, str, strlen(str), NULL);
-    ok(bret, "got error %lu.\n", GetLastError());
-
-    ystart = r.bottom - sz.cy;
-    yend = r.bottom;
-    for (j = 0; j < r.right; ++j)
-    {
-        if (data[ystart * r.right + j] != 0x808080)
-            break;
-    }
-    ok(j < r.right, "Expected to find white pixel.\n");
-    if (j == r.right)
-        goto done;
-    ok(j == 10 + neg_a.abcA - 1 || j == 10 + neg_a.abcA, "got %d, neg_a.abcA %d.\n", j, neg_a.abcA);
-
-    for (i = ystart; i < yend; ++i)
-    {
-        if (data[i * r.right + j] == 0x808080)
-            break;
-    }
-    ok(i == yend, "got i %d, expected %d.\n", i, yend);
-
-    for (j = r.right - 1; j >= 0; --j)
-    {
-        if (data[ystart * r.right + j] == 0xffffff)
-            break;
-    }
-    ok(j >= 0, "Expected to find white pixel.\n");
-    if (j < 0)
-        goto done;
-    ok(j == 10 + sz.cx - neg_c.abcC || j == 10 + sz.cx - neg_c.abcC - 1, "got %d, neg_c.abcC %ld.\n", j, 10 + sz.cx - neg_c.abcC);
-    for (i = ystart; i < yend; ++i)
-    {
-        if (data[i * r.right + j] == 0x808080)
-            break;
-    }
-    ok(i == yend, "got i %d.\n", i);
-
-done:
-    SelectObject(hdc, hbmpprev);
-    hfont = SelectObject(hdc, hfont);
-    DeleteObject(hfont);
-    DeleteObject(hbmp);
-    DeleteDC(hdc);
+    SetCurrentDirectoryW( cwd );
 }
 
 START_TEST(font)
@@ -8112,7 +8097,7 @@ START_TEST(font)
     test_char_width();
     test_select_object();
     test_font_weight();
-    test_text_out_fill();
+    test_add_font_path();
 
     /* These tests should be last test until RemoveFontResource
      * is properly implemented.

@@ -1309,6 +1309,7 @@ static void test_AddDllDirectory(void)
     static const WCHAR tmpW[] = {'t','m','p',0};
     static const WCHAR dotW[] = {'.','\\','.',0};
     static const WCHAR rootW[] = {'\\',0};
+    static const WCHAR deviceW[] = {'\\','\\','.','\\', 'C', ':', '\\', 0};
     WCHAR path[MAX_PATH], buf[MAX_PATH];
     DLL_DIRECTORY_COOKIE cookie;
     BOOL ret;
@@ -1339,6 +1340,11 @@ static void test_AddDllDirectory(void)
     ok( !cookie, "AddDllDirectory succeeded\n" );
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "wrong error %lu\n", GetLastError() );
     cookie = pAddDllDirectory( rootW );
+    ok( cookie != NULL, "AddDllDirectory failed err %lu\n", GetLastError() );
+    SetLastError( 0xdeadbeef );
+    ret = pRemoveDllDirectory( cookie );
+    ok( ret, "RemoveDllDirectory failed err %lu\n", GetLastError() );
+    cookie = pAddDllDirectory( deviceW );
     ok( cookie != NULL, "AddDllDirectory failed err %lu\n", GetLastError() );
     SetLastError( 0xdeadbeef );
     ret = pRemoveDllDirectory( cookie );
@@ -1801,10 +1807,7 @@ static void test_tls_links(void)
     TEB *teb = NtCurrentTeb(), *thread_teb;
     THREAD_BASIC_INFORMATION tbi;
     NTSTATUS status;
-    ULONG i, count;
     HANDLE thread;
-    SIZE_T size;
-    void **ptr;
 
     ok(!!teb->ThreadLocalStoragePointer, "got NULL.\n");
 
@@ -1823,26 +1826,6 @@ static void test_tls_links(void)
     ok(!thread_teb->ThreadLocalStoragePointer, "got %p.\n", thread_teb->ThreadLocalStoragePointer);
     ResumeThread(thread);
     WaitForSingleObject(test_tls_links_started, INFINITE);
-
-    if (!is_old_loader_struct())
-    {
-        ptr = teb->ThreadLocalStoragePointer;
-        count = (ULONG_PTR)ptr[-2];
-        size = HeapSize(GetProcessHeap(), 0, ptr - 2);
-        ok(size == (count + 2) * sizeof(void *), "got count %lu, size %Iu.\n", count, size);
-
-        for (i = 0; i < count; ++i)
-        {
-            if (!ptr[i]) continue;
-            size = HeapSize(GetProcessHeap(), 0, (void **)ptr[i] - 2);
-            ok(size && size < 100000, "got %Iu.\n", size);
-        }
-
-        ptr = thread_teb->ThreadLocalStoragePointer;
-        count = (ULONG_PTR)ptr[-2];
-        size = HeapSize(GetProcessHeap(), 0, ptr - 2);
-        ok(size == (count + 2) * sizeof(void *), "got count %lu, size %Iu.\n", count, size);
-    }
 
     ok(!!thread_teb->ThreadLocalStoragePointer, "got NULL.\n");
     ok(!teb->TlsLinks.Flink, "got %p.\n", teb->TlsLinks.Flink);

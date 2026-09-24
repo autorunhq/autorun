@@ -28,7 +28,6 @@
 #include <stdio.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winreg.h"
@@ -111,15 +110,20 @@ static BOOL is_classes_root( const UNICODE_STRING *name )
     return (len >= classes_root_len - 1 && !wcsnicmp( name->Buffer, classes_root, min( len, classes_root_len ) ));
 }
 
-static KEY_NAME_INFORMATION *get_key_name( HKEY key, char *buffer, DWORD len )
+static BOOL is_classes_wow6432node( HKEY key )
 {
-    char *buf_ptr = buffer;
+    char buffer[256], *buf_ptr = buffer;
     KEY_NAME_INFORMATION *info = (KEY_NAME_INFORMATION *)buffer;
+    DWORD len = sizeof(buffer);
+    UNICODE_STRING name;
     NTSTATUS status;
+    BOOL ret = FALSE;
 
-    status = NtQueryKey( key, KeyNameInformation, buf_ptr, len, &len );
-    if (status && status != STATUS_BUFFER_OVERFLOW) return NULL;
+    /* Obtain the name of the root key */
+    status = NtQueryKey( key, KeyNameInformation, info, len, &len );
+    if (status && status != STATUS_BUFFER_OVERFLOW) return FALSE;
 
+    /* Retry with a dynamically allocated buffer */
     while (status == STATUS_BUFFER_OVERFLOW)
     {
         if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
@@ -127,22 +131,9 @@ static KEY_NAME_INFORMATION *get_key_name( HKEY key, char *buffer, DWORD len )
         info = (KEY_NAME_INFORMATION *)buf_ptr;
         status = NtQueryKey( key, KeyNameInformation, info, len, &len );
     }
-    if (!status) return (KEY_NAME_INFORMATION *)buf_ptr;
-    if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
-    return NULL;
-}
-
-static BOOL is_classes_wow6432node( HKEY key )
-{
-    KEY_NAME_INFORMATION *info;
-    char buffer[256];
-    UNICODE_STRING name;
-    BOOL ret = FALSE;
-
-    if (!(info = get_key_name( key, buffer, sizeof(buffer) ))) return FALSE;
 
     /* Check if the key ends in Wow6432Node and if the root is the Classes key*/
-    if (info->NameLength / sizeof(WCHAR) >= 11)
+    if (!status && info->NameLength / sizeof(WCHAR) >= 11)
     {
         name.Buffer = info->Name + info->NameLength / sizeof(WCHAR) - 11;
         name.Length = 11 * sizeof(WCHAR);
@@ -153,39 +144,9 @@ static BOOL is_classes_wow6432node( HKEY key )
             ret = is_classes_root( &name );
         }
     }
-    if ((char *)info != buffer) HeapFree( GetProcessHeap(), 0, info );
 
-    return ret;
-}
+    if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
 
-static BOOL is_wow6432_shared( HANDLE key )
-{
-    static const WCHAR users_root[] = L"\\Registry\\User\\";
-    const DWORD users_root_len = ARRAY_SIZE( users_root ) - 1;
-    static const WCHAR software[] = L"\\Software";
-    const DWORD software_len = ARRAY_SIZE( software ) - 1;
-    KEY_NAME_INFORMATION *info;
-    char buffer[256];
-    BOOL ret = FALSE;
-    WCHAR *name;
-    DWORD len;
-
-    info = get_key_name( key, buffer, sizeof(buffer) );
-    len =  info->NameLength / sizeof(WCHAR);
-    if (len <= users_root_len) goto done;
-    name = info->Name;
-    if (wcsnicmp( name, users_root, users_root_len )) goto done;
-    name += users_root_len;
-    len -= users_root_len;
-    while (len && *name != '\\')
-    {
-        ++name;
-        --len;
-    }
-    if (len != software_len) goto done;
-    ret = !wcsnicmp( name, software, software_len );
-done:
-    if ((char *)info != buffer) HeapFree( GetProcessHeap(), 0, info );
     return ret;
 }
 
@@ -198,11 +159,6 @@ static HANDLE open_wow6432node( HANDLE key )
 
     InitializeObjectAttributes( &attr, &nameW, 0, key, NULL );
     if (NtOpenKeyEx( &ret, MAXIMUM_ALLOWED | KEY_WOW64_64KEY, &attr, 0 )) return key;
-    if (is_wow6432_shared( key ))
-    {
-        NtClose( ret );
-        return key;
-    }
     return ret;
 }
 

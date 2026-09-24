@@ -22,8 +22,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
-#include <time.h>
-#include <sys/stat.h>
 
 #include "debugger.h"
 #include "psapi.h"
@@ -65,12 +63,8 @@ static unsigned dbg_handle_debug_event(DEBUG_EVENT* de);
  *		dbg_attach_debuggee
  *
  * Sets the debuggee to <pid>
- * cofe instructs winedbg what to do when first exception is received 
- * (break=FALSE, continue=TRUE)
- * wfe is set to TRUE if dbg_attach_debuggee should also proceed with all debug events
- * until the first exception is received (aka: attach to an already running process)
  */
-BOOL dbg_attach_debuggee(DWORD pid)
+BOOL dbg_attach_debuggee(DWORD pid, BOOL verbose)
 {
     if (pid == GetCurrentProcessId())
     {
@@ -94,7 +88,8 @@ BOOL dbg_attach_debuggee(DWORD pid)
     SetEnvironmentVariableA("DBGHELP_NOLIVE", NULL);
 
     dbg_curr_process->active_debuggee = TRUE;
-    dbg_printf("WineDbg attached to pid %04lx\n", pid);
+    if (verbose)
+        dbg_printf("WineDbg attached to pid %04lx\n", pid);
     dbg_curr_pid = pid;
     dbg_curr_thread = NULL;
     dbg_curr_tid = 0;
@@ -521,14 +516,38 @@ static unsigned dbg_handle_debug_event(DEBUG_EVENT* de)
         if (dbg_curr_thread == NULL)
         {
             WINE_ERR("Unknown thread\n");
-            break;
         }
+        else if (de->u.DebugString.nDebugStringLength >= 2)
+        {
+            void *buffer;
+            SIZE_T sz, buf_len = de->u.DebugString.nDebugStringLength * (de->u.DebugString.fUnicode ? sizeof(WCHAR) : sizeof(char));
 
-        memory_get_string(dbg_curr_process,
-                          de->u.DebugString.lpDebugStringData, TRUE,
-                          de->u.DebugString.fUnicode, u.bufferA, sizeof(u.bufferA));
-        WINE_TRACE("%04lx:%04lx: output debug string (%s)\n",
-                   de->dwProcessId, de->dwThreadId, u.bufferA);
+            if (de->u.DebugString.nDebugStringLength <= sizeof(u.bufferA))
+                buffer = u.bufferA;
+            else
+                buffer = malloc(buf_len);
+            if (buffer &&
+                dbg_curr_process->process_io->read(dbg_curr_process->handle,
+                                                   de->u.DebugString.lpDebugStringData,
+                                                   buffer, buf_len, &sz))
+            {
+                /* FIXME: nDebugStringLength can be cropped (as WORD) in DEBUG_EVENT, so force 0 termination
+                 * proper implem shall grow the buffer and retry until it's 0 terminated
+                 */
+                if (de->u.DebugString.fUnicode)
+                {
+                    ((WCHAR*)buffer)[de->u.DebugString.nDebugStringLength - 1] = L'\0';
+                    dbg_printf("OutputDebugString: %ls\n", (WCHAR*)buffer);
+                }
+                else
+                {
+                    ((char*)buffer)[de->u.DebugString.nDebugStringLength - 1] = '\0';
+                    dbg_printf("OutputDebugString: %s\n", (char*)buffer);
+                }
+            }
+            if (buffer != u.bufferA) free(buffer);
+        }
+        else dbg_printf("OutputDebugString:\n");
         break;
 
     case RIP_EVENT:
@@ -829,48 +848,6 @@ static HANDLE create_temp_file(void)
                         NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, 0 );
 }
 
-static HANDLE create_crash_report_file(void)
-{
-    const char *dir = getenv("WINE_CRASH_REPORT_DIR");
-    const char *sgi;
-    char timestr[32];
-    char name[MAX_PATH], *c;
-    time_t t;
-    struct tm lt;
-
-    if(!dir || dir[0] == 0)
-        return INVALID_HANDLE_VALUE;
-
-    strcpy(name, dir);
-
-    for(c = name + 1; *c; ++c){
-        if(*c == '/'){
-            *c = 0;
-            CreateDirectoryA(name, NULL);
-            *c = '/';
-        }
-    }
-    CreateDirectoryA(name, NULL);
-
-    sgi = getenv("SteamGameId");
-
-    t = time(NULL);
-    lt = *localtime(&t);
-    strftime(timestr, ARRAY_SIZE(timestr), "%Y-%m-%d_%H:%M:%S", &lt);
-
-    /* /path/to/crash/reports/2021-05-18_13:21:15_appid-976310_crash.log */
-    snprintf(name, ARRAY_SIZE(name),
-            "%s%s/%s_appid-%s_crash.log",
-            dir[0] == '/' ? "Z:/" : "",
-            dir,
-            timestr,
-            sgi ? sgi : "0"
-            );
-
-    return CreateFileA( name, GENERIC_WRITE, FILE_SHARE_READ,
-                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0 );
-}
-
 /******************************************************************
  *		dbg_active_attach
  *
@@ -884,14 +861,14 @@ enum dbg_start  dbg_active_attach(int argc, char* argv[])
     /* try the form <myself> pid */
     if (argc == 1 && str2int(argv[0], &pid) && pid != 0)
     {
-        if (!dbg_attach_debuggee(pid))
+        if (!dbg_attach_debuggee(pid, TRUE))
             return start_error_init;
     }
     /* try the form <myself> pid evt (Win32 JIT debugger) */
     else if (argc == 2 && str2int(argv[0], &pid) && pid != 0 &&
              str2int(argv[1], &evt) && evt != 0)
     {
-        if (!dbg_attach_debuggee(pid))
+        if (!dbg_attach_debuggee(pid, TRUE))
         {
             /* don't care about result */
             SetEvent((HANDLE)evt);
@@ -960,10 +937,6 @@ enum dbg_start dbg_active_auto(int argc, char* argv[])
         event = CreateEventW( NULL, TRUE, FALSE, NULL );
         if (event) thread = display_crash_details( event );
         if (thread) dbg_houtput = output = create_temp_file();
-        break;
-    case TRUE:
-        dbg_use_wine_dbg_output = TRUE;
-        dbg_crash_report_file = create_crash_report_file();
         break;
     }
 
@@ -1140,10 +1113,46 @@ static BOOL tgt_process_active_get_selector(HANDLE hThread, DWORD sel, LDT_ENTRY
 #endif
 }
 
+BOOL dbg_fetch_active_thread_name(DWORD tid, WCHAR **description)
+{
+    static HRESULT (WINAPI *my_GetThreadDescription)(HANDLE, PWSTR*) = NULL;
+    static BOOL resolved = FALSE;
+    HANDLE h;
+    WCHAR *result = NULL;
+
+    if (!resolved)
+    {
+        HMODULE kernelbase = GetModuleHandleA("kernelbase.dll");
+        if (kernelbase)
+            my_GetThreadDescription = (void *)GetProcAddress(kernelbase, "GetThreadDescription");
+        resolved = TRUE;
+    }
+
+    if (my_GetThreadDescription && (h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)))
+    {
+        WCHAR *descr;
+        if (my_GetThreadDescription(h, &descr) == S_OK)
+        {
+            if (*descr) result = wcsdup(descr);
+            LocalFree(descr);
+        }
+        CloseHandle(h);
+    }
+    if (!result) return FALSE;
+    *description = result;
+    return TRUE;
+}
+
+static BOOL tgt_process_active_fetch_thread_name(const struct dbg_thread *thread, WCHAR **description)
+{
+    return dbg_fetch_active_thread_name(thread->tid, description);
+}
+
 static struct be_process_io be_process_active_io =
 {
     tgt_process_active_close_process,
     tgt_process_active_read,
     tgt_process_active_write,
-    tgt_process_active_get_selector
+    tgt_process_active_get_selector,
+    tgt_process_active_fetch_thread_name,
 };

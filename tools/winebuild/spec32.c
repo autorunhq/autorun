@@ -62,7 +62,7 @@ static unsigned int hash_filename( const char *name )
     /* FNV-1 hash */
     unsigned int ret = 2166136261u;
     while (*name) ret = (ret * 16777619) ^ *name++;
-    return ret + target.cpu;
+    return ret;
 }
 
 /* check if entry point needs a relay thunk */
@@ -704,6 +704,37 @@ static void output_load_config(void)
 
 
 /*******************************************************************
+ *         output_crt_sections
+ *
+ * Generate the start/end symbols for .CRT$X?? sections. The start symbol is put into
+ * .CRT$X?A, the end .CRT$X?Z. Since the linker sort .CRT$X?? sections by name, these symbols
+ * will end up at the right location.
+ */
+void output_crt_sections(void)
+{
+    static const char sections[] = "ict";
+    int i;
+
+    for (i = 0; sections[i]; i++)
+    {
+        char *symbol_name = strmake( "__x%c_a", sections[i] );
+        output( "\t.section .CRT$X%cA\n", toupper( sections[i] ) );
+        output( "\t.globl %s\n", asm_name( symbol_name ) );
+        output( "\t.balign %u\n", get_ptr_size() );
+        output( "%s:\n", asm_name( symbol_name ) );
+        output( "\t%s 0\n", get_asm_ptr_keyword() );
+
+        symbol_name = strmake( "__x%c_z", sections[i] );
+        output( "\t.section .CRT$X%cZ\n", toupper( sections[i] ) );
+        output( "\t.globl %s\n", asm_name( symbol_name ) );
+        output( "\t.balign %u\n", get_ptr_size() );
+        output( "%s:\n", asm_name( symbol_name ) );
+        output( "\t%s 0\n", get_asm_ptr_keyword() );
+    }
+}
+
+
+/*******************************************************************
  *         output_module
  *
  * Output the module data.
@@ -720,6 +751,7 @@ void output_module( DLLSPEC *spec )
     {
     case PLATFORM_MINGW:
     case PLATFORM_WINDOWS:
+    case PLATFORM_WINDOWS_GNU:
         return;  /* nothing to do */
     case PLATFORM_APPLE:
         output( "\t.text\n" );
@@ -841,6 +873,7 @@ void output_spec32_file( DLLSPEC *spec )
     output_imports( spec );
     if (needs_get_pc_thunk) output_get_pc_thunk();
     output_load_config();
+    output_crt_sections();
     output_resources( spec );
     output_gnu_stack_note();
     close_output_file();

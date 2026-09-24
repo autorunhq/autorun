@@ -813,17 +813,14 @@ static void test_array_dimensions(void)
     if (!init_test_context(&test_context))
         return;
 
-    todo_wine ps_code = compile_shader(shader, "ps_2_0", 0);
-    if (ps_code)
-    {
-        draw_quad(test_context.device, ps_code);
+    ps_code = compile_shader(shader, "ps_2_0", 0);
+    draw_quad(test_context.device, ps_code);
 
-        v = get_color_vec4(test_context.device, 0, 0);
-        ok(compare_vec4(&v, 0.1f, 0.1f, 0.2f, 0.4f, 0),
-                "Got unexpected value {%.8e, %.8e, %.8e, %.8e}.\n", v.x, v.y, v.z, v.w);
+    v = get_color_vec4(test_context.device, 0, 0);
+    ok(compare_vec4(&v, 0.1f, 0.1f, 0.2f, 0.4f, 0),
+            "Got unexpected value {%.8e, %.8e, %.8e, %.8e}.\n", v.x, v.y, v.z, v.w);
 
-        ID3D10Blob_Release(ps_code);
-    }
+    ID3D10Blob_Release(ps_code);
 
     release_test_context(&test_context);
 }
@@ -1492,9 +1489,6 @@ static HRESULT WINAPI test_d3dinclude_open(ID3DInclude *iface, D3D_INCLUDE_TYPE 
         "#include \"include1.h\"\n"
         "def c0, LIGHT, 0, 0, 0\n";
     char *buffer;
-
-    trace("filename %s.\n", filename);
-    trace("parent_data %p: %s.\n", parent_data, parent_data ? (char *)parent_data : "(null)");
 
     if (!strcmp(filename, "include1.h"))
     {

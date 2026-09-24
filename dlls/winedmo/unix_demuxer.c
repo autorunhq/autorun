@@ -43,7 +43,6 @@ struct stream
 struct demuxer
 {
     AVFormatContext *ctx;
-    struct stream_context *stream_context;
     struct stream *streams;
 
     AVPacket *last_packet; /* last read packet */
@@ -99,25 +98,9 @@ NTSTATUS demuxer_check( void *arg )
     else if (!strcmp( params->mime_type, "audio/mp3" )) format = av_find_input_format( "mp3" );
 
     if (format) TRACE( "Found format %s (%s)\n", format->name, format->long_name );
-    else WARN( "Found MIME type %s\n", debugstr_a(params->mime_type) );
+    else FIXME( "Unsupported MIME type %s\n", debugstr_a(params->mime_type) );
 
-    return STATUS_SUCCESS;
-}
-
-static BOOL codec_is_big_endian_pcm(enum AVCodecID codec_id)
-{
-    switch (codec_id)
-    {
-    case AV_CODEC_ID_PCM_S16BE:
-    case AV_CODEC_ID_PCM_S24BE:
-    case AV_CODEC_ID_PCM_S32BE:
-    case AV_CODEC_ID_PCM_S64BE:
-    case AV_CODEC_ID_PCM_F32BE:
-    case AV_CODEC_ID_PCM_F64BE:
-        return TRUE;
-    default:
-        return FALSE;
-    }
+    return format ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
 }
 
 static NTSTATUS demuxer_create_streams( struct demuxer *demuxer )
@@ -142,14 +125,6 @@ static NTSTATUS demuxer_create_streams( struct demuxer *demuxer )
                 continue;
             }
         }
-        else if (codec_is_big_endian_pcm(par->codec_id))
-        {
-            /* WAVEFORMATEX does not contain endianness info, so this needs to be converted here. */
-            if (av_bsf_alloc( &ff_pcm_byte_order_reverse_bsf, &stream->filter ) < 0) return STATUS_UNSUCCESSFUL;
-            avcodec_parameters_copy( stream->filter->par_in, par );
-            av_bsf_init( stream->filter );
-            continue;
-        }
 
         av_bsf_get_null_filter( &stream->filter );
         avcodec_parameters_copy( stream->filter->par_in, demuxer->ctx->streams[i]->codecpar );
@@ -159,113 +134,58 @@ static NTSTATUS demuxer_create_streams( struct demuxer *demuxer )
     return STATUS_SUCCESS;
 }
 
-static int next_mov_atom( struct stream_context *context, UINT32 *type, UINT64 *size )
-{
-    struct
-    {
-        UINT32 size;
-        UINT32 type;
-    } atom;
-    int ret;
-
-    if ((ret = unix_read_callback( context, (uint8_t *)&atom, sizeof(atom) )) < 0) return ret;
-    if (!(*size = RtlUlongByteSwap( atom.size )) || (*size > 1 && *size < sizeof(atom))) return -1;
-    if (*size == 1 && (ret = unix_read_callback( context, (uint8_t *)size, sizeof(*size) )) < 0) return ret;
-    *size -= sizeof(atom);
-    *type = atom.type;
-    return 0;
-}
-
-static void parse_stream_names( struct demuxer *demuxer, UINT32 root, UINT64 size, int index )
-{
-    struct stream_context *context = demuxer->ctx->pb->opaque;
-    UINT64 end = context->position + size;
-    UINT32 atom;
-    char *name;
-
-    TRACE( "demuxer %p, root %s\n", demuxer, debugstr_fourcc(root) );
-
-    while (context->position < end && !next_mov_atom( context, &atom, &size ))
-    {
-#define CASE(l,h) (((UINT64)(h) << 32) | (l))
-        switch (CASE(root, atom))
-        {
-        case CASE(MAKEFOURCC('r','o','o','t'), MAKEFOURCC('m','o','o','v')):
-            parse_stream_names( demuxer, atom, size, 0 );
-            break;
-        case CASE(MAKEFOURCC('m','o','o','v'), MAKEFOURCC('t','r','a','k')):
-            parse_stream_names( demuxer, atom, size, index++ );
-            break;
-        case CASE(MAKEFOURCC('t','r','a','k'), MAKEFOURCC('u','d','t','a')):
-            parse_stream_names( demuxer, atom, size, index );
-            break;
-        case CASE(MAKEFOURCC('u','d','t','a'), MAKEFOURCC('n','a','m','e')):
-            if ((name = calloc( 1, size + 1 )))
-            {
-                unix_read_callback( context, (uint8_t *)name, size );
-                TRACE( "found name %s for stream %u\n", debugstr_a(name), index );
-                av_dict_set( &demuxer->ctx->streams[index]->metadata, "name", name, 0 );
-                free( name );
-                break;
-            }
-            /* fallthrough */
-        default:
-            unix_seek_callback( context, size, SEEK_CUR );
-            break;
-#undef CASE
-        }
-    }
-}
-
-static void parse_mp4_streams_metadata( struct demuxer *demuxer )
-{
-    struct stream_context *context = demuxer->ctx->pb->opaque;
-    int64_t pos = context->position;
-
-    if (context->length == -1) return;
-
-    unix_seek_callback( context, 0, SEEK_SET );
-    parse_stream_names( demuxer, MAKEFOURCC('r','o','o','t'), context->length, 0 );
-    unix_seek_callback( context, pos, SEEK_SET );
-}
-
 NTSTATUS demuxer_create( void *arg )
 {
     struct demuxer_create_params *params = arg;
     const char *ext = params->url ? strrchr( params->url, '.' ) : "";
+    BOOL needs_find_stream_info = FALSE;
     const AVInputFormat *format;
     struct demuxer *demuxer;
     int i, ret;
 
     TRACE( "context %p, url %s, mime %s\n", params->context, debugstr_a(params->url), debugstr_a(params->mime_type) );
 
-    mediaconv_demuxer_init();
-
     if (!(demuxer = calloc( 1, sizeof(*demuxer) ))) return STATUS_NO_MEMORY;
-    demuxer->stream_context = params->context;
-
     if (!(demuxer->ctx = avformat_alloc_context())) goto failed;
     if (!(demuxer->ctx->pb = avio_alloc_context( NULL, 0, 0, params->context, unix_read_callback, NULL, unix_seek_callback ))) goto failed;
 
     if ((ret = avformat_open_input( &demuxer->ctx, NULL, NULL, NULL )) < 0)
-        WARN( "Failed to open input, error %s.\n", debugstr_averr(ret) );
-    if ((ret = mediaconv_demuxer_open( &demuxer->ctx, params->context ) < 0))
     {
         ERR( "Failed to open input, error %s.\n", debugstr_averr(ret) );
         goto failed;
     }
     format = demuxer->ctx->iformat;
 
+    /* Determine if we need a call to avformat_find_stream_info. Some stream information is only
+     * available after calling it. */
     if ((params->duration = get_context_duration( demuxer->ctx )) == AV_NOPTS_VALUE ||
         strstr( format->name, "mp3" ))
+        needs_find_stream_info = TRUE;
+
+    for (i = 0; i < demuxer->ctx->nb_streams && !needs_find_stream_info; i++)
     {
-        if ((ret = avformat_find_stream_info( demuxer->ctx, NULL )) < 0)
-        {
-            ERR( "Failed to find stream info, error %s.\n", debugstr_averr(ret) );
-            goto failed;
-        }
-        params->duration = get_context_duration( demuxer->ctx );
+        /* For H264 streams, sample aspect ratio is sometimes found in its sequence parameter set,
+         * which requires avformat_find_stream_info. */
+        AVStream *stream = demuxer->ctx->streams[i];
+        AVCodecParameters *par = stream->codecpar;
+
+        if (par->codec_id != AV_CODEC_ID_H264) continue;
+
+        /* If sample aspect ratio is available somewhere, skip find stream info. */
+        if (stream->sample_aspect_ratio.den && stream->sample_aspect_ratio.num) continue;
+        if (par->sample_aspect_ratio.den && par->sample_aspect_ratio.num) continue;
+
+        needs_find_stream_info = TRUE;
     }
+
+    if (needs_find_stream_info && (ret = avformat_find_stream_info( demuxer->ctx, NULL )) < 0)
+    {
+        ERR( "Failed to find stream info, error %s.\n", debugstr_averr( ret ) );
+        goto failed;
+    }
+
+    if (params->duration == AV_NOPTS_VALUE) params->duration = get_context_duration( demuxer->ctx );
+
     if (!(demuxer->streams = calloc( demuxer->ctx->nb_streams, sizeof(*demuxer->streams) ))) goto failed;
     if (demuxer_create_streams( demuxer )) goto failed;
 
@@ -282,32 +202,24 @@ NTSTATUS demuxer_create( void *arg )
         else if (!strcmp( ext, ".wmv" )) strcpy( params->mime_type, "video/x-ms-wmv" );
         else strcpy( params->mime_type, "video/x-ms-asf" );
     }
-    else if (strstr( format->name, "ogg" ))
-    {
-        if (!strcmp( ext, ".oga" ) || !strcmp( ext, ".opus" )) strcpy( params->mime_type, "audio/ogg" );
-        else strcpy( params->mime_type, "video/ogg" );
-    }
     else
     {
         FIXME( "Unknown MIME type for format %s, url %s\n", debugstr_a(format->name), debugstr_a(params->url) );
         strcpy( params->mime_type, "video/x-application" );
     }
 
-    if (strstr( format->name, "mp4" )) parse_mp4_streams_metadata( demuxer );
     return STATUS_SUCCESS;
 
 failed:
+    for (i = 0; demuxer->streams && i < demuxer->ctx->nb_streams; i++)
+        av_bsf_free( &demuxer->streams[i].filter );
+    free( demuxer->streams );
     if (demuxer->ctx)
     {
         avio_context_free( &demuxer->ctx->pb );
         avformat_free_context( demuxer->ctx );
     }
-    for (i = 0; demuxer->streams && i < demuxer->ctx->nb_streams; i++)
-        av_bsf_free( &demuxer->streams[i].filter );
-    free( demuxer->streams );
     free( demuxer );
-
-    mediaconv_demuxer_exit();
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -319,15 +231,14 @@ NTSTATUS demuxer_destroy( void *arg )
 
     TRACE( "demuxer %p\n", demuxer );
 
-    params->context = demuxer->stream_context;
-    avio_context_free( &demuxer->ctx->pb );
-    avformat_free_context( demuxer->ctx );
     for (i = 0; i < demuxer->ctx->nb_streams; i++)
         av_bsf_free( &demuxer->streams[i].filter );
     free( demuxer->streams );
+    params->context = demuxer->ctx->pb->opaque;
+    avio_context_free( &demuxer->ctx->pb );
+    avformat_free_context( demuxer->ctx );
     free( demuxer );
 
-    mediaconv_demuxer_exit();
     return STATUS_SUCCESS;
 }
 
@@ -376,7 +287,7 @@ static NTSTATUS demuxer_filter_packet( struct demuxer *demuxer, AVPacket **packe
     } while (!ret || ret == AVERROR(EAGAIN));
 
     ERR( "Failed to read packet from demuxer %p, error %s.\n", demuxer, debugstr_averr( ret ) );
-    return STATUS_END_OF_FILE;
+    return STATUS_UNSUCCESSFUL;
 }
 
 NTSTATUS demuxer_read( void *arg )
@@ -464,8 +375,7 @@ NTSTATUS demuxer_stream_name( void *arg )
 
     TRACE( "demuxer %p, stream %u\n", demuxer, params->stream );
 
-    if (!(tag = av_dict_get( stream->metadata, "title", NULL, AV_DICT_IGNORE_SUFFIX )) &&
-        !(tag = av_dict_get( stream->metadata, "name", NULL, AV_DICT_IGNORE_SUFFIX )))
+    if (!(tag = av_dict_get( stream->metadata, "title", NULL, AV_DICT_IGNORE_SUFFIX )))
         return STATUS_NOT_FOUND;
 
     lstrcpynA( params->buffer, tag->value, ARRAY_SIZE( params->buffer ) );
@@ -478,11 +388,12 @@ NTSTATUS demuxer_stream_type( void *arg )
     struct demuxer *demuxer = get_demuxer( params->demuxer );
     AVStream *stream = demuxer->ctx->streams[params->stream];
     AVCodecParameters *par = demuxer->streams[params->stream].filter->par_out;
+    AVRational sar = stream->sample_aspect_ratio;
 
     TRACE( "demuxer %p, stream %u, stream %p, index %u\n", demuxer, params->stream, stream, stream->index );
 
-    return media_type_from_codec_params( par, &stream->sample_aspect_ratio,
-                                         &stream->avg_frame_rate, 0, &params->media_type );
+    if (!sar.den || !sar.num) sar = stream->codecpar->sample_aspect_ratio;
+    return media_type_from_codec_params( par, &sar, &stream->avg_frame_rate, 0, &params->media_type );
 }
 
 #endif /* HAVE_FFMPEG */

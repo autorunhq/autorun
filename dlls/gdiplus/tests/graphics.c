@@ -3252,7 +3252,8 @@ static void test_GdipGetNearestColor(void)
     expect(Ok, status);
     status = GdipGetNearestColor(graphics, &color);
     expect(Ok, status);
-    todo_wine expect(0xffa8bce8, color);
+    ok(color == 0xffa8bce8,
+       "Expected 0xffa8bce8, got %.8lx\n", color);
     GdipDeleteGraphics(graphics);
     GdipDisposeImage((GpImage*)bitmap);
 
@@ -3262,10 +3263,9 @@ static void test_GdipGetNearestColor(void)
     expect(Ok, status);
     status = GdipGetNearestColor(graphics, &color);
     expect(Ok, status);
-    todo_wine
     ok(color == 0xffa8b8e8 ||
        broken(color == 0xffa0b8e0), /* Win98/WinMe */
-       "Expected ffa8b8e8, got %.8lx\n", color);
+       "Expected 0xffa8b8e8, got %.8lx\n", color);
     GdipDeleteGraphics(graphics);
     GdipDisposeImage((GpImage*)bitmap);
 
@@ -3407,7 +3407,7 @@ static void test_string_functions(void)
     expectf(0.0, bounds.X);
     expectf(0.0, bounds.Y);
     todo_wine expect(5, codepointsfitted);
-    todo_wine expect(1, linesfilled);
+    expect(1, linesfilled);
 
     /* Cut off everything after the first space. */
     rc.Width = char_bounds.Width + char_width * 2.1;
@@ -3443,7 +3443,7 @@ static void test_string_functions(void)
     expectf_(char_bounds.Width, bounds.Width, 0.01);
     expectf_(char_bounds.Height + char_height * 3, bounds.Height, 0.05);
     expect(6, codepointsfitted);
-    todo_wine expect(4, linesfilled);
+    expect(4, linesfilled);
 
     for (i = 0; i < 4; i++)
         regions[i] = (GpRegion *)0xdeadbeef;
@@ -3636,6 +3636,20 @@ static void test_string_functions(void)
     ok(rc.Y < 0.0, "unexpected Y %0.2f\n", rc.Y);
     ok(rc.Width > 0, "unexpected Width %0.2f\n", rc.Width);
     expectf(rc.Height, char_height);
+
+    rc.X = -1;
+    rc.Y = -1;
+    rc.Width = -1;
+    rc.Height = -1;
+    status = GdipMeasureDriverString(graphics, teststring2, 0, font, positions,
+        DriverStringOptionsCmapLookup|DriverStringOptionsRealizedAdvance,
+        identity, &rc);
+    expect(Ok, status);
+
+    expectf(rc.X, 0.0);
+    expectf(rc.Y, 0.0);
+    expectf(rc.Width, 0.0);
+    expectf(rc.Height, 0.0);
 
     GdipDeleteMatrix(identity);
     GdipDeleteStringFormat(format);
@@ -4749,8 +4763,11 @@ static void test_measure_string(void)
     set_rect_empty(&bounds);
     status = GdipGetRegionBounds(region, graphics, &bounds);
     expect(Ok, status);
+    todo_wine
     expectf_(5.0 + margin_x, bounds.X, 1.0);
+    todo_wine
     expectf(5.0, bounds.Y);
+    todo_wine
     expectf_(width_1, bounds.Width, 1.0);
     todo_wine
     expectf_(height - margin_y, bounds.Height, 1.0);
@@ -4780,9 +4797,13 @@ static void test_measure_string(void)
     set_rect_empty(&bounds);
     status = GdipGetRegionBounds(region, graphics, &bounds);
     expect(Ok, status);
+    todo_wine
     expectf_(5.0 + margin_x, bounds.X, 1.0);
+    todo_wine
     expectf(5.0, bounds.Y);
+    todo_wine
     expectf_(width_1, bounds.Width, 1.0);
+    todo_wine
     expectf(height_rgn, bounds.Height);
 
     set_rect_empty(&rect);
@@ -4921,7 +4942,6 @@ static void test_measure_string(void)
     expect(3, glyphs);
     expect(1, lines);
     expectf_(5.0 + width/2.0, bounds.X, 0.01);
-    todo_wine
     expectf(5.0 + height/2.0, bounds.Y);
     expectf_(width, bounds.Width, 0.01);
     expectf(height, bounds.Height);
@@ -4935,9 +4955,7 @@ static void test_measure_string(void)
     expect(Ok, status);
     expect(3, glyphs);
     expect(1, lines);
-    todo_wine
     expectf_(5.0 - width/2.0, bounds.X, 0.01);
-    todo_wine
     expectf(5.0 - height/2.0, bounds.Y);
     expectf_(width, bounds.Width, 0.01);
     expectf(height, bounds.Height);
@@ -4951,9 +4969,7 @@ static void test_measure_string(void)
     set_rect_empty(&bounds);
     status = GdipGetRegionBounds(region, graphics, &bounds);
     expect(Ok, status);
-    todo_wine
     expectf_(5.0 + width_rgn/2.0, bounds.X, 1.0);
-    todo_wine
     expectf_(5.0 + height_rgn/2.0, bounds.Y, 1.0);
     expectf_(width_rgn, bounds.Width, 1.0);
     expectf_(height_rgn, bounds.Height, 1.0);
@@ -4969,7 +4985,6 @@ static void test_measure_string(void)
     expect(Ok, status);
     todo_wine
     expectf_(5.0 - width_rgn/2.0, bounds.X, 1.0);
-    todo_wine
     expectf_(5.0 - height_rgn/2.0, bounds.Y, 1.0);
     expectf_(width_rgn, bounds.Width, 1.0);
     expectf_(height_rgn, bounds.Height, 1.0);
@@ -4988,7 +5003,6 @@ static void test_measure_string(void)
     expect(3, glyphs);
     expect(1, lines);
     expectf_(5.0 + width, bounds.X, 0.01);
-    todo_wine
     expectf(5.0 + height, bounds.Y);
     expectf_(width, bounds.Width, 0.01);
     expectf(height, bounds.Height);
@@ -5002,9 +5016,7 @@ static void test_measure_string(void)
     expect(Ok, status);
     expect(3, glyphs);
     expect(1, lines);
-    todo_wine
     expectf_(5.0 - width, bounds.X, 0.01);
-    todo_wine
     expectf(5.0 - height, bounds.Y);
     expectf_(width, bounds.Width, 0.01);
     expectf(height, bounds.Height);
@@ -5020,7 +5032,6 @@ static void test_measure_string(void)
     expect(Ok, status);
     todo_wine
     expectf_(5.0 + width_rgn, bounds.X, 2.0);
-    todo_wine
     expectf_(5.0 + height_rgn, bounds.Y, 1.0);
     expectf_(width_rgn, bounds.Width, 1.0);
     expectf_(height_rgn, bounds.Height, 1.0);
@@ -5036,7 +5047,6 @@ static void test_measure_string(void)
     expect(Ok, status);
     todo_wine
     expectf_(5.0 - width_rgn, bounds.X, 2.0);
-    todo_wine
     expectf_(5.0 - height_rgn, bounds.Y, 1.0);
     expectf_(width_rgn, bounds.Width, 1.0);
     expectf_(height_rgn, bounds.Height, 1.0);

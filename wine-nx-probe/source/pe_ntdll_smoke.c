@@ -638,7 +638,8 @@ static uint32_t run_pe_image( const unsigned char *pe, size_t pe_size )
 
 static unsigned int smoke_init_first_thread(void)
 {
-    struct ntdll_thread_data *thread_data = (struct ntdll_thread_data *)&NtCurrentTeb()->GdiTebBatch;
+    NtCurrentTeb();
+    struct thread_data *thread_data = get_thread_data();
     USHORT machines[8] = { 0 };
     obj_handle_t version = 0;
     int control_fd;
@@ -676,6 +677,7 @@ static unsigned int smoke_init_first_thread(void)
         req->reply_fd = reply_pipe[1];
         req->wait_fd = wait_pipe[1];
         req->debug_level = 0;
+        req->page_size = 4096;
         wine_server_set_reply( req, machines, sizeof(machines) );
         status = wine_server_call( req );
         if (!status)

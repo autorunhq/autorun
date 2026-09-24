@@ -53,7 +53,12 @@ static void generate_lighting_footer(struct wined3d_string_buffer *buffer,
         shader_addline(buffer, "        t = dot(normal, ffp_normalize(dir + float3(0.0, 0.0, -1.0)));\n");
     if (settings->specular_enable)
     {
-        shader_addline(buffer, "        if (dot(dir, normal) > 0.0 && t > 0.0");
+        /* pow() of a negative number yields NaN. If the compiler decides to
+         * flatten this branch, it relies on multiplication to do so, which
+         * only works if 0 * NaN = 0. That breaks shaders anyway, but we don't
+         * yet have a way to avoid it, so don't make the problem any worse.
+         * Forcing branching saves the compiler some pointless work anyway. */
+        shader_addline(buffer, "        [branch] if (dot(dir, normal) > 0.0 && t > 0.0");
         if (legacy_lighting)
             shader_addline(buffer, " && c.material.power > 0.0");
         shader_addline(buffer, ")\n");
@@ -146,8 +151,9 @@ static void generate_lighting(struct wined3d_string_buffer *buffer,
         }
         shader_addline(buffer, "        dir = ffp_normalize(dir);\n");
         shader_addline(buffer, "        t = dot(-dir, ffp_normalize(c.lights[%u].direction.xyz));\n", idx);
-        shader_addline(buffer, "        if (t > cos_htheta) att = 1.0;\n");
-        shader_addline(buffer, "        else if (t <= cos_hphi) att = 0.0;\n");
+        /* Force branching here. See the similar case in generate_lighting_footer(). */
+        shader_addline(buffer, "        [branch] if (t > cos_htheta) att = 1.0;\n");
+        shader_addline(buffer, "        else [branch] if (t <= cos_hphi) att = 0.0;\n");
         shader_addline(buffer, "        else att = pow((t - cos_hphi) / (cos_htheta - cos_hphi), falloff);\n");
         if (legacy_lighting)
             shader_addline(buffer, "        att *= dot(dst.xyz, c.lights[%u].attenuation.xyz);\n", idx);
@@ -327,6 +333,24 @@ static bool ffp_hlsl_generate_vertex_shader(const struct wined3d_ffp_vs_settings
                     shader_addline(&texcoord, "i.texcoord[%u]", settings->texgen[i] & 0x0000ffff);
                 else
                     continue;
+                break;
+
+            case WINED3DTSS_TCI_CAMERASPACENORMAL:
+                shader_addline(&texcoord, "float4(normal, 1.0)");
+                break;
+
+            case WINED3DTSS_TCI_CAMERASPACEPOSITION:
+                shader_addline(&texcoord, "ec_pos");
+                break;
+
+            case WINED3DTSS_TCI_CAMERASPACEREFLECTIONVECTOR:
+                shader_addline(&texcoord, "float4(reflect(ffp_normalize(ec_pos.xyz), normal), 1.0)");
+                break;
+
+            case WINED3DTSS_TCI_SPHEREMAP:
+                shader_addline(buffer, "float3 r = reflect(ffp_normalize(ec_pos.xyz), normal);");
+                shader_addline(buffer, "float m = 2.0 * length(float3(r.xy, r.z - 1.0));");
+                shader_addline(&texcoord, "float4(r.xy / m + 0.5, 0.0, 1.0)");
                 break;
 
             default:

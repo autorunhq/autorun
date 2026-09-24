@@ -23,7 +23,6 @@
 #include <tiffio.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "winbase.h"
@@ -1241,7 +1240,6 @@ static const struct tiff_encode_format formats[] = {
     {&GUID_WICPixelFormatBlackWhite, 1, 1, 1, 1, 0, 0, 0},
     {&GUID_WICPixelFormat4bppGray, 1, 4, 1, 4, 0, 0, 0},
     {&GUID_WICPixelFormat8bppGray, 1, 8, 1, 8, 0, 0, 0},
-    {&GUID_WICPixelFormat16bppGray, 1, 16, 1, 16, 0, 0, 0},
     {&GUID_WICPixelFormat32bppBGRA, 2, 8, 4, 32, 1, 2, 1},
     {&GUID_WICPixelFormat32bppPBGRA, 2, 8, 4, 32, 1, 1, 1},
     {&GUID_WICPixelFormat48bppRGB, 2, 16, 3, 48, 0, 0, 0},

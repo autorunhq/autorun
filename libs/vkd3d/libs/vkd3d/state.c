@@ -938,19 +938,19 @@ static unsigned int vk_binding_count_from_descriptor_range(const struct d3d12_ro
     switch (range->type)
     {
         case VKD3D_SHADER_DESCRIPTOR_TYPE_CBV:
-            limit = limits->uniform_buffer_max_descriptors;
+            limit = limits->max_cbv_descriptor_count;
             count = (limit - min(info->cbv_count, limit)) / info->cbv_unbounded_range_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_SRV:
-            limit = limits->sampled_image_max_descriptors;
+            limit = limits->max_srv_descriptor_count;
             count = (limit - min(info->srv_count, limit)) / info->srv_unbounded_range_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_UAV:
-            limit = limits->storage_image_max_descriptors;
+            limit = limits->max_uav_descriptor_count;
             count = (limit - min(info->uav_count, limit)) / info->uav_unbounded_range_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER:
-            limit = limits->sampler_max_descriptors;
+            limit = limits->max_sampler_descriptor_count;
             count = (limit - min(info->sampler_count, limit)) / info->sampler_unbounded_range_count;
             break;
         default:
@@ -1084,36 +1084,36 @@ static void vkd3d_descriptor_heap_binding_from_descriptor_range(const struct d3d
         if (range->type == VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER)
         {
             binding->set = VKD3D_SET_INDEX_SAMPLER;
-            descriptor_set_size = descriptor_limits->sampler_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_sampler_descriptor_count;
         }
         else
         {
             binding->set = VKD3D_SET_INDEX_MUTABLE;
-            descriptor_set_size = descriptor_limits->sampled_image_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_srv_descriptor_count;
         }
     }
     else switch (range->type)
     {
         case VKD3D_SHADER_DESCRIPTOR_TYPE_SRV:
             binding->set = is_buffer ? VKD3D_SET_INDEX_UNIFORM_TEXEL_BUFFER : VKD3D_SET_INDEX_SAMPLED_IMAGE;
-            descriptor_set_size = descriptor_limits->sampled_image_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_srv_descriptor_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_UAV:
             binding->set = is_buffer ? VKD3D_SET_INDEX_STORAGE_TEXEL_BUFFER : VKD3D_SET_INDEX_STORAGE_IMAGE;
-            descriptor_set_size = descriptor_limits->storage_image_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_uav_descriptor_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_CBV:
             binding->set = VKD3D_SET_INDEX_UNIFORM_BUFFER;
-            descriptor_set_size = descriptor_limits->uniform_buffer_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_cbv_descriptor_count;
             break;
         case VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER:
             binding->set = VKD3D_SET_INDEX_SAMPLER;
-            descriptor_set_size = descriptor_limits->sampler_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_sampler_descriptor_count;
             break;
         default:
             FIXME("Unhandled descriptor range type type %#x.\n", range->type);
             binding->set = VKD3D_SET_INDEX_SAMPLED_IMAGE;
-            descriptor_set_size = descriptor_limits->sampled_image_max_descriptors;
+            descriptor_set_size = descriptor_limits->max_srv_descriptor_count;
             break;
     }
     binding->set += root_signature->vk_set_count;
@@ -1151,7 +1151,7 @@ static void d3d12_root_signature_map_vk_heap_uav_counter(struct d3d12_root_signa
     mapping->binding.set = root_signature->vk_set_count + VKD3D_SET_INDEX_UAV_COUNTER;
     mapping->binding.binding = 0;
     mapping->binding.count = vk_heap_binding_count_from_descriptor_range(range,
-            root_signature->device->vk_info.descriptor_limits.storage_image_max_descriptors);
+            root_signature->device->vk_info.descriptor_limits.max_uav_descriptor_count);
     offset->static_offset = range->offset;
     offset->dynamic_offset_index = context->push_constant_index;
 }
@@ -2059,6 +2059,8 @@ static HRESULT pipeline_state_desc_from_d3d12_stream_desc(struct d3d12_pipeline_
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, hs),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, gs),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, cs),
+        [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, as),
+        [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, ms),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT]   = DCL_SUBOBJECT_INFO(D3D12_STREAM_OUTPUT_DESC, stream_output),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND]           = DCL_SUBOBJECT_INFO(D3D12_BLEND_DESC, blend_state),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK]     = DCL_SUBOBJECT_INFO(UINT, sample_mask),
@@ -2141,6 +2143,12 @@ static HRESULT pipeline_state_desc_from_d3d12_stream_desc(struct d3d12_pipeline_
             && desc->cs.BytecodeLength && desc->cs.pShaderBytecode)
     {
         WARN("Invalid combination of shader stages VS and CS.\n");
+        return E_INVALIDARG;
+    }
+
+    if (desc->as.BytecodeLength || desc->ms.BytecodeLength)
+    {
+        WARN("Amplification and mesh shaders are not supported.\n");
         return E_INVALIDARG;
     }
 
@@ -2395,6 +2403,9 @@ static HRESULT create_shader_stage(struct d3d12_device *device,
         {VKD3D_SHADER_COMPILE_OPTION_TYPED_UAV, typed_uav_compile_option(device)},
         {VKD3D_SHADER_COMPILE_OPTION_WRITE_TESS_GEOM_POINT_SIZE, 0},
         {VKD3D_SHADER_COMPILE_OPTION_FEATURE, feature_flags_compile_option(device)},
+        {VKD3D_SHADER_COMPILE_OPTION_DENORMAL_MODE_F16, VKD3D_SHADER_DENORMAL_MODE_ANY},
+        {VKD3D_SHADER_COMPILE_OPTION_DENORMAL_MODE_F32, VKD3D_SHADER_DENORMAL_MODE_ANY},
+        {VKD3D_SHADER_COMPILE_OPTION_DENORMAL_MODE_F64, VKD3D_SHADER_DENORMAL_MODE_ANY},
     };
 
     stage_desc->sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

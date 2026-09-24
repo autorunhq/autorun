@@ -18,8 +18,6 @@
 
 #define COBJMACROS
 
-#include "initguid.h"
-#include "d3d11.h"
 #include "d3dx11.h"
 #include "d3dcompiler.h"
 #include "dxhelpers.h"
@@ -108,15 +106,12 @@ static DXGI_FORMAT dxgi_format_from_d3dx_pixel_format_id(enum d3dx_pixel_format_
 {
     switch (format)
     {
-        case D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM_SRGB:     return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         case D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM:          return DXGI_FORMAT_R8G8B8A8_UNORM;
         case D3DX_PIXEL_FORMAT_B8G8R8A8_UNORM:          return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case D3DX_PIXEL_FORMAT_B8G8R8A8_UNORM_SRGB:     return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         case D3DX_PIXEL_FORMAT_B8G8R8X8_UNORM:          return DXGI_FORMAT_B8G8R8X8_UNORM;
         case D3DX_PIXEL_FORMAT_R10G10B10A2_UNORM:       return DXGI_FORMAT_R10G10B10A2_UNORM;
         case D3DX_PIXEL_FORMAT_R16G16B16A16_UNORM:      return DXGI_FORMAT_R16G16B16A16_UNORM;
         case D3DX_PIXEL_FORMAT_R8_UNORM:                return DXGI_FORMAT_R8_UNORM;
-        case D3DX_PIXEL_FORMAT_R8_SNORM:                return DXGI_FORMAT_R8_SNORM;
         case D3DX_PIXEL_FORMAT_R8G8_UNORM:              return DXGI_FORMAT_R8G8_UNORM;
         case D3DX_PIXEL_FORMAT_R16_UNORM:               return DXGI_FORMAT_R16_UNORM;
         case D3DX_PIXEL_FORMAT_R16G16_UNORM:            return DXGI_FORMAT_R16G16_UNORM;
@@ -127,16 +122,12 @@ static DXGI_FORMAT dxgi_format_from_d3dx_pixel_format_id(enum d3dx_pixel_format_
         case D3DX_PIXEL_FORMAT_R32_FLOAT:               return DXGI_FORMAT_R32_FLOAT;
         case D3DX_PIXEL_FORMAT_R32G32_FLOAT:            return DXGI_FORMAT_R32G32_FLOAT;
         case D3DX_PIXEL_FORMAT_R32G32B32_FLOAT:         return DXGI_FORMAT_R32G32B32_FLOAT;
-        case D3DX_PIXEL_FORMAT_R11G11B10_FLOAT:         return DXGI_FORMAT_R11G11B10_FLOAT;
         case D3DX_PIXEL_FORMAT_R32G32B32A32_FLOAT:      return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case D3DX_PIXEL_FORMAT_G8R8_G8B8_UNORM:         return DXGI_FORMAT_G8R8_G8B8_UNORM;
         case D3DX_PIXEL_FORMAT_R8G8_B8G8_UNORM:         return DXGI_FORMAT_R8G8_B8G8_UNORM;
         case D3DX_PIXEL_FORMAT_BC1_UNORM:               return DXGI_FORMAT_BC1_UNORM;
-        case D3DX_PIXEL_FORMAT_BC1_UNORM_SRGB:          return DXGI_FORMAT_BC1_UNORM_SRGB;
         case D3DX_PIXEL_FORMAT_BC2_UNORM:               return DXGI_FORMAT_BC2_UNORM;
-        case D3DX_PIXEL_FORMAT_BC2_UNORM_SRGB:          return DXGI_FORMAT_BC2_UNORM_SRGB;
         case D3DX_PIXEL_FORMAT_BC3_UNORM:               return DXGI_FORMAT_BC3_UNORM;
-        case D3DX_PIXEL_FORMAT_BC3_UNORM_SRGB:          return DXGI_FORMAT_BC3_UNORM_SRGB;
         case D3DX_PIXEL_FORMAT_BC4_UNORM:               return DXGI_FORMAT_BC4_UNORM;
         case D3DX_PIXEL_FORMAT_BC4_SNORM:               return DXGI_FORMAT_BC4_SNORM;
         case D3DX_PIXEL_FORMAT_BC5_UNORM:               return DXGI_FORMAT_BC5_UNORM;
@@ -220,25 +211,7 @@ HRESULT WINAPI D3DX11GetImageInfoFromFileW(const WCHAR *src_file, ID3DX11ThreadP
         return E_FAIL;
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncFileLoaderW(src_file, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureInfoProcessor(info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, result, NULL);
-        if (FAILED(hr))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (SUCCEEDED((hr = load_file(src_file, &buffer, &size))))
     {
@@ -261,24 +234,7 @@ HRESULT WINAPI D3DX11GetImageInfoFromResourceA(HMODULE module, const char *resou
             module, debugstr_a(resource), pump, info, result);
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderA(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureInfoProcessor(info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, result, NULL))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (FAILED((hr = d3dx_load_resource_a(module, resource, &buffer, &size))))
         return hr;
@@ -299,24 +255,7 @@ HRESULT WINAPI D3DX11GetImageInfoFromResourceW(HMODULE module, const WCHAR *reso
             module, debugstr_w(resource), pump, info, result);
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderW(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureInfoProcessor(info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, result, NULL))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (FAILED((hr = d3dx_load_resource_w(module, resource, &buffer, &size))))
         return hr;
@@ -407,7 +346,7 @@ HRESULT get_image_info(const void *data, SIZE_T size, D3DX11_IMAGE_INFO *img_inf
     return S_OK;
 }
 
-void init_load_info(const D3DX11_IMAGE_LOAD_INFO *load_info, D3DX11_IMAGE_LOAD_INFO *out)
+static void init_load_info(const D3DX11_IMAGE_LOAD_INFO *load_info, D3DX11_IMAGE_LOAD_INFO *out)
 {
     if (load_info)
     {
@@ -433,7 +372,7 @@ void init_load_info(const D3DX11_IMAGE_LOAD_INFO *load_info, D3DX11_IMAGE_LOAD_I
 HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO *load_info,
         D3D11_SUBRESOURCE_DATA **resource_data)
 {
-    uint32_t loaded_mip_level_count, max_mip_level_count;
+    uint32_t loaded_mip_level_count, max_mip_level_count, loaded_layer_count;
     const struct pixel_format_desc *fmt_desc, *src_desc;
     struct d3dx_subresource_data *sub_rsrcs = NULL;
     D3DX11_IMAGE_INFO img_info;
@@ -445,14 +384,6 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO 
         return E_FAIL;
 
     *resource_data = NULL;
-    if (!load_info->Filter || load_info->Filter == D3DX11_DEFAULT)
-        load_info->Filter = D3DX11_FILTER_LINEAR;
-    if (FAILED(hr = d3dx_validate_filter(load_info->Filter)))
-    {
-        WARN("Invalid filter argument %#x.\n", load_info->Filter);
-        return hr;
-    }
-
     hr = d3dx_image_init(data, size, &image, 0, D3DX_IMAGE_SUPPORT_DXT10);
     if (FAILED(hr))
         return E_FAIL;
@@ -465,12 +396,11 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO 
         goto end;
     }
 
-    if ((!(img_info.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) || img_info.ArraySize != 6)
-            && img_info.ArraySize != 1)
+    loaded_layer_count = img_info.ArraySize;
+    if ((loaded_layer_count > 1) && (img_info.ResourceDimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D))
     {
-        FIXME("img_info.ArraySize = %u not supported.\n", img_info.ArraySize);
-        hr = E_NOTIMPL;
-        goto end;
+        TRACE("Ignoring array size variable %u for 3D texture.\n", img_info.ArraySize);
+        loaded_layer_count = 1;
     }
 
     if (load_info->FirstMipLevel == D3DX11_DEFAULT || load_info->FirstMipLevel >= img_info.MipLevels)
@@ -506,14 +436,31 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO 
         load_info->MipLevels = (load_info->MipLevels == D3DX11_FROM_FILE) ? img_info.MipLevels : max_mip_level_count;
     load_info->MipLevels = min(max_mip_level_count, load_info->MipLevels);
 
+    if ((load_info->Width != image.size.width) || (load_info->Height != image.size.height)
+            || (load_info->Depth != image.size.depth) || (load_info->MipLevels != image.mip_levels)
+            || (fmt_desc->format != image.format))
+    {
+        if (!load_info->Filter || load_info->Filter == D3DX11_DEFAULT)
+            load_info->Filter = D3DX11_FILTER_LINEAR;
+        if (FAILED(hr = d3dx_validate_filter(load_info->Filter)))
+        {
+            WARN("Invalid filter argument %#x.\n", load_info->Filter);
+            goto end;
+        }
+    }
+    else
+    {
+        load_info->Filter = D3DX11_FILTER_NONE;
+    }
+
     hr = d3dx_create_subresource_data_for_texture(load_info->Width, load_info->Height, load_info->Depth,
-            load_info->MipLevels, img_info.ArraySize, fmt_desc, &sub_rsrcs);
+            load_info->MipLevels, loaded_layer_count, fmt_desc, &sub_rsrcs);
     if (FAILED(hr))
         goto end;
 
     src_desc = get_d3dx_pixel_format_info(image.format);
     loaded_mip_level_count = min(img_info.MipLevels - load_info->FirstMipLevel, load_info->MipLevels);
-    for (i = 0; i < img_info.ArraySize; ++i)
+    for (i = 0; i < loaded_layer_count; ++i)
     {
         struct volume dst_size = { load_info->Width, load_info->Height, load_info->Depth };
 
@@ -552,7 +499,7 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO 
         }
 
         d3dx_get_mip_level_size(&base_level_size, base_level);
-        for (i = 0; i < img_info.ArraySize; ++i)
+        for (i = 0; i < loaded_layer_count; ++i)
         {
             struct volume src_size, dst_size;
 
@@ -725,24 +672,7 @@ HRESULT WINAPI D3DX11CreateTextureFromFileW(ID3D11Device *device, const WCHAR *s
         return E_FAIL;
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncFileLoaderW(src_file, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)texture))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (SUCCEEDED((hr = load_file(src_file, &buffer, &size))))
     {
@@ -768,24 +698,7 @@ HRESULT WINAPI D3DX11CreateTextureFromResourceA(ID3D11Device *device, HMODULE mo
         return E_INVALIDARG;
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderA(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)texture))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (FAILED((hr = d3dx_load_resource_a(module, resource, &buffer, &size))))
         return hr;
@@ -809,24 +722,7 @@ HRESULT WINAPI D3DX11CreateTextureFromResourceW(ID3D11Device *device, HMODULE mo
         return E_INVALIDARG;
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderW(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)texture))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     if (FAILED((hr = d3dx_load_resource_w(module, resource, &buffer, &size))))
         return hr;
@@ -834,6 +730,16 @@ HRESULT WINAPI D3DX11CreateTextureFromResourceW(ID3D11Device *device, HMODULE mo
     if (hresult)
         *hresult = hr;
     return hr;
+}
+
+HRESULT WINAPI D3DX11CreateShaderResourceViewFromMemory(ID3D11Device *device, const void *data,
+        SIZE_T data_size, D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump,
+        ID3D11ShaderResourceView **view, HRESULT *hresult)
+{
+    FIXME("device %p, data %p, data_size %Iu, load_info %p, pump %p, view %p, hresult %p stub!\n",
+            device, data, data_size, load_info, pump, view, hresult);
+
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI D3DX11CreateTextureFromMemory(ID3D11Device *device, const void *data,
@@ -851,29 +757,48 @@ HRESULT WINAPI D3DX11CreateTextureFromMemory(ID3D11Device *device, const void *d
         return E_FAIL;
 
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncMemoryLoader(data, data_size, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)texture))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     hr = create_texture(device, data, data_size, load_info, texture);
     if (hresult)
         *hresult = hr;
     return hr;
+}
+
+HRESULT WINAPI D3DX11SaveTextureToFileW(ID3D11DeviceContext *context, ID3D11Resource *texture,
+        D3DX11_IMAGE_FILE_FORMAT format, const WCHAR *filename)
+{
+    FIXME("context %p, texture %p, format %u, filename %s stub!\n",
+            context, texture, format, debugstr_w(filename));
+
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI D3DX11SaveTextureToFileA(ID3D11DeviceContext *context, ID3D11Resource *texture,
+        D3DX11_IMAGE_FILE_FORMAT format, const char *filename)
+{
+    FIXME("context %p, texture %p, format %u, filename %s stub!\n",
+            context, texture, format, debugstr_a(filename));
+
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI D3DX11SaveTextureToMemory(ID3D11DeviceContext *context, ID3D11Resource *texture,
+        D3DX11_IMAGE_FILE_FORMAT format, ID3D10Blob **buffer, UINT flags)
+{
+    FIXME("context %p, texture %p, format %u, buffer %p, flags %#x stub!\n",
+            context, texture, format, buffer, flags);
+
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI D3DX11LoadTextureFromTexture(ID3D11DeviceContext *context, ID3D11Resource *src_texture,
+        D3DX11_TEXTURE_LOAD_INFO *info, ID3D11Resource *dst_texture)
+{
+    FIXME("context %p, src_texture %p, info %p, dst_texture %p stub!\n",
+            context, src_texture, info, dst_texture);
+
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI D3DX11GetImageInfoFromMemory(const void *src_data, SIZE_T src_data_size, ID3DX11ThreadPump *pump,
@@ -887,961 +812,10 @@ HRESULT WINAPI D3DX11GetImageInfoFromMemory(const void *src_data, SIZE_T src_dat
     if (!src_data)
         return E_FAIL;
     if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncMemoryLoader(src_data, src_data_size, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncTextureInfoProcessor(img_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, NULL))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
+        FIXME("D3DX11 thread pump is currently unimplemented.\n");
 
     hr = get_image_info(src_data, src_data_size, img_info);
     if (hresult)
         *hresult = hr;
-    return hr;
-}
-
-/*
- * D3DX11CreateShaderResourceView variants.
- */
-HRESULT WINAPI D3DX11CreateShaderResourceViewFromFileA(ID3D11Device *device, const char *src_file,
-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11ShaderResourceView **srv, HRESULT *hresult)
-{
-    WCHAR *buffer;
-    int str_len;
-    HRESULT hr;
-
-    TRACE("device %p, src_file %s, load_info %p, pump %p, srv %p, hresult %p.\n",
-            device, debugstr_a(src_file), load_info, pump, srv, hresult);
-
-    if (!device)
-        return E_INVALIDARG;
-    if (!src_file)
-        return E_FAIL;
-
-    if (!(str_len = MultiByteToWideChar(CP_ACP, 0, src_file, -1, NULL, 0)))
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    if (!(buffer = malloc(str_len * sizeof(*buffer))))
-        return E_OUTOFMEMORY;
-
-    MultiByteToWideChar(CP_ACP, 0, src_file, -1, buffer, str_len);
-    hr = D3DX11CreateShaderResourceViewFromFileW(device, buffer, load_info, pump, srv, hresult);
-
-    free(buffer);
-
-    return hr;
-}
-
-HRESULT WINAPI D3DX11CreateShaderResourceViewFromFileW(ID3D11Device *device, const WCHAR *src_file,
-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11ShaderResourceView **srv, HRESULT *hresult)
-{
-    ID3D11Resource *texture;
-    void *buffer = NULL;
-    DWORD size = 0;
-    HRESULT hr;
-
-    TRACE("device %p, src_file %s, load_info %p, pump %p, srv %p, hresult %p.\n",
-            device, debugstr_w(src_file), load_info, pump, srv, hresult);
-
-    if (!device)
-        return E_INVALIDARG;
-    if (!src_file)
-        return E_FAIL;
-
-    if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncFileLoaderW(src_file, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)srv))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
-
-    if (SUCCEEDED((hr = load_file(src_file, &buffer, &size))))
-    {
-        hr = create_texture(device, buffer, size, load_info, &texture);
-        if (SUCCEEDED(hr))
-        {
-            hr = ID3D11Device_CreateShaderResourceView(device, texture, NULL, srv);
-            ID3D11Resource_Release(texture);
-        }
-        free(buffer);
-    }
-    if (hresult)
-        *hresult = hr;
-    return hr;
-}
-
-HRESULT WINAPI D3DX11CreateShaderResourceViewFromResourceA(ID3D11Device *device, HMODULE module, const char *resource,
-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11ShaderResourceView **srv, HRESULT *hresult)
-{
-    ID3D11Resource *texture;
-    uint32_t size;
-    void *buffer;
-    HRESULT hr;
-
-    TRACE("device %p, module %p, resource %s, load_info %p, pump %p, srv %p, hresult %p.\n",
-            device, module, debugstr_a(resource), load_info, pump, srv, hresult);
-
-    if (!device)
-        return E_INVALIDARG;
-
-    if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderA(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)srv))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
-
-    if (FAILED((hr = d3dx_load_resource_a(module, resource, &buffer, &size))))
-        return hr;
-    hr = create_texture(device, buffer, size, load_info, &texture);
-    if (SUCCEEDED(hr))
-    {
-        hr = ID3D11Device_CreateShaderResourceView(device, texture, NULL, srv);
-        ID3D11Resource_Release(texture);
-    }
-    if (hresult)
-        *hresult = hr;
-    return hr;
-}
-
-HRESULT WINAPI D3DX11CreateShaderResourceViewFromResourceW(ID3D11Device *device, HMODULE module, const WCHAR *resource,
-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11ShaderResourceView **srv, HRESULT *hresult)
-{
-    ID3D11Resource *texture;
-    uint32_t size;
-    void *buffer;
-    HRESULT hr;
-
-    TRACE("device %p, module %p, resource %s, load_info %p, pump %p, srv %p, hresult %p.\n",
-            device, module, debugstr_w(resource), load_info, pump, srv, hresult);
-
-    if (!device)
-        return E_INVALIDARG;
-
-    if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncResourceLoaderW(module, resource, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)srv))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
-
-    if (FAILED((hr = d3dx_load_resource_w(module, resource, &buffer, &size))))
-        return hr;
-    hr = create_texture(device, buffer, size, load_info, &texture);
-    if (SUCCEEDED(hr))
-    {
-        hr = ID3D11Device_CreateShaderResourceView(device, texture, NULL, srv);
-        ID3D11Resource_Release(texture);
-    }
-    if (hresult)
-        *hresult = hr;
-    return hr;
-}
-
-HRESULT WINAPI D3DX11CreateShaderResourceViewFromMemory(ID3D11Device *device, const void *src_data, SIZE_T src_data_size,
-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11ShaderResourceView **srv, HRESULT *hresult)
-{
-    ID3D11Resource *texture;
-    HRESULT hr;
-
-    TRACE("device %p, src_data %p, src_data_size %Iu, load_info %p, pump %p, srv %p, hresult %p.\n",
-            device, src_data, src_data_size, load_info, pump, srv, hresult);
-
-    if (!device)
-        return E_INVALIDARG;
-    if (!src_data)
-        return E_FAIL;
-
-    if (pump)
-    {
-        ID3DX11DataProcessor *processor;
-        ID3DX11DataLoader *loader;
-
-        if (FAILED((hr = D3DX11CreateAsyncMemoryLoader(src_data, src_data_size, &loader))))
-            return hr;
-        if (FAILED((hr = D3DX11CreateAsyncShaderResourceViewProcessor(device, load_info, &processor))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            return hr;
-        }
-        if (FAILED((hr = ID3DX11ThreadPump_AddWorkItem(pump, loader, processor, hresult, (void **)srv))))
-        {
-            ID3DX11DataLoader_Destroy(loader);
-            ID3DX11DataProcessor_Destroy(processor);
-        }
-        return hr;
-    }
-
-    hr = create_texture(device, src_data, src_data_size, load_info, &texture);
-    if (SUCCEEDED(hr))
-    {
-        hr = ID3D11Device_CreateShaderResourceView(device, texture, NULL, srv);
-        ID3D11Resource_Release(texture);
-    }
-    if (hresult)
-        *hresult = hr;
-    return hr;
-}
-
-/*
- * D3DX11LoadTextureFromTexture implementation.
- */
-struct d3d11_texture_resource {
-    D3D11_RESOURCE_DIMENSION texture_dimension;
-    union
-    {
-        ID3D11Resource  *tex_rsrc;
-        ID3D11Texture2D *tex_2d;
-        ID3D11Texture3D *tex_3d;
-    } iface;
-    struct volume size;
-    uint32_t mip_levels;
-    uint32_t layer_count;
-};
-
-struct d3d11_texture {
-    ID3D11Device *device;
-    ID3D11DeviceContext *device_context;
-    struct d3d11_texture_resource texture;
-    struct d3d11_texture_resource staging_texture;
-
-    const struct pixel_format_desc *fmt_desc;
-    D3D11_MAP map_flags;
-    D3D11_BOX texture_box;
-    BOOL is_cubemap;
-
-    uint32_t first_layer;
-    uint32_t first_mip_level;
-};
-
-static void set_d3d11_box(D3D11_BOX *box, uint32_t left, uint32_t top, uint32_t right, uint32_t bottom, uint32_t front,
-        uint32_t back)
-{
-    box->left = left;
-    box->top = top;
-    box->right = right;
-    box->bottom = bottom;
-    box->front = front;
-    box->back = back;
-}
-
-static const char *debug_d3d11_box(const struct D3D11_BOX *box)
-{
-    if (!box)
-        return "(null)";
-    return wine_dbg_sprintf("(%ux%ux%u)-(%ux%ux%u)", box->left, box->top, box->front, box->right, box->bottom, box->back);
-}
-
-static void d3d11_box_get_mip_level(D3D11_BOX *box, uint32_t level)
-{
-    uint32_t i;
-
-    for (i = 0; i < level; ++i)
-    {
-        set_d3d11_box(box, (box->left ? (box->left / 2) : 0), (box->top ? (box->top / 2) : 0),
-                max(box->right / 2, 1), max(box->bottom / 2, 1),
-                (box->front ? (box->front / 2) : 0), max(box->back / 2, 1));
-    }
-}
-
-static uint32_t d3d11_get_resource_mip_levels(ID3D11Resource *rsrc)
-{
-    D3D11_RESOURCE_DIMENSION rsrc_dim;
-    uint32_t mip_levels = 0;
-    HRESULT hr;
-
-    ID3D11Resource_GetType(rsrc, &rsrc_dim);
-    switch (rsrc_dim)
-    {
-    case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-    {
-        D3D11_TEXTURE2D_DESC desc;
-        ID3D11Texture2D *tex_2d;
-
-        hr = ID3D11Resource_QueryInterface(rsrc, &IID_ID3D11Texture2D, (void **)&tex_2d);
-        if (FAILED(hr))
-            break;
-
-        ID3D11Texture2D_GetDesc(tex_2d, &desc);
-        ID3D11Texture2D_Release(tex_2d);
-        mip_levels = desc.MipLevels;
-        break;
-    }
-
-    case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-    {
-        D3D11_TEXTURE3D_DESC desc;
-        ID3D11Texture3D *tex_3d;
-
-        hr = ID3D11Resource_QueryInterface(rsrc, &IID_ID3D11Texture3D, (void **)&tex_3d);
-        if (FAILED(hr))
-            break;
-
-        ID3D11Texture3D_GetDesc(tex_3d, &desc);
-        ID3D11Texture3D_Release(tex_3d);
-        mip_levels = desc.MipLevels;
-        break;
-    }
-
-    default:
-        break;
-    }
-
-    return mip_levels;
-}
-
-static HRESULT d3dx_d3d11_texture_init(ID3D11DeviceContext *context, ID3D11Resource *tex_rsrc, uint32_t first_layer,
-        uint32_t first_mip_level, D3D11_MAP map_flags, D3D11_BOX *tex_box, struct d3d11_texture *texture)
-{
-    struct d3d11_texture_resource *staging_tex_rsrc = &texture->staging_texture;
-    struct d3d11_texture_resource *src_tex_rsrc = &texture->texture;
-    HRESULT hr;
-
-    ID3D11Resource_GetDevice(tex_rsrc, &texture->device);
-    if (!texture->device)
-    {
-        ERR("Failed to get device from texture resource.\n");
-        return E_FAIL;
-    }
-
-    texture->map_flags = map_flags;
-    ID3D11Resource_GetType(tex_rsrc, &src_tex_rsrc->texture_dimension);
-    switch (src_tex_rsrc->texture_dimension)
-    {
-    case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-    {
-        D3D11_TEXTURE2D_DESC desc;
-
-        hr = ID3D11Resource_QueryInterface(tex_rsrc, &IID_ID3D11Texture2D, (void **)&src_tex_rsrc->iface.tex_2d);
-        if (FAILED(hr))
-            return hr;
-
-        ID3D11Texture2D_GetDesc(src_tex_rsrc->iface.tex_2d, &desc);
-        if (map_flags != D3D11_MAP_READ && (first_mip_level >= desc.MipLevels))
-            return S_FALSE;
-
-        texture->fmt_desc = get_d3dx_pixel_format_info(d3dx_pixel_format_id_from_dxgi_format(desc.Format));
-        if (texture->fmt_desc->format == D3DX_PIXEL_FORMAT_COUNT)
-        {
-            FIXME("Unknown DXGI format supplied, %#x.\n", desc.Format);
-            return E_NOTIMPL;
-        }
-
-        set_volume_struct(&src_tex_rsrc->size, desc.Width, desc.Height, 1);
-        src_tex_rsrc->mip_levels = desc.MipLevels;
-        src_tex_rsrc->layer_count = desc.ArraySize;
-
-        texture->first_mip_level = min((desc.MipLevels - 1), first_mip_level);
-        texture->first_layer = first_layer >= desc.ArraySize ? 0 : first_layer;
-        texture->is_cubemap = !!(desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE);
-
-        staging_tex_rsrc->texture_dimension = src_tex_rsrc->texture_dimension;
-        staging_tex_rsrc->size = src_tex_rsrc->size;
-        d3dx_get_mip_level_size(&staging_tex_rsrc->size, texture->first_mip_level);
-        staging_tex_rsrc->mip_levels = src_tex_rsrc->mip_levels - texture->first_mip_level;
-        staging_tex_rsrc->layer_count = 1;
-
-        /* Create the staging texture. */
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = desc.MiscFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (map_flags != D3D11_MAP_READ)
-            desc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE;
-        desc.ArraySize = 1;
-        desc.MipLevels = staging_tex_rsrc->mip_levels;
-        desc.Width = staging_tex_rsrc->size.width;
-        desc.Height = staging_tex_rsrc->size.height;
-
-        hr = ID3D11Device_CreateTexture2D(texture->device, &desc, NULL, &staging_tex_rsrc->iface.tex_2d);
-        if (FAILED(hr))
-            return hr;
-        break;
-    }
-
-    case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-    {
-        D3D11_TEXTURE3D_DESC desc;
-
-        hr = ID3D11Resource_QueryInterface(tex_rsrc, &IID_ID3D11Texture3D, (void **)&src_tex_rsrc->iface.tex_3d);
-        if (FAILED(hr))
-            return hr;
-
-        ID3D11Texture3D_GetDesc(src_tex_rsrc->iface.tex_3d, &desc);
-        if (map_flags != D3D11_MAP_READ && (first_mip_level >= desc.MipLevels))
-            return S_FALSE;
-
-        texture->fmt_desc = get_d3dx_pixel_format_info(d3dx_pixel_format_id_from_dxgi_format(desc.Format));
-        if (texture->fmt_desc->format == D3DX_PIXEL_FORMAT_COUNT)
-        {
-            FIXME("Unknown DXGI format supplied, %#x.\n", desc.Format);
-            return E_NOTIMPL;
-        }
-
-        set_volume_struct(&src_tex_rsrc->size, desc.Width, desc.Height, desc.Depth);
-        src_tex_rsrc->mip_levels = desc.MipLevels;
-        src_tex_rsrc->layer_count = 1;
-
-        texture->first_mip_level = min((desc.MipLevels - 1), first_mip_level);
-        if (first_layer)
-            WARN("Specified a non zero FirstElement argument on a 3D texture.\n");
-        texture->first_layer = 0;
-
-        staging_tex_rsrc->texture_dimension = src_tex_rsrc->texture_dimension;
-        staging_tex_rsrc->size = src_tex_rsrc->size;
-        d3dx_get_mip_level_size(&staging_tex_rsrc->size, texture->first_mip_level);
-        staging_tex_rsrc->mip_levels = src_tex_rsrc->mip_levels - texture->first_mip_level;
-        staging_tex_rsrc->layer_count = 1;
-
-        /* Create the staging texture. */
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = desc.MiscFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (map_flags != D3D11_MAP_READ)
-            desc.CPUAccessFlags |= D3D11_CPU_ACCESS_WRITE;
-        desc.MipLevels = staging_tex_rsrc->mip_levels;
-        desc.Width = staging_tex_rsrc->size.width;
-        desc.Height = staging_tex_rsrc->size.height;
-        desc.Depth = staging_tex_rsrc->size.depth;
-
-        hr = ID3D11Device_CreateTexture3D(texture->device, &desc, NULL, &staging_tex_rsrc->iface.tex_3d);
-        if (FAILED(hr))
-            return hr;
-        break;
-    }
-
-    default:
-        FIXME("Unhandled resource dimension %u.\n", src_tex_rsrc->texture_dimension);
-        return E_NOTIMPL;
-    }
-
-    if (tex_box)
-        texture->texture_box = *tex_box;
-    else
-        set_d3d11_box(&texture->texture_box, 0, 0, staging_tex_rsrc->size.width, staging_tex_rsrc->size.height, 0,
-                staging_tex_rsrc->size.depth);
-    texture->device_context = context;
-    ID3D11DeviceContext_AddRef(context);
-
-    return S_OK;
-}
-
-static void d3dx_d3d11_texture_release(struct d3d11_texture *texture)
-{
-    if (texture->device)
-        ID3D11Device_Release(texture->device);
-    if (texture->device_context)
-        ID3D11DeviceContext_Release(texture->device_context);
-    if (texture->texture.iface.tex_rsrc)
-        ID3D11Resource_Release(texture->texture.iface.tex_rsrc);
-    if (texture->staging_texture.iface.tex_rsrc)
-        ID3D11Resource_Release(texture->staging_texture.iface.tex_rsrc);
-}
-
-static HRESULT d3dx_d3d11_texture_map(struct d3d11_texture *texture, uint32_t layer, uint32_t mip_level,
-        struct d3dx_pixels *pixels)
-{
-    struct d3d11_texture_resource *staging_tex_rsrc = &texture->staging_texture;
-    struct d3d11_texture_resource *src_tex_rsrc = &texture->texture;
-    D3D11_BOX tmp_box = texture->texture_box;
-    D3D11_MAPPED_SUBRESOURCE map = { 0 };
-    uint32_t sub_rsrc_idx;
-    HRESULT hr;
-
-    d3d11_box_get_mip_level(&tmp_box, mip_level);
-    sub_rsrc_idx = (src_tex_rsrc->mip_levels * (texture->first_layer + layer)) + (mip_level + texture->first_mip_level);
-    ID3D11DeviceContext_CopySubresourceRegion(texture->device_context, staging_tex_rsrc->iface.tex_rsrc, mip_level, 0, 0, 0,
-             src_tex_rsrc->iface.tex_rsrc, sub_rsrc_idx, NULL);
-    hr = ID3D11DeviceContext_Map(texture->device_context, staging_tex_rsrc->iface.tex_rsrc, mip_level,
-            texture->map_flags, 0, &map);
-    if (FAILED(hr))
-        return hr;
-
-    TRACE("Mapping layer %u, mip level %u, box %s.\n", texture->first_layer + layer, texture->first_mip_level + mip_level,
-            debug_d3d11_box(&tmp_box));
-    return d3dx_pixels_init(map.pData, map.RowPitch, map.DepthPitch, NULL, texture->fmt_desc->format, tmp_box.left, tmp_box.top,
-            tmp_box.right, tmp_box.bottom, tmp_box.front, tmp_box.back, pixels);
-}
-
-static void d3dx_d3d11_texture_unmap(struct d3d11_texture *texture, uint32_t layer, uint32_t mip_level)
-{
-    struct d3d11_texture_resource *staging_tex_rsrc = &texture->staging_texture;
-    struct d3d11_texture_resource *src_tex_rsrc = &texture->texture;
-    uint32_t sub_rsrc_idx;
-
-    ID3D11DeviceContext_Unmap(texture->device_context, staging_tex_rsrc->iface.tex_rsrc, mip_level);
-    if (texture->map_flags == D3D11_MAP_READ)
-        return;
-
-    sub_rsrc_idx = (src_tex_rsrc->mip_levels * (texture->first_layer + layer)) + (mip_level + texture->first_mip_level);
-    ID3D11DeviceContext_CopySubresourceRegion(texture->device_context, src_tex_rsrc->iface.tex_rsrc, sub_rsrc_idx, 0, 0, 0,
-            staging_tex_rsrc->iface.tex_rsrc, mip_level, NULL);
-}
-
-static const D3DX11_TEXTURE_LOAD_INFO default_load_info = { NULL, NULL, 0, 0, D3DX11_DEFAULT, 0, 0, D3DX11_DEFAULT,
-                                                            D3DX11_DEFAULT, D3DX11_DEFAULT };
-HRESULT WINAPI D3DX11LoadTextureFromTexture(ID3D11DeviceContext *context, ID3D11Resource *src_texture,
-        D3DX11_TEXTURE_LOAD_INFO *load_info, ID3D11Resource *dst_texture)
-{
-    D3DX11_TEXTURE_LOAD_INFO info = (load_info) ? *load_info : default_load_info;
-    struct d3d11_texture src_tex = { 0 };
-    struct d3d11_texture dst_tex = { 0 };
-    uint32_t i, j, loaded_mip_levels;
-    HRESULT hr;
-
-    TRACE("context %p, src_texture %p, load_info %p, dst_texture %p.\n", context, src_texture, load_info, dst_texture);
-
-    if (!src_texture || !dst_texture)
-        return E_INVALIDARG;
-
-    if (info.Filter == D3DX11_DEFAULT)
-        info.Filter = D3DX11_FILTER_LINEAR;
-    if (FAILED(hr = d3dx_validate_filter(info.Filter)))
-    {
-        WARN("Invalid filter argument %#x.\n", info.Filter);
-        goto end;
-    }
-
-    hr = d3dx_d3d11_texture_init(context, src_texture, info.SrcFirstElement, info.SrcFirstMip, D3D11_MAP_READ,
-            info.pSrcBox, &src_tex);
-    if (FAILED(hr))
-        goto end;
-
-    hr = d3dx_d3d11_texture_init(context, dst_texture, info.DstFirstElement, info.DstFirstMip, D3D11_MAP_READ_WRITE,
-            info.pDstBox, &dst_tex);
-    if (hr == S_FALSE || FAILED(hr))
-        goto end;
-
-    if ((src_texture == dst_texture) && ((src_tex.first_layer == dst_tex.first_layer) &&
-                (src_tex.first_mip_level == dst_tex.first_mip_level)))
-    {
-        hr = D3DERR_INVALIDCALL;
-        goto end;
-    }
-
-    if (!info.NumMips || info.NumMips == D3DX11_DEFAULT)
-        info.NumMips = dst_tex.staging_texture.mip_levels;
-    info.NumMips = min(info.NumMips, dst_tex.staging_texture.mip_levels);
-    if (!info.NumElements || info.NumElements == D3DX11_DEFAULT)
-        info.NumElements = min(src_tex.texture.layer_count, dst_tex.texture.layer_count);
-    info.NumElements = min(info.NumElements, min(src_tex.texture.layer_count, dst_tex.texture.layer_count));
-    loaded_mip_levels = min(info.NumMips, src_tex.staging_texture.mip_levels);
-    for (i = 0; i < info.NumElements; ++i)
-    {
-        for (j = 0; j < loaded_mip_levels; ++j)
-        {
-            struct d3dx_pixels src_pixels, dst_pixels;
-
-            hr = d3dx_d3d11_texture_map(&src_tex, i, j, &src_pixels);
-            if (FAILED(hr))
-                goto end;
-
-            hr = d3dx_d3d11_texture_map(&dst_tex, i, j, &dst_pixels);
-            if (FAILED(hr))
-            {
-                d3dx_d3d11_texture_unmap(&src_tex, i, j);
-                goto end;
-            }
-
-            hr = d3dx_load_pixels_from_pixels(&dst_pixels, dst_tex.fmt_desc, &src_pixels, src_tex.fmt_desc, info.Filter, 0);
-            d3dx_d3d11_texture_unmap(&src_tex, i, j);
-            d3dx_d3d11_texture_unmap(&dst_tex, i, j);
-            if (FAILED(hr))
-            {
-                WARN("Failed with hr %#lx.\n", hr);
-                goto end;
-            }
-        }
-    }
-
-    if (loaded_mip_levels < info.NumMips)
-    {
-        if (info.MipFilter == D3DX11_DEFAULT)
-            info.MipFilter = D3DX11_FILTER_LINEAR;
-        if (FAILED(hr = d3dx_validate_filter(info.MipFilter)))
-        {
-            WARN("Invalid mip filter argument %#x.\n", info.MipFilter);
-            goto end;
-        }
-
-        for (i = 0; i < info.NumElements; ++i)
-        {
-            for (j = loaded_mip_levels; j < info.NumMips; ++j)
-            {
-                struct d3dx_pixels src_pixels, dst_pixels;
-
-                hr = d3dx_d3d11_texture_map(&dst_tex, i, j - 1, &src_pixels);
-                if (FAILED(hr))
-                    break;
-
-                hr = d3dx_d3d11_texture_map(&dst_tex, i, j, &dst_pixels);
-                if (SUCCEEDED(hr))
-                {
-                    hr = d3dx_load_pixels_from_pixels(&dst_pixels, dst_tex.fmt_desc, &src_pixels, dst_tex.fmt_desc, info.MipFilter, 0);
-                    d3dx_d3d11_texture_unmap(&dst_tex, i, j);
-                }
-                d3dx_d3d11_texture_unmap(&dst_tex, i, j - 1);
-                if (FAILED(hr))
-                    goto end;
-            }
-        }
-    }
-
-end:
-    d3dx_d3d11_texture_release(&src_tex);
-    d3dx_d3d11_texture_release(&dst_tex);
-    return SUCCEEDED(hr) ? S_OK : hr;
-}
-
-HRESULT WINAPI D3DX11FilterTexture(ID3D11DeviceContext *context, ID3D11Resource *texture, UINT src_level, UINT filter)
-{
-    D3DX11_TEXTURE_LOAD_INFO load_info = { NULL, NULL, src_level, src_level + 1, 0, 0, 0, 0, filter, filter };
-
-    TRACE("context %p, texture %p, src_level %u, filter %#x.\n", context, texture, src_level, filter);
-
-    if (d3d11_get_resource_mip_levels(texture) <= src_level)
-        return S_OK;
-
-    return D3DX11LoadTextureFromTexture(context, texture, &load_info, texture);
-}
-
-static void d3dx11_buffer_destroy(struct d3dx_buffer *d3dx_buffer)
-{
-    ID3D10Blob *buffer_iface = (ID3D10Blob *)d3dx_buffer->buffer_iface;
-
-    if (buffer_iface)
-        ID3D10Blob_Release(buffer_iface);
-    d3dx_buffer->buffer_iface = d3dx_buffer->buffer_data = NULL;
-}
-
-static HRESULT d3dx11_buffer_create(unsigned int size, struct d3dx_buffer *buffer)
-{
-    ID3D10Blob *buffer_iface;
-    HRESULT hr;
-
-    hr = D3DCreateBlob(size, &buffer_iface);
-    if (FAILED(hr))
-        return hr;
-
-    buffer->buffer_iface = buffer_iface;
-    buffer->buffer_data = ID3D10Blob_GetBufferPointer(buffer_iface);
-    return S_OK;
-}
-
-static const struct d3dx_buffer_wrapper d3dx11_buffer_wrapper =
-{
-    d3dx11_buffer_create,
-    d3dx11_buffer_destroy,
-    11,
-};
-
-static HRESULT d3dx11_create_dds_file_blob(const struct pixel_format_desc *fmt_desc, enum d3dx_resource_type d3dx_rtype,
-        const struct volume *size, uint32_t mip_levels, uint32_t layers, ID3D10Blob **dst_buffer)
-{
-    struct d3dx_buffer buffer;
-    HRESULT hr;
-
-    *dst_buffer = NULL;
-    hr = d3dx_create_dds_file_blob(fmt_desc->format, NULL, d3dx_rtype, size, mip_levels, layers, &d3dx11_buffer_wrapper,
-            &buffer);
-    if (SUCCEEDED(hr))
-        *dst_buffer = (ID3D10Blob *)buffer.buffer_iface;
-
-    return hr;
-}
-
-static HRESULT d3dx11_get_save_format_for_file_format(D3DX11_IMAGE_FILE_FORMAT iff, enum d3dx_pixel_format_id src_fmt,
-        enum d3dx_pixel_format_id *save_fmt)
-{
-    *save_fmt = D3DX_PIXEL_FORMAT_COUNT;
-    switch (iff)
-    {
-        case D3DX11_IFF_JPG:
-            switch (src_fmt)
-            {
-                case D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM:
-                case D3DX_PIXEL_FORMAT_R16G16B16A16_FLOAT:
-                case D3DX_PIXEL_FORMAT_R32G32B32A32_FLOAT:
-                    *save_fmt = D3DX_PIXEL_FORMAT_B8G8R8_UNORM;
-                    break;
-
-                case D3DX_PIXEL_FORMAT_R16_UNORM:
-                    *save_fmt = D3DX_PIXEL_FORMAT_L8_UNORM;
-                    break;
-
-                default:
-                    return E_FAIL;
-            }
-            break;
-
-        case D3DX11_IFF_PNG:
-        case D3DX11_IFF_TIFF:
-            switch (src_fmt)
-            {
-                case D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM:
-                    *save_fmt = D3DX_PIXEL_FORMAT_B8G8R8A8_UNORM;
-                    break;
-
-                case D3DX_PIXEL_FORMAT_R16G16B16A16_FLOAT:
-                case D3DX_PIXEL_FORMAT_R32G32B32A32_FLOAT:
-                    *save_fmt = D3DX_PIXEL_FORMAT_R16G16B16A16_UNORM;
-                    break;
-
-                case D3DX_PIXEL_FORMAT_R16_UNORM:
-                    *save_fmt = D3DX_PIXEL_FORMAT_L16_UNORM;
-                    break;
-
-                default:
-                    return E_FAIL;
-            }
-            break;
-
-        case D3DX11_IFF_BMP:
-            switch (src_fmt)
-            {
-                case D3DX_PIXEL_FORMAT_R8G8B8A8_UNORM:
-                    *save_fmt = D3DX_PIXEL_FORMAT_B8G8R8X8_UNORM;
-                    break;
-
-                case D3DX_PIXEL_FORMAT_R16G16B16A16_FLOAT:
-                case D3DX_PIXEL_FORMAT_R32G32B32A32_FLOAT:
-                case D3DX_PIXEL_FORMAT_R16_UNORM:
-                    FIXME("Encoding of BMP files to WICPixelFormat64bppRGBAFixedPoint unimplemented, using default instead.\n");
-                    *save_fmt = D3DX_PIXEL_FORMAT_B8G8R8X8_UNORM;
-                    break;
-
-                default:
-                    return E_FAIL;
-            }
-            break;
-
-        case D3DX11_IFF_WMP:
-            FIXME("Saving to WMP is currently unimplemented.\n");
-            return E_NOTIMPL;
-
-        default:
-            assert(0);
-            break;
-    }
-
-    return S_OK;
-}
-
-HRESULT WINAPI D3DX11SaveTextureToMemory(ID3D11DeviceContext *context, ID3D11Resource *texture,
-        D3DX11_IMAGE_FILE_FORMAT format, ID3D10Blob **buffer, UINT flags)
-{
-    const struct pixel_format_desc *fmt_desc = NULL;
-    struct d3d11_texture src_tex = { 0 };
-    enum d3dx_resource_type d3dx_rtype;
-    D3D11_RESOURCE_DIMENSION rsrc_dim;
-    struct d3dx_image image = { 0 };
-    ID3D10Blob *out_buffer;
-    unsigned int i, j;
-    HRESULT hr;
-
-    TRACE("context %p, texture %p, format %u, buffer %p, flags %#x.\n", context, texture, format, buffer, flags);
-
-    if (!texture || !buffer || format == D3DX11_IFF_GIF)
-        return E_INVALIDARG;
-
-    out_buffer = *buffer = NULL;
-    if (format == D3DX11_IFF_WMP)
-    {
-        FIXME("Saving to file format %u is currently unimplemented.\n", format);
-        return E_NOTIMPL;
-    }
-
-    ID3D11Resource_GetType(texture, &rsrc_dim);
-    switch (rsrc_dim)
-    {
-        case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-            d3dx_rtype = D3DX_RESOURCE_TYPE_TEXTURE_2D;
-            break;
-
-        case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-            d3dx_rtype = D3DX_RESOURCE_TYPE_TEXTURE_3D;
-            break;
-
-        default:
-            FIXME("Currently only 2D and 3D texture saving is supported.\n");
-            return E_NOTIMPL;
-    }
-
-    if (format != D3DX11_IFF_DDS && rsrc_dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
-        return E_INVALIDARG;
-
-    hr = d3dx_d3d11_texture_init(context, texture, 0, 0, D3D11_MAP_READ, NULL, &src_tex);
-    if (FAILED(hr))
-        return hr;
-
-    if (format != D3DX11_IFF_DDS)
-    {
-        enum d3dx_pixel_format_id dst_format;
-        struct d3dx_pixels src_pixels;
-        struct d3dx_buffer dst_buffer;
-
-        hr = d3dx11_get_save_format_for_file_format(format, src_tex.fmt_desc->format, &dst_format);
-        if (FAILED(hr))
-            goto exit;
-
-        hr = d3dx_d3d11_texture_map(&src_tex, 0, 0, &src_pixels);
-        if (FAILED(hr))
-            goto exit;
-
-        hr = d3dx_save_pixels_to_memory(&src_pixels, src_tex.fmt_desc, (enum d3dx_image_file_format)format, dst_format,
-                &d3dx11_buffer_wrapper, &dst_buffer);
-        d3dx_d3d11_texture_unmap(&src_tex, 0, 0);
-        if (SUCCEEDED(hr))
-            *buffer = out_buffer = (ID3D10Blob *)dst_buffer.buffer_iface;
-        else
-            WARN("Failed with hr %#lx.\n", hr);
-
-        goto exit;
-    }
-
-    if (src_tex.is_cubemap)
-        d3dx_rtype = D3DX_RESOURCE_TYPE_CUBE_TEXTURE;
-    hr = d3dx11_create_dds_file_blob(src_tex.fmt_desc, d3dx_rtype, &src_tex.texture.size, src_tex.texture.mip_levels,
-            src_tex.texture.layer_count, &out_buffer);
-    if (FAILED(hr))
-    {
-        FIXME("Failed to create dds file with hr %#lx.\n", hr);
-        goto exit;
-    }
-
-    hr = d3dx_image_init(ID3D10Blob_GetBufferPointer(out_buffer), ID3D10Blob_GetBufferSize(out_buffer), &image, 0,
-            D3DX_IMAGE_SUPPORT_DXT10);
-    if (FAILED(hr))
-        goto exit;
-
-    fmt_desc = get_d3dx_pixel_format_info(image.format);
-    for (i = 0; i < image.layer_count; ++i)
-    {
-        for (j = 0; j < image.mip_levels; ++j)
-        {
-            struct d3dx_pixels src_pixels, dst_pixels;
-
-            hr = d3dx_image_get_pixels(&image, i, j, &dst_pixels);
-            if (FAILED(hr))
-                goto exit;
-
-            hr = d3dx_d3d11_texture_map(&src_tex, i, j, &src_pixels);
-            if (FAILED(hr))
-                goto exit;
-
-            hr = d3dx_load_pixels_from_pixels(&dst_pixels, fmt_desc, &src_pixels, src_tex.fmt_desc, D3DX11_FILTER_NONE, 0);
-            d3dx_d3d11_texture_unmap(&src_tex, i, j);
-            if (FAILED(hr))
-            {
-                WARN("Failed with hr %#lx.\n", hr);
-                goto exit;
-            }
-        }
-    }
-
-    if (SUCCEEDED(hr))
-        *buffer = out_buffer;
-
-exit:
-    if (out_buffer && *buffer != out_buffer)
-        ID3D10Blob_Release(out_buffer);
-    d3dx_d3d11_texture_release(&src_tex);
-    return SUCCEEDED(hr) ? S_OK : hr;
-}
-
-HRESULT WINAPI D3DX11SaveTextureToFileW(ID3D11DeviceContext *context, ID3D11Resource *texture,
-    D3DX11_IMAGE_FILE_FORMAT format, const WCHAR *filename)
-{
-    ID3D10Blob *buffer;
-    HRESULT hr;
-
-    TRACE("texture %p, format %u, filename %s.\n", texture, format, debugstr_w(filename));
-
-    if (!filename)
-        return E_FAIL;
-
-    hr = D3DX11SaveTextureToMemory(context, texture, format, &buffer, 0);
-    if (SUCCEEDED(hr))
-    {
-        hr = d3dx_write_buffer_to_file(filename, ID3D10Blob_GetBufferPointer(buffer), ID3D10Blob_GetBufferSize(buffer));
-        ID3D10Blob_Release(buffer);
-    }
-
-    return hr;
-}
-
-HRESULT WINAPI D3DX11SaveTextureToFileA(ID3D11DeviceContext *context, ID3D11Resource *texture,
-        D3DX11_IMAGE_FILE_FORMAT format, const char *filename)
-{
-    WCHAR *buffer;
-    int str_len;
-    HRESULT hr;
-
-    TRACE("texture %p, format %u, filename %s.\n", texture, format, debugstr_a(filename));
-
-    if (!filename)
-        return E_FAIL;
-
-    str_len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
-    if (!str_len)
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    buffer = malloc(str_len * sizeof(*buffer));
-    if (!buffer)
-        return E_OUTOFMEMORY;
-
-    MultiByteToWideChar(CP_ACP, 0, filename, -1, buffer, str_len);
-    hr = D3DX11SaveTextureToFileW(context, texture, format, buffer);
-    free(buffer);
     return hr;
 }

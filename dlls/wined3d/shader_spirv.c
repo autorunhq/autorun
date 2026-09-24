@@ -104,6 +104,7 @@ struct wined3d_shader_spirv_compile_args
     struct vkd3d_shader_varying_map_info varying_map;
     struct vkd3d_shader_spirv_target_info spirv_target;
     struct vkd3d_shader_parameter_info parameter_info;
+    struct vkd3d_shader_d3dbc_source_info d3dbc_info;
     enum vkd3d_shader_spirv_extension extensions[1];
     struct vkd3d_shader_parameter1 parameters[12];
     unsigned int ps_alpha_swizzle[WINED3D_MAX_RENDER_TARGETS];
@@ -258,7 +259,10 @@ static void shader_spirv_init_compile_args(const struct wined3d_vk_info *vk_info
     args->spirv_target.environment = environment;
 
     args->parameter_info.type = VKD3D_SHADER_STRUCTURE_TYPE_PARAMETER_INFO;
-    args->parameter_info.next = vkd3d_interface;
+    args->parameter_info.next = &args->d3dbc_info;
+
+    args->d3dbc_info.type = VKD3D_SHADER_STRUCTURE_TYPE_D3DBC_SOURCE_INFO;
+    args->d3dbc_info.next = vkd3d_interface;
 
     args->spirv_target.extensions = args->extensions;
 
@@ -276,7 +280,7 @@ static void shader_spirv_init_compile_args(const struct wined3d_vk_info *vk_info
 
         for (i = 0; i < ARRAY_SIZE(args->ps_alpha_swizzle); ++i)
         {
-            if (rt_alpha_swizzle && (1u << i))
+            if (rt_alpha_swizzle & (1u << i))
                 args->ps_alpha_swizzle[i] = VKD3D_SHADER_SWIZZLE(W, X, Y, Z);
             else
                 args->ps_alpha_swizzle[i] = VKD3D_SHADER_NO_SWIZZLE;
@@ -284,6 +288,21 @@ static void shader_spirv_init_compile_args(const struct wined3d_vk_info *vk_info
 
         args->spirv_target.output_swizzles = args->ps_alpha_swizzle;
         args->spirv_target.output_swizzle_count = ARRAY_SIZE(args->ps_alpha_swizzle);
+
+        for (i = 0; i < ARRAY_SIZE(args->d3dbc_info.texture_dimensions); ++i)
+        {
+            enum wined3d_shader_tex_types type = (compile_args->u.fs.args.tex_types
+                    >> (i * WINED3D_PSARGS_TEXTYPE_SHIFT)) & WINED3D_PSARGS_TEXTYPE_MASK;
+
+            if (type == WINED3D_SHADER_TEX_3D)
+                args->d3dbc_info.texture_dimensions[i] = VKD3D_SHADER_RESOURCE_TEXTURE_3D;
+            else if (type == WINED3D_SHADER_TEX_CUBE)
+                args->d3dbc_info.texture_dimensions[i] = VKD3D_SHADER_RESOURCE_TEXTURE_CUBE;
+            else
+                args->d3dbc_info.texture_dimensions[i] = VKD3D_SHADER_RESOURCE_TEXTURE_2D;
+        }
+
+        args->d3dbc_info.shadow_samplers = compile_args->u.fs.args.shadow;
     }
     else if (shader_type == WINED3D_SHADER_TYPE_VERTEX)
     {
@@ -1190,7 +1209,7 @@ static void shader_spirv_get_caps(const struct wined3d_adapter *adapter, struct 
     caps->vs_uniform_count = WINED3D_MAX_VS_CONSTS_F;
     caps->ps_uniform_count = WINED3D_MAX_PS_CONSTS_F;
     caps->ps_1x_max_value = FLT_MAX;
-    caps->varying_count = 0;
+    caps->varying_count = wined3d_adapter_vk_const(adapter)->device_limits.maxFragmentInputComponents;
     caps->wined3d_caps = WINED3D_SHADER_CAP_FULL_FFP_VARYINGS;
 }
 
@@ -1248,6 +1267,19 @@ static void spirv_vertex_pipe_vk_vp_get_caps(const struct wined3d_adapter *adapt
 {
     memset(caps, 0, sizeof(*caps));
     caps->emulated_flatshading = true;
+    caps->max_active_lights = WINED3D_MAX_ACTIVE_LIGHTS;
+    caps->max_vertex_blend_matrices = MAX_VERTEX_BLENDS;
+    caps->max_vertex_blend_matrix_index = 0;
+    caps->vertex_processing_caps = WINED3DVTXPCAPS_TEXGEN
+            | WINED3DVTXPCAPS_MATERIALSOURCE7
+            | WINED3DVTXPCAPS_VERTEXFOG
+            | WINED3DVTXPCAPS_DIRECTIONALLIGHTS
+            | WINED3DVTXPCAPS_POSITIONALLIGHTS
+            | WINED3DVTXPCAPS_LOCALVIEWER
+            | WINED3DVTXPCAPS_TEXGEN_SPHEREMAP;
+    caps->fvf_caps = WINED3DFVFCAPS_PSIZE | 8; /* 8 texture coordinates. */
+    caps->max_user_clip_planes = wined3d_adapter_vk_const(adapter)->device_limits.maxClipDistances;
+    caps->raster_caps = WINED3DPRASTERCAPS_FOGRANGE;
 }
 
 static unsigned int spirv_vertex_pipe_vk_vp_get_emul_mask(const struct wined3d_adapter *adapter)
@@ -1307,7 +1339,35 @@ static void spirv_fragment_pipe_vk_fp_disable(const struct wined3d_context *cont
 static void spirv_fragment_pipe_vk_fp_get_caps(const struct wined3d_adapter *adapter, struct fragment_caps *caps)
 {
     memset(caps, 0, sizeof(*caps));
+    caps->PrimitiveMiscCaps = WINED3DPMISCCAPS_TSSARGTEMP
+            | WINED3DPMISCCAPS_PERSTAGECONSTANT;
+    caps->TextureOpCaps = WINED3DTEXOPCAPS_DISABLE
+            | WINED3DTEXOPCAPS_SELECTARG1
+            | WINED3DTEXOPCAPS_SELECTARG2
+            | WINED3DTEXOPCAPS_MODULATE4X
+            | WINED3DTEXOPCAPS_MODULATE2X
+            | WINED3DTEXOPCAPS_MODULATE
+            | WINED3DTEXOPCAPS_ADDSIGNED2X
+            | WINED3DTEXOPCAPS_ADDSIGNED
+            | WINED3DTEXOPCAPS_ADD
+            | WINED3DTEXOPCAPS_SUBTRACT
+            | WINED3DTEXOPCAPS_ADDSMOOTH
+            | WINED3DTEXOPCAPS_BLENDCURRENTALPHA
+            | WINED3DTEXOPCAPS_BLENDFACTORALPHA
+            | WINED3DTEXOPCAPS_BLENDTEXTUREALPHA
+            | WINED3DTEXOPCAPS_BLENDDIFFUSEALPHA
+            | WINED3DTEXOPCAPS_BLENDTEXTUREALPHAPM
+            | WINED3DTEXOPCAPS_MODULATEALPHA_ADDCOLOR
+            | WINED3DTEXOPCAPS_MODULATECOLOR_ADDALPHA
+            | WINED3DTEXOPCAPS_MODULATEINVCOLOR_ADDALPHA
+            | WINED3DTEXOPCAPS_MODULATEINVALPHA_ADDCOLOR
+            | WINED3DTEXOPCAPS_DOTPRODUCT3
+            | WINED3DTEXOPCAPS_MULTIPLYADD
+            | WINED3DTEXOPCAPS_LERP
+            | WINED3DTEXOPCAPS_BUMPENVMAP
+            | WINED3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
     caps->max_blend_stages = WINED3D_MAX_FFP_TEXTURES;
+    caps->max_textures = WINED3D_MAX_FFP_TEXTURES;
 }
 
 static unsigned int spirv_fragment_pipe_vk_fp_get_emul_mask(const struct wined3d_adapter *adapter)

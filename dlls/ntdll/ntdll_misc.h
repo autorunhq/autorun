@@ -51,10 +51,6 @@ static const USHORT current_machine = IMAGE_FILE_MACHINE_UNKNOWN;
 
 static const UINT_PTR page_size = 0x1000;
 
-extern BOOL delay_heap_free;
-extern BOOL heap_zero_hack;
-extern BOOL heap_top_down_hack;
-
 /* exceptions */
 extern NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *context );
 extern NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context );
@@ -63,8 +59,6 @@ extern EXCEPTION_DISPOSITION WINAPI user_callback_handler( EXCEPTION_RECORD *rec
                                                            CONTEXT *context, void *dispatch );
 extern void DECLSPEC_NORETURN raise_status( NTSTATUS status, EXCEPTION_RECORD *rec );
 extern LONG WINAPI call_unhandled_exception_filter( PEXCEPTION_POINTERS eptr );
-extern void register_module_exception_directory( void *module );
-extern void unregister_module_exception_directory( void *module );
 extern void WINAPI process_breakpoint(void);
 
 static inline BOOL is_valid_frame( ULONG_PTR frame )
@@ -80,7 +74,6 @@ extern void WINAPI KiUserApcDispatcher(CONTEXT*,ULONG_PTR,ULONG_PTR,ULONG_PTR,PN
 extern void WINAPI KiUserCallbackDispatcher(ULONG,void*,ULONG);
 extern void WINAPI KiUserCallbackDispatcherReturn(void);
 extern void (WINAPI *pWow64PrepareForException)( EXCEPTION_RECORD *rec, CONTEXT *context );
-extern NTSTATUS (WINAPI *pWow64SuspendLocalThread)( HANDLE thread, ULONG *count );
 
 /* debug helpers */
 extern LPCSTR debugstr_us( const UNICODE_STRING *str );
@@ -89,11 +82,10 @@ extern void set_native_thread_name( DWORD tid, const char *name );
 /* init routines */
 extern void loader_init( CONTEXT *context, void **entry );
 extern void version_init(void);
-extern void debug_init(void);
 extern void actctx_init(void);
 extern void locale_init(void);
 extern void init_user_process_params(void);
-extern void get_resource_lcids( LANGID *user, LANGID *user_neutral, LANGID *system );
+extern ULONG get_resource_lcids( LANGID *langs, ULONG size, LCID lcid );
 
 /* module handling */
 extern FARPROC RELAY_GetProcAddress( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports,
@@ -128,12 +120,6 @@ static inline void ascii_to_unicode( WCHAR *dst, const char *src, size_t len )
 /* FLS data */
 extern TEB_FLS_DATA *fls_alloc_data(void);
 extern void heap_thread_detach(void);
-
-#define need_backtrace(exc_code) \
-    WINE_BACKTRACE_LOG_ON() && exc_code != EXCEPTION_WINE_NAME_THREAD \
-    && exc_code != DBG_PRINTEXCEPTION_WIDE_C && exc_code != DBG_PRINTEXCEPTION_C \
-    && exc_code != EXCEPTION_WINE_CXX_EXCEPTION && exc_code != 0x6ba
-
 
 /* register context */
 
@@ -181,7 +167,6 @@ extern IMAGE_ARM64EC_METADATA *arm64ec_get_module_metadata( HMODULE module );
 extern void arm64ec_update_hybrid_metadata( void *module, IMAGE_NT_HEADERS *nt,
                                             const IMAGE_ARM64EC_METADATA *metadata );
 extern void invoke_arm64ec_syscall(void);
-extern void arm64ec_suspend_point(void);
 
 extern void *__os_arm64x_check_call;
 extern void *__os_arm64x_check_icall;

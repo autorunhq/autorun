@@ -325,6 +325,9 @@ static void test_key_import_rsa(void)
                           sizeof(invalid_rsa_key_blob), 0);
     ok(ret == NTE_INVALID_PARAMETER, "got %#lx\n", ret);
 
+    ret = NCryptImportKey(prov, 0, BCRYPT_PUBLIC_KEY_BLOB, NULL, &key, NULL, 0, 0);
+    ok(ret == NTE_INVALID_PARAMETER, "got %#lx\n", ret);
+
     key = 0;
     ret = NCryptImportKey(prov, 0, BCRYPT_PUBLIC_KEY_BLOB, NULL, &key, rsa_key_blob_with_invalid_bit_length,
                           sizeof(rsa_key_blob_with_invalid_bit_length), 0);
@@ -636,7 +639,7 @@ static void test_verify_signature(void)
 
     ret = NCryptVerifySignature(key, &padinfo, sha256_hash, sizeof(sha256_hash), signature_pkcs1_sha256, 4,
                                 NCRYPT_PAD_PKCS1_FLAG);
-    todo_wine ok(ret == NTE_INVALID_PARAMETER, "got %#lx\n", ret);
+    ok(ret == NTE_INVALID_PARAMETER, "got %#lx\n", ret);
 
     invalid_padinfo.pszAlgId = BCRYPT_MD5_ALGORITHM;
     ret = NCryptVerifySignature(key, &invalid_padinfo, sha256_hash, sizeof(sha256_hash), signature_pkcs1_sha256,

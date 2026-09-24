@@ -179,7 +179,6 @@ DEFINE_EXPECT(BindToStorage);
 DEFINE_EXPECT(IsSystemMoniker);
 DEFINE_EXPECT(GetBindResult);
 DEFINE_EXPECT(GetClassID);
-DEFINE_EXPECT(Abort);
 DEFINE_EXPECT(Read);
 DEFINE_EXPECT(CreateInstance);
 DEFINE_EXPECT(Start);
@@ -197,7 +196,6 @@ DEFINE_EXPECT(EnableModeless_TRUE);
 DEFINE_EXPECT(EnableModeless_FALSE);
 DEFINE_EXPECT(Frame_EnableModeless_TRUE);
 DEFINE_EXPECT(Frame_EnableModeless_FALSE);
-DEFINE_EXPECT(Frame_GetWindow);
 DEFINE_EXPECT(TranslateUrl);
 DEFINE_EXPECT(Advise_Close);
 DEFINE_EXPECT(OnViewChange);
@@ -232,7 +230,7 @@ static BOOL set_clientsite, container_locked;
 static BOOL readystate_set_loading = FALSE, readystate_set_interactive = FALSE, load_from_stream;
 static BOOL editmode = FALSE, ignore_external_qi;
 static BOOL inplace_deactivated, open_call;
-static BOOL complete, loading_js, loading_hash, is_refresh, is_from_hist;
+static BOOL loading_js, loading_hash, is_refresh, is_from_hist;
 static DWORD status_code = HTTP_STATUS_OK;
 static BOOL asynchronous_binding = FALSE;
 static BOOL support_wbapp, allow_new_window, no_travellog;
@@ -298,29 +296,6 @@ static const WCHAR wszTimesNewRoman[] =
     {'T','i','m','e','s',' ','N','e','w',' ','R','o','m','a','n',0};
 static const WCHAR wszArial[] =
     {'A','r','i','a','l',0};
-
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
 
 static BOOL iface_cmp(IUnknown *iface1, IUnknown *iface2)
 {
@@ -1469,7 +1444,7 @@ static ULONG WINAPI Binding_Release(IBinding *iface)
 
 static HRESULT WINAPI Binding_Abort(IBinding *iface)
 {
-    CHECK_EXPECT(Abort);
+    ok(0, "unexpected call\n");
     if(asynchronous_binding)
         PeekMessageA(NULL, container_hwnd, WM_CONTINUE_BINDING, WM_CONTINUE_BINDING, PM_REMOVE);
     return S_OK;
@@ -1998,7 +1973,7 @@ static ULONG WINAPI InPlaceFrame_Release(IOleInPlaceFrame *iface)
 
 static HRESULT WINAPI InPlaceFrame_GetWindow(IOleInPlaceFrame *iface, HWND *phwnd)
 {
-    CHECK_EXPECT(Frame_GetWindow);
+    ok(0, "unexpected call\n");
     return E_NOTIMPL;
 }
 
@@ -2038,7 +2013,7 @@ static HRESULT WINAPI InPlaceUIWindow_SetActiveObject(IOleInPlaceFrame *iface,
 
     if(expect_InPlaceUIWindow_SetActiveObject_active) {
         ok(pActiveObject != NULL, "pActiveObject = NULL\n");
-        if(pActiveObject && is_lang_english())
+        if(pActiveObject)
             ok(!lstrcmpW(wszHTML_Document, pszObjName), "%s != \"HTML Document\"\n", wine_dbgstr_w(pszObjName));
     }
     else {
@@ -2058,7 +2033,7 @@ static HRESULT WINAPI InPlaceFrame_SetActiveObject(IOleInPlaceFrame *iface,
     if(pActiveObject) {
         CHECK_EXPECT2(SetActiveObject);
 
-        if(pActiveObject && is_lang_english())
+        if(pActiveObject)
             ok(!lstrcmpW(wszHTML_Document, pszObjName), "%s != \"HTML Document\"\n", wine_dbgstr_w(pszObjName));
     }else {
         CHECK_EXPECT(SetActiveObject_null);
@@ -2844,12 +2819,14 @@ static HRESULT WINAPI DocHostUIHandler_GetDropTarget(IDocHostUIHandler2 *iface,
     return E_NOTIMPL;
 }
 
+static HRESULT GetExternal_hres = S_FALSE;
+
 static HRESULT WINAPI DocHostUIHandler_GetExternal(IDocHostUIHandler2 *iface, IDispatch **ppDispatch)
 {
     CHECK_EXPECT(GetExternal);
     ok(iface == expect_uihandler_iface, "called on unexpected iface\n");
     *ppDispatch = &External;
-    return S_FALSE;
+    return GetExternal_hres;
 }
 
 static HRESULT WINAPI DocHostUIHandler_TranslateUrl(IDocHostUIHandler2 *iface, DWORD dwTranslate,
@@ -3533,10 +3510,9 @@ static HRESULT WINAPI EventDispatch_Invoke(IDispatch *iface, DISPID dispIdMember
             CHECK_EXPECT(Invoke_OnReadyStateChange_Interactive);
         else if(!lstrcmpW(state, L"loading"))
             CHECK_EXPECT(Invoke_OnReadyStateChange_Loading);
-        else if(!lstrcmpW(state, L"complete")) {
+        else if(!lstrcmpW(state, L"complete"))
             CHECK_EXPECT(Invoke_OnReadyStateChange_Complete);
-            complete = TRUE;
-        } else
+        else
             ok(0, "Unexpected readyState: %s\n", wine_dbgstr_w(state));
 
         SysFreeString(state);
@@ -8007,6 +7983,40 @@ static void test_external(IHTMLDocument2 *doc, BOOL initialized)
     IHTMLWindow2_Release(htmlwin);
 }
 
+static void test_external_hres(IHTMLDocument2 *doc)
+{
+    static HRESULT fail_codes[] = { E_FAIL, E_OUTOFMEMORY, E_NOTIMPL };
+    HRESULT old_hres = GetExternal_hres;
+    IHTMLWindow2 *htmlwin;
+    IDispatch *external;
+    HRESULT hres;
+    unsigned i;
+
+    hres = IHTMLDocument2_get_parentWindow(doc, &htmlwin);
+    ok(hres == S_OK, "get_parentWindow failed: %08lx\n", hres);
+
+    GetExternal_hres = E_NOINTERFACE;
+    SET_EXPECT(GetExternal);
+    external = (void*)0xdeadbeef;
+    hres = IHTMLWindow2_get_external(htmlwin, &external);
+    ok(hres == S_OK, "get_external failed: %08lx\n", hres);
+    ok(external == NULL, "external = %p\n", external);
+    CHECK_CALLED(GetExternal);
+
+    for(i = 0; i < ARRAY_SIZE(fail_codes); i++) {
+        GetExternal_hres = fail_codes[i];
+        SET_EXPECT(GetExternal);
+        external = (void*)0xdeadbeef;
+        hres = IHTMLWindow2_get_external(htmlwin, &external);
+        ok(hres == fail_codes[i], "[%u] get_external returned: %08lx\n", i, hres);
+        ok(external == NULL, "external = %p\n", external);
+        CHECK_CALLED(GetExternal);
+    }
+
+    IHTMLWindow2_Release(htmlwin);
+    GetExternal_hres = old_hres;
+}
+
 static void test_enum_objects(IOleContainer *container)
 {
     IEnumUnknown *enum_unknown;
@@ -8383,7 +8393,6 @@ static void init_test(enum load_state_t ls) {
     nav_url = NULL;
     ipsex = FALSE;
     inplace_deactivated = FALSE;
-    complete = FALSE;
     testing_submit = FALSE;
     expect_uihandler_iface = &DocHostUIHandler;
     is_mhtml = FALSE;
@@ -8495,6 +8504,7 @@ static void test_HTMLDocument(BOOL do_load, BOOL mime)
     test_Window(doc, TRUE);
 
     test_external(doc, TRUE);
+    test_external_hres(doc);
     set_custom_uihandler(doc, NULL);
     test_external(doc, FALSE);
 
@@ -9545,7 +9555,7 @@ static void test_UIActivate(BOOL do_load, BOOL use_ipsex, BOOL use_ipsw)
     CHECK_CALLED(GetWindow);
     if(use_ipsex) {
         CHECK_CALLED(OnInPlaceActivateEx);
-        SET_EXPECT(RequestUIActivate);
+        CHECK_CALLED(RequestUIActivate);
     }
     else
         CHECK_CALLED(OnInPlaceActivate);
@@ -9782,7 +9792,7 @@ static void test_com_aggregation(const CLSID *clsid)
     SET_EXPECT(outer_QI_IPersistMoniker); /* Some IE version QI for that. */
     hres = IClassFactory_CreateInstance(class_factory, &outer, &IID_IUnknown, (void**)&unk);
     ok(hres == S_OK, "CreateInstance returned: %08lx\n", hres);
-    SET_CALLED(outer_QI_IPersistMoniker);
+    CLEAR_CALLED(outer_QI_IPersistMoniker);
 
     hres = IUnknown_QueryInterface(unk, &IID_IDispatch, (void**)&unk2);
     ok(hres == S_OK, "Could not get IDispatch iface: %08lx\n", hres);
@@ -9806,6 +9816,9 @@ static void test_com_aggregation(const CLSID *clsid)
 
 START_TEST(htmldoc)
 {
+    /* some tests need an English locale */
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
+
     CoInitialize(NULL);
 
     if(!check_ie()) {

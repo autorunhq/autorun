@@ -27,7 +27,6 @@
 #include <stdlib.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #define WINNORMALIZEAPI
 #include "windef.h"
 #include "winbase.h"
@@ -305,6 +304,7 @@ static CPTABLEINFO oem_cpinfo;
 static UINT unix_cp = CP_UTF8;
 static LCID system_lcid;
 static LCID user_lcid;
+static LCID user_ui_lcid;
 static HKEY intl_key;
 static HKEY nls_key;
 static HKEY tz_key;
@@ -314,6 +314,7 @@ static const NLS_LOCALE_HEADER *locale_table;
 static const WCHAR *locale_strings;
 static const NLS_LOCALE_DATA *system_locale;
 static const NLS_LOCALE_DATA *user_locale;
+static const NLS_LOCALE_DATA *user_ui_locale;
 
 static CPTABLEINFO codepages[128];
 static unsigned int nb_codepages;
@@ -659,6 +660,52 @@ static const NLS_LOCALE_DATA *get_locale_by_name( const WCHAR *name, LCID *lcid 
 }
 
 
+static const NLS_LOCALE_DATA *find_locale_from_geoid( GEOID id )
+{
+    const NLS_LOCALE_DATA *locale;
+
+    for (unsigned int i = 0; i < locale_table->nb_lcnames; i++)
+    {
+        if (!lcnames_index[i].name) continue;  /* skip invariant locale */
+        if (lcnames_index[i].id & 0x80000000) continue;  /* skip aliases */
+        locale = get_locale_data( lcnames_index[i].idx );
+        if (locale->igeoid == id) return locale;
+    }
+    return NULL;
+}
+
+
+static BOOL get_sort_locale_name( LCID lcid, const WCHAR **name )
+{
+    const NLS_LOCALE_LCID_INDEX *entry;
+
+    *name = LOCALE_NAME_USER_DEFAULT;
+    switch (lcid)
+    {
+    case LOCALE_NEUTRAL:
+    case LOCALE_USER_DEFAULT:
+    case LOCALE_SYSTEM_DEFAULT:
+    case LOCALE_CUSTOM_DEFAULT:
+    case LOCALE_CUSTOM_UNSPECIFIED:
+        break;
+    case LOCALE_CUSTOM_UI_DEFAULT:
+        *name = locale_strings + user_ui_locale->sname + 1;
+        break;
+    default:
+        if (lcid == user_lcid || lcid == system_lcid) break;
+        if (!(entry = find_lcid_entry( lcid )))
+        {
+            WARN( "unknown locale %04lx\n", lcid );
+            SetLastError( ERROR_INVALID_PARAMETER );
+            return FALSE;
+        }
+        *name = locale_strings + entry->name + 1;
+        break;
+    }
+    return TRUE;
+}
+
+
 static const struct sortguid *get_language_sort( const WCHAR *name )
 {
     const NLS_LOCALE_LCNAME_INDEX *entry;
@@ -735,9 +782,11 @@ const NLS_LOCALE_DATA * WINAPI NlsValidateLocale( LCID *lcid, ULONG flags )
     case LOCALE_USER_DEFAULT:
     case LOCALE_CUSTOM_DEFAULT:
     case LOCALE_CUSTOM_UNSPECIFIED:
-    case LOCALE_CUSTOM_UI_DEFAULT:
         *lcid = user_lcid;
         return user_locale;
+    case LOCALE_CUSTOM_UI_DEFAULT:
+        *lcid = user_ui_lcid;
+        return user_ui_locale;
     default:
         if (!(entry = find_lcid_entry( *lcid ))) return NULL;
         locale = get_locale_data( entry->idx );
@@ -1777,8 +1826,10 @@ invalid:
 static int get_geo_info( const struct geo_id *geo, enum SYSGEOTYPE type,
                          WCHAR *buffer, int len, LANGID lang )
 {
-    WCHAR tmp[12];
+    WCHAR tmp[12], tmp2[12];
     const WCHAR *str = tmp;
+    const NLS_LOCALE_DATA *locale;
+    ULONG id;
     int ret;
 
     switch (type)
@@ -1817,15 +1868,36 @@ static int get_geo_info( const struct geo_id *geo, enum SYSGEOTYPE type,
         str = geo->currsymbol;
         break;
     case GEO_RFC1766:
+        if (!lang) lang = GetUserDefaultLangID();
+        if (!GetLocaleInfoW( lang, LOCALE_SISO639LANGNAME, tmp2, ARRAY_SIZE(tmp2) )) return 0;
+        swprintf( tmp, ARRAY_SIZE(tmp), L"%s-%s", tmp2, geo->iso2 );
+        wcslwr( tmp );
+        break;
     case GEO_LCID:
+        if (!lang) lang = GetUserDefaultLangID();
+        if (!GetLocaleInfoW( lang, LOCALE_ILANGUAGE | LOCALE_RETURN_NUMBER, (WCHAR *)&id, 2 )) return 0;
+        swprintf( tmp, ARRAY_SIZE(tmp), L"%08X", id );
+        break;
     case GEO_FRIENDLYNAME:
+        if ((locale = find_locale_from_geoid( geo->id )))
+        {
+            str = locale_strings + locale->sengcountry + 1; /* FIXME: localization */
+            break;
+        }
+        FIXME( "no GEO_FRIENDLYNAME found for id %lu\n", geo->id );
+        return 0;
     case GEO_OFFICIALNAME:
-    case GEO_TIMEZONES:
-    case GEO_OFFICIALLANGUAGES:
-    case GEO_NAME:
         FIXME( "type %u is not supported\n", type );
         SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
         return 0;
+    case GEO_TIMEZONES:
+        return 0;  /* not supported on Windows */
+    case GEO_OFFICIALLANGUAGES:
+        return 0;  /* not supported on Windows */
+    case GEO_NAME:
+        if (geo->class == GEOCLASS_NATION) str = geo->iso2;
+        else swprintf( tmp, ARRAY_SIZE(tmp), L"%03u", geo->uncode );
+        break;
     default:
         SetLastError( ERROR_INVALID_FLAGS );
         return 0;
@@ -1913,6 +1985,7 @@ void init_locale( HMODULE module )
     USHORT utf8[2] = { 0, CP_UTF8 };
     USHORT *ansi_ptr, *oem_ptr;
     WCHAR bufferW[LOCALE_NAME_MAX_LENGTH];
+    UNICODE_STRING strW;
     DYNAMIC_TIME_ZONE_INFORMATION timezone;
     const WCHAR *user_locale_name;
     DWORD count;
@@ -1926,15 +1999,18 @@ void init_locale( HMODULE module )
     if (system_lcid == LOCALE_CUSTOM_UNSPECIFIED) system_lcid = MAKELANGID( LANG_ENGLISH, SUBLANG_DEFAULT );
     system_locale = NlsValidateLocale( &system_lcid, 0 );
 
-    NtQueryDefaultLocale( TRUE, &user_lcid );
-    if (!(user_locale = NlsValidateLocale( &user_lcid, 0 )))
+    if (!RtlLcidToLocaleName( LOCALE_CUSTOM_DEFAULT, &strW, 2, TRUE ))
     {
-        if (GetEnvironmentVariableW( L"WINEUSERLOCALE", bufferW, ARRAY_SIZE(bufferW) ))
-            user_locale = get_locale_by_name( bufferW, &user_lcid );
-        if (!user_locale) user_locale = system_locale;
+        user_locale = get_locale_by_name( strW.Buffer, &user_lcid );
+        if (user_lcid == LOCALE_CUSTOM_UNSPECIFIED) user_lcid = LOCALE_CUSTOM_DEFAULT;
+        RtlFreeUnicodeString( &strW );
     }
-    user_lcid = user_locale->ilanguage;
-    if (user_lcid == LOCALE_CUSTOM_UNSPECIFIED) user_lcid = LOCALE_CUSTOM_DEFAULT;
+    if (!RtlLcidToLocaleName( LOCALE_CUSTOM_UI_DEFAULT, &strW, 2, TRUE ))
+    {
+        user_ui_locale = get_locale_by_name( strW.Buffer, &user_ui_lcid );
+        if (user_ui_lcid == LOCALE_CUSTOM_UNSPECIFIED) user_ui_lcid = LOCALE_CUSTOM_UI_DEFAULT;
+        RtlFreeUnicodeString( &strW );
+    }
 
     if (GetEnvironmentVariableW( L"WINEUNIXCP", bufferW, ARRAY_SIZE(bufferW) ))
         unix_cp = wcstoul( bufferW, NULL, 10 );
@@ -4852,30 +4928,9 @@ INT WINAPI DECLSPEC_HOTPATCH CompareStringA( LCID lcid, DWORD flags, const char 
 INT WINAPI DECLSPEC_HOTPATCH CompareStringW( LCID lcid, DWORD flags, const WCHAR *str1, int len1,
                                              const WCHAR *str2, int len2 )
 {
-    const WCHAR *locale = LOCALE_NAME_USER_DEFAULT;
-    const NLS_LOCALE_LCID_INDEX *entry;
+    const WCHAR *locale;
 
-    switch (lcid)
-    {
-    case LOCALE_NEUTRAL:
-    case LOCALE_USER_DEFAULT:
-    case LOCALE_SYSTEM_DEFAULT:
-    case LOCALE_CUSTOM_DEFAULT:
-    case LOCALE_CUSTOM_UNSPECIFIED:
-    case LOCALE_CUSTOM_UI_DEFAULT:
-        break;
-    default:
-        if (lcid == user_lcid || lcid == system_lcid) break;
-        if (!(entry = find_lcid_entry( lcid )))
-        {
-            WARN( "unknown locale %04lx\n", lcid );
-            SetLastError( ERROR_INVALID_PARAMETER );
-            return 0;
-        }
-        locale = locale_strings + entry->name + 1;
-        break;
-    }
-
+    if (!get_sort_locale_name( lcid, &locale )) return 0;
     return CompareStringEx( locale, flags, str1, len1, str2, len2, NULL, NULL, 0 );
 }
 
@@ -5189,30 +5244,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumTimeFormatsEx( TIMEFMT_ENUMPROCEX proc, const 
 INT WINAPI DECLSPEC_HOTPATCH FindNLSString( LCID lcid, DWORD flags, const WCHAR *src,
                                             int srclen, const WCHAR *value, int valuelen, int *found )
 {
-    const WCHAR *locale = LOCALE_NAME_USER_DEFAULT;
-    const NLS_LOCALE_LCID_INDEX *entry;
+    const WCHAR *locale;
 
-    switch (lcid)
-    {
-    case LOCALE_NEUTRAL:
-    case LOCALE_USER_DEFAULT:
-    case LOCALE_SYSTEM_DEFAULT:
-    case LOCALE_CUSTOM_DEFAULT:
-    case LOCALE_CUSTOM_UNSPECIFIED:
-    case LOCALE_CUSTOM_UI_DEFAULT:
-        break;
-    default:
-        if (lcid == user_lcid || lcid == system_lcid) break;
-        if (!(entry = find_lcid_entry( lcid )))
-        {
-            WARN( "unknown locale %04lx\n", lcid );
-            SetLastError( ERROR_INVALID_PARAMETER );
-            return 0;
-        }
-        locale = locale_strings + entry->name + 1;
-        break;
-    }
-
+    if (!get_sort_locale_name( lcid, &locale )) return 0;
     return FindNLSStringEx( locale, flags, src, srclen, value, valuelen, found, NULL, NULL, 0 );
 }
 
@@ -6264,7 +6298,7 @@ INT WINAPI DECLSPEC_HOTPATCH GetSystemDefaultLocaleName( LPWSTR name, INT count 
 LANGID WINAPI DECLSPEC_HOTPATCH GetSystemDefaultUILanguage(void)
 {
     LANGID lang;
-    NtQueryInstallUILanguage( &lang );
+    RtlpQueryDefaultUILanguage( &lang, TRUE );
     return lang;
 }
 
@@ -6286,6 +6320,49 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetThreadPreferredUILanguages( DWORD flags, ULONG 
                                                              WCHAR *buffer, ULONG *size )
 {
     return set_ntstatus( RtlGetThreadPreferredUILanguages( flags, count, buffer, size ));
+}
+
+
+/***********************************************************************
+ *      GetThreadUILanguage   (kernelbase.@)
+ */
+LANGID WINAPI DECLSPEC_HOTPATCH GetThreadUILanguage(void)
+{
+    WCHAR *buffer;
+    ULONG size = 0;
+    LANGID ret = 0;
+
+    if (GetThreadPreferredUILanguages( MUI_LANGUAGE_ID | MUI_UI_FALLBACK, NULL, NULL, &size ))
+    {
+        if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size * sizeof(WCHAR) ))) return 0;
+        if (GetThreadPreferredUILanguages( MUI_LANGUAGE_ID | MUI_UI_FALLBACK, NULL, buffer, &size ))
+            ret = wcstoul( buffer, NULL, 16 );
+        HeapFree( GetProcessHeap(), 0, buffer );
+    }
+    return ret;
+}
+
+
+/**********************************************************************
+ *	SetThreadUILanguage   (kernelbase.@)
+ */
+LANGID WINAPI DECLSPEC_HOTPATCH SetThreadUILanguage( LANGID langid )
+{
+    LCID lcid = langid;
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH + 1];
+    const NLS_LOCALE_DATA *locale;
+
+    if (!langid) return GetThreadUILanguage(); /* FIXME: set MUI_CONSOLE_FILTER */
+
+    if (!(locale = NlsValidateLocale( &lcid, 0 )))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+    wcscpy( buffer, locale_strings + locale->sname + 1 );
+    buffer[wcslen(buffer) + 1] = 0;
+    if (!SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, buffer, NULL )) return 0;
+    return LANGIDFROMLCID( lcid );
 }
 
 
@@ -6410,7 +6487,9 @@ INT WINAPI DECLSPEC_HOTPATCH GetUserDefaultLocaleName( LPWSTR name, INT len )
  */
 LANGID WINAPI DECLSPEC_HOTPATCH GetUserDefaultUILanguage(void)
 {
-    return LANGIDFROMLCID( GetUserDefaultLCID() );
+    LANGID lang;
+    RtlpQueryDefaultUILanguage( &lang, FALSE );
+    return lang;
 }
 
 
@@ -6959,30 +7038,9 @@ done:
 INT WINAPI DECLSPEC_HOTPATCH LCMapStringW( LCID lcid, DWORD flags, const WCHAR *src, int srclen,
                                            WCHAR *dst, int dstlen )
 {
-    const WCHAR *locale = LOCALE_NAME_USER_DEFAULT;
-    const NLS_LOCALE_LCID_INDEX *entry;
+    const WCHAR *locale;
 
-    switch (lcid)
-    {
-    case LOCALE_NEUTRAL:
-    case LOCALE_USER_DEFAULT:
-    case LOCALE_SYSTEM_DEFAULT:
-    case LOCALE_CUSTOM_DEFAULT:
-    case LOCALE_CUSTOM_UNSPECIFIED:
-    case LOCALE_CUSTOM_UI_DEFAULT:
-        break;
-    default:
-        if (lcid == user_lcid || lcid == system_lcid) break;
-        if (!(entry = find_lcid_entry( lcid )))
-        {
-            WARN( "unknown locale %04lx\n", lcid );
-            SetLastError( ERROR_INVALID_PARAMETER );
-            return 0;
-        }
-        locale = locale_strings + entry->name + 1;
-        break;
-    }
-
+    if (!get_sort_locale_name( lcid, &locale )) return 0;
     return LCMapStringEx( locale, flags, src, srclen, dst, dstlen, NULL, NULL, 0 );
 }
 
@@ -7265,11 +7323,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetUserGeoID( GEOID id )
         swprintf( bufferW, ARRAY_SIZE(bufferW), L"%u", geo->id );
         RegSetValueExW( hkey, name, 0, REG_SZ, (BYTE *)bufferW, (lstrlenW(bufferW) + 1) * sizeof(WCHAR) );
 
-        if (geo->class == GEOCLASS_NATION || wcscmp( geo->iso2, L"XX" ))
-            lstrcpyW( bufferW, geo->iso2 );
-        else
-            swprintf( bufferW, ARRAY_SIZE(bufferW), L"%03u", geo->uncode );
-        RegSetValueExW( hkey, L"Name", 0, REG_SZ, (BYTE *)bufferW, (lstrlenW(bufferW) + 1) * sizeof(WCHAR) );
+        if (geo->class == GEOCLASS_NATION && wcscmp( geo->iso2, L"XX" ))
+            RegSetValueExW( hkey, L"Name", 0, REG_SZ,
+                            (BYTE *)geo->iso2, (lstrlenW(geo->iso2) + 1) * sizeof(WCHAR) );
         RegCloseKey( hkey );
     }
     return TRUE;

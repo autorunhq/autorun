@@ -87,12 +87,8 @@
 #else
   extern char **environ;
 #endif
-#ifdef __ANDROID__
-# include <jni.h>
-#endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winnt.h"
 #include "winbase.h"
@@ -101,7 +97,6 @@
 #include "winternl.h"
 #include "unix_private.h"
 #include "wine/list.h"
-#include "ntsyscalls.h"
 #include "wine/debug.h"
 
 #ifdef __SWITCH__
@@ -122,9 +117,8 @@
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(module);
-WINE_DECLARE_DEBUG_CHANNEL(syscall);
 
-#if defined __i386__ || defined __x86_64__
+#if defined __i386__ || (defined __x86_64__ && !defined __APPLE__)
 #define SO_DLLS_SUPPORTED
 #endif
 
@@ -138,67 +132,6 @@ void *pLdrInitializeThunk = NULL;
 void *pRtlUserThreadStart = NULL;
 void *p__wine_ctrl_routine = NULL;
 SYSTEM_DLL_INIT_BLOCK *pLdrSystemDllInitBlock = NULL;
-
-static void stub_syscall( const char *name )
-{
-    CONTEXT context = { .ContextFlags = CONTEXT_FULL };
-    EXCEPTION_RECORD rec =
-    {
-        .ExceptionCode = EXCEPTION_WINE_STUB,
-        .ExceptionFlags = EXCEPTION_NONCONTINUABLE,
-        .NumberParameters = 2,
-        .ExceptionInformation[0] = (ULONG_PTR)"ntdll",
-        .ExceptionInformation[1] = (ULONG_PTR)name,
-    };
-    NtGetContextThread( GetCurrentThread(), &context );
-#ifdef __i386__
-    rec.ExceptionAddress = (void *)context.Eip;
-#elif defined __x86_64__
-    rec.ExceptionAddress = (void *)context.Rip;
-#elif defined __arm__ || defined __aarch64__
-    rec.ExceptionAddress = (void *)context.Pc;
-#endif
-    NtRaiseException( &rec, &context, TRUE );
-}
-
-
-#define SYSCALL_STUB(name) static void name(void) { stub_syscall( #name ); }
-ALL_SYSCALL_STUBS
-
-static void * const syscalls[] =
-{
-#define SYSCALL_ENTRY(id,name,args) name,
-    ALL_SYSCALLS
-#undef SYSCALL_ENTRY
-};
-
-static BYTE syscall_args[ARRAY_SIZE(syscalls)] =
-{
-#define SYSCALL_ENTRY(id,name,args) args,
-    ALL_SYSCALLS
-#undef SYSCALL_ENTRY
-};
-
-SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4] =
-{
-    { (ULONG_PTR *)syscalls, NULL, ARRAY_SIZE(syscalls), syscall_args }
-};
-
-static const char *ntsyscall_names[] =
-{
-#define SYSCALL_ENTRY(id,name,args) #name,
-    ALL_SYSCALLS
-#undef SYSCALL_ENTRY
-};
-
-static const char **syscall_names[4] = { ntsyscall_names };
-static const char **usercall_names;
-
-void ntdll_add_syscall_debug_info( UINT idx, const char **names, const char **user_names )
-{
-    syscall_names[idx] = names;
-    usercall_names = user_names;
-}
 
 #ifdef __GNUC__
 static void fatal_error( const char *err, ... ) __attribute__((noreturn, format(printf,1,2)));
@@ -218,6 +151,7 @@ const char *wineloader = NULL;
 const char **dll_paths = NULL;
 const char **system_dll_paths = NULL;
 const char *user_name = NULL;
+void *main_module = NULL;
 SECTION_IMAGE_INFORMATION main_image_info = { NULL };
 
 /* die on a fatal error; use only during initialization */
@@ -426,16 +360,10 @@ static WORD get_alt_machine( WORD machine )
 
 static void set_dll_path(void)
 {
-    char *p, *path = getenv( "WINEDLLPATH" ), *be_runtime = getenv( "PROTON_BATTLEYE_RUNTIME" ), *eac_runtime = getenv( "PROTON_EAC_RUNTIME" );
+    char *p, *path = getenv( "WINEDLLPATH" );
     int i, count = 0;
 
     if (path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
-
-    if (be_runtime)
-        count += 2;
-
-    if (eac_runtime)
-        count += 2;
 
     dll_paths = malloc( (count + 2) * sizeof(*dll_paths) );
     count = 0;
@@ -447,42 +375,6 @@ static void set_dll_path(void)
         path = strdup(path);
         for (p = strtok( path, ":" ); p; p = strtok( NULL, ":" )) dll_paths[count++] = strdup( p );
         free( path );
-    }
-
-    if (be_runtime)
-    {
-        const char lib32[] = "/v1/lib/wine/";
-        const char lib64[] = "/v1/lib64/wine/";
-
-        p = malloc( strlen(be_runtime) + strlen(lib32) + 1 );
-        strcpy(p, be_runtime);
-        strcat(p, lib32);
-
-        dll_paths[count++] = p;
-
-        p = malloc( strlen(be_runtime) + strlen(lib64) + 1 );
-        strcpy(p, be_runtime);
-        strcat(p, lib64);
-
-        dll_paths[count++] = p;
-    }
-
-    if (eac_runtime)
-    {
-        const char lib32[] = "/v2/lib32/";
-        const char lib64[] = "/v2/lib64/";
-
-        p = malloc( strlen(eac_runtime) + strlen(lib32) + 1 );
-        strcpy(p, eac_runtime);
-        strcat(p, lib32);
-
-        dll_paths[count++] = p;
-
-        p = malloc( strlen(eac_runtime) + strlen(lib64) + 1 );
-        strcpy(p, eac_runtime);
-        strcat(p, lib64);
-
-        dll_paths[count++] = p;
     }
 
     for (i = 0; i < count; i++) dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
@@ -634,16 +526,10 @@ char *get_alternate_wineloader( WORD machine )
 }
 
 
-static void preloader_exec( char **argv, WORD machine )
+static void preloader_exec( char **argv )
 {
 #ifdef HAVE_WINE_PRELOADER
-#if !defined(__arm__) && !defined(__aarch64__)
-    if (machine == IMAGE_FILE_MACHINE_AMD64)
-        asprintf( &argv[0], "%s64-preloader", argv[1] );
-    else
-#endif
-        asprintf( &argv[0], "%s-preloader", argv[1] );
-
+    asprintf( &argv[0], "%s-preloader", argv[1] );
 #ifdef __APPLE__
     {
         posix_spawnattr_t attr;
@@ -666,10 +552,10 @@ static NTSTATUS loader_exec( char **argv, WORD machine )
 
     putenv( noexec );
 
-    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, machine );
+    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
 
     argv[1] = strdup( wineloader );
-    preloader_exec( argv, machine );
+    preloader_exec( argv );
     return STATUS_INVALID_IMAGE_FORMAT;
 }
 
@@ -684,47 +570,11 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info 
     WORD machine = pe_info->machine;
     ULONGLONG res_start = pe_info->base;
     ULONGLONG res_end = pe_info->base + pe_info->map_size;
-    const char *ld_preload = getenv( "LD_PRELOAD" );
     char preloader_reserve[64], socket_env[64];
 
     if (pe_info->wine_fakedll) res_start = res_end = 0;
-    if (pe_info->image_flags & IMAGE_FLAGS_ComPlusNativeReady) machine = native_machine;
-
-    unsetenv( "WINE_LD_PRELOAD" );
-
-    /* HACK: Unset LD_PRELOAD before executing explorer.exe to disable buggy gameoverlayrenderer.so */
-    if (ld_preload && argv[2] && !strcmp( argv[2], "C:\\windows\\system32\\explorer.exe" ) &&
-        argv[3] && !strcmp( argv[3], "/desktop" ))
-    {
-        static char const gorso[] = "gameoverlayrenderer.so";
-        static int gorso_len = sizeof(gorso) - 1;
-        int len = strlen( ld_preload );
-        char *next, *tmp, *env = malloc( sizeof("LD_PRELOAD=") + len );
-
-        setenv( "EXPLORER_LD_PRELOAD", ld_preload, 1 );
-        if (!env) return STATUS_NO_MEMORY;
-        strcpy( env, "LD_PRELOAD=" );
-        strcat( env, ld_preload );
-
-        tmp = env + 11;
-        do
-        {
-            if (!(next = strchr( tmp, ':' ))) next = tmp + strlen( tmp );
-            if (next - tmp >= gorso_len && strncmp( next - gorso_len, gorso, gorso_len ) == 0)
-            {
-                if (*next) memmove( tmp, next + 1, strlen(next) );
-                else *tmp = 0;
-                next = tmp;
-            }
-            else tmp = next + 1;
-        }
-        while (*next);
-
-        putenv( env );
-        ld_preload = NULL;
-    }
-
-    if (ld_preload) setenv( "WINE_LD_PRELOAD", ld_preload, 1 );
+    if (pe_info->image_flags & IMAGE_FLAGS_ComPlusNativeReady)
+        machine = is_machine_64bit( native_machine ) ? IMAGE_FILE_MACHINE_AMD64 : native_machine;
 
     signal( SIGPIPE, SIG_DFL );
 
@@ -800,66 +650,6 @@ void start_server( BOOL debug )
     }
 }
 
-
-/***********************************************************************
- *           KeAddSystemServiceTable
- */
-BOOLEAN KeAddSystemServiceTable( ULONG_PTR *funcs, ULONG_PTR *counters, ULONG limit,
-                                 BYTE *arguments, ULONG index )
-{
-    if (index >= ARRAY_SIZE(KeServiceDescriptorTable)) return FALSE;
-    KeServiceDescriptorTable[index].ServiceTable  = funcs;
-    KeServiceDescriptorTable[index].CounterTable  = counters;
-    KeServiceDescriptorTable[index].ServiceLimit  = limit;
-    KeServiceDescriptorTable[index].ArgumentTable = arguments;
-    return TRUE;
-}
-
-void trace_syscall( UINT id, ULONG_PTR *args, ULONG len )
-{
-    UINT idx = (id >> 12) & 3, num = id & 0xfff;
-    const char **names = syscall_names[idx];
-
-    if (names && names[num])
-        TRACE_(syscall)( "\1SysCall  %s(", names[num] );
-    else
-        TRACE_(syscall)( "\1SysCall  %04x(", id );
-
-    len /= sizeof(ULONG_PTR);
-    for (ULONG i = 0; i < len; i++)
-    {
-        TRACE_(syscall)( "%08lx", args[i] );
-        if (i < len - 1) TRACE_(syscall)( "," );
-    }
-    TRACE_(syscall)( ")\n" );
-}
-
-void trace_sysret( UINT id, ULONG_PTR retval )
-{
-    UINT idx = (id >> 12) & 3, num = id & 0xfff;
-    const char **names = syscall_names[idx];
-
-    if (names && names[num])
-        TRACE_(syscall)( "\1SysRet   %s() retval=%08lx\n", names[num], retval );
-    else
-        TRACE_(syscall)( "\1SysRet   %04x() retval=%08lx\n", id, retval );
-}
-
-void trace_usercall( UINT id, ULONG_PTR *args, ULONG len )
-{
-    if (usercall_names)
-        TRACE_(syscall)("\1UserCall %s(%p,%u)\n", usercall_names[id], args, len );
-    else
-        TRACE_(syscall)("\1UserCall %04x(%p,%u)\n", id, args, len );
-}
-
-void trace_userret( void *ret_ptr, ULONG len, NTSTATUS status, UINT id )
-{
-    if (usercall_names)
-        TRACE_(syscall)("\1UserRet  %s(%p,%u) retval=%08x\n", usercall_names[id], ret_ptr, len, status );
-    else
-        TRACE_(syscall)("\1UserRet  %04x(%p,%u) retval=%08x\n", id, ret_ptr, len, status );
-}
 
 #ifdef SO_DLLS_SUPPORTED
 
@@ -1144,6 +934,9 @@ static NTSTATUS dlopen_dll( const char *so_name, UNICODE_STRING *nt_name, void *
         dlclose( handle );
         return STATUS_NO_MEMORY;
     }
+#ifdef __x86_64__
+    signal_disable_syscall_dispatch();
+#endif
     *ret_module = module;
     return STATUS_SUCCESS;
 }
@@ -1164,7 +957,7 @@ static NTSTATUS load_so_dll( void *args )
     NTSTATUS status;
     DWORD len;
 
-    if (get_load_order( nt_name ) == LO_DISABLED) return STATUS_DLL_NOT_FOUND;
+    if (get_load_order( nt_name, FALSE, NULL ) == LO_DISABLED) return STATUS_DLL_NOT_FOUND;
     InitializeObjectAttributes( &attr, nt_name, OBJ_CASE_INSENSITIVE, 0, 0 );
     if (!get_nt_and_unix_names( &attr, &true_nt_name, &unix_name, FILE_OPEN, FALSE ))
     {
@@ -1259,8 +1052,7 @@ static NTSTATUS open_builtin_so_file( char *name, OBJECT_ATTRIBUTES *attr, void 
 /***********************************************************************
  *           open_main_image_so_file
  */
-static NTSTATUS open_main_image_so_file( const char *name, UNICODE_STRING *nt_name, void **module,
-                                         SECTION_IMAGE_INFORMATION *image_info )
+static NTSTATUS open_main_image_so_file( const char *name, UNICODE_STRING *nt_name )
 {
     struct pe_image_info pe_info;
     NTSTATUS status;
@@ -1276,8 +1068,8 @@ static NTSTATUS open_main_image_so_file( const char *name, UNICODE_STRING *nt_na
             nt_name->Length -= 3 * sizeof(WCHAR);
         }
     }
-    status = dlopen_dll( name, nt_name, module, &pe_info, FALSE );
-    if (!status) virtual_fill_image_information( &pe_info, image_info );
+    status = dlopen_dll( name, nt_name, &main_module, &pe_info, FALSE );
+    if (!status) virtual_fill_image_information( &pe_info, &main_image_info );
     return status;
 }
 
@@ -1292,8 +1084,7 @@ static NTSTATUS open_builtin_so_file( char *name, OBJECT_ATTRIBUTES *attr, void 
     return STATUS_DLL_NOT_FOUND;
 }
 
-static NTSTATUS open_main_image_so_file( const char *name, UNICODE_STRING *nt_name, void **module,
-                                         SECTION_IMAGE_INFORMATION *image_info )
+static NTSTATUS open_main_image_so_file( const char *name, UNICODE_STRING *nt_name )
 {
     return STATUS_INVALID_IMAGE_FORMAT;
 }
@@ -1310,202 +1101,6 @@ static NTSTATUS unwind_builtin_dll( void *args )
 
 #endif /* SO_DLLS_SUPPORTED */
 
-static ULONG_PTR find_ordinal_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports, DWORD ordinal );
-static ULONG_PTR find_named_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *exports, const char *name );
-static void *get_rva( void *module, ULONG_PTR addr );
-static const void *get_module_data_dir( HMODULE module, ULONG dir, ULONG *size );
-
-/**********************************************************************
- *      __wine_get_unix_env
- */
-NTSTATUS WINAPI wine_get_unix_env( void *args )
-{
-    struct wine_get_unix_env_params *params = args;
-    unsigned int len;
-    char *s;
-
-    if (!(s = getenv( params->name ))) return STATUS_VARIABLE_NOT_FOUND;
-    len = strlen( s ) + 1;
-    if (len > params->buffer_len) return STATUS_BUFFER_TOO_SMALL;
-    memcpy( params->val, s, len );
-    return STATUS_SUCCESS;
-}
-
-
-/**********************************************************************
- *      __wine_set_unix_env
- */
-NTSTATUS WINAPI wine_set_unix_env( void *args )
-{
-    struct wine_set_unix_env_params *params = args;
-
-    if (!params->val) unsetenv( params->name );
-    else setenv( params->name, params->val, 1 );
-    return 0;
-}
-
-/**********************************************************************
- *      __wine_dbg_ftrace
- */
-static NTSTATUS unix__wine_dbg_ftrace( void *args )
-{
-    struct wine_dbg_ftrace_params *params = args;
-
-    return __wine_dbg_ftrace( params->str, params->len, params->ctx );
-}
-
-
-static void *steamclient_srcs[128];
-static void *steamclient_tgts[128];
-static int steamclient_count;
-
-void *steamclient_handle_fault( LPCVOID addr, DWORD err )
-{
-    int i;
-
-    if (!(err & EXCEPTION_EXECUTE_FAULT)) return NULL;
-
-    for (i = 0; i < steamclient_count; ++i)
-    {
-        if (addr == steamclient_srcs[i])
-            return steamclient_tgts[i];
-    }
-
-    return NULL;
-}
-
-static void steamclient_write_jump_x64(void *src_addr, ULONGLONG tgt_addr)
-{
-    static const char mov[] = {0x48, 0xb8};
-    static const char jmp[] = {0xff, 0xe0};
-    memcpy(src_addr, mov, sizeof(mov));
-    memcpy((char *)src_addr + sizeof(mov), &tgt_addr, sizeof(tgt_addr));
-    memcpy((char *)src_addr + sizeof(mov) + sizeof(tgt_addr), jmp, sizeof(jmp));
-}
-
-static void steamclient_write_jump_x86(void *src_addr, ULONG tgt_addr)
-{
-    static const char mov[] = {0xb8};
-    static const char jmp[] = {0xff, 0xe0};
-    memcpy(src_addr, mov, sizeof(mov));
-    memcpy((char *)src_addr + sizeof(mov), &tgt_addr, sizeof(tgt_addr));
-    memcpy((char *)src_addr + sizeof(mov) + sizeof(tgt_addr), jmp, sizeof(jmp));
-}
-
-static NTSTATUS steamclient_setup_trampolines( void *args )
-{
-    static int noexec_cached = -1;
-
-    struct steamclient_setup_trampolines_params *params = args;
-    HMODULE src_mod = params->src_mod, tgt_mod = params->tgt_mod;
-    SYSTEM_BASIC_INFORMATION info;
-    IMAGE_NT_HEADERS *src_nt = get_rva( src_mod, ((IMAGE_DOS_HEADER *)src_mod)->e_lfanew );
-    IMAGE_NT_HEADERS *tgt_nt = get_rva( tgt_mod, ((IMAGE_DOS_HEADER *)tgt_mod)->e_lfanew );
-    IMAGE_SECTION_HEADER *src_sec = IMAGE_FIRST_SECTION( src_nt );
-    BOOL x64 = src_nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
-    const IMAGE_EXPORT_DIRECTORY *src_exp, *tgt_exp;
-    const DWORD *names;
-    SIZE_T size;
-    void *addr, *src_addr, *tgt_addr;
-    char *name, *wsne;
-    UINT_PTR page_mask;
-    int i;
-
-    if (noexec_cached == -1)
-        noexec_cached = (wsne = getenv("WINESTEAMNOEXEC")) && atoi(wsne);
-
-    virtual_get_system_info( &info, !!NtCurrentTeb()->WowTebOffset );
-    page_mask = info.PageSize - 1;
-
-    for (i = 0; i < src_nt->FileHeader.NumberOfSections; ++i)
-    {
-        if (memcmp(src_sec[i].Name, ".text", 5)) continue;
-        addr = (void *)(((UINT_PTR)src_mod + src_sec[i].VirtualAddress) & ~page_mask);
-        size = (src_sec[i].Misc.VirtualSize + page_mask) & ~page_mask;
-        if (noexec_cached) mprotect(addr, size, PROT_READ);
-        else mprotect(addr, size, PROT_READ|PROT_WRITE|PROT_EXEC);
-    }
-
-    src_exp = get_module_data_dir( src_mod, IMAGE_FILE_EXPORT_DIRECTORY, NULL );
-    tgt_exp = get_module_data_dir( tgt_mod, IMAGE_FILE_EXPORT_DIRECTORY, NULL );
-    names = (const DWORD *)((UINT_PTR)src_mod + src_exp->AddressOfNames);
-    for (i = 0; i < src_exp->NumberOfNames; ++i)
-    {
-        if (!names[i] || !(name = (char *)((UINT_PTR)src_mod + names[i]))) continue;
-        if (!(src_addr = (void *)find_named_export(src_mod, src_exp, name))) continue;
-        if (!(tgt_addr = (void *)find_named_export(tgt_mod, tgt_exp, name))) continue;
-        assert(steamclient_count < ARRAY_SIZE(steamclient_srcs));
-        steamclient_srcs[steamclient_count] = src_addr;
-        steamclient_tgts[steamclient_count] = tgt_addr;
-        if (!noexec_cached)
-        {
-            if (x64) steamclient_write_jump_x64( src_addr, (ULONG_PTR)tgt_addr );
-            else steamclient_write_jump_x86( src_addr, PtrToUlong(tgt_addr) );
-        }
-        else steamclient_count++;
-    }
-
-    if (x64)
-    {
-        IMAGE_NT_HEADERS64 *src_nt64 = (IMAGE_NT_HEADERS64 *)src_nt, *tgt_nt64 = (IMAGE_NT_HEADERS64 *)tgt_nt;
-        src_addr = (void *)((UINT_PTR)src_mod + src_nt64->OptionalHeader.AddressOfEntryPoint);
-        tgt_addr = (void *)((UINT_PTR)tgt_mod + tgt_nt64->OptionalHeader.AddressOfEntryPoint);
-    }
-    else
-    {
-        IMAGE_NT_HEADERS32 *src_nt32 = (IMAGE_NT_HEADERS32 *)src_nt, *tgt_nt32 = (IMAGE_NT_HEADERS32 *)tgt_nt;
-        src_addr = (void *)((UINT_PTR)src_mod + src_nt32->OptionalHeader.AddressOfEntryPoint);
-        tgt_addr = (void *)((UINT_PTR)tgt_mod + tgt_nt32->OptionalHeader.AddressOfEntryPoint);
-    }
-
-    assert(steamclient_count < ARRAY_SIZE(steamclient_srcs));
-    steamclient_srcs[steamclient_count] = src_addr;
-    steamclient_tgts[steamclient_count] = tgt_addr;
-    if (!noexec_cached)
-    {
-        if (x64) steamclient_write_jump_x64( src_addr, (ULONG_PTR)tgt_addr );
-        else steamclient_write_jump_x86( src_addr, PtrToUlong(tgt_addr) );
-    }
-    else steamclient_count++;
-
-    return STATUS_SUCCESS;
-}
-
-BOOL debugstr_pc_impl( void *pc, char *buffer, unsigned int size )
-{
-    unsigned int len;
-    char *s = buffer;
-    Dl_info info;
-
-    snprintf( s, size, "%p:", pc );
-    if (!dladdr( pc, &info )) return FALSE;
-
-    s += (len = strlen( s ));
-    size -= len;
-    snprintf( s, size, " %s + %#zx", info.dli_fname, (char *)pc - (char *)info.dli_fbase );
-    if (info.dli_sname)
-    {
-        s += (len = strlen( s ));
-        size -= len;
-        snprintf( s, size, " (%s + %#zx)", info.dli_sname, (char *)pc - (char *)info.dli_saddr );
-    }
-    return TRUE;
-}
-
-static NTSTATUS debugstr_pc( void *args )
-{
-    struct debugstr_pc_args *params = args;
-
-    return debugstr_pc_impl( params->pc, params->buffer, params->size ) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-}
-
-const char * wine_debuginfostr_pc( void *pc )
-{
-    char buffer[256];
-
-    debugstr_pc_impl( pc, buffer, sizeof(buffer) );
-    return __wine_dbg_strdup( buffer );
-}
 
 static const unixlib_entry_t unix_call_funcs[] =
 {
@@ -1517,12 +1112,6 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_wine_server_handle_to_fd,
     unixcall_wine_spawnvp,
     system_time_precise,
-    wine_get_unix_env,
-    wine_set_unix_env,
-    unix__wine_dbg_ftrace,
-    steamclient_setup_trampolines,
-    debugstr_pc,
-    unixcall_compat_wine_nt_to_unix_file_name,
 };
 
 #ifdef __SWITCH__
@@ -1538,81 +1127,6 @@ unixlib_handle_t wine_nx_get_ntdll_unixlib_handle(void)
 static NTSTATUS wow64_load_so_dll( void *args ) { return STATUS_INVALID_IMAGE_FORMAT; }
 static NTSTATUS wow64_unwind_builtin_dll( void *args ) { return STATUS_UNSUCCESSFUL; }
 
-static NTSTATUS wow64___wine_get_unix_env( void *args )
-{
-    struct
-    {
-        ULONG name;
-        ULONG val;
-        unsigned int buffer_len;
-    } const *params32 = args;
-    struct wine_get_unix_env_params params =
-    {
-        .name = ULongToPtr( params32->name ),
-        .val = ULongToPtr( params32->val ),
-        .buffer_len = params32->buffer_len,
-    };
-    return wine_get_unix_env( &params );
-}
-
-static NTSTATUS wow64___wine_set_unix_env( void *args )
-{
-    struct
-    {
-        ULONG name;
-        ULONG val;
-    } const *params32 = args;
-    struct wine_set_unix_env_params params =
-    {
-        .name = ULongToPtr( params32->name ),
-        .val = ULongToPtr( params32->val ),
-    };
-    return wine_set_unix_env( &params );
-}
-
-static NTSTATUS wow64___wine_dbg_ftrace( void *args )
-{
-    struct
-    {
-        ULONG str;
-        unsigned int len;
-        unsigned int ctx;
-    } const *params32 = args;
-    return __wine_dbg_ftrace( ULongToPtr( params32->str ), params32->len, params32->ctx );
-}
-
-static NTSTATUS wow64_steamclient_setup_trampolines( void *args )
-{
-    struct
-    {
-        ULONG src_mod;
-        ULONG tgt_mod;
-    } const *params32 = args;
-    struct steamclient_setup_trampolines_params params;
-    params.src_mod = (HMODULE)(UINT_PTR)params32->src_mod;
-    params.tgt_mod = (HMODULE)(UINT_PTR)params32->tgt_mod;
-    return steamclient_setup_trampolines( &params );
-}
-
-static NTSTATUS wow64_debugstr_pc( void *args )
-{
-    struct
-    {
-        ULONG        pc;
-        ULONG        buffer;
-        unsigned int size;
-    } const *params32 = args;
-    return debugstr_pc_impl( ULongToPtr( params32->pc ), ULongToPtr( params32->buffer ), params32->size )
-               ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
-}
-
-static NTSTATUS wow64_compat_wine_nt_to_unix_file_name( void *args )
-{
-    FIXME( "Not supported.\n" );
-
-    return STATUS_NOT_SUPPORTED;
-}
-
 const unixlib_entry_t unix_call_wow64_funcs[] =
 {
     wow64_load_so_dll,
@@ -1623,12 +1137,6 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_server_handle_to_fd,
     wow64_wine_spawnvp,
     system_time_precise,
-    wow64___wine_get_unix_env,
-    wow64___wine_set_unix_env,
-    wow64___wine_dbg_ftrace,
-    wow64_steamclient_setup_trampolines,
-    wow64_debugstr_pc,
-    wow64_compat_wine_nt_to_unix_file_name,
 };
 
 #ifdef __SWITCH__
@@ -1845,7 +1353,7 @@ done:
     if (NT_SUCCESS(status) && ext)
     {
         strcpy( ext, ".so" );
-        load_builtin_unixlib( *module, ptr );
+        set_builtin_unixlib_name( *module, ptr );
     }
     free( file );
     return status;
@@ -1858,31 +1366,36 @@ done:
  * Load the builtin dll if specified by load order configuration.
  * Return STATUS_IMAGE_ALREADY_LOADED if we should keep the native one that we have found.
  */
-NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
-                       ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,
-                       void **module, SIZE_T *size, ULONG_PTR limit_low, ULONG_PTR limit_high,
-                       off_t offset )
+NTSTATUS load_builtin( struct pe_mapping_info *pe_mapping, USHORT machine,
+                       SECTION_IMAGE_INFORMATION *info, void **module, SIZE_T *size,
+                       ULONG_PTR limit_low, ULONG_PTR limit_high, off_t offset )
 {
     NTSTATUS status;
-    USHORT search_machine = image_info->machine;
-    enum loadorder loadorder = get_load_order( nt_name );
+    USHORT sysdir_machine, search_machine = pe_mapping->image.machine;
+    BOOL is_system_dir = is_system_dir_path( &pe_mapping->nt_name, &sysdir_machine );
+    enum loadorder loadorder = get_load_order( &pe_mapping->nt_name, is_system_dir, pe_mapping );
 
     if (loadorder == LO_DISABLED) return STATUS_DLL_NOT_FOUND;
 
-    if (image_info->wine_builtin)
+    if (pe_mapping->image.wine_builtin)
     {
         if (loadorder == LO_NATIVE) return STATUS_DLL_NOT_FOUND;
         loadorder = LO_BUILTIN_NATIVE;  /* load builtin, then fallback to the file we found */
     }
-    else if (image_info->wine_fakedll)
+    else if (pe_mapping->image.wine_fakedll)
     {
-        TRACE( "%s is a fake Wine dll\n", debugstr_us(nt_name) );
+        TRACE( "%s is a fake Wine dll\n", debugstr_us(&pe_mapping->nt_name) );
         if (loadorder == LO_NATIVE) return STATUS_DLL_NOT_FOUND;
         loadorder = LO_BUILTIN;  /* builtin with no fallback since mapping a fake dll is not useful */
     }
 
-    if (is_arm64ec() && image_info->is_hybrid && search_machine == IMAGE_FILE_MACHINE_AMD64)
-        search_machine = current_machine;
+    if (current_machine == IMAGE_FILE_MACHINE_ARM64 && search_machine == IMAGE_FILE_MACHINE_AMD64)
+    {
+        /* force loading the x64 version of the builtin */
+        if (!pe_mapping->image.is_hybrid && !machine) machine = IMAGE_FILE_MACHINE_AMD64;
+        /* but make sure we load from the aarch64 builtin directory */
+        search_machine = IMAGE_FILE_MACHINE_ARM64;
+    }
 
     switch (loadorder)
     {
@@ -1890,15 +1403,87 @@ NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *n
     case LO_NATIVE_BUILTIN:
         return STATUS_IMAGE_ALREADY_LOADED;
     case LO_BUILTIN:
-        return find_builtin_dll( nt_name, exp_name, module, size, info, limit_low, limit_high,
-                                 search_machine, machine, FALSE, offset );
+        return find_builtin_dll( &pe_mapping->nt_name, &pe_mapping->exp_name, module, size, info,
+                                 limit_low, limit_high, search_machine, machine, FALSE, offset );
     default:
-        status = find_builtin_dll( nt_name, exp_name, module, size, info, limit_low, limit_high,
-                                   search_machine, machine, (loadorder == LO_DEFAULT), offset );
+        status = find_builtin_dll( &pe_mapping->nt_name, &pe_mapping->exp_name, module, size, info,
+                                   limit_low, limit_high, search_machine, machine,
+                                   (loadorder == LO_DEFAULT), offset );
         if (status == STATUS_DLL_NOT_FOUND || status == STATUS_NOT_SUPPORTED)
             return STATUS_IMAGE_ALREADY_LOADED;
         return status;
     }
+}
+
+
+/***********************************************************************
+ *           load_unixlib_by_name
+ */
+NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret )
+{
+    unsigned int i, pos, maxlen = 0;
+    unsigned int len = nt_name->Length / sizeof(WCHAR);
+    const char *so_dir = get_so_dir( current_machine );
+    char *ptr = NULL, *file, *ext = NULL;
+    void *handle = NULL;
+
+    if (!len) return STATUS_DLL_NOT_FOUND;
+
+    for (i = 0; i < len; i++) if (nt_name->Buffer[i] == '/' || nt_name->Buffer[i] == '\\') break;
+
+    if (i < len)  /* explicit path */
+    {
+        UNICODE_STRING true_nt_name;
+        OBJECT_ATTRIBUTES attr;
+
+        InitializeObjectAttributes( &attr, (UNICODE_STRING *)nt_name, 0, 0, NULL );
+        if (!get_nt_and_unix_names( &attr, &true_nt_name, &file, FILE_OPEN, FALSE ))
+            handle = dlopen( file, RTLD_NOW );
+        free( true_nt_name.Buffer );
+        goto done;
+    }
+
+    if (build_dir) maxlen = strlen(build_dir) + sizeof("/dlls/") + len;
+    maxlen = max( maxlen, dll_path_maxlen + 1 ) + len + sizeof("/aarch64-unix") + sizeof(".so");
+
+    if (!(file = malloc( maxlen ))) return STATUS_NO_MEMORY;
+
+    pos = maxlen - len - 4;
+    ext = file + pos + len;
+    /* we don't want to depend on the current codepage here */
+    for (i = 0; i < len; i++)
+    {
+        if (nt_name->Buffer[i] > 127) goto done;
+        file[pos + i] = (char)nt_name->Buffer[i];
+        if (file[pos + i] >= 'A' && file[pos + i] <= 'Z') file[pos + i] += 'a' - 'A';
+        else if (file[pos + i] == '.') ext = file + pos + i;
+    }
+    file[pos + len] = 0;
+    file[--pos] = '/';
+
+    if (build_dir)
+    {
+        ptr = prepend_build_dir_path( file + pos, ".so", "", "/dlls", build_dir );
+        strcpy( ext, ".so" );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+    }
+
+    strcpy( ext, ".so" );
+    for (i = 0; dll_paths[i]; i++)
+    {
+        ptr = prepend( file + pos, so_dir, strlen(so_dir) );
+        ptr = prepend( ptr, dll_paths[i], strlen(dll_paths[i]) );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+
+        ptr = prepend( file + pos, dll_paths[i], strlen(dll_paths[i]) );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+    }
+
+ done:
+    free( file );
+    if (!handle) return STATUS_DLL_NOT_FOUND;
+    *handle_ret = handle;
+    return STATUS_SUCCESS;
 }
 
 
@@ -1926,18 +1511,15 @@ static const WCHAR *get_machine_wow64_dir( WORD machine )
 
 
 /***************************************************************************
- *	is_builtin_path
+ *	is_system_dir_path
  *
  * Check if path is inside a system directory, to support loading builtins
  * when the corresponding file doesn't exist yet.
  */
-BOOL is_builtin_path( const UNICODE_STRING *path, WORD *machine )
+BOOL is_system_dir_path( const UNICODE_STRING *path, WORD *machine )
 {
     unsigned int i, len = path->Length / sizeof(WCHAR), dirlen;
     const WCHAR *sysdir, *p = path->Buffer;
-
-    /* only fake builtin existence during prefix bootstrap */
-    if (!is_prefix_bootstrap) return FALSE;
 
     for (i = 0; i < supported_machines_count; i++)
     {
@@ -1956,61 +1538,54 @@ BOOL is_builtin_path( const UNICODE_STRING *path, WORD *machine )
 
 
 /***********************************************************************
- *           open_main_image
+ *           load_main_exe
  */
-static NTSTATUS open_main_image( UNICODE_STRING *nt_name, void **module, SECTION_IMAGE_INFORMATION *info,
-                                 enum loadorder loadorder, USHORT machine )
+NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine )
 {
+    NTSTATUS status = STATUS_DLL_NOT_FOUND;
     OBJECT_ATTRIBUTES attr;
-    SIZE_T size = 0;
     char *unix_name;
-    NTSTATUS status;
     HANDLE mapping;
     UNICODE_STRING true_nt_name;
+    SIZE_T size = 0;
+    USHORT search_machine;
+    BOOL is_system_dir = is_system_dir_path( nt_name, &search_machine );
+    enum loadorder loadorder = get_load_order( nt_name, is_system_dir, NULL );
 
-    if (loadorder == LO_DISABLED) NtTerminateProcess( GetCurrentProcess(), STATUS_DLL_NOT_FOUND );
+    if (loadorder == LO_DISABLED) NtTerminateProcess( GetCurrentProcess(), status );
 
     InitializeObjectAttributes( &attr, nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
-    if (get_nt_and_unix_names( &attr, &true_nt_name, &unix_name, FILE_OPEN, FALSE )) return STATUS_DLL_NOT_FOUND;
+    if (!get_nt_and_unix_names( &attr, &true_nt_name, &unix_name, FILE_OPEN, FALSE ))
+        status = open_dll_file( unix_name, &attr, &mapping );
 
-    status = open_dll_file( unix_name, &attr, &mapping );
     if (!status)
     {
-        status = virtual_map_module( mapping, module, &size, info, 0, 0, machine );
-        if (status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH && info->ComPlusNativeReady)
+        status = virtual_map_main_module( mapping, load_machine );
+        if (status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH && main_image_info.ComPlusNativeReady)
         {
-            info->Machine = native_machine;
+            main_image_info.Machine = is_machine_64bit( native_machine ) ? IMAGE_FILE_MACHINE_AMD64 : native_machine;
             status = STATUS_SUCCESS;
         }
         NtClose( mapping );
     }
     else if (status == STATUS_INVALID_IMAGE_NOT_MZ && loadorder != LO_NATIVE)
     {
-        status = open_main_image_so_file( unix_name, attr.ObjectName, module, info );
+        status = open_main_image_so_file( unix_name, attr.ObjectName );
     }
     free( unix_name );
     free( true_nt_name.Buffer );
-    return status;
-}
 
-
-/***********************************************************************
- *           load_main_exe
- */
-NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **module )
-{
-    enum loadorder loadorder = get_load_order( nt_name );
-    unsigned int status;
-    SIZE_T size;
-    USHORT search_machine;
-
-    status = open_main_image( nt_name, module, &main_image_info, loadorder, load_machine );
-    if (status != STATUS_DLL_NOT_FOUND) return status;
-
-    /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
-    if (loadorder != LO_NATIVE && is_builtin_path( nt_name, &search_machine ))
-        status = find_builtin_dll( nt_name, NULL, module, &size, &main_image_info, 0, 0,
-                                   search_machine, load_machine, FALSE, 0 );
+    switch (status)
+    {
+    case STATUS_DLL_NOT_FOUND:
+    case STATUS_INVALID_IMAGE_FORMAT:
+    case STATUS_NOT_SUPPORTED:
+        /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
+        if (loadorder != LO_NATIVE && is_prefix_bootstrap && is_system_dir)
+            status = find_builtin_dll( nt_name, NULL, &main_module, &size, &main_image_info, 0, 0,
+                                       search_machine, load_machine, FALSE, 0 );
+        break;
+    }
     return status;
 }
 
@@ -2020,7 +1595,7 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **mod
  *
  * Load start.exe as main image.
  */
-NTSTATUS load_start_exe( UNICODE_STRING *nt_name, void **module )
+NTSTATUS load_start_exe( UNICODE_STRING *nt_name )
 {
     static const WCHAR startW[] = {'s','t','a','r','t','.','e','x','e',0};
     unsigned int status;
@@ -2030,7 +1605,8 @@ NTSTATUS load_start_exe( UNICODE_STRING *nt_name, void **module )
     wcscpy( image, get_machine_wow64_dir( current_machine ));
     wcscat( image, startW );
     init_unicode_string( nt_name, image );
-    status = find_builtin_dll( nt_name, NULL, module, &size, &main_image_info, 0, 0, current_machine, 0, FALSE, 0 );
+    status = find_builtin_dll( nt_name, NULL, &main_module, &size,
+                               &main_image_info, 0, 0, current_machine, 0, FALSE, 0 );
     if (!NT_SUCCESS(status))
     {
         MESSAGE( "wine: failed to load start.exe: %x\n", status );
@@ -2477,323 +2053,29 @@ static ULONG_PTR get_image_address(void)
     return 0;
 }
 
-BOOL process_termination_delay;
-BOOL ac_odyssey;
-BOOL fsync_help_simulated_pulse;
-BOOL localsystem_sid;
-BOOL simulate_writecopy;
-BOOL wine_allocs_2g_limit;
-SIZE_T kernel_stack_size = 0x100000;
-long long ram_reporting_bias;
-char *release_reserved_memory_low_bound;
-BOOL alert_simulate_sched_quantum;
-BOOL fsync_simulate_sched_quantum;
-BOOL fsync_yield_to_waiters;
-
-static void hacks_init(void)
-{
-    const char *sgi = getenv( "SteamGameId" );
-    const char *env_str;
-    if ((env_str = getenv("WINE_RAM_REPORTING_BIAS")))
-    {
-        ram_reporting_bias = atoll(env_str) * 1024 * 1024;
-        ERR( "HACK: ram_reporting_bias %lldMB.\n", ram_reporting_bias / (1024 * 1024) );
-    }
-
-    if (inproc_device_fd >= 0)
-    {
-        env_str = getenv("WINE_SIMULATE_ASYNC_READ");
-        if (env_str)
-            ac_odyssey = !!atoi(env_str);
-        else if (main_argc > 1 && (strstr(main_argv[1], "ACOdyssey.exe") || strstr(main_argv[1], "ImmortalsFenyxRising.exe")))
-            ac_odyssey = TRUE;
-
-        if (ac_odyssey)
-            ERR("HACK: AC Odyssey sync tweak on.\n");
-    }
-
-    env_str = getenv("WINE_ALERT_SIMULATE_SCHED_QUANTUM");
-    if (env_str)
-        alert_simulate_sched_quantum = !!atoi(env_str);
-    else if (main_argc > 1)
-    {
-        alert_simulate_sched_quantum = !!strstr(main_argv[1], "GTA5.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "MarySkelter2.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "MarySkelterFinale.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "Application.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "DeathEndReQuest2.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "v2r.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "NeptuniaVirtualStars.exe");
-        alert_simulate_sched_quantum = alert_simulate_sched_quantum || !!strstr(main_argv[1], "DragonStarVarnir.exe");
-    }
-    if (alert_simulate_sched_quantum)
-        ERR("HACK: Simulating sched quantum in NtWaitForAlertByThreadId.\n");
-
-    env_str = getenv("WINE_FSYNC_SIMULATE_SCHED_QUANTUM");
-    if (env_str)
-        fsync_simulate_sched_quantum = !!atoi(env_str);
-    else if (main_argc > 1)
-    {
-        fsync_simulate_sched_quantum = !!strstr(main_argv[1], "Ubisoft Game Launcher\\upc.exe");
-        fsync_simulate_sched_quantum = fsync_simulate_sched_quantum || !!strstr(main_argv[1], "PlanetZoo.exe");
-        fsync_simulate_sched_quantum = fsync_simulate_sched_quantum || !!strstr(main_argv[1], "GTA5.exe");
-    }
-    if (fsync_simulate_sched_quantum)
-        ERR("HACK: Simulating sched quantum in fsync.\n");
-
-    env_str = getenv("WINE_FSYNC_YIELD_TO_WAITERS");
-    if (env_str)
-        fsync_yield_to_waiters = !!atoi(env_str);
-    else if (sgi) fsync_yield_to_waiters = !strcmp(sgi, "292120") || !strcmp(sgi, "345350") || !strcmp(sgi, "292140")
-                                           || !strcmp(sgi, "33460");
-    if (fsync_yield_to_waiters)
-        ERR("HACK: fsync: yield to waiters.\n");
-
-    env_str = getenv("WINE_FSYNC_HELP_SIMULATED_PULSE");
-    if (env_str)
-        fsync_help_simulated_pulse = !!atoi(env_str);
-    else if (sgi) fsync_help_simulated_pulse =
-        !strcmp(sgi, "460870")
-        || !strcmp(sgi, "1486920")
-        || !strcmp(sgi, "438490");
-
-    if (fsync_help_simulated_pulse)
-        ERR("HACK: fsync: helping simulated pulse event.\n");
-
-    switch (sgi ? atoi( sgi ) : -1)
-    {
-    case 25700: /* Madballs in Babo: Invasion */
-    case 50130: /* Mafia II */
-    case 202990: /* CoD Black Ops II Multiplayer */
-    case 212910: /* CoD Black Ops II Zombies */
-    case 247910: /* Sniper Elite: Nazi Zombie Army 2 */
-    case 227100: /* Sniper Elite: Nazi Zombie Army */
-        setenv( "WINESTEAMNOEXEC", "1", 0 );
-        break;
-    }
-
-    env_str = getenv("WINE_SIMULATE_WRITECOPY");
-    if (env_str) simulate_writecopy = atoi(env_str);
-    else if (main_argc > 1 &&
-                          (strstr(main_argv[1], "UplayWebCore.exe")
-                           || (strstr(main_argv[1], "Battle.net.exe"))))
-        simulate_writecopy = TRUE;
-    else if (sgi) simulate_writecopy = !strcmp(sgi, "1608730") /* Dawn of Corruption */
-                                       || !strcmp(sgi, "1680700") /* Purgo box */
-                                       || !strcmp(sgi, "2095300") /* Breakout 13 */
-                                       || !strcmp(sgi, "2053940") /* Idol Hands 2 */
-                                       || !strcmp(sgi, "391150") /* Red Tie Runner */
-                                       || !strcmp(sgi, "2152990") /* Dinogen Online */
-                                       || !strcmp(sgi, "2176450") /* Mr. Hopp's Playhouse 3 */
-                                       || !strcmp(sgi, "2329630") /* Lovey-Dovey Lockdown */
-                                       || !strcmp(sgi, "2209020") /* Gemstones */
-                                       || !strcmp(sgi, "223750") /* DCS World */
-                                       || !strcmp(sgi, "2495160") /* Puppeteer : Control */
-                                       || !strcmp(sgi, "2361360"); /* Hentai Maid Memories */
-
-    if (sgi) wine_allocs_2g_limit = !strcmp(sgi, "359870");
-    if (wine_allocs_2g_limit) ERR("Allocation 2g limit enabled.\n");
-
-    if (main_argc > 1 && strstr(main_argv[1], "MicrosoftEdgeUpdate.exe"))
-    {
-        ERR("HACK: reporting LocalSystem account SID.\n");
-        localsystem_sid = TRUE;
-        return;
-    }
-
-    if ((env_str = getenv( "WINE_KERNEL_STACK_SIZE" )))
-        kernel_stack_size = atoll( env_str ) * 1024;
-    else if (sgi && !strcmp( sgi, "702700" ))
-        kernel_stack_size = 200 * 1024;
-    if (kernel_stack_size != 0x100000)
-        ERR( "HACK: setting kernel_stack_size to %luKB.\n", (long)(kernel_stack_size / 1024) );
-
-    if (sgi && (0
-        || !strcmp(sgi, "1364780") || !strcmp(sgi, "1952120") || !strcmp(sgi, "2154900") /* Street Fighter 6 */
-        || !strcmp(sgi, "1740720") /* Have a Nice Death  */
-    ))
-    {
-        ERR("HACK: setting WINE_ENABLE_GST_LIVE_LATENCY.\n");
-        setenv("WINE_ENABLE_GST_LIVE_LATENCY", "1", 0);
-    }
-
-    if (sgi && !strcmp(sgi, "2379390"))
-    {
-        ERR("HACK: setting vk_x11_override_min_image_count, vk_x11_strict_image_count.\n");
-        setenv("vk_x11_override_min_image_count", "2", 0);
-        setenv("vk_x11_strict_image_count", "true", 0);
-    }
-
-#ifndef __x86_64__
-    if ((env_str = getenv( "WINE_RES_MEM_LOW_BOUND" )))
-        release_reserved_memory_low_bound = (void *)strtol( env_str, NULL, 0x10 );
-    else if (sgi && (
-                        !strcmp( sgi, "518920" )
-                    ))
-        release_reserved_memory_low_bound = (void *)0x00200000;
-#endif
-
-    if (main_argc > 1 && strstr(main_argv[1], "edCefRenderProcess.exe"))
-        process_termination_delay = TRUE;
-}
-
 /***********************************************************************
  *           start_main_thread
  */
 static void start_main_thread(void)
 {
-    TEB *teb = virtual_alloc_first_teb();
+    struct thread_data *data = virtual_alloc_first_thread_data();
 
-    signal_init_threading();
-    dbg_init();
-    startup_info_size = server_init_process();
-    hacks_init();
+    server_init_process( data );
     virtual_map_user_shared_data();
     init_cpu_info();
     init_files();
-
-#if defined(__x86_64__) || defined(__i386__)
-    set_thread_teb( teb );
-#endif
-
-#ifdef M_PERTURB
-    mallopt( M_PERTURB, 0xff );
-#endif
     init_startup_info();
+    dbg_init();
     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
     set_load_order_app_name( main_wargv[0] );
-    init_thread_stack( teb, 0, 0, 0 );
+    init_thread_stack( data->teb, 0, 0, 0 );
     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
     load_ntdll();
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
-#ifdef M_PERTURB
-    mallopt( M_PERTURB, 0 );
-#endif
     server_init_process_done();
 }
 
-#ifdef __ANDROID__
-
-#ifndef WINE_JAVA_CLASS
-#define WINE_JAVA_CLASS "org/winehq/wine/WineActivity"
-#endif
-
-JavaVM *java_vm = NULL;
-jobject java_object = 0;
-unsigned short java_gdt_sel = 0;
-
-/* main Wine initialisation */
-static jstring wine_init_jni( JNIEnv *env, jobject obj, jobjectArray cmdline, jobjectArray environment )
-{
-    char **argv;
-    char *str;
-    char error[1024];
-    int i, argc, length;
-
-    /* get the command line array */
-
-    argc = (*env)->GetArrayLength( env, cmdline );
-    for (i = length = 0; i < argc; i++)
-    {
-        jobject str_obj = (*env)->GetObjectArrayElement( env, cmdline, i );
-        length += (*env)->GetStringUTFLength( env, str_obj ) + 1;
-    }
-
-    argv = malloc( (argc + 1) * sizeof(*argv) + length );
-    str = (char *)(argv + argc + 1);
-    for (i = 0; i < argc; i++)
-    {
-        jobject str_obj = (*env)->GetObjectArrayElement( env, cmdline, i );
-        length = (*env)->GetStringUTFLength( env, str_obj );
-        (*env)->GetStringUTFRegion( env, str_obj, 0,
-                                    (*env)->GetStringLength( env, str_obj ), str );
-        argv[i] = str;
-        str[length] = 0;
-        str += length + 1;
-    }
-    argv[argc] = NULL;
-
-    /* set the environment variables */
-
-    if (environment)
-    {
-        int count = (*env)->GetArrayLength( env, environment );
-        for (i = 0; i < count - 1; i += 2)
-        {
-            jobject var_obj = (*env)->GetObjectArrayElement( env, environment, i );
-            jobject val_obj = (*env)->GetObjectArrayElement( env, environment, i + 1 );
-            const char *var = (*env)->GetStringUTFChars( env, var_obj, NULL );
-
-            if (val_obj)
-            {
-                const char *val = (*env)->GetStringUTFChars( env, val_obj, NULL );
-                setenv( var, val, 1 );
-                if (!strcmp( var, "LD_LIBRARY_PATH" ))
-                {
-                    void (*update_func)( const char * ) = dlsym( RTLD_DEFAULT,
-                                                                 "android_update_LD_LIBRARY_PATH" );
-                    if (update_func) update_func( val );
-                }
-                else if (!strcmp( var, "WINEDEBUGLOG" ))
-                {
-                    int fd = open( val, O_WRONLY | O_CREAT | O_APPEND, 0666 );
-                    if (fd != -1)
-                    {
-                        dup2( fd, 2 );
-                        close( fd );
-                    }
-                }
-                (*env)->ReleaseStringUTFChars( env, val_obj, val );
-            }
-            else unsetenv( var );
-
-            (*env)->ReleaseStringUTFChars( env, var_obj, var );
-        }
-    }
-
-    java_object = (*env)->NewGlobalRef( env, obj );
-
-    main_argc = argc;
-    main_argv = argv;
-
-    init_paths();
-    virtual_init();
-    init_environment();
-
-#ifdef __i386__
-    {
-        unsigned short java_fs;
-        __asm__( "mov %%fs,%0" : "=r" (java_fs) );
-        if (!(java_fs & 4)) java_gdt_sel = java_fs;
-        __asm__( "mov %0,%%fs" :: "r" (0) );
-        start_main_thread();
-        __asm__( "mov %0,%%fs" :: "r" (java_fs) );
-    }
-#else
-    start_main_thread();
-#endif
-    return (*env)->NewStringUTF( env, error );
-}
-
-jint JNI_OnLoad( JavaVM *vm, void *reserved )
-{
-    static const JNINativeMethod method =
-    {
-        "wine_init", "([Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/String;", wine_init_jni
-    };
-
-    JNIEnv *env;
-    jclass class;
-
-    java_vm = vm;
-    if ((*vm)->AttachCurrentThread( vm, &env, NULL ) != JNI_OK) return JNI_ERR;
-    if (!(class = (*env)->FindClass( env, WINE_JAVA_CLASS ))) return JNI_ERR;
-    (*env)->RegisterNatives( env, class, &method, 1 );
-    return JNI_VERSION_1_6;
-}
-
-#endif  /* __ANDROID__ */
 
 #ifdef __APPLE__
 static void *apple_wine_thread( void *arg )

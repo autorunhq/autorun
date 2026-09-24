@@ -56,6 +56,7 @@ static HRESULT do_regexp_match_next(script_ctx_t *ctx, RegExpInstance *regexp,
         DWORD rem_flags, jsstr_t *jsstr, const WCHAR *str, match_state_t *ret)
 {
     HRESULT hres;
+    DWORD last_index;
 
     hres = regexp_execute(regexp->jsregexp, ctx, &ctx->tmp_heap,
             str, jsstr_length(jsstr), ret);
@@ -89,7 +90,8 @@ static HRESULT do_regexp_match_next(script_ctx_t *ctx, RegExpInstance *regexp,
             memset(ctx->match_parens+n, 0, sizeof(ctx->match_parens) - n*sizeof(ctx->match_parens[0]));
     }
 
-    set_last_index(regexp, ret->cp-str);
+    last_index = ret->cp-str;
+    set_last_index(regexp, ret->match_len == 0 ? last_index + 1 : last_index);
 
     if(!(rem_flags & REM_NO_CTX_UPDATE)) {
         ctx->last_match_index = ret->cp-str-ret->match_len;
@@ -557,14 +559,7 @@ static void RegExp_destructor(jsdisp_t *dispex)
 
 static HRESULT RegExp_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *dispex)
 {
-    return gc_process_linked_val(gc_ctx, op, dispex, &regexp_from_jsdisp(dispex)->last_index_val);
-}
-
-static void RegExp_cc_traverse(jsdisp_t *dispex, nsCycleCollectionTraversalCallback *cb)
-{
-    RegExpInstance *This = regexp_from_jsdisp(dispex);
-    if(is_object_instance(This->last_index_val))
-        cc_api.note_edge(get_edge_obj(get_object(This->last_index_val)), "last_index_val", cb);
+    return gc_process_linked_val(gc_ctx, op, &regexp_from_jsdisp(dispex)->last_index_val);
 }
 
 static const builtin_prop_t RegExp_props[] = {
@@ -584,8 +579,7 @@ static const builtin_info_t RegExp_info = {
     .props_cnt   = ARRAY_SIZE(RegExp_props),
     .props       = RegExp_props,
     .destructor  = RegExp_destructor,
-    .gc_traverse = RegExp_gc_traverse,
-    .cc_traverse = RegExp_cc_traverse
+    .gc_traverse = RegExp_gc_traverse
 };
 
 static const builtin_prop_t RegExpInst_props[] = {
@@ -602,8 +596,7 @@ static const builtin_info_t RegExpInst_info = {
     .props_cnt   = ARRAY_SIZE(RegExpInst_props),
     .props       = RegExpInst_props,
     .destructor  = RegExp_destructor,
-    .gc_traverse = RegExp_gc_traverse,
-    .cc_traverse = RegExp_cc_traverse
+    .gc_traverse = RegExp_gc_traverse
 };
 
 static HRESULT alloc_regexp(script_ctx_t *ctx, jsstr_t *str, jsdisp_t *object_prototype, RegExpInstance **ret)
@@ -980,6 +973,13 @@ HRESULT create_regexp_constr(script_ctx_t *ctx, jsdisp_t *object_prototype, jsdi
     jsstr_release(str);
     if(FAILED(hres))
         return hres;
+
+    regexp->jsregexp = regexp_new(ctx, &ctx->tmp_heap, L"", 0, 0, FALSE);
+    if(!regexp->jsregexp) {
+        WARN("regexp_new failed\n");
+        jsdisp_release(&regexp->dispex);
+        return DISP_E_EXCEPTION;
+    }
 
     hres = create_builtin_constructor(ctx, RegExpConstr_value, L"RegExp", &RegExpConstr_info,
             PROPF_CONSTR|2, &regexp->dispex, ret);

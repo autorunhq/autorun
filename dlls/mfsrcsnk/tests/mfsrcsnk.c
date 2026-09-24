@@ -66,6 +66,13 @@ static void check_interface_(unsigned int line, void *iface_ptr, REFIID iid, BOO
         IUnknown_Release(unk);
 }
 
+static ULONG get_refcount(void *iface)
+{
+    IUnknown *unknown = iface;
+    IUnknown_AddRef(unknown);
+    return IUnknown_Release(unknown);
+}
+
 static void test_wave_sink(void)
 {
     IMFMediaType *media_type, *media_type2;
@@ -824,6 +831,501 @@ static void test_thinning(void)
     IMFMediaSource_Release(source);
 }
 
+static void test_mp4_extra_metadata(void)
+{
+    IMFPresentationDescriptor *presentation_descriptor;
+    IMFStreamDescriptor *stream_descriptor;
+    IMFMediaTypeHandler *type_handler;
+    IMFMediaType *media_type;
+    IMFMediaSource *source;
+    IMFByteStream *stream;
+    DWORD stream_count;
+    UINT64 value64;
+    BOOL selected;
+    HRESULT hr;
+
+    /* Some metadata are duplicated at multiple levels in a mp4. Notably, the pixel aspect ratio
+     * is defined in both: 1) the pasp atom, and 2) the avcC atom.
+     * This test checks how they are treated by the byte stream handler. For example: are they both
+     * parsed? Which one takes precedence if both are present? */
+
+    /* 1. has no pasp atom. Aspect ratio set to 3:4 in the SPS contained by the avcC atom. */
+    stream = create_resource_byte_stream(L"test_metadata.mp4");
+    hr = create_source(&CLSID_MPEG4ByteStreamHandlerPlugin, stream, &source);
+    IMFByteStream_Release(stream);
+
+    if (FAILED(hr))
+    {
+        win_skip("Failed to create MPEG4 source: %#lx.\n", hr);
+        return;
+    }
+
+    hr = IMFMediaSource_CreatePresentationDescriptor(source, &presentation_descriptor);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFPresentationDescriptor_GetStreamDescriptorCount(presentation_descriptor, &stream_count);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(stream_count == 1, "Unexpected stream count %lu.\n", stream_count);
+    hr = IMFPresentationDescriptor_GetStreamDescriptorByIndex(presentation_descriptor, 0, &selected, &stream_descriptor);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFStreamDescriptor_GetMediaTypeHandler(stream_descriptor, &type_handler);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFMediaTypeHandler_GetCurrentMediaType(type_handler, &media_type);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    value64 = 0xdeadbeef;
+    hr = IMFMediaType_GetUINT64(media_type, &MF_MT_PIXEL_ASPECT_RATIO, &value64);
+    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    todo_wine ok(value64 == 0x300000004, "Unexpected aspect ratio %#I64x.\n", value64);
+    IMFMediaType_Release(media_type);
+    IMFMediaTypeHandler_Release(type_handler);
+    IMFStreamDescriptor_Release(stream_descriptor);
+    IMFPresentationDescriptor_Release(presentation_descriptor);
+    hr = IMFMediaSource_Shutdown(source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IMFMediaSource_Release(source);
+
+    /* 2. has pasp atom. Aspect ratio set to 3:4 in the SPS, and 15:16 in the pasp. */
+    stream = create_resource_byte_stream(L"test_metadata2.mp4");
+    hr = create_source(&CLSID_MPEG4ByteStreamHandlerPlugin, stream, &source);
+    IMFByteStream_Release(stream);
+
+    hr = IMFMediaSource_CreatePresentationDescriptor(source, &presentation_descriptor);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFPresentationDescriptor_GetStreamDescriptorCount(presentation_descriptor, &stream_count);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(stream_count == 1, "Unexpected stream count %lu.\n", stream_count);
+    hr = IMFPresentationDescriptor_GetStreamDescriptorByIndex(presentation_descriptor, 0, &selected, &stream_descriptor);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFStreamDescriptor_GetMediaTypeHandler(stream_descriptor, &type_handler);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFMediaTypeHandler_GetCurrentMediaType(type_handler, &media_type);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    value64 = 0xdeadbeef;
+    hr = IMFMediaType_GetUINT64(media_type, &MF_MT_PIXEL_ASPECT_RATIO, &value64);
+    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    /* pasp takes precedence */
+    todo_wine ok(value64 == 0xf00000010 || broken(value64 == 0x300000004) /* <= Win10 1809 */, "Unexpected aspect ratio: %#I64x.\n", value64);
+    IMFMediaType_Release(media_type);
+    IMFMediaTypeHandler_Release(type_handler);
+    IMFStreamDescriptor_Release(stream_descriptor);
+    IMFPresentationDescriptor_Release(presentation_descriptor);
+    hr = IMFMediaSource_Shutdown(source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IMFMediaSource_Release(source);
+}
+
+static void test_end_of_presentation(void)
+{
+    IMFPresentationDescriptor *pd;
+    IMFAsyncCallback *callback;
+    IMFByteStream *byte_stream;
+    IMFMediaSource *source;
+    IMFMediaStream *stream;
+    IMFMediaEvent *event;
+    MediaEventType type;
+    PROPVARIANT value;
+    HRESULT hr;
+
+    byte_stream = create_resource_byte_stream(L"test_thinning.avi");
+    hr = create_source(&CLSID_AVIByteStreamPlugin, byte_stream, &source);
+    IMFByteStream_Release(byte_stream);
+
+    if (FAILED(hr))
+    {
+        win_skip("Failed to create AVI media source: %#lx.\n", hr);
+        return;
+    }
+
+    hr = IMFMediaSource_CreatePresentationDescriptor(source, &pd);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    PropVariantInit(&value);
+    hr = IMFMediaSource_Start(source, pd, &GUID_NULL, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    callback = create_test_callback(TRUE);
+
+    hr = wait_media_event(source, callback, MENewStream, 1000, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(value.vt == VT_UNKNOWN, "Unexpected value type %d.\n", value.vt);
+    IMFMediaStream_AddRef(stream = (IMFMediaStream*)value.punkVal);
+    PropVariantClear(&value);
+
+    hr = wait_media_event(source, callback, MESourceStarted, 1000, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(value.vt == VT_EMPTY || value.vt == VT_I8, "Unexpected value type %d.\n", value.vt);
+    PropVariantClear(&value);
+
+    hr = wait_media_event(stream, callback, MEStreamStarted, 1000, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(value.vt == VT_EMPTY || value.vt == VT_I8, "Unexpected value type %d.\n", value.vt);
+    PropVariantClear(&value);
+
+    while (hr == S_OK)
+    {
+        hr = IMFMediaStream_RequestSample(stream, NULL);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = next_media_event(stream, callback, 1000, &event);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IMFMediaEvent_GetType(event, &type);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(type == MEMediaSample || type == MEEndOfStream, "Unexpected event type %ld.\n", type);
+
+        hr = IMFMediaEvent_GetValue(event, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        if (type == MEMediaSample)
+            ok(value.vt == VT_UNKNOWN, "Unexpected value type %d.\n", value.vt);
+        else if (type == MEEndOfStream)
+            ok(value.vt == VT_EMPTY, "Unexpected value type %d.\n", value.vt);
+
+        PropVariantClear(&value);
+        if (type == MEEndOfStream)
+            break;
+    }
+
+    hr = wait_media_event(source, callback, MEEndOfPresentation, 1000, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(value.vt == VT_EMPTY, "Unexpected value type %d.\n", value.vt);
+    PropVariantClear(&value);
+
+    /* Test we can still pause after end of presentation */
+    hr = IMFMediaSource_Pause(source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* And resume */
+    hr = IMFMediaSource_Start(source, pd, NULL, &value);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* And finally stop */
+    hr = IMFMediaSource_Stop(source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* Free resources */
+    hr = IMFMediaSource_Shutdown(source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    IMFMediaSource_Release(source);
+    IMFPresentationDescriptor_Release(pd);
+    IMFAsyncCallback_Release(callback);
+}
+
+static void test_release(void)
+{
+    IMFByteStream *byte_stream;
+    IMFMediaSource *source;
+    HRESULT hr;
+    LONG ref;
+
+    byte_stream = create_resource_byte_stream(L"test_thinning.avi");
+    hr = create_source(&CLSID_AVIByteStreamPlugin, byte_stream, &source);
+    ok(hr == S_OK, "failed to create MediaSource with hr %#lx\n", hr);
+
+    ref = get_refcount(byte_stream);
+    ok(ref > 1, "got unexpected ref %lu\n", ref);
+
+    hr = IMFMediaSource_Shutdown(source);
+    ok(hr == S_OK, "IMFMediaSource_Shutdown failed with hr %#lx\n", hr);
+
+    ref = IMFByteStream_Release(byte_stream);
+    ok(ref == 0, "got unexpected ref %lu\n", ref);
+
+    ref = IMFMediaSource_Release(source);
+    ok(ref == 0, "got unexpected ref %lu\n", ref);
+}
+
+struct test_stream
+{
+    IMFByteStream iface;
+    LONG refcount;
+
+    IMFByteStream *inner;
+};
+
+static struct test_stream *impl_from_IMFByteStream(IMFByteStream *iface)
+{
+    return (struct test_stream *)iface;
+}
+
+static HRESULT WINAPI teststream_QueryInterface(IMFByteStream *iface, REFIID riid, void **obj)
+{
+    struct test_stream *stream = impl_from_IMFByteStream(iface);
+
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IMFByteStream))
+    {
+        *obj = &stream->iface;
+        IMFByteStream_AddRef(iface);
+        return S_OK;
+    }
+
+    return IMFByteStream_QueryInterface(stream->inner, riid, obj);
+}
+
+static ULONG WINAPI teststream_AddRef(IMFByteStream *iface)
+{
+    struct test_stream *stream = impl_from_IMFByteStream(iface);
+    return InterlockedIncrement(&stream->refcount);
+}
+
+static ULONG WINAPI teststream_Release(IMFByteStream *iface)
+{
+    struct test_stream *stream = impl_from_IMFByteStream(iface);
+    ULONG refcount = InterlockedDecrement(&stream->refcount);
+
+    if (!refcount)
+    {
+        IMFByteStream_Release(stream->inner);
+        free(stream);
+    }
+
+    return refcount;
+}
+
+static HRESULT WINAPI teststream_GetCapabilities(IMFByteStream *iface, DWORD *capabilities)
+{
+    return IMFByteStream_GetCapabilities(impl_from_IMFByteStream(iface)->inner, capabilities);
+}
+
+static HRESULT WINAPI teststream_GetLength(IMFByteStream *iface, QWORD *length)
+{
+    return IMFByteStream_GetLength(impl_from_IMFByteStream(iface)->inner, length);
+}
+
+static HRESULT WINAPI teststream_SetLength(IMFByteStream *iface, QWORD length)
+{
+    return IMFByteStream_SetLength(impl_from_IMFByteStream(iface)->inner, length);
+}
+
+static HRESULT WINAPI teststream_GetCurrentPosition(IMFByteStream *iface, QWORD *position)
+{
+    return IMFByteStream_GetCurrentPosition(impl_from_IMFByteStream(iface)->inner, position);
+}
+
+static HRESULT WINAPI teststream_SetCurrentPosition(IMFByteStream *iface, QWORD position)
+{
+    ok(position % 0x40000 == 0, "IMFByteStream::SetCurrentPosition pos=%I64d should be aligned on 0x40000 boundary.\n", position);
+    return IMFByteStream_SetCurrentPosition(impl_from_IMFByteStream(iface)->inner, position);
+}
+
+static HRESULT WINAPI teststream_IsEndOfStream(IMFByteStream *iface, BOOL *ret)
+{
+    return IMFByteStream_IsEndOfStream(impl_from_IMFByteStream(iface)->inner, ret);
+}
+
+static HRESULT WINAPI teststream_Read(IMFByteStream *iface, BYTE *buffer, ULONG size, ULONG *read_len)
+{
+    QWORD pos = 0;
+    HRESULT hr = IMFByteStream_GetCurrentPosition(impl_from_IMFByteStream(iface)->inner, &pos);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(pos % 0x40000 == 0, "IMFByteStream::Read pos=%I64d should be aligned on 0x40000 boundary.\n", pos);
+    ok(size <= 0x40000, "IMFByteStream::BeginRead size=%lu should not be larger than 0x40000.\n", size);
+    return IMFByteStream_Read(impl_from_IMFByteStream(iface)->inner, buffer, size, read_len);
+}
+
+static HRESULT WINAPI teststream_BeginRead(IMFByteStream *iface, BYTE *data, ULONG size, IMFAsyncCallback *callback,
+        IUnknown *state)
+{
+    QWORD pos = 0;
+    HRESULT hr = IMFByteStream_GetCurrentPosition(impl_from_IMFByteStream(iface)->inner, &pos);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(pos % 0x40000 == 0, "IMFByteStream::BeginRead pos=%I64d should be aligned on 0x40000 boundary.\n", pos);
+    ok(size <= 0x40000, "IMFByteStream::BeginRead size=%lu should not be larger than 0x40000.\n", size);
+    return IMFByteStream_BeginRead(impl_from_IMFByteStream(iface)->inner, data, size, callback, state);
+}
+
+static HRESULT WINAPI teststream_EndRead(IMFByteStream *iface, IMFAsyncResult *result, ULONG *byte_read)
+{
+    return IMFByteStream_EndRead(impl_from_IMFByteStream(iface)->inner, result, byte_read);
+}
+
+static HRESULT WINAPI teststream_Write(IMFByteStream *iface, const BYTE *data, ULONG size, ULONG *written)
+{
+    return IMFByteStream_Write(impl_from_IMFByteStream(iface)->inner, data, size, written);
+}
+
+static HRESULT WINAPI teststream_BeginWrite(IMFByteStream *iface, const BYTE *data, ULONG size,
+        IMFAsyncCallback *callback, IUnknown *state)
+{
+    return IMFByteStream_BeginWrite(impl_from_IMFByteStream(iface)->inner, data, size, callback, state);
+}
+
+static HRESULT WINAPI teststream_EndWrite(IMFByteStream *iface, IMFAsyncResult *result, ULONG *written)
+{
+    return IMFByteStream_EndWrite(impl_from_IMFByteStream(iface)->inner, result, written);
+}
+
+static HRESULT WINAPI teststream_Seek(IMFByteStream *iface, MFBYTESTREAM_SEEK_ORIGIN origin, LONGLONG offset,
+        DWORD flags, QWORD *current)
+{
+    HRESULT ret_hr = IMFByteStream_Seek(impl_from_IMFByteStream(iface)->inner, origin, offset, flags, current);
+
+    QWORD pos = 0;
+    HRESULT hr = IMFByteStream_GetCurrentPosition(impl_from_IMFByteStream(iface)->inner, &pos);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(pos % 0x40000 == 0, "IMFByteStream::Seek pos=%I64d should be aligned on 0x40000 boundary.\n", pos);
+
+    return ret_hr;
+}
+
+static HRESULT WINAPI teststream_Flush(IMFByteStream *iface)
+{
+    return IMFByteStream_Flush(impl_from_IMFByteStream(iface)->inner);
+}
+
+static HRESULT WINAPI teststream_Close(IMFByteStream *iface)
+{
+    return IMFByteStream_Close(impl_from_IMFByteStream(iface)->inner);
+}
+
+static const IMFByteStreamVtbl test_stream_vtbl =
+{
+    teststream_QueryInterface,
+    teststream_AddRef,
+    teststream_Release,
+    teststream_GetCapabilities,
+    teststream_GetLength,
+    teststream_SetLength,
+    teststream_GetCurrentPosition,
+    teststream_SetCurrentPosition,
+    teststream_IsEndOfStream,
+    teststream_Read,
+    teststream_BeginRead,
+    teststream_EndRead,
+    teststream_Write,
+    teststream_BeginWrite,
+    teststream_EndWrite,
+    teststream_Seek,
+    teststream_Flush,
+    teststream_Close,
+};
+
+static IMFByteStream *create_test_stream(IMFByteStream *inner)
+{
+    struct test_stream *stream;
+
+    if (!(stream = calloc(1, sizeof *stream))) return NULL;
+    stream->iface.lpVtbl = &test_stream_vtbl;
+    stream->refcount = 1;
+    stream->inner = inner;
+
+    return &stream->iface;
+}
+
+static void test_source_buffer_size(void)
+{
+    /* using WAV source as example - but this should hold for any of our builtin sources */
+    static const GUID CLSID_WAVByteStreamHandler = {0x42c9b9f5,0x16fc,0x47ef,{0xaf,0x22,0xda,0x05,0xf7,0xc8,0x42,0xe3}};
+    static const ULONG sizes[3] =
+    {
+        0x5000,   /* smaller */
+        0x50000,  /* larger */
+        0x500000, /* much larger */
+    };
+    IMFByteStream *byte_stream;
+    IMFMediaSource *source;
+    IMFMediaStream *stream;
+    IMFPresentationDescriptor *pres_desc;
+    IMFAsyncCallback *callback;
+    PROPVARIANT propvar;
+    HRESULT hr;
+
+    for (UINT i = 0; i < 3; i++)
+    {
+        ULONG read_size = 0, wav_size = sizes[i];
+        BYTE *wav_data;
+        const BYTE header[] =
+        {
+#define EMBED_U32(X) (X) & 0xff, ((X) >> 8) & 0xff, ((X) >> 16) & 0xff, ((X) >> 24) & 0xff
+#define EMBED_U16(X) (X) & 0xff, ((X) >> 8) & 0xff
+            'R', 'I', 'F', 'F',
+            EMBED_U32(wav_size - 8),
+            'W', 'A', 'V', 'E',
+            'f', 'm', 't', ' ',
+            EMBED_U32(16),
+            EMBED_U16(1),             /* PCM */
+            EMBED_U16(1),             /* channels */
+            EMBED_U32(48000),         /* rate */
+            EMBED_U32((48000*8*1)/8), /* bytes per second */
+            EMBED_U16((8*1)/8),       /* block alignment */
+            EMBED_U16(8),             /* bits per sample */
+            'd', 'a', 't', 'a',
+            EMBED_U32(wav_size - 44),
+#undef EMBED_U16
+#undef EMBED_U32
+        };
+        C_ASSERT(sizeof header == 44);
+
+        if (!(wav_data = calloc(wav_size, 1)))
+        {
+            win_skip("Failed to allocate memory for WAV data.\n");
+            return;
+        }
+        memcpy(wav_data, header, sizeof header);
+
+        byte_stream = create_byte_stream(wav_data, wav_size);
+        byte_stream = create_test_stream(byte_stream);
+
+        free(wav_data);
+
+        hr = create_source(&CLSID_WAVByteStreamHandler, byte_stream, &source);
+        if (FAILED(hr))
+        {
+            win_skip("Failed to create WAV source: %#lx.\n", hr);
+            return;
+        }
+
+        hr = IMFMediaSource_CreatePresentationDescriptor(source, &pres_desc);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        propvar.vt = VT_EMPTY;
+        hr = IMFMediaSource_Start(source, pres_desc, &GUID_NULL, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IMFPresentationDescriptor_Release(pres_desc);
+
+        callback = create_test_callback(TRUE);
+
+        hr = wait_media_event(source, callback, MENewStream, 100, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(propvar.vt == VT_UNKNOWN, "got vt %u\n", propvar.vt);
+        stream = (IMFMediaStream *)propvar.punkVal;
+        IMFMediaStream_AddRef(stream);
+        PropVariantClear(&propvar);
+
+        hr = wait_media_event(source, callback, MESourceStarted, 100, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = wait_media_event(stream, callback, MEStreamStarted, 100, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        while (read_size < wav_size - sizeof header)
+        {
+            IMFSample *sample;
+            DWORD size;
+            if ((hr = IMFMediaStream_RequestSample(stream, NULL)) != S_OK) break;
+            if ((hr = wait_media_event(stream, callback, MEMediaSample, 100, &propvar)) != S_OK) break;
+            if ((hr = IUnknown_QueryInterface(propvar.punkVal, &IID_IMFSample, (void **) &sample)) != S_OK) break;
+            if ((hr = IMFSample_GetTotalLength(sample, &size)) != S_OK) break;
+            read_size += size;
+            IMFSample_Release(sample);
+            PropVariantClear(&propvar);
+        }
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(read_size == wav_size - sizeof header, "Incomplete bytes read: %lu.\n", read_size);
+
+        hr = IMFMediaSource_Stop(source);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = wait_media_event(source, callback, MESourceStopped, 100, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(propvar.vt == VT_EMPTY, "got vt %u\n", propvar.vt);
+        hr = wait_media_event(stream, callback, MEStreamStopped, 100, &propvar);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(propvar.vt == VT_EMPTY, "got vt %u\n", propvar.vt);
+
+        IMFMediaSource_Release(source);
+        IMFMediaStream_Release(stream);
+        IMFAsyncCallback_Release(callback);
+        IMFByteStream_Release(byte_stream);
+    }
+}
+
 START_TEST(mfsrcsnk)
 {
     HRESULT hr;
@@ -833,6 +1335,10 @@ START_TEST(mfsrcsnk)
 
     test_wave_sink();
     test_thinning();
+    test_mp4_extra_metadata();
+    test_end_of_presentation();
+    test_release();
+    test_source_buffer_size();
 
     hr = MFShutdown();
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);

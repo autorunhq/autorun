@@ -173,12 +173,118 @@ static void test_AccentColor( IUISettings3 *uisettings3 )
     if (default_palette_len) set_accent_palette( default_palette, default_palette_len );
 }
 
+static void test_UIElementColor( IUISettings *uisettings )
+{
+    static const struct
+    {
+        enum UIElementType type;
+        int syscolor_index;
+    }
+    tests[] =
+    {
+        { UIElementType_ActiveCaption, COLOR_ACTIVECAPTION },
+        { UIElementType_Background, COLOR_BACKGROUND },
+        { UIElementType_ButtonFace, COLOR_BTNFACE },
+        { UIElementType_ButtonText, COLOR_BTNTEXT },
+        { UIElementType_CaptionText, COLOR_CAPTIONTEXT },
+        { UIElementType_GrayText, COLOR_GRAYTEXT },
+        { UIElementType_Highlight, COLOR_HIGHLIGHT },
+        { UIElementType_HighlightText, COLOR_HIGHLIGHTTEXT },
+        { UIElementType_Hotlight, COLOR_HOTLIGHT },
+        { UIElementType_InactiveCaption, COLOR_INACTIVECAPTION },
+        { UIElementType_InactiveCaptionText, COLOR_INACTIVECAPTIONTEXT },
+        { UIElementType_Window, COLOR_WINDOW },
+        { UIElementType_WindowText, COLOR_WINDOWTEXT },
+        { UIElementType_AccentColor, -1 },
+        { UIElementType_TextHigh, -1 },
+        { UIElementType_TextMedium, -1 },
+        { UIElementType_TextLow, -1 },
+        { UIElementType_TextContrastWithHigh, -1 },
+        { UIElementType_NonTextHigh, -1 },
+        { UIElementType_NonTextMediumHigh, -1 },
+        { UIElementType_NonTextMedium, -1 },
+        { UIElementType_NonTextMediumLow, -1 },
+        { UIElementType_NonTextLow, -1 },
+        { UIElementType_PageBackground, -1 },
+        { UIElementType_PopupBackground, -1 },
+        { UIElementType_OverlayOutsidePopup, -1 },
+        { (UIElementType)12345, -1 } /* Invalid UIElementType */
+    };
+    Color color;
+    HRESULT hr;
+
+    for (int i = 0; i < ARRAY_SIZE( tests ); i++)
+    {
+        winetest_push_context( "%d", i );
+
+        memset( &color, 0xff, sizeof(color) );
+        hr = IUISettings_UIElementColor( uisettings, tests[i].type, &color );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (tests[i].syscolor_index == -1)
+        {
+            ok( color.A == 0 && color.R == 0 && color.G == 0 && color.B == 0,
+                "Got unexpected color %d %d %d %d.\n", color.A, color.R, color.G, color.B );
+        }
+        else
+        {
+            COLORREF colorref = GetSysColor( tests[i].syscolor_index );
+            ok( color.A == 0xff && color.R == GetRValue( colorref )
+                && color.G == GetGValue( colorref ) && color.B == GetBValue( colorref ),
+                "Got unexpected color %d %d %d %d.\n", color.A, color.R, color.G, color.B );
+        }
+
+        winetest_pop_context();
+    }
+
+    /* Crash on Windows */
+    if (0)
+    {
+    hr = IUISettings_UIElementColor( uisettings, UIElementType_ActiveCaption, NULL );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    }
+}
+
+static void test_AnimationsEnabled( IUISettings *uisettings )
+{
+    BOOL client_area_animation, ret;
+    boolean enabled;
+    HRESULT hr;
+
+    /* Crash on Windows */
+    if (0)
+    {
+    hr = IUISettings_get_AnimationsEnabled( uisettings, NULL );
+    ok( hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr );
+    }
+
+    ret = SystemParametersInfoW( SPI_GETCLIENTAREAANIMATION, 0, &client_area_animation, 0 );
+    ok( ret, "SystemParametersInfoW failed, error %ld.\n", GetLastError() );
+    hr = IUISettings_get_AnimationsEnabled( uisettings, &enabled );
+    ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+    ok( enabled == client_area_animation, "Expected %d, got %d.\n", client_area_animation, enabled );
+
+    ret = SystemParametersInfoW( SPI_SETCLIENTAREAANIMATION, 0, IntToPtr(!client_area_animation), 0 );
+    ok( ret, "SystemParametersInfoW failed, error %ld.\n", GetLastError() );
+    hr = IUISettings_get_AnimationsEnabled( uisettings, &enabled );
+    ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+    ok( enabled == !client_area_animation, "Expected %d, got %d.\n", !client_area_animation, enabled );
+
+    ret = SystemParametersInfoW( SPI_SETCLIENTAREAANIMATION, 0, IntToPtr(client_area_animation), 0 );
+    ok( ret, "SystemParametersInfoW failed, error %ld.\n", GetLastError() );
+    hr = IUISettings_get_AnimationsEnabled( uisettings, &enabled );
+    ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+    ok( enabled == client_area_animation, "Expected %d, got %d.\n", client_area_animation, enabled );
+}
+
 static void test_UISettings(void)
 {
     static const WCHAR *uisettings_name = L"Windows.UI.ViewManagement.UISettings";
     IActivationFactory *factory;
+    IUISettings2 *uisettings2;
     IUISettings3 *uisettings3;
     IInspectable *inspectable;
+    DOUBLE text_scale_factor;
+    IUISettings *uisettings;
     DWORD default_theme;
     UIColorType type;
     Color value;
@@ -222,12 +328,27 @@ static void test_UISettings(void)
     check_interface( inspectable, &IID_IWeakReferenceSource, TRUE );
     check_interface( inspectable, &IID_IWeakReference, FALSE );
 
+    hr = IInspectable_QueryInterface( inspectable, &IID_IUISettings, (void **)&uisettings );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( inspectable, &IID_IUISettings2, (void **)&uisettings2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    text_scale_factor = 12345.6;
+    hr = IUISettings2_get_TextScaleFactor( uisettings2, &text_scale_factor );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( text_scale_factor >= 1.0 && text_scale_factor <= 2.25, "got text_scale_factor %f.\n", text_scale_factor );
+
+    IUISettings2_Release( uisettings2 );
+
+    test_AnimationsEnabled( uisettings );
     test_AccentColor( uisettings3 );
 
     default_theme = get_app_theme();
 
     /* Light Theme */
     if (!set_app_theme( 1 )) goto done;
+
+    test_UIElementColor( uisettings );
 
     reset_color( &value );
     type = UIColorType_Foreground;
@@ -246,6 +367,8 @@ static void test_UISettings(void)
     /* Dark Theme */
     if (!set_app_theme( 0 )) goto done;
 
+    test_UIElementColor( uisettings );
+
     reset_color( &value );
     type = UIColorType_Foreground;
     hr = IUISettings3_GetColorValue( uisettings3, type, &value );
@@ -262,6 +385,7 @@ static void test_UISettings(void)
 
 done:
     set_app_theme( default_theme );
+    IUISettings_Release( uisettings );
     IUISettings3_Release( uisettings3 );
 
 skip_uisettings3:

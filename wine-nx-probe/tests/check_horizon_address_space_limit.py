@@ -33,6 +33,7 @@ typedef int BOOL;
 #define max(a,b) ((a) > (b) ? (a) : (b))
 static const uintptr_t page_size = 0x1000;
 static const uintptr_t granularity_mask = 0xffff;
+static unsigned int cpu_count = 4;
 static void *address_space_limit;
 static void *user_space_limit;
 static void *working_set_limit;
@@ -57,7 +58,6 @@ typedef struct
     unsigned int NumberOfProcessors;
     unsigned int unknown;
 } SYSTEM_BASIC_INFORMATION;
-static struct { unsigned int NumberOfProcessors; } peb_data = { 4 }, *peb = &peb_data;
 static void horizon_get_memory_info(unsigned long long *total, unsigned long long *used)
 {
     *total = 8ull << 30;

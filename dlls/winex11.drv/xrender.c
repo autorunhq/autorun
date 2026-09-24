@@ -959,7 +959,6 @@ static BOOL xrenderdrv_DeleteDC( PHYSDEV dev )
     struct xrender_physdev *physdev = get_xrender_dev( dev );
 
     free_xrender_picture( physdev );
-    if (physdev->region) NtGdiDeleteObjectApp( physdev->region );
 
     pthread_mutex_lock( &xrender_mutex );
     if (physdev->cache_index != -1) dec_ref_cache( physdev->cache_index );
@@ -1015,16 +1014,15 @@ static INT xrenderdrv_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LPCVOID 
 /***********************************************************************
  *           xrenderdrv_SetDeviceClipping
  */
-static void xrenderdrv_SetDeviceClipping( PHYSDEV dev, HRGN rgn, HRGN monitor_rgn )
+static void xrenderdrv_SetDeviceClipping( PHYSDEV dev, HRGN rgn )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
 
-    if (physdev->region) NtGdiDeleteObjectApp( physdev->region );
-    physdev->region = clone_gdi_region( monitor_rgn );
+    physdev->region = rgn;
     physdev->update_clip = TRUE;
 
     dev = GET_NEXT_PHYSDEV( dev, pSetDeviceClipping );
-    dev->funcs->pSetDeviceClipping( dev, rgn, monitor_rgn );
+    dev->funcs->pSetDeviceClipping( dev, rgn );
 }
 
 

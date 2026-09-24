@@ -50,7 +50,7 @@ typedef int BOOL;
 #define ROUND_ADDR(addr,mask) ((void *)((UINT_PTR)(addr) & ~(UINT_PTR)(mask)))
 #define ROUND_SIZE(addr,size,mask) (((SIZE_T)(size) + ((UINT_PTR)(addr) & (mask)) + (mask)) & ~(UINT_PTR)(mask))
 static const uintptr_t limit_4g = 0x100000000ull;
-static const uintptr_t host_page_mask = 0xfff, granularity_mask = 0xffff;
+static const uintptr_t host_page_size = 0x1000, host_page_mask = 0xfff, granularity_mask = 0xffff;
 static void *host_addr_space_limit = (void *)0x100000000ull;
 static void *address_space_start = (void *)0x10000;
 static struct list reserved_areas = LIST_INIT(reserved_areas);
@@ -92,7 +92,7 @@ static void *anon_mmap_tryfixed(void *addr, size_t size, int prot, int flags)
 }
 static void wine_nx_runtime_trace(const char *msg) { puts(msg); }
 '''
-for name in ('reserved_area', 'range_entry', 'alloc_area'):
+for name in ('reserved_area', 'range_entry'):
     fixture += re.search(r'^struct ' + name + r'\n\{.*?^\};', source, re.M | re.S)[0] + '\n'
 fixture += r'''
 /* virtual_init excludes the kernel heap before making reservations. */
@@ -129,16 +129,13 @@ static void *anon_mmap_fixed(void *ptr, size_t size, int prot, int flags)
     committed = prot == PROT_NONE ? 0 : size;
     return ptr;
 }
-/* This fixture has no free space outside the early reservation. Exercise the
- * real reserved-area branch rather than mocking Wine's choice of address. */
-static void *try_map_free_area_range(struct alloc_area *a, void *start, void *end)
-{ (void)a; (void)start; (void)end; return NULL; }
 static size_t unmap_area_above_user_limit(void *ptr, size_t size)
 { (void)ptr; return size; }
 static int munmap(void *ptr, size_t size)
 { (void)ptr; (void)size; abort(); }
 '''
-fixture += block('static void *alloc_free_area_in_range(')
+fixture += block('static void *find_reserved_free_area(')
+fixture += block('static void *map_reserved_area(')
 fixture += block('static void unmap_area(')
 fixture += block('static void mmap_remove_reserved_area(')
 fixture += r'''
@@ -182,7 +179,7 @@ static void cleanup(void)
 }
 int main(void)
 {
-    struct alloc_area a = {.size = 60032u * 1024, .align_mask = 0xffff};
+    const size_t size = 60032u * 1024, align_mask = 0xffff;
     void *ptr;
     /* A released neighboring view may merge free ranges across a sparse
      * kernel exclusion. Restore both partial sides of the permanent hole. */
@@ -213,7 +210,7 @@ int main(void)
     assert(!committed); /* reservation consumes address space, not physical pages */
     assert(!mmap_is_in_reserved_area((void *)0x10000000, 0x1000));
     assert(!mmap_is_in_reserved_area((void *)0x75000000, 0x1000));
-    assert(mmap_is_in_reserved_area((void *)0x11000000, a.size) == 1);
+    assert(mmap_is_in_reserved_area((void *)0x11000000, size) == 1);
     /* Future libnx allocations cannot split the protected guest range into
      * 16 MiB gaps. Native allocation still has space outside the reservation. */
     for (uintptr_t p = 0x1000000; p < (uintptr_t)horizon_native_window_start; p += 0x1000000)
@@ -236,25 +233,28 @@ int main(void)
     }
     for (int top_down = 0; top_down < 2; top_down++)
     {
-        a.top_down = top_down;
-        a.unix_prot = PROT_NONE;
-        ptr = alloc_free_area_in_range(&a, (char *)0x10000, (char *)0x40000000);
+        ptr = map_reserved_area((char *)0x10000, (char *)0x40000000,
+                                size, top_down, PROT_NONE, align_mask);
         assert(ptr && ptr != MAP_FAILED && !committed);
-        assert(anon_mmap_fixed(ptr, a.size, PROT_READ | PROT_WRITE, 0) == ptr);
-        assert(committed == a.size);
-        unmap_area(ptr, a.size);
-        assert(!committed && mmap_is_in_reserved_area(ptr, a.size) == 1);
-        assert(anon_mmap_tryfixed(ptr, a.size, PROT_NONE, 0) == MAP_FAILED);
-        assert(alloc_free_area_in_range(&a, ptr, (char *)ptr + a.size) == ptr);
+        assert(anon_mmap_fixed(ptr, size, PROT_READ | PROT_WRITE, 0) == ptr);
+        assert(committed == size);
+        unmap_area(ptr, size);
+        assert(!committed && mmap_is_in_reserved_area(ptr, size) == 1);
+        assert(anon_mmap_tryfixed(ptr, size, PROT_NONE, 0) == MAP_FAILED);
+        assert(map_reserved_area(ptr, (char *)ptr + size, size,
+                                 top_down, PROT_NONE, align_mask) == ptr);
     }
     assert(fixed_calls == 8);
     for (int top_down = 0; top_down < 2; top_down++)
     {
-        a.top_down = top_down;
         fixed_failures = -1;
-        assert(!alloc_free_area_in_range(&a, (char *)0x10000, (char *)0x40000000));
+        assert(!map_reserved_area((char *)0x10000, (char *)0x40000000,
+                                  size, top_down, PROT_NONE, align_mask));
         fixed_failures = 1;
-        ptr = alloc_free_area_in_range(&a, (char *)0x10000, (char *)0x40000000);
+        assert(!map_reserved_area((char *)0x10000, (char *)0x40000000,
+                                  size, top_down, PROT_NONE, align_mask));
+        ptr = map_reserved_area((char *)0x10000, (char *)0x40000000,
+                                size, top_down, PROT_NONE, align_mask);
         assert(ptr && ptr != MAP_FAILED && !fixed_failures);
     }
     /* Most Wanted reserves 172 MiB in one piece, with its own mappings
@@ -273,10 +273,11 @@ int main(void)
     assert(mmap_is_in_reserved_area((void *)0x40000000, 0xafd0000) == 1);
     assert(!mmap_is_in_reserved_area((void *)(stack_hi - (stack_hi - stack_lo) / 8 * 5), 0x1000));
     {
-        struct alloc_area big = {.size = 0xafd0000, .align_mask = 0xffff};
-        void *p = alloc_free_area_in_range(&big, (char *)0x10000, (char *)0x100000000ull);
+        const size_t big_size = 0xafd0000;
+        void *p = map_reserved_area((char *)0x10000, (char *)0x100000000ull,
+                                    big_size, 0, PROT_NONE, align_mask);
         assert(p && p != MAP_FAILED);
-        assert((uintptr_t)p >= stack_hi && (uintptr_t)p + big.size <= 0x78200000);
+        assert((uintptr_t)p >= stack_hi && (uintptr_t)p + big_size <= 0x78200000);
     }
     /* A 39-bit address space: libnx can place code memory outside the window,
      * so the window is half the region again and the program keeps the rest.
@@ -330,7 +331,7 @@ int main(void)
     {
         const unsigned long long inside = 0x4644000, window = (uintptr_t)horizon_native_window_start + 0x10000;
         const unsigned long long viewed = 0x9100000;
-        struct alloc_area big = {.size = 0x400000, .align_mask = 0xffff};
+        const size_t big_size = 0x400000;
         unsigned int found = 0, dropped, i;
 
         assert(mmap_is_in_reserved_area((void *)(uintptr_t)inside, 0x1000) == 1);
@@ -342,15 +343,16 @@ int main(void)
         view_end = 0x9400000;
         dropped = horizon_drop_thread_local_pages(&found);
         assert(found == 3 && dropped == 1);
-        assert(!mmap_is_in_reserved_area((void *)(uintptr_t)inside, 0x1000));
+        assert(mmap_is_in_reserved_area((void *)(uintptr_t)inside, 0x1000) != 1);
         assert(mmap_is_in_reserved_area((void *)(uintptr_t)(inside - 0x1000), 0x1000) == 1);
         assert(mmap_is_in_reserved_area((void *)(uintptr_t)(inside + 0x1000), 0x1000) == 1);
         assert(mmap_is_in_reserved_area((void *)(uintptr_t)viewed, 0x1000) == 1);
         for (i = 0; i < 64; i++)
         {
-            char *p = alloc_free_area_in_range(&big, (char *)0x10000, (char *)0x18000000);
+            char *p = map_reserved_area((char *)0x10000, (char *)0x18000000,
+                                        big_size, 0, PROT_NONE, align_mask);
             if (!p || p == MAP_FAILED) break;
-            assert((uintptr_t)p + big.size <= inside || (uintptr_t)p > inside);
+            assert((uintptr_t)p + big_size <= inside || (uintptr_t)p > inside);
         }
         assert(i > 4);
         tls_page_count = 0;

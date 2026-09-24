@@ -16,15 +16,15 @@
 
 #include <stdlib.h>
 
-#define HORIZON_REQ_CREATE_COMPLETION      266
-#define HORIZON_REQ_OPEN_COMPLETION        267
-#define HORIZON_REQ_ADD_COMPLETION         268
-#define HORIZON_REQ_REMOVE_COMPLETION      269
-#define HORIZON_REQ_GET_THREAD_COMPLETION  270
-#define HORIZON_REQ_QUERY_COMPLETION       271
-#define HORIZON_REQ_SET_COMPLETION_INFO    272
-#define HORIZON_REQ_ADD_FD_COMPLETION      273
-#define HORIZON_REQ_SET_FD_COMPLETION_MODE 274
+#define HORIZON_REQ_CREATE_COMPLETION      264
+#define HORIZON_REQ_OPEN_COMPLETION        265
+#define HORIZON_REQ_ADD_COMPLETION         266
+#define HORIZON_REQ_REMOVE_COMPLETION      267
+#define HORIZON_REQ_GET_THREAD_COMPLETION  268
+#define HORIZON_REQ_QUERY_COMPLETION       269
+#define HORIZON_REQ_SET_COMPLETION_INFO    270
+#define HORIZON_REQ_ADD_FD_COMPLETION      271
+#define HORIZON_REQ_SET_FD_COMPLETION_MODE 272
 
 #define HORIZON_FILE_SYNCHRONOUS_IO_ALERT            0x10
 #define HORIZON_FILE_SYNCHRONOUS_IO_NONALERT         0x20
@@ -136,14 +136,14 @@ struct horizon_create_completion_request
     struct horizon_server_request_header header;
     unsigned int access;
     unsigned int concurrent;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_create_completion_reply
 {
     struct horizon_server_reply_header header;
     unsigned int handle;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_add_completion_request
@@ -162,7 +162,7 @@ struct horizon_remove_completion_request
     struct horizon_server_request_header header;
     unsigned int handle;
     int alertable;
-    char pad[4];
+    char __pad_20[4];
 };
 
 struct horizon_remove_completion_reply
@@ -182,7 +182,7 @@ struct horizon_get_thread_completion_reply
     unsigned long long cvalue;
     unsigned long long information;
     unsigned int status;
-    char pad[4];
+    char __pad_36[4];
 };
 
 struct horizon_query_completion_request
@@ -195,7 +195,7 @@ struct horizon_query_completion_reply
 {
     struct horizon_server_reply_header header;
     unsigned int depth;
-    char pad[4];
+    char __pad_12[4];
 };
 
 struct horizon_set_completion_info_request
@@ -204,7 +204,7 @@ struct horizon_set_completion_info_request
     unsigned int handle;
     unsigned long long ckey;
     unsigned int chandle;
-    char pad[4];
+    char __pad_28[4];
 };
 
 struct horizon_add_fd_completion_request
@@ -222,7 +222,7 @@ struct horizon_set_fd_completion_mode_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned int flags;
-    char pad[4];
+    char __pad_20[4];
 };
 
 #endif /* __WINE_HORIZON_COMPLETION_H */

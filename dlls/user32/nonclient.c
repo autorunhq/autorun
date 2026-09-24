@@ -21,7 +21,6 @@
 #include "user_private.h"
 #include "controls.h"
 #include "wine/debug.h"
-#include "ntuser.h"
 
 
 #define SC_ABOUTWINE            (SC_SCREENSAVE+1)

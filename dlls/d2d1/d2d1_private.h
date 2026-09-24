@@ -460,6 +460,28 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
 unsigned int d2d_get_bitmap_options_for_surface(IDXGISurface *surface);
 struct d2d_bitmap *unsafe_impl_from_ID2D1Bitmap(ID2D1Bitmap *iface);
 
+struct d2d_sprite
+{
+    D2D1_RECT_F dest;
+    D2D1_RECT_U source;
+    D2D1_COLOR_F color;
+    D2D1_MATRIX_3X2_F transform;
+};
+
+struct d2d_sprite_batch
+{
+    ID2D1SpriteBatch ID2D1SpriteBatch_iface;
+    LONG refcount;
+
+    ID2D1Factory *factory;
+    size_t sprites_size;
+    size_t sprite_count;
+    struct d2d_sprite *sprites;
+};
+
+HRESULT d2d_sprite_batch_create(ID2D1Factory *factory, struct d2d_sprite_batch **batch);
+struct d2d_sprite_batch *unsafe_impl_from_ID2D1SpriteBatch(ID2D1SpriteBatch *iface);
+
 struct d2d_state_block
 {
     ID2D1DrawingStateBlock1 ID2D1DrawingStateBlock1_iface;
@@ -511,10 +533,20 @@ struct d2d_curve_outline_vertex
     D2D1_POINT_2F prev, next;
 };
 
+struct d2d_geometry;
+
+struct d2d_geometry_ops
+{
+    void (*stream)(struct d2d_geometry *geometry, const D2D_MATRIX_3X2_F *transform,
+            ID2D1GeometrySink *sink);
+};
+
 struct d2d_geometry
 {
     ID2D1Geometry ID2D1Geometry_iface;
     LONG refcount;
+
+    const struct d2d_geometry_ops *ops;
 
     ID2D1Factory *factory;
 
@@ -582,6 +614,7 @@ struct d2d_geometry
             enum d2d_geometry_state state;
             HRESULT code;
             D2D1_FILL_MODE fill_mode;
+            UINT32 segment_flags;
             UINT32 segment_count;
 
             D2D1_RECT_F bounds;
@@ -604,6 +637,7 @@ struct d2d_geometry
             ID2D1Geometry **src_geometries;
             UINT32 geometry_count;
             D2D1_FILL_MODE fill_mode;
+            ID2D1PathGeometry *path;
         } group;
     } u;
 };
@@ -917,6 +951,9 @@ void d2d_command_list_draw_glyph_run(struct d2d_command_list *command_list,
 void d2d_command_list_draw_bitmap(struct d2d_command_list *command_list, ID2D1Bitmap *bitmap,
         const D2D1_RECT_F *dst_rect, float opacity, D2D1_INTERPOLATION_MODE interpolation_mode,
         const D2D1_RECT_F *src_rect, const D2D1_MATRIX_4X4_F *perspective_transform);
+void d2d_command_list_draw_sprite_batch(struct d2d_command_list *command_list, ID2D1SpriteBatch *sprite_batch,
+        UINT32 start_index, UINT32 sprite_count, ID2D1Bitmap *bitmap, D2D1_BITMAP_INTERPOLATION_MODE interpolation_mode,
+        D2D1_SPRITE_OPTIONS sprite_options);
 void d2d_command_list_draw_image(struct d2d_command_list *command_list, ID2D1Image *image,
         const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
         D2D1_COMPOSITE_MODE composite_mode);
@@ -925,7 +962,7 @@ void d2d_command_list_fill_mesh(struct d2d_command_list *command_list, const str
 void d2d_command_list_fill_opacity_mask(struct d2d_command_list *command_list, const struct d2d_device_context *context,
         ID2D1Bitmap *bitmap, ID2D1Brush *orig_brush, const D2D1_RECT_F *dst_rect, const D2D1_RECT_F *src_rect);
 void d2d_command_list_push_layer(struct d2d_command_list *command_list, const struct d2d_device_context *context,
-        const D2D1_LAYER_PARAMETERS1 *params, ID2D1Layer *layer);
+        const D2D1_LAYER_PARAMETERS1 *params);
 void d2d_command_list_pop_layer(struct d2d_command_list *command_list);
 
 static inline BOOL d2d_array_reserve(void **elements, size_t *capacity, size_t count, size_t size)

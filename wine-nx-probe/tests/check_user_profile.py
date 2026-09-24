@@ -30,11 +30,12 @@ def check(condition, message):
         failures.append(message)
 
 
-# The name GetUserNameW answers, as a char-by-char literal.
-letters = re.search(r"static const WCHAR steamuserW\[\] = \{([^}]*)\}", advapi)
-check(letters is not None, "advapi32 no longer spells GetUserNameW's answer out")
-user_name = ''.join(re.findall(r"'(.)'", letters.group(1))) if letters else ''
-check(user_name != '', 'could not read the user name out of dlls/advapi32/advapi.c')
+# GetUserNameW reads WINEUSERNAME from the process environment.
+check('GetEnvironmentVariableW( L"WINEUSERNAME"' in advapi,
+      'GetUserNameW no longer reads WINEUSERNAME; re-read this test')
+wine_user = re.search(r'"WINEUSERNAME=([^"\\]*)\\0"', runtime)
+check(wine_user is not None, 'runtime environment no longer defines WINEUSERNAME')
+user_name = wine_user.group(1) if wine_user else ''
 
 # shell32 still builds the profile from that name rather than the environment.
 check('GetUserNameW(userName, &userLen);' in shellpath,

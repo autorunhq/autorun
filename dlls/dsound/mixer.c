@@ -25,6 +25,9 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <math.h>	/* Insomnia - pow() function */
+#ifdef __SSE__
+#include <xmmintrin.h>
+#endif
 
 #define COBJMACROS
 
@@ -42,6 +45,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dsound);
 
+#define FREQ_ADJUST_SHIFT 32
+#define FIXED_0_32_TO_FLOAT(x) ((int)((x) >> 1) * (1.0f / (1ll << 31)))
+
 void DSOUND_RecalcVolPan(PDSVOLUMEPAN volpan)
 {
 	double temp;
@@ -50,6 +56,13 @@ void DSOUND_RecalcVolPan(PDSVOLUMEPAN volpan)
 	TRACE("Vol=%ld Pan=%ld\n", volpan->lVolume, volpan->lPan);
 	/* the AmpFactors are expressed in 16.16 fixed point */
 
+	if (volpan->lVolume == DSBVOLUME_MIN)
+	{
+		for (unsigned int i = 0; i < DS_MAX_CHANNELS; i++)
+			volpan->dwTotalAmpFactor[i] = 0;
+		TRACE("setting all channel volumes to 0\n");
+		return;
+	}
 	/* FIXME: use calculated vol and pan ampfactors */
 	temp = (double) (volpan->lVolume - (volpan->lPan > 0 ? volpan->lPan : 0));
 	volpan->dwTotalAmpFactor[0] = (ULONG) (pow(2.0, temp / 600.0) * 0xffff);
@@ -86,8 +99,79 @@ void DSOUND_AmpFactorToVolPan(PDSVOLUMEPAN volpan)
     TRACE("Vol=%ld Pan=%ld\n", volpan->lVolume, volpan->lPan);
 }
 
+static void get8(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + channel;
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        ((float *)dst)[i] = (buf[i * channels] - 0x80) / (float)0x80;
+}
+
+static void get16(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 2 * channel;
+    const SHORT *sbuf = (const SHORT*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        ((float *)dst)[i] = sbuf[i * channels] / (float)0x8000;
+}
+
+static void get24(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 3 * channel;
+    int i;
+
+    for (i = 0; i < samples; ++i) {
+        /* The next expression deliberately has an overflow for buf[2] >= 0x80,
+           this is how negative values are made.
+         */
+        LONG sample =
+                (buf[i * channels * 3 + 0] << 8) |
+                (buf[i * channels * 3 + 1] << 16) |
+                (buf[i * channels * 3 + 2] << 24);
+        ((float *)dst)[i] = sample / (float)0x80000000U;
+    }
+}
+
+static void get32(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 4 * channel;
+    const LONG *sbuf = (const LONG*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        ((float *)dst)[i] = sbuf[i * channels] / (float)0x80000000U;
+}
+
+static const bitsgetfunc getbpp[4] = {get8, get16, get24, get32};
+
+static void getieee32(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 4 * channel;
+    const float *sbuf = (const float*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        /* The value will be clipped later, when put into some non-float buffer */
+        ((float *)dst)[i] = sbuf[i * channels];
+}
+
+static void get_raw(const IDirectSoundBufferImpl *dsb, BYTE *base, BYTE *dst, unsigned samples, DWORD channel)
+{
+    DWORD istride = dsb->pwfx->nBlockAlign;
+
+    memcpy(dst, base, samples * istride);
+}
+
 /**
- * Recalculate the size for temporary buffer, and new writelead
+ * Recalculate the size for temporary buffer
  * Should be called when one of the following things occur:
  * - Primary buffer format is changed
  * - This buffer format (frequency) is changed
@@ -96,7 +180,7 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 {
 	DWORD ichannels = dsb->pwfx->nChannels;
 	DWORD ochannels = dsb->device->pwfx->nChannels;
-	LONG64 oldFreqAdjustDen = dsb->freqAdjustDen;
+	DWORD oldFreqAdjustDen = dsb->freqAdjustDen;
 	WAVEFORMATEXTENSIBLE *pwfxe;
 	BOOL ieee = FALSE;
 
@@ -111,29 +195,18 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 		ieee = TRUE;
 
 	/**
-	 * Recalculate FIR step and gain.
-	 *
-	 * firstep says how many points of the FIR exist per one
-	 * sample in the secondary buffer. firgain specifies what
-	 * to multiply the FIR output by in order to attenuate it correctly.
+	 * Recalculate FIR gain, which specifies what to multiply the FIR
+	 * output by in order to attenuate it correctly.
 	 */
-        if (dsb->freqAdjustNum > dsb->freqAdjustDen)
-		dsb->firstep = fir_step * dsb->freqAdjustDen / dsb->freqAdjustNum;
-        else
-		dsb->firstep = fir_step;
-	dsb->firgain = (float)dsb->firstep / fir_step;
-
-	/* calculate the 10ms write lead */
-	dsb->writelead = (dsb->freq / 100) * dsb->pwfx->nBlockAlign;
-	dsb->maxwritelead = (DSBFREQUENCY_MAX / 100) * dsb->pwfx->nBlockAlign;
+	dsb->firgain = min(1.0f, dsb->freqAdjustDen / (float)dsb->freqAdjustNum);
 
 	if (oldFreqAdjustDen)
-		dsb->freqAccNum = (dsb->freqAccNum * dsb->freqAdjustDen + oldFreqAdjustDen / 2) / oldFreqAdjustDen;
+		dsb->freqAccNum = (dsb->freqAccNum * (LONG64)dsb->freqAdjustDen +
+				oldFreqAdjustDen / 2) / oldFreqAdjustDen;
 
-	dsb->get_aux = ieee ? getbpp[4] : getbpp[dsb->pwfx->wBitsPerSample/8 - 1];
 	dsb->put_aux = putieee32;
 
-	dsb->get = dsb->get_aux;
+	dsb->get = ieee ? getieee32 : getbpp[dsb->pwfx->wBitsPerSample/8 - 1];
 	dsb->put = dsb->put_aux;
 
 	if (ichannels == ochannels)
@@ -157,8 +230,9 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 	}
 	else if (ochannels == 1)
 	{
-		dsb->mix_channels = 1;
-		dsb->get = get_mono;
+		dsb->mix_channels = ichannels;
+		dsb->put = put_mono;
+		dsb->put_aux = putieee32_sum;
 	}
 	else if (ichannels == 2 && ochannels == 4)
 	{
@@ -188,12 +262,35 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 		dsb->put = put_quad2stereo;
 		dsb->put_aux = putieee32_sum;
 	}
+	else if (ichannels == 1 && ochannels == 8)
+	{
+		dsb->mix_channels = 1;
+		dsb->put = put_mono2surround71;
+	}
+	else if (ichannels == 2 && ochannels == 8)
+	{
+		dsb->mix_channels = 2;
+		dsb->put = put_stereo2surround71;
+	}
+	else if (ichannels == 4 && ochannels == 8)
+	{
+		dsb->mix_channels = 4;
+		dsb->put = put_quad2surround71;
+	}
+	else if (ichannels == 6 && ochannels == 8)
+	{
+		dsb->mix_channels = 6;
+		dsb->put = put_surround512surround71;
+	}
 	else
 	{
 		if (ichannels > 2)
 			FIXME("Conversion from %lu to %lu channels is not implemented, falling back to stereo\n", ichannels, ochannels);
 		dsb->mix_channels = 2;
 	}
+
+	dsb->input_delay = ((FIR_WIDTH - 1) * DSBFREQUENCY_MAX + dsb->freqAdjustDen - 1) /
+			dsb->freqAdjustDen;
 }
 
 /**
@@ -272,67 +369,257 @@ void DSOUND_CheckEvent(const IDirectSoundBufferImpl *dsb, DWORD playpos, int len
     }
 }
 
-static inline float get_current_sample(const IDirectSoundBufferImpl *dsb,
-        BYTE *buffer, DWORD buflen, DWORD mixpos, DWORD channel)
-{
-    if (mixpos >= buflen && !(dsb->playflags & DSBPLAY_LOOPING))
-        return 0.0f;
-    return dsb->get(dsb, buffer + (mixpos % buflen), channel);
-}
-
-static UINT cp_fields_noresample(IDirectSoundBufferImpl *dsb, UINT count)
+static inline void get_samples(const IDirectSoundBufferImpl *dsb, BYTE *buffer, DWORD buflen,
+        DWORD mixpos, DWORD channel, DWORD count, DWORD ostride, BYTE *dst, bitsgetfunc get)
 {
     UINT istride = dsb->pwfx->nBlockAlign;
-    UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
-    UINT committed_samples = 0;
-    DWORD channel, i;
+    DWORD advance;
+    DWORD pos;
 
-    if (!secondarybuffer_is_audible(dsb))
-        return count;
-
-    if(dsb->use_committed) {
-        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
-        committed_samples = committed_samples <= count ? committed_samples : count;
+    if (dsb->state == STATE_STOPPING) {
+        memset(dst, 0, count * ostride);
+        return;
     }
 
-    for (i = 0; i < committed_samples; i++)
-        for (channel = 0; channel < dsb->mix_channels; channel++)
-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->committedbuff,
-                dsb->writelead, dsb->committed_mixpos + i * istride, channel));
+    if (!(dsb->playflags & DSBPLAY_LOOPING)) {
+        advance = buflen < mixpos ? 0 : min((buflen - mixpos) / istride, count);
+        get(dsb, buffer + mixpos, dst, advance, channel);
+        memset(dst + advance * ostride, 0, (count - advance) * ostride);
+        return;
+    }
 
-    for (; i < count; i++)
-        for (channel = 0; channel < dsb->mix_channels; channel++)
-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->buffer->memory,
-                dsb->buflen, dsb->sec_mixpos + i * istride, channel));
-
-    return count;
+    advance = min((buflen - mixpos % buflen) / istride, count);
+    get(dsb, buffer + mixpos % buflen, dst, advance, channel);
+    pos = advance;
+    while (pos < count) {
+        advance = min(buflen / istride, count - pos);
+        get(dsb, buffer, dst + pos * ostride, advance, channel);
+        pos += advance;
+    }
 }
 
-static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+static inline void filter_samples(const IDirectSoundBufferImpl *dsb, BYTE *buffer, DWORD buflen,
+        DWORD mixpos, DWORD count, BYTE *dst)
+{
+    UINT istride = dsb->pwfx->nBlockAlign;
+    IMediaObjectInPlace *inplace;
+    int i;
+
+    get_samples(dsb, buffer, buflen, mixpos, 0, count, istride, dst, get_raw);
+
+    for (i = 0; i < dsb->num_filters; i++) {
+        if (!(inplace = dsb->filters[i].inplace)) {
+            WARN("filter %u has no inplace object - unsupported\n", i);
+            continue;
+        }
+
+        if (FAILED(IMediaObjectInPlace_Process(inplace, count * istride, dst, 0,
+                DMO_INPLACE_NORMAL)))
+            WARN("IMediaObjectInPlace_Process failed for filter %u\n", i);
+    }
+}
+
+#ifdef __SSE__
+
+/**
+ * Note that this function will overwrite up to FIR_WIDTH - 1 frames before and
+ * after output[].
+ */
+void downsample_sse(LONG64 opos_num, DWORD opos_num_step, float rem_float, float rem_step_float,
+        float firgain_float, UINT required_input, float *input, float *output)
+{
+    __m128 rem = _mm_set1_ps(rem_float);
+    __m128 rem_step = _mm_set1_ps(rem_step_float);
+    __m128 firgain = _mm_set_ss(firgain_float);
+    __m128 one = _mm_set1_ps(1.0f);
+    int j;
+
+    for (j = 0; j < required_input; ++j) {
+        /* opos is in the range [-(fir_width - 1), count) */
+        int opos = (int)(opos_num >> FREQ_ADJUST_SHIFT) - FIR_WIDTH;
+        UINT idx = ~(DWORD)opos_num >> (FREQ_ADJUST_SHIFT - FIR_STEP_SHIFT) << FIR_WIDTH_SHIFT;
+        __m128 rem_inv = _mm_sub_ps(one, rem);
+
+        __m128 input_value_ss = _mm_mul_ss(_mm_load_ss(&input[j]), firgain);
+        __m128 input_value = _mm_shuffle_ps(input_value_ss, input_value_ss, 0);
+        __m128 input_value0 = _mm_mul_ps(rem_inv, input_value);
+        __m128 input_value1 = _mm_mul_ps(rem, input_value);
+
+        int i;
+        C_ASSERT(!(FIR_WIDTH % 4));
+        for (i = 0; i < FIR_WIDTH; i += 4) {
+            __m128 value0 = _mm_mul_ps(_mm_load_ps(&fir[idx + i]), input_value0);
+            __m128 value1 = _mm_mul_ps(_mm_load_ps(&fir[idx + FIR_WIDTH + i]), input_value1);
+            __m128 value = _mm_add_ps(value0, value1);
+            _mm_storeu_ps(&output[opos + i], _mm_add_ps(_mm_loadu_ps(&output[opos + i]), value));
+        }
+
+        rem = _mm_add_ps(rem, rem_step);
+        rem = _mm_sub_ps(rem, _mm_and_ps(one, _mm_cmple_ps(one, rem)));
+
+        opos_num += opos_num_step;
+    }
+}
+
+#endif
+
+/**
+ * Note that this function will overwrite up to FIR_WIDTH - 1 frames before and
+ * after output[].
+ */
+static void downsample(DWORD freq_adjust_den, DWORD freq_acc_start, float firgain,
+        UINT required_input, float *input, float *output)
+{
+    /* Both opos_num and rem are calculated in an incremental fashion,
+     * independently of each other. This improves performance a bit, presumably
+     * because it allows the CPU to do the calculation in parallel.
+     *
+     * However, the value of rem must still be kept in perfect sync with the
+     * lower part of opos_num. Otherwise, even a small divergence can cause them
+     * to wrap around on different iterations of the outer loop, which will
+     * produce artifacts.
+     *
+     * To prevent this, clear the lower bits of opos_num and opos_num_step so
+     * that rem can always represent the calculated value exactly. As rem is
+     * always less than 2, its exponent is less than or equal to zero. This
+     * means that in the worst case, rem has the same number of fractional bits
+     * as the significand, which is 23 for a single-precision floating point.
+     *
+     * Clearing the bits is safe as it has the same effect as rounding up the
+     * resampling ratio and the subsample position and doesn't affect the
+     * initial opos value. */
+    LONG64 opos_num_mask = ~0ull << (FREQ_ADJUST_SHIFT - 23 - FIR_STEP_SHIFT);
+    LONG64 opos_num = (freq_adjust_den - freq_acc_start + (1ll << FREQ_ADJUST_SHIFT) - 1) & opos_num_mask;
+    DWORD opos_num_step = freq_adjust_den & (DWORD)opos_num_mask;
+
+    /* Use XOR to invert the lower part of opos_num so that the lower bits
+     * remain cleared. */
+    float rem = FIXED_0_32_TO_FLOAT(((DWORD)opos_num ^ (DWORD)opos_num_mask) << FIR_STEP_SHIFT);
+    float rem_step = FIXED_0_32_TO_FLOAT(-opos_num_step << FIR_STEP_SHIFT);
+
+#ifdef __SSE__
+    downsample_sse(opos_num, opos_num_step, rem, rem_step, firgain, required_input, input, output);
+#else
+    int j;
+    for (j = 0; j < required_input; ++j) {
+        /* opos is in the range [-(fir_width - 1), count) */
+        int opos = (int)(opos_num >> FREQ_ADJUST_SHIFT) - FIR_WIDTH;
+        UINT idx = ~(DWORD)opos_num >> (FREQ_ADJUST_SHIFT - FIR_STEP_SHIFT) << FIR_WIDTH_SHIFT;
+
+        float input_value = input[j] * firgain;
+        float input_value0 = (1.0f - rem) * input_value;
+        float input_value1 = rem * input_value;
+
+        int i;
+        for (i = 0; i < FIR_WIDTH; ++i)
+            output[opos + i] += fir[idx + i] * input_value0 + fir[idx + FIR_WIDTH + i] * input_value1;
+
+        rem += rem_step;
+        rem -= rem >= 1.0f ? 1.0f : 0.0f;
+
+        opos_num += opos_num_step;
+    }
+#endif
+}
+
+/**
+ * Note that this function will overwrite up to FIR_WIDTH - 1 frames before and
+ * after output[].
+ */
+static void resample(DWORD freq_adjust_num, DWORD freq_adjust_den, DWORD freq_acc_start,
+        float firgain, UINT required_input, UINT count, float *input, float *output)
+{
+    if (freq_adjust_num > freq_adjust_den) {
+        /* Take a reciprocal of the resampling ratio and convert it to a 0.32
+         * fixed point. Round down to prevent output buffer overflow. */
+        DWORD freq_adjust_fixed_den = ((LONG64)freq_adjust_den << FREQ_ADJUST_SHIFT)
+                / freq_adjust_num;
+        /* Convert the subsample position to a 0.32 fixed point. Round up to
+         * prevent output buffer overflow. */
+        DWORD freq_acc_fixed_start = ((LONG64)freq_acc_start * freq_adjust_fixed_den
+                + freq_adjust_den - 1) / freq_adjust_den;
+
+        memset(output, 0, count * sizeof(float));
+        downsample(freq_adjust_fixed_den, freq_acc_fixed_start, firgain, required_input, input,
+                output);
+    } else {
+        /* Convert the resampling ratio to a 0.32 fixed point. Round down to
+         * prevent input buffer overflow. */
+        DWORD freq_adjust_fixed_num = ((LONG64)freq_adjust_num << FREQ_ADJUST_SHIFT)
+                / freq_adjust_den;
+        /* Convert the subsample position to a 0.32 fixed point. Round down to
+         * prevent input buffer overflow. */
+        DWORD freq_acc_fixed_start = ((LONG64)freq_acc_start << FREQ_ADJUST_SHIFT)
+                / freq_adjust_den;
+
+        UINT i;
+        UINT64 pos = freq_acc_fixed_start;
+        const float inv_fraction = 1.0f / 4294967296.0f;
+
+        /* Match the FIR phase while using four-point interpolation for upsampling. */
+        input += FIR_WIDTH / 2 - 2;
+        for (i = 0; i < count; ++i, pos += freq_adjust_fixed_num) {
+            const float *s = input + (pos >> FREQ_ADJUST_SHIFT);
+            float t = (DWORD)pos * inv_fraction;
+            output[i] = s[1] + 0.5f * t * (s[2] - s[0] + t * (2.0f * s[0] - 5.0f * s[1]
+                    + 4.0f * s[2] - s[3] + t * (3.0f * (s[1] - s[2]) + s[3] - s[0])));
+        }
+    }
+}
+
+static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, DWORD *freqAccNum)
 {
     UINT i, channel;
-    UINT istride = dsb->pwfx->nBlockAlign;
     UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
-    UINT committed_samples = 0;
 
     LONG64 freqAcc_start = *freqAccNum;
     LONG64 freqAcc_end = freqAcc_start + count * dsb->freqAdjustNum;
-    UINT dsbfirstep = dsb->firstep;
+    /* The FIR has a latency of FIR_WIDTH / 2 samples. Our resampling functions
+     * add FIR_WIDTH - 1 samples of lead, for a total lead of FIR_WIDTH / 2 - 1
+     * samples. When downsampling, this value is scaled by the resampling ratio,
+     * creating a position discontinuity when the frequency changes. This can
+     * produce an audible click if the frequency step is large enough. To
+     * prevent this, shift the input position so that the lead always matches
+     * the worst case, which is dsb->freqAdjustNum == DSBFREQUENCY_MAX. */
+    LONG64 freqAcc_equalized = freqAcc_start +
+            (FIR_WIDTH / 2 - 1) * (DSBFREQUENCY_MAX - max(dsb->freqAdjustNum, dsb->freqAdjustDen));
     UINT channels = dsb->mix_channels;
     UINT max_ipos = (freqAcc_start + count * dsb->freqAdjustNum) / dsb->freqAdjustDen;
 
-    UINT fir_cachesize = (fir_len + dsbfirstep - 2) / dsbfirstep;
-    UINT required_input = max_ipos + fir_cachesize;
-    float *intermediate, *fir_copy, *itmp;
+    UINT total_input = dsb->input_delay + max_ipos;
+    UINT required_input = max(
+            (freqAcc_start + (count - 1) * dsb->freqAdjustNum) / dsb->freqAdjustDen + FIR_WIDTH,
+            (freqAcc_start + (count - 1 + FIR_WIDTH) * dsb->freqAdjustNum) / dsb->freqAdjustDen);
+    float *intermediate, *output;
 
-    DWORD len = required_input * channels;
-    len += fir_cachesize;
+    DWORD len = total_input * channels;
+    /* Allocate an output buffer for each channel with padding on both ends as
+     * required by the resample function. Padding at the end of one channel
+     * buffer is reused as a start padding for the next channel buffer. */
+    len += FIR_WIDTH - 1 + (count + FIR_WIDTH - 1) * channels;
     len *= sizeof(float);
+
+    if (dsb->num_filters) {
+        DWORD size_bytes = max_ipos * dsb->pwfx->nBlockAlign;
+
+        if (dsb->device->filter_buffer_len < size_bytes) {
+            BYTE *filter_buffer = realloc(dsb->device->filter_buffer, size_bytes);
+            if (!filter_buffer)
+                return max_ipos;
+            dsb->device->filter_buffer_len = size_bytes;
+            dsb->device->filter_buffer = filter_buffer;
+        }
+
+        filter_samples(dsb, dsb->buffer->memory, dsb->buflen, dsb->sec_mixpos, max_ipos,
+                dsb->device->filter_buffer);
+    }
 
     *freqAccNum = freqAcc_end % dsb->freqAdjustDen;
 
-    if (!secondarybuffer_is_audible(dsb))
+    if (!secondarybuffer_is_audible(dsb)) {
+        dsb->input_tail_valid = FALSE;
         return max_ipos;
+    }
 
     if (!dsb->device->cp_buffer) {
         dsb->device->cp_buffer = malloc(len);
@@ -342,81 +629,80 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *
         dsb->device->cp_buffer_len = len;
     }
 
-    fir_copy = dsb->device->cp_buffer;
-    intermediate = fir_copy + fir_cachesize;
-
-    if(dsb->use_committed) {
-        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
-        committed_samples = committed_samples <= required_input ? committed_samples : required_input;
-    }
+    intermediate = dsb->device->cp_buffer;
+    output = intermediate + total_input * channels + FIR_WIDTH - 1;
 
     /* Important: this buffer MUST be non-interleaved
      * if you want -msse3 to have any effect.
      * This is good for CPU cache effects, too.
      */
-    itmp = intermediate;
     for (channel = 0; channel < channels; channel++) {
-        for (i = 0; i < committed_samples; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->committedbuff,
-                dsb->writelead, dsb->committed_mixpos + i * istride, channel);
-        for (; i < required_input; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->buffer->memory,
-                    dsb->buflen, dsb->sec_mixpos + i * istride, channel);
+        float *channel_input = intermediate + channel * total_input;
+        if (dsb->num_filters)
+            get_samples(dsb, dsb->device->filter_buffer, dsb->device->filter_buffer_len, 0, channel,
+                    max_ipos, sizeof(float), (BYTE *)(channel_input + dsb->input_delay), dsb->get);
+        else
+            get_samples(dsb, dsb->buffer->memory, dsb->buflen, dsb->sec_mixpos, channel, max_ipos,
+                    sizeof(float), (BYTE *)(channel_input + dsb->input_delay), dsb->get);
     }
 
-    for(i = 0; i < count; ++i) {
-        UINT int_fir_steps = (freqAcc_start + i * dsb->freqAdjustNum) * dsbfirstep / dsb->freqAdjustDen;
-        float total_fir_steps = (freqAcc_start + i * dsb->freqAdjustNum) * dsbfirstep / (float)dsb->freqAdjustDen;
-        UINT ipos = int_fir_steps / dsbfirstep;
+    for (channel = 0; channel < channels; channel++) {
+        float *channel_input = intermediate + channel * total_input;
+        float *channel_output = output + channel * (count + FIR_WIDTH - 1);
+        float *channel_input_tail = dsb->input_tail + channel * dsb->input_delay;
 
-        UINT idx = (ipos + 1) * dsbfirstep - int_fir_steps - 1;
-        float rem = int_fir_steps + 1.0 - total_fir_steps;
+        if (dsb->input_tail_valid)
+            /* Copy the previously saved dsb->input_delay input samples. */
+            memcpy(channel_input, channel_input_tail, dsb->input_delay * sizeof(float));
+        else
+            memset(channel_input, 0, dsb->input_delay * sizeof(float));
+        /* Save the last dsb->input_delay input samples. Note that the two
+         * copies may overlap, so the order is important here. */
+        memcpy(channel_input_tail, channel_input + max_ipos, dsb->input_delay * sizeof(float));
 
-        int fir_used = 0;
-        while (idx < fir_len - 1) {
-            fir_copy[fir_used++] = fir[idx] * (1.0 - rem) + fir[idx + 1] * rem;
-            idx += dsb->firstep;
-        }
-
-        assert(fir_used <= fir_cachesize);
-        assert(ipos + fir_used <= required_input);
-
-        for (channel = 0; channel < dsb->mix_channels; channel++) {
-            int j;
-            float sum = 0.0;
-            float* cache = &intermediate[channel * required_input + ipos];
-            for (j = 0; j < fir_used; j++)
-                sum += fir_copy[j] * cache[j];
-            dsb->put(dsb, i * ostride, channel, sum * dsb->firgain);
-        }
+        resample(dsb->freqAdjustNum, dsb->freqAdjustDen, freqAcc_equalized % dsb->freqAdjustDen,
+                dsb->firgain, required_input, count,
+                channel_input + freqAcc_equalized / dsb->freqAdjustDen, channel_output);
     }
+
+    for(i = 0; i < count; ++i)
+        for (channel = 0; channel < channels; channel++)
+            dsb->put(dsb, i * ostride, channel, output[channel * (FIR_WIDTH - 1 + count) + i]);
+
+    dsb->input_tail_valid = TRUE;
 
     return max_ipos;
 }
 
-/* Upsampling by four-point cubic (Catmull-Rom) interpolation between the two
- * middle samples. The FIR above takes some 66 taps per output sample; run as
- * translated x86 code on the Switch that mixed one game's sounds on a quarter
- * of a core. Raising the rate needs no anti-aliasing, so four points do. The
- * output lags the input by one sample. Advances like cp_fields_resample. */
-static UINT cp_fields_resample_cubic(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+static UINT cp_fields_noresample(IDirectSoundBufferImpl *dsb, UINT count)
 {
-    UINT i, channel;
-    UINT istride = dsb->pwfx->nBlockAlign;
     UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
-    UINT committed_samples = 0;
-    UINT channels = dsb->mix_channels;
-    UINT num = dsb->freqAdjustNum, den = dsb->freqAdjustDen, acc = *freqAccNum, ipos = 0;
-    UINT max_ipos = (*freqAccNum + count * dsb->freqAdjustNum) / dsb->freqAdjustDen;
-    UINT required_input = max_ipos + 4;
-    float inv_den = 1.0f / den;
-    float *intermediate, *itmp;
-    DWORD len = required_input * channels * sizeof(float);
+    DWORD total_input = dsb->input_delay + count;
+    float *intermediate;
+    DWORD channel, i;
 
-    *freqAccNum = (*freqAccNum + count * dsb->freqAdjustNum) % dsb->freqAdjustDen;
+    DWORD len = total_input * dsb->mix_channels;
+    len *= sizeof(float);
 
-    if (!secondarybuffer_is_audible(dsb))
-        return max_ipos;
+    if (dsb->num_filters) {
+        DWORD size_bytes = count * dsb->pwfx->nBlockAlign;
+
+        if (dsb->device->filter_buffer_len < size_bytes) {
+            BYTE *filter_buffer = realloc(dsb->device->filter_buffer, size_bytes);
+            if (!filter_buffer)
+                return count;
+            dsb->device->filter_buffer_len = size_bytes;
+            dsb->device->filter_buffer = filter_buffer;
+        }
+
+        filter_samples(dsb, dsb->buffer->memory, dsb->buflen, dsb->sec_mixpos, count,
+                dsb->device->filter_buffer);
+    }
+
+    if (!secondarybuffer_is_audible(dsb)) {
+        dsb->input_tail_valid = FALSE;
+        return count;
+    }
 
     if (!dsb->device->cp_buffer) {
         dsb->device->cp_buffer = malloc(len);
@@ -428,50 +714,53 @@ static UINT cp_fields_resample_cubic(IDirectSoundBufferImpl *dsb, UINT count, LO
 
     intermediate = dsb->device->cp_buffer;
 
-    if(dsb->use_committed) {
-        committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
-        committed_samples = committed_samples <= required_input ? committed_samples : required_input;
+    for (channel = 0; channel < dsb->mix_channels; channel++)
+    {
+        float *channel_input = intermediate + channel * total_input;
+        if (dsb->num_filters)
+            get_samples(dsb, dsb->device->filter_buffer, dsb->device->filter_buffer_len, 0, channel,
+                    count, sizeof(float), (BYTE *)(channel_input + dsb->input_delay), dsb->get);
+        else
+            get_samples(dsb, dsb->buffer->memory, dsb->buflen, dsb->sec_mixpos, channel, count,
+                    sizeof(float), (BYTE *)(channel_input + dsb->input_delay), dsb->get);
     }
 
-    itmp = intermediate;
-    for (channel = 0; channel < channels; channel++) {
-        for (i = 0; i < committed_samples; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->committedbuff,
-                dsb->writelead, dsb->committed_mixpos + i * istride, channel);
-        for (; i < required_input; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->buffer->memory,
-                    dsb->buflen, dsb->sec_mixpos + i * istride, channel);
+    for (channel = 0; channel < dsb->mix_channels; channel++) {
+        float *channel_input = intermediate + channel * total_input;
+        float *channel_input_tail = dsb->input_tail + channel * dsb->input_delay;
+
+        if (dsb->input_tail_valid)
+            /* Copy the previously saved dsb->input_delay input samples. */
+            memcpy(channel_input, channel_input_tail, dsb->input_delay * sizeof(float));
+        else
+            memset(channel_input, 0, dsb->input_delay * sizeof(float));
+        /* Save the last dsb->input_delay input samples. */
+        memcpy(channel_input_tail, channel_input + count, dsb->input_delay * sizeof(float));
     }
 
-    for (i = 0; i < count; ++i) {
-        float t = acc * inv_den;
+    for (i = 0; i < count; i++)
+        for (channel = 0; channel < dsb->mix_channels; channel++)
+            dsb->put(dsb, i * ostride, channel, intermediate[channel * total_input + i]);
 
-        for (channel = 0; channel < channels; channel++) {
-            const float *s = &intermediate[channel * required_input + ipos];
+    dsb->input_tail_valid = TRUE;
 
-            dsb->put(dsb, i * ostride, channel, s[1] + 0.5f * t * (s[2] - s[0] + t * (2.0f * s[0] - 5.0f * s[1]
-                     + 4.0f * s[2] - s[3] + t * (3.0f * (s[1] - s[2]) + s[3] - s[0]))));
-        }
-        acc += num;
-        while (acc >= den) {
-            acc -= den;
-            ipos++;
-        }
-    }
-
-    return max_ipos;
+    return count;
 }
 
-static void cp_fields(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+static void cp_fields(IDirectSoundBufferImpl *dsb, UINT count, DWORD *freqAccNum)
 {
     DWORD ipos, adv;
 
     if (dsb->freqAdjustNum == dsb->freqAdjustDen)
         adv = cp_fields_noresample(dsb, count); /* *freqAccNum is unmodified */
-    else if (dsb->freqAdjustNum < dsb->freqAdjustDen)
-        adv = cp_fields_resample_cubic(dsb, count, freqAccNum);
     else
         adv = cp_fields_resample(dsb, count, freqAccNum);
+
+    if (dsb->state == STATE_STOPPING) {
+        dsb->sec_playpos = dsb->sec_mixpos;
+        dsb->state = STATE_STOPPED;
+        return;
+    }
 
     ipos = dsb->sec_mixpos + adv * dsb->pwfx->nBlockAlign;
     if (ipos >= dsb->buflen) {
@@ -479,17 +768,12 @@ static void cp_fields(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNu
             ipos %= dsb->buflen;
         else {
             ipos = 0;
-            dsb->state = STATE_STOPPED;
+            dsb->state = STATE_STOPPING;
         }
     }
 
+    dsb->sec_playpos = dsb->sec_mixpos;
     dsb->sec_mixpos = ipos;
-
-    if(dsb->use_committed) {
-        dsb->committed_mixpos += adv * dsb->pwfx->nBlockAlign;
-        if(dsb->committed_mixpos >= dsb->writelead)
-            dsb->use_committed = FALSE;
-    }
 }
 
 /**
@@ -523,8 +807,6 @@ static inline DWORD DSOUND_BufPtrDiff(DWORD buflen, DWORD ptr1, DWORD ptr2)
 static void DSOUND_MixToTemporary(IDirectSoundBufferImpl *dsb, DWORD frames)
 {
 	UINT size_bytes = frames * sizeof(float) * dsb->device->pwfx->nChannels;
-	HRESULT hr;
-	int i;
 
 	if (dsb->device->tmp_buffer_len < size_bytes || !dsb->device->tmp_buffer)
 	{
@@ -535,18 +817,6 @@ static void DSOUND_MixToTemporary(IDirectSoundBufferImpl *dsb, DWORD frames)
 		memset(dsb->device->tmp_buffer, 0, dsb->device->tmp_buffer_len);
 
 	cp_fields(dsb, frames, &dsb->freqAccNum);
-
-	if (size_bytes > 0) {
-		for (i = 0; i < dsb->num_filters; i++) {
-			if (dsb->filters[i].inplace) {
-				hr = IMediaObjectInPlace_Process(dsb->filters[i].inplace, size_bytes, (BYTE*)dsb->device->tmp_buffer, 0, DMO_INPLACE_NORMAL);
-
-				if (FAILED(hr))
-					WARN("IMediaObjectInPlace_Process failed for filter %u\n", i);
-			} else
-				WARN("filter %u has no inplace object - unsupported\n", i);
-		}
-	}
 }
 
 static void DSOUND_MixerVol(const IDirectSoundBufferImpl *dsb, INT frames)
@@ -601,7 +871,7 @@ static DWORD DSOUND_MixInBuffer(IDirectSoundBufferImpl *dsb, float *mix_buffer, 
 	TRACE("(%p, frames=%ld)\n",dsb,frames);
 
 	/* Resample buffer to temporary buffer specifically allocated for this purpose, if needed */
-	oldpos = dsb->sec_mixpos;
+	oldpos = dsb->sec_playpos;
 	DSOUND_MixToTemporary(dsb, frames);
 	ibuf = dsb->device->tmp_buffer;
 
@@ -614,7 +884,7 @@ static DWORD DSOUND_MixInBuffer(IDirectSoundBufferImpl *dsb, float *mix_buffer, 
 
 	/* check for notification positions */
 	if (dsb->dsbd.dwFlags & DSBCAPS_CTRLPOSITIONNOTIFY) {
-		INT ilen = DSOUND_BufPtrDiff(dsb->buflen, dsb->sec_mixpos, oldpos);
+		INT ilen = DSOUND_BufPtrDiff(dsb->buflen, dsb->sec_playpos, oldpos);
 		DSOUND_CheckEvent(dsb, oldpos, ilen);
 	}
 
@@ -650,23 +920,10 @@ static DWORD DSOUND_MixOne(IDirectSoundBufferImpl *dsb, float *mix_buffer, DWORD
 	return primary_done;
 }
 
-/**
- * For a DirectSoundDevice, go through all the currently playing buffers and
- * mix them in to the device buffer.
- *
- * frames = the maximum amount to mix into the primary buffer
- * all_stopped = reports back if all buffers have stopped
- *
- * Returns:  the length beyond the writepos that was mixed to.
- */
-
-static void DSOUND_MixToPrimary(const DirectSoundDevice *device, float *mix_buffer, DWORD frames, BOOL *all_stopped)
+static void DSOUND_MixToPrimary(const DirectSoundDevice *device, float *mix_buffer, DWORD frames)
 {
 	INT i;
 	IDirectSoundBufferImpl	*dsb;
-
-	/* unless we find a running buffer, all have stopped */
-	*all_stopped = TRUE;
 
 	TRACE("(frames %ld)\n", frames);
 	for (i = 0; i < device->nrofbuffers; i++) {
@@ -685,8 +942,6 @@ static void DSOUND_MixToPrimary(const DirectSoundDevice *device, float *mix_buff
 
 				/* mix next buffer into the main buffer */
 				DSOUND_MixOne(dsb, mix_buffer, frames);
-
-				*all_stopped = FALSE;
 			}
 			ReleaseSRWLockShared(&dsb->lock);
 		}
@@ -738,7 +993,6 @@ static void DSOUND_WaveQueue(DirectSoundDevice *device, LPBYTE pos, DWORD bytes)
  * secondary->buffer (secondary format)
  *   =[Resample]=> device->tmp_buffer (float format)
  *   =[Volume]=> device->tmp_buffer (float format)
- *   =[Reformat]=> device->buffer (device format, skipped on float)
  */
 static void DSOUND_PerformMix(DirectSoundDevice *device)
 {
@@ -773,7 +1027,6 @@ static void DSOUND_PerformMix(DirectSoundDevice *device)
 		frames = device->frag_frames * 3;
 
 	if (device->priolevel != DSSCL_WRITEPRIMARY) {
-		BOOL all_stopped = FALSE;
 		int nfiller;
 		void *buffer = NULL;
 
@@ -794,16 +1047,7 @@ static void DSOUND_PerformMix(DirectSoundDevice *device)
 
 		memset(buffer, nfiller, frames * block);
 
-		if (!device->normfunction)
-			DSOUND_MixToPrimary(device, buffer, frames, &all_stopped);
-		else {
-			memset(device->buffer, nfiller, device->buflen);
-
-			/* do the mixing */
-			DSOUND_MixToPrimary(device, (float*)device->buffer, frames, &all_stopped);
-
-			device->normfunction(device->buffer, buffer, frames * device->pwfx->nChannels);
-		}
+                DSOUND_MixToPrimary(device, buffer, frames);
 
 		hr = IAudioRenderClient_ReleaseBuffer(device->render, frames, 0);
 		if(FAILED(hr))
@@ -830,27 +1074,24 @@ static void DSOUND_PerformMix(DirectSoundDevice *device)
 DWORD CALLBACK DSOUND_mixthread(void *p)
 {
 	DirectSoundDevice *dev = p;
+
 	TRACE("(%p)\n", dev);
 	SetThreadDescription(GetCurrentThread(), L"wine_dsound_mixer");
+        _controlfp_s(NULL, _DN_FLUSH, _MCW_DN);
 
-	while (dev->ref) {
-		DWORD ret;
+        for (;;)
+        {
+            DWORD ret = WaitForSingleObject(dev->sleepev, dev->sleeptime);
+            if (ret == WAIT_FAILED)
+                WARN("wait returned error %lu %08lx!\n", GetLastError(), GetLastError());
+            else if (ret != WAIT_OBJECT_0)
+                WARN("wait returned %08lx!\n", ret);
+            if (dev->terminated)
+                break;
 
-		/*
-		 * Some audio drivers are retarded and won't fire after being
-		 * stopped, add a timeout to handle this.
-		 */
-		ret = WaitForSingleObject(dev->sleepev, dev->sleeptime);
-		if (ret == WAIT_FAILED)
-			WARN("wait returned error %lu %08lx!\n", GetLastError(), GetLastError());
-		else if (ret != WAIT_OBJECT_0)
-			WARN("wait returned %08lx!\n", ret);
-		if (!dev->ref)
-			break;
-
-		AcquireSRWLockShared(&dev->buffer_list_lock);
-		DSOUND_PerformMix(dev);
-		ReleaseSRWLockShared(&dev->buffer_list_lock);
-	}
+            AcquireSRWLockShared(&dev->buffer_list_lock);
+            DSOUND_PerformMix(dev);
+            ReleaseSRWLockShared(&dev->buffer_list_lock);
+        }
 	return 0;
 }

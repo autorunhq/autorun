@@ -70,27 +70,12 @@ static BOOL WINAPI init_xinput1_4_funcs(INIT_ONCE *once, void *param, void **con
     return TRUE;
 }
 
-DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILITIES *caps)
+DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilities(DWORD index, DWORD flags, XINPUT_CAPABILITIES *capabilities)
 {
-    DWORD ret;
-
     InitOnceExecuteOnce(&init_xinput1_4_once, init_xinput1_4_funcs, NULL, NULL);
 
     if (!pXInputGetCapabilities) return ERROR_DEVICE_NOT_CONNECTED;
-    if (!(ret = pXInputGetCapabilities(index, flags, caps)))
-    {
-        caps->Flags = XINPUT_CAPS_VOICE_SUPPORTED;
-        caps->Gamepad.bLeftTrigger = !!caps->Gamepad.bLeftTrigger;
-        caps->Gamepad.bRightTrigger = !!caps->Gamepad.bRightTrigger;
-        caps->Gamepad.sThumbLX = !!caps->Gamepad.sThumbLX;
-        caps->Gamepad.sThumbLY = !!caps->Gamepad.sThumbLY;
-        caps->Gamepad.sThumbRX = !!caps->Gamepad.sThumbRX;
-        caps->Gamepad.sThumbRY = !!caps->Gamepad.sThumbRY;
-        caps->Vibration.wLeftMotorSpeed = !!caps->Vibration.wLeftMotorSpeed;
-        caps->Vibration.wRightMotorSpeed = !!caps->Vibration.wRightMotorSpeed;
-    }
-
-    return ret;
+    return pXInputGetCapabilities(index, flags, capabilities);
 }
 
 DWORD WINAPI DECLSPEC_HOTPATCH XInputGetDSoundAudioDeviceGuids(DWORD index, GUID *render_guid, GUID *capture_guid)

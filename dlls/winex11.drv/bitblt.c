@@ -1589,10 +1589,6 @@ struct x11drv_window_surface
     GC                    gc;
     struct x11drv_image  *image;
     BOOL                  byteswap;
-    int                   x_offset;
-    int                   y_offset;
-    RECT                 *clip_rects;
-    unsigned int          clip_rect_count;
 };
 
 static struct x11drv_window_surface *get_x11_surface( struct window_surface *surface )
@@ -1752,20 +1748,20 @@ failed:
     return NULL;
 }
 
-static XRectangle *xrectangles_from_rects( const RECT *rects, UINT count, int x_offset, int y_offset )
+static XRectangle *xrectangles_from_rects( const RECT *rects, UINT count )
 {
     XRectangle *xrects;
     if (!(xrects = malloc( count * sizeof(*xrects) ))) return NULL;
     while (count--)
     {
-        if (rects[count].left + x_offset > SHRT_MAX) continue;
-        if (rects[count].top + y_offset > SHRT_MAX) continue;
-        if (rects[count].right + x_offset < SHRT_MIN) continue;
-        if (rects[count].bottom + y_offset < SHRT_MIN) continue;
-        xrects[count].x      = max( min( rects[count].left + x_offset, SHRT_MAX), SHRT_MIN);
-        xrects[count].y      = max( min( rects[count].top + y_offset, SHRT_MAX), SHRT_MIN);
-        xrects[count].width  = max( min( rects[count].right + x_offset, SHRT_MAX ) - xrects[count].x, 0);
-        xrects[count].height = max( min( rects[count].bottom + y_offset, SHRT_MAX ) - xrects[count].y, 0);
+        if (rects[count].left > SHRT_MAX) continue;
+        if (rects[count].top > SHRT_MAX) continue;
+        if (rects[count].right < SHRT_MIN) continue;
+        if (rects[count].bottom < SHRT_MIN) continue;
+        xrects[count].x      = max( min( rects[count].left, SHRT_MAX), SHRT_MIN);
+        xrects[count].y      = max( min( rects[count].top, SHRT_MAX), SHRT_MIN);
+        xrects[count].width  = max( min( rects[count].right, SHRT_MAX ) - xrects[count].x, 0);
+        xrects[count].height = max( min( rects[count].bottom, SHRT_MAX ) - xrects[count].y, 0);
     }
     return xrects;
 }
@@ -1780,17 +1776,10 @@ static void x11drv_surface_set_clip( struct window_surface *window_surface, cons
 
     TRACE( "surface %p, rects %p, count %u\n", surface, rects, count );
 
-    free( surface->clip_rects );
-    surface->clip_rects = NULL;
-    surface->clip_rect_count = 0;
-
     if (!count)
         XSetClipMask( gdi_display, surface->gc, None );
-    else if ((xrects = xrectangles_from_rects( rects, count, surface->x_offset, surface->y_offset )))
+    else if ((xrects = xrectangles_from_rects( rects, count )))
     {
-        surface->clip_rect_count = count;
-        surface->clip_rects = malloc( count * sizeof(*surface->clip_rects) );
-        memcpy( surface->clip_rects, rects, count * sizeof(*surface->clip_rects) );
         XSetClipRectangles( gdi_display, surface->gc, 0, 0, xrects, count, YXBanded );
         free( xrects );
     }
@@ -1799,7 +1788,7 @@ static void x11drv_surface_set_clip( struct window_surface *window_surface, cons
 /***********************************************************************
  *           x11drv_surface_flush
  */
-static BOOL x11drv_surface_flush( struct window_surface *window_surface, const RECT *surface_rect, const RECT *dirty,
+static BOOL x11drv_surface_flush( struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
                                   const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
                                   const BITMAPINFO *shape_info, const void *shape_bits )
 {
@@ -1808,9 +1797,6 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
     XImage *ximage = surface->image->ximage;
     const unsigned char *src = color_bits;
     unsigned char *dst = (unsigned char *)ximage->data;
-    RECT rect = *surface_rect;
-
-    OffsetRect( &rect, surface->x_offset, surface->y_offset );
 
     if (alpha_bits == -1)
     {
@@ -1845,10 +1831,6 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
 
     if (shape_changed)
     {
-        /* HACK: Do not shape layered windows on gamescope */
-        if (shape_bits && alpha_mask != 0 && X11DRV_HasWindowManager( "steamcompmgr" ))
-            shape_bits = 0;
-
 #ifdef HAVE_LIBXSHAPE
         if (!shape_bits)
             XShapeCombineMask( gdi_display, surface->window, ShapeBounding, 0, 0, None, ShapeSet );
@@ -1860,15 +1842,15 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
 
             vis.depth = 1;
             shape = create_pixmap_from_image( 0, &vis, shape_info, &bits, DIB_RGB_COLORS );
-            XShapeCombineMask( gdi_display, surface->window, ShapeBounding, surface->x_offset, surface->y_offset, shape, ShapeSet );
+            XShapeCombineMask( gdi_display, surface->window, ShapeBounding, 0, 0, shape, ShapeSet );
             XFreePixmap( gdi_display, shape );
         }
 #endif /* HAVE_LIBXSHAPE */
     }
 
-    if (!put_shm_image( ximage, &surface->image->shminfo, surface->window, surface->gc, &rect, dirty ))
+    if (!put_shm_image( ximage, &surface->image->shminfo, surface->window, surface->gc, rect, dirty ))
         XPutImage( gdi_display, surface->window, surface->gc, ximage, dirty->left,
-                   dirty->top, rect.left + dirty->left, rect.top + dirty->top,
+                   dirty->top, rect->left + dirty->left, rect->top + dirty->top,
                    dirty->right - dirty->left, dirty->bottom - dirty->top );
 
     XFlush( gdi_display );
@@ -1884,16 +1866,16 @@ static void x11drv_surface_destroy( struct window_surface *window_surface )
     struct x11drv_window_surface *surface = get_x11_surface( window_surface );
 
     TRACE( "freeing %p\n", surface );
-    free( surface->clip_rects );
     if (surface->gc) XFreeGC( gdi_display, surface->gc );
     if (surface->image) x11drv_image_destroy( surface->image );
 }
 
 static const struct window_surface_funcs x11drv_surface_funcs =
 {
-    x11drv_surface_set_clip,
-    x11drv_surface_flush,
-    x11drv_surface_destroy
+    .size = sizeof(struct x11drv_window_surface),
+    .set_clip = x11drv_surface_set_clip,
+    .flush = x11drv_surface_flush,
+    .destroy = x11drv_surface_destroy
 };
 
 /***********************************************************************
@@ -1951,7 +1933,7 @@ static struct window_surface *create_surface( HWND hwnd, Window window, const XV
         if (desc.hDeviceDc) NtUserReleaseDC( hwnd, desc.hDeviceDc );
     }
 
-    if (!(window_surface = window_surface_create( sizeof(*surface), &x11drv_surface_funcs, hwnd, rect, info, bitmap )))
+    if (!(window_surface = window_surface_create( &x11drv_surface_funcs, hwnd, rect, info, bitmap )))
     {
         if (bitmap) NtGdiDeleteObjectApp( bitmap );
         x11drv_image_destroy( image );
@@ -1975,12 +1957,6 @@ static BOOL enable_direct_drawing( struct x11drv_win_data *data, BOOL layered )
     if (layered) return FALSE;
     if (data->embedded) return TRUE; /* draw directly to the window */
     if (data->whole_window == root_window) return TRUE; /* draw directly to the window */
-    if (!is_window_rect_mapped( &data->rects.visible ))
-    {
-        DWORD style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
-
-        if (style & WS_VISIBLE && !(style & WS_MINIMIZE)) return FALSE;
-    }
     if (data->client_window) return TRUE; /* draw directly to the window */
     if (!client_side_graphics) return TRUE; /* draw directly to the window */
     return FALSE;
@@ -2019,30 +1995,8 @@ BOOL X11DRV_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surface_re
 
     *surface = create_surface( data->hwnd, data->whole_window, &data->vis, surface_rect,
                                layered ? data->use_alpha : FALSE );
-    set_surface_window_rects( *surface, &data->rects );
 
 done:
     release_win_data( data );
     return TRUE;
-}
-
-void set_surface_window_rects( struct window_surface *window_surface, const struct window_rects *rects )
-{
-    if (window_surface && window_surface->funcs == &x11drv_surface_funcs)
-    {
-        struct x11drv_window_surface *surface = get_x11_surface( window_surface );
-        XRectangle *xrects;
-
-        window_surface_lock( window_surface );
-        surface->x_offset = max( rects->window.left - rects->visible.left, 0 );
-        surface->y_offset = max( rects->window.top - rects->visible.top, 0 );
-        window_surface_unlock( window_surface );
-
-        if (surface->clip_rects && (xrects = xrectangles_from_rects( surface->clip_rects, surface->clip_rect_count,
-                                                                     surface->x_offset, surface->y_offset )))
-        {
-            XSetClipRectangles( gdi_display, surface->gc, 0, 0, xrects, surface->clip_rect_count, YXBanded );
-            free( xrects );
-        }
-    }
 }

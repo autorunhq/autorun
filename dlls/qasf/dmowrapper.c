@@ -276,15 +276,16 @@ static HRESULT process_output(struct dmo_wrapper *filter, IMediaObject *dmo)
 
     do
     {
+        HRESULT process_hr;
         more_data = FALSE;
 
         if (FAILED(hr = get_output_samples(filter, dmo)))
             return hr;
 
-        hr = IMediaObject_ProcessOutput(dmo, DMO_PROCESS_OUTPUT_DISCARD_WHEN_NO_BUFFER,
+        process_hr = IMediaObject_ProcessOutput(dmo, DMO_PROCESS_OUTPUT_DISCARD_WHEN_NO_BUFFER,
                 filter->source_count, buffers, &status);
-        TRACE("ProcessOutput() returned %#lx.\n", hr);
-        if (hr != S_OK)
+        TRACE("ProcessOutput() returned %#lx.\n", process_hr);
+        if (FAILED(process_hr))
         {
             release_output_samples(filter);
             break;
@@ -330,8 +331,6 @@ static HRESULT process_output(struct dmo_wrapper *filter, IMediaObject *dmo)
         release_output_samples(filter);
     } while (more_data);
 
-    if (hr == S_FALSE)
-        return S_OK;
     return hr;
 }
 

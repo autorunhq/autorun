@@ -37,8 +37,6 @@ static ULONG64 (WINAPI *pRtlGetEnabledExtendedFeatures)(ULONG64);
 static NTSTATUS (WINAPI *pRtlFreeUserStack)(void *);
 static void * (WINAPI *pRtlFindExportedRoutineByName)(HMODULE,const char*);
 static BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL);
-static NTSTATUS (WINAPI *pRtlGetNativeSystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
-static BOOLEAN (WINAPI *pRtlIsEcCode)(const void *);
 static NTSTATUS (WINAPI *pNtAllocateVirtualMemoryEx)(HANDLE, PVOID *, SIZE_T *, ULONG, ULONG,
                                                      MEM_EXTENDED_PARAMETER *, ULONG);
 static NTSTATUS (WINAPI *pNtMapViewOfSectionEx)(HANDLE, HANDLE, PVOID *, const LARGE_INTEGER *, SIZE_T *,
@@ -47,8 +45,17 @@ static NTSTATUS (WINAPI *pNtSetInformationVirtualMemory)(HANDLE, VIRTUAL_MEMORY_
                                                          ULONG_PTR, PMEMORY_RANGE_ENTRY,
                                                          PVOID, ULONG);
 
+#ifndef __aarch64__
+static NTSTATUS (WINAPI *pRtlGetNativeSystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+#endif
+
+#ifdef __x86_64__
+static BOOLEAN (WINAPI *pRtlIsEcCode)(const void *);
+#endif
+
 static const BOOL is_win64 = sizeof(void*) != sizeof(int);
 static BOOL is_wow64;
+static BOOL old_wow64;
 
 static SYSTEM_BASIC_INFORMATION sbi;
 
@@ -103,9 +110,12 @@ static UINT_PTR get_zero_bits_mask(ULONG_PTR z)
 
 static void test_NtAllocateVirtualMemory(void)
 {
+    SYSTEM_INFO si;
     void *addr1, *addr2;
     NTSTATUS status;
+    ULONG_PTR max_address, granularity_mask;
     SIZE_T size;
+    NTSTATUS limit_status;
     ULONG_PTR zero_bits;
 
     /* simple allocation should success */
@@ -280,6 +290,49 @@ static void test_NtAllocateVirtualMemory(void)
     addr1 = NULL;
     status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr1, 0, &size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS);
     ok(!!status, "Unexpected status %08lx.\n", status);
+
+    GetSystemInfo(&si);
+    max_address = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    granularity_mask = si.dwAllocationGranularity - 1;
+    limit_status = is_win64 || old_wow64 ? STATUS_INVALID_PARAMETER : STATUS_CONFLICTING_ADDRESSES;
+
+    size = 0x1000;
+    addr1 = NULL;
+    status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr1, 0, &size,
+                                     MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == STATUS_SUCCESS, "NtAllocateVirtualMemory returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        ok((char *)addr1 + size - 1 <= (char *)si.lpMaximumApplicationAddress,
+           "NtAllocateVirtualMemory returned address range %p-%p above maximum application address %p\n",
+           addr1, (char *)addr1 + size - 1, si.lpMaximumApplicationAddress);
+
+        size = 0;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+        ok(status == STATUS_SUCCESS, "NtFreeVirtualMemory returned %08lx\n", status);
+    }
+
+    size = 0x1000;
+    addr1 = (void *)((max_address + si.dwAllocationGranularity) & ~granularity_mask);
+    status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr1, 0, &size,
+                                     MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == limit_status, "NtAllocateVirtualMemory returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        size = 0;
+        NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+    }
+
+    size = si.dwAllocationGranularity * 2;
+    addr1 = (void *)(max_address & ~granularity_mask);
+    status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr1, 0, &size,
+                                     MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == limit_status, "NtAllocateVirtualMemory returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        size = 0;
+        NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+    }
 }
 
 #define check_region_size(p, s) check_region_size_(p, s, __LINE__)
@@ -306,7 +359,10 @@ static void test_NtAllocateVirtualMemoryEx(void)
     SIZE_T size, size2;
     ULONG granularity;
     NTSTATUS status;
+    ULONG_PTR max_address, granularity_mask;
     ULONG_PTR count;
+    NTSTATUS limit_status;
+    SYSTEM_INFO si;
     void *addr1;
 
     if (!pNtAllocateVirtualMemoryEx)
@@ -668,6 +724,52 @@ static void test_NtAllocateVirtualMemoryEx(void)
     status = pNtAllocateVirtualMemoryEx( NtCurrentProcess(), &addr1, &size, MEM_RESERVE,
                                          PAGE_EXECUTE_READWRITE, ext, 2 );
     ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %08lx.\n", status);
+
+    GetSystemInfo(&si);
+    max_address = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    granularity_mask = si.dwAllocationGranularity - 1;
+    limit_status = is_win64 || old_wow64 ? STATUS_INVALID_PARAMETER : STATUS_CONFLICTING_ADDRESSES;
+
+    size = 0x1000;
+    addr1 = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr1, &size,
+                                        MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN,
+                                        PAGE_READWRITE, NULL, 0);
+    ok(status == STATUS_SUCCESS, "NtAllocateVirtualMemoryEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        ok((char *)addr1 + size - 1 <= (char *)si.lpMaximumApplicationAddress,
+           "NtAllocateVirtualMemoryEx returned address range %p-%p above maximum application address %p\n",
+           addr1, (char *)addr1 + size - 1, si.lpMaximumApplicationAddress);
+
+        size = 0;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+        ok(status == STATUS_SUCCESS, "NtFreeVirtualMemory returned %08lx\n", status);
+    }
+
+    size = 0x1000;
+    addr1 = (void *)((max_address + si.dwAllocationGranularity) & ~granularity_mask);
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr1, &size,
+                                        MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN,
+                                        PAGE_READWRITE, NULL, 0);
+    ok(status == limit_status, "NtAllocateVirtualMemoryEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        size = 0;
+        NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+    }
+
+    size = si.dwAllocationGranularity * 2;
+    addr1 = (void *)(max_address & ~granularity_mask);
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr1, &size,
+                                        MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN,
+                                        PAGE_READWRITE, NULL, 0);
+    ok(status == limit_status, "NtAllocateVirtualMemoryEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        size = 0;
+        NtFreeVirtualMemory(NtCurrentProcess(), &addr1, &size, MEM_RELEASE);
+    }
 
     memset( ext, 0, sizeof(ext) );
     ext[0].Type = MemExtendedParameterAttributeFlags;
@@ -1444,10 +1546,10 @@ static void test_NtMapViewOfSection(void)
     DWORD status, written;
     SIZE_T size, size2, result;
     LARGE_INTEGER offset;
+    ULONG_PTR max_address, granularity_mask;
     ULONG_PTR zero_bits;
+    NTSTATUS limit_status;
     SYSTEM_INFO si;
-
-    if (!pIsWow64Process || !pIsWow64Process(NtCurrentProcess(), &is_wow64)) is_wow64 = FALSE;
 
     file = CreateFileA(testfile, GENERIC_READ|GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0);
     ok(file != INVALID_HANDLE_VALUE, "Failed to create test file\n");
@@ -1748,6 +1850,56 @@ static void test_NtMapViewOfSection(void)
     NtClose(mapping);
     CloseHandle(file);
 
+    GetSystemInfo(&si);
+    max_address = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    granularity_mask = si.dwAllocationGranularity - 1;
+    limit_status = is_win64 || old_wow64 ? STATUS_INVALID_PARAMETER : STATUS_CONFLICTING_ADDRESSES;
+
+    mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x40000, NULL);
+    ok(mapping != 0, "CreateFileMapping failed, error %lu\n", GetLastError());
+    if (!mapping)
+    {
+        TerminateProcess(process, 0);
+        CloseHandle(process);
+        return;
+    }
+
+    offset.QuadPart = 0;
+    size = 0x1000;
+    ptr = NULL;
+    status = NtMapViewOfSection(mapping, NtCurrentProcess(), &ptr, 0, 0, &offset, &size,
+                                1, MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == STATUS_SUCCESS, "NtMapViewOfSection returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        ok((char *)ptr + size - 1 <= (char *)si.lpMaximumApplicationAddress,
+           "NtMapViewOfSection returned address range %p-%p above maximum application address %p\n",
+           ptr, (char *)ptr + size - 1, si.lpMaximumApplicationAddress);
+
+        status = NtUnmapViewOfSection(NtCurrentProcess(), ptr);
+        ok(status == STATUS_SUCCESS, "NtUnmapViewOfSection returned %08lx\n", status);
+    }
+
+    offset.QuadPart = 0;
+    size = 0x1000;
+    ptr = (void *)((max_address + si.dwAllocationGranularity) & ~granularity_mask);
+    status = NtMapViewOfSection(mapping, NtCurrentProcess(), &ptr, 0, 0, &offset, &size,
+                                1, MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == STATUS_INVALID_PARAMETER, "NtMapViewOfSection returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+        NtUnmapViewOfSection(NtCurrentProcess(), ptr);
+
+    offset.QuadPart = 0;
+    size = si.dwAllocationGranularity * 2;
+    ptr = (void *)(max_address & ~granularity_mask);
+    status = NtMapViewOfSection(mapping, NtCurrentProcess(), &ptr, 0, 0, &offset, &size,
+                                1, MEM_TOP_DOWN, PAGE_READWRITE);
+    ok(status == limit_status, "NtMapViewOfSection returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+        NtUnmapViewOfSection(NtCurrentProcess(), ptr);
+
+    CloseHandle(mapping);
+
     TerminateProcess(process, 0);
     CloseHandle(process);
 }
@@ -1764,6 +1916,8 @@ static void test_NtMapViewOfSectionEx(void)
     DWORD status, written;
     SIZE_T size, result;
     LARGE_INTEGER offset;
+    ULONG_PTR max_address, granularity_mask;
+    NTSTATUS limit_status;
     void *ptr, *ptr2;
     BOOL ret;
 
@@ -1773,8 +1927,10 @@ static void test_NtMapViewOfSectionEx(void)
         return;
     }
 
-    if (!pIsWow64Process || !pIsWow64Process(NtCurrentProcess(), &is_wow64)) is_wow64 = FALSE;
     GetSystemInfo(&si);
+    max_address = (ULONG_PTR)si.lpMaximumApplicationAddress;
+    granularity_mask = si.dwAllocationGranularity - 1;
+    limit_status = is_win64 || old_wow64 ? STATUS_INVALID_PARAMETER : STATUS_CONFLICTING_ADDRESSES;
 
     file = CreateFileA(testfile, GENERIC_READ|GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0);
     ok(file != INVALID_HANDLE_VALUE, "Failed to create test file\n");
@@ -1789,6 +1945,40 @@ static void test_NtMapViewOfSectionEx(void)
 
     process = create_target_process("sleep");
     ok(process != NULL, "Can't start process\n");
+
+    offset.QuadPart = 0;
+    size = 0x1000;
+    ptr = NULL;
+    status = pNtMapViewOfSectionEx(mapping, NtCurrentProcess(), &ptr, &offset, &size,
+                                   MEM_TOP_DOWN, PAGE_READWRITE, NULL, 0);
+    ok(status == STATUS_SUCCESS, "NtMapViewOfSectionEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        ok((char *)ptr + size - 1 <= (char *)si.lpMaximumApplicationAddress,
+           "NtMapViewOfSectionEx returned address range %p-%p above maximum application address %p\n",
+           ptr, (char *)ptr + size - 1, si.lpMaximumApplicationAddress);
+
+        status = NtUnmapViewOfSection(NtCurrentProcess(), ptr);
+        ok(status == STATUS_SUCCESS, "NtUnmapViewOfSection returned %08lx\n", status);
+    }
+
+    offset.QuadPart = 0;
+    size = 0x1000;
+    ptr = (void *)((max_address + si.dwAllocationGranularity) & ~granularity_mask);
+    status = pNtMapViewOfSectionEx(mapping, NtCurrentProcess(), &ptr, &offset, &size,
+                                   MEM_TOP_DOWN, PAGE_READWRITE, NULL, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "NtMapViewOfSectionEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+        NtUnmapViewOfSection(NtCurrentProcess(), ptr);
+
+    offset.QuadPart = 0;
+    size = si.dwAllocationGranularity * 2;
+    ptr = (void *)(max_address & ~granularity_mask);
+    status = pNtMapViewOfSectionEx(mapping, NtCurrentProcess(), &ptr, &offset, &size,
+                                   MEM_TOP_DOWN, PAGE_READWRITE, NULL, 0);
+    ok(status == limit_status, "NtMapViewOfSectionEx returned %08lx\n", status);
+    if (status == STATUS_SUCCESS)
+        NtUnmapViewOfSection(NtCurrentProcess(), ptr);
 
     ptr = NULL;
     size = 0x1000;
@@ -2508,6 +2698,33 @@ static void test_syscall_numbers(void)
             }
         }
     }
+}
+
+static void test_syscall_abi(void)
+{
+    LCID user_lcid, system_lcid, prev_user_lcid = 0, lcid;
+    NTSTATUS (WINAPI *pNtQueryDefaultLocale)( ULONG user, LCID *lcid );
+
+    /* test that BOOLEAN values are correctly extended */
+
+    pNtQueryDefaultLocale = (void *)GetProcAddress( GetModuleHandleA("ntdll.dll"), "NtQueryDefaultLocale" );
+    pNtQueryDefaultLocale( 0, &system_lcid );
+    pNtQueryDefaultLocale( 1, &user_lcid );
+    if (system_lcid == user_lcid)
+    {
+        prev_user_lcid = user_lcid;
+        user_lcid += 0x400;
+        NtSetDefaultLocale( TRUE, user_lcid );
+    }
+    pNtQueryDefaultLocale( 0, &lcid );
+    ok( lcid == system_lcid, "got %04lx / %04lx\n", lcid, system_lcid );
+    for (ULONG i = 1; i < 0x10000; i <<= 1)
+    {
+        LCID expect = LOBYTE(i) ? user_lcid : system_lcid;
+        pNtQueryDefaultLocale( i, &lcid );
+        ok( lcid == expect, "%lx: got %04lx / %04lx\n", i, lcid, expect );
+    }
+    if (prev_user_lcid) NtSetDefaultLocale( TRUE, prev_user_lcid );
 }
 
 static void test_NtFreeVirtualMemory(void)
@@ -3302,7 +3519,7 @@ static void test_exec_memory_writes(void)
         SYSTEM_CPU_INFORMATION info;
         ULONG len;
 
-        RtlGetNativeSystemInformation( SystemCpuInformation, &info, sizeof(info), &len );
+        pRtlGetNativeSystemInformation( SystemCpuInformation, &info, sizeof(info), &len );
         ok (info.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64, "succeeded on non-ARM64\n" );
         mem.ProcessEnableWriteExceptions = 1;
         NtSetInformationProcess( GetCurrentProcess(), ProcessManageWritesToExecutableMemory,
@@ -3550,16 +3767,30 @@ START_TEST(virtual)
     pRtlFreeUserStack = (void *)GetProcAddress(mod, "RtlFreeUserStack");
     pRtlFindExportedRoutineByName = (void *)GetProcAddress(mod, "RtlFindExportedRoutineByName");
     pRtlGetEnabledExtendedFeatures = (void *)GetProcAddress(mod, "RtlGetEnabledExtendedFeatures");
-    pRtlGetNativeSystemInformation = (void *)GetProcAddress(mod, "RtlGetNativeSystemInformation");
-    pRtlIsEcCode = (void *)GetProcAddress(mod, "RtlIsEcCode");
     pNtAllocateVirtualMemoryEx = (void *)GetProcAddress(mod, "NtAllocateVirtualMemoryEx");
     pNtMapViewOfSectionEx = (void *)GetProcAddress(mod, "NtMapViewOfSectionEx");
     pNtSetInformationVirtualMemory = (void *)GetProcAddress(mod, "NtSetInformationVirtualMemory");
+
+#ifndef __aarch64__
+    pRtlGetNativeSystemInformation = (void *)GetProcAddress(mod, "RtlGetNativeSystemInformation");
+#endif
+#ifdef __x86_64__
+    pRtlIsEcCode = (void *)GetProcAddress(mod, "RtlIsEcCode");
+#endif
 
     NtQuerySystemInformation(SystemBasicInformation, &sbi, sizeof(sbi), NULL);
     trace("system page size %#lx\n", sbi.PageSize);
     page_size = sbi.PageSize;
     if (!pIsWow64Process || !pIsWow64Process(NtCurrentProcess(), &is_wow64)) is_wow64 = FALSE;
+    if (is_wow64)
+    {
+        TEB64 *teb64 = ULongToPtr( NtCurrentTeb()->GdiBatchCount );
+        if (teb64)
+        {
+            PEB64 *peb64 = ULongToPtr(teb64->Peb);
+            old_wow64 = !peb64->LdrData;
+        }
+    }
 
     test_NtAllocateVirtualMemory();
     test_NtAllocateVirtualMemoryEx();
@@ -3574,6 +3805,7 @@ START_TEST(virtual)
     test_syscalls();
     test_invalid_syscalls();
     test_syscall_numbers();
+    test_syscall_abi();
     test_query_region_information();
     test_query_image_information();
     test_exec_memory_writes();

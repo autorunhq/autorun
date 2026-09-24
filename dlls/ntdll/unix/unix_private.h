@@ -51,6 +51,7 @@ static const WORD current_machine = IMAGE_FILE_MACHINE_ARMNT;
 static const WORD current_machine = IMAGE_FILE_MACHINE_ARM64;
 #endif
 extern WORD native_machine;
+extern ULONG cpu_count;
 
 static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 
@@ -65,15 +66,16 @@ static inline BOOL is_machine_64bit( WORD machine )
 #ifdef _WIN64
 typedef TEB32 WOW_TEB;
 typedef PEB32 WOW_PEB;
-static inline TEB64 *NtCurrentTeb64(void) { return NULL; }
+static inline TEB64 *get_teb64( TEB *teb ) { return NULL; }
 #else
 typedef TEB64 WOW_TEB;
 typedef PEB64 WOW_PEB;
-static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiBatchCount; }
+static inline TEB64 *get_teb64( TEB *teb ) { return teb ? (TEB64 *)(ULONG_PTR)teb->GdiBatchCount : NULL; }
 #endif
 
 extern WOW_PEB *wow_peb;
 extern ULONG_PTR user_space_wow_limit;
+extern void *main_module;
 extern SECTION_IMAGE_INFORMATION main_image_info;
 
 static inline WOW_TEB *get_wow_teb( TEB *teb )
@@ -83,13 +85,14 @@ static inline WOW_TEB *get_wow_teb( TEB *teb )
 
 static inline BOOL is_wow64(void)
 {
-    return !!wow_peb;
+    if (is_win64) return !is_machine_64bit( main_image_info.Machine ); /* 64-bit ntdll, 32-bit image */
+    else return is_machine_64bit( native_machine );  /* 32-bit ntdll, 64-bit wineserver */
 }
 
 /* check for old-style Wow64 (using a 32-bit ntdll.so) */
 static inline BOOL is_old_wow64(void)
 {
-    return !is_win64 && wow_peb;
+    return !is_win64 && is_machine_64bit( native_machine );
 }
 
 static inline BOOL is_arm64ec(void)
@@ -98,47 +101,70 @@ static inline BOOL is_arm64ec(void)
             main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64);
 }
 
+static inline ULONG_PTR get_system_affinity_mask(void)
+{
+#ifdef __SWITCH__
+    extern ULONG_PTR horizon_get_system_affinity_mask(void);
+    return horizon_get_system_affinity_mask();
+#else
+    if (cpu_count >= sizeof(ULONG_PTR) * 8) return ~(ULONG_PTR)0;
+    return ((ULONG_PTR)1 << cpu_count) - 1;
+#endif
+}
+
+
+/* per-thread data for the Unix side, stored at the bottom of the signal stack */
+
+struct thread_data
+{
+    TEB         *teb;               /* TEB */
+    int          request_fd;        /* fd for sending server requests */
+    int          reply_fd;          /* fd for receiving server replies */
+    int          wait_fd[2];        /* fd for sleeping server requests */
+    int          alert_fd;          /* inproc sync fd for user apc alerts */
+    DWORD        tid;               /* thread id */
+    BOOL         allow_writes;      /* ThreadAllowWrites flags */
+    BOOL         suspend;           /* suspend on startup */
+    BOOL         filesys_redir;     /* WOW64_TLS_FILESYSREDIR before the TEB is created */
+    pthread_t    pthread_id;        /* pthread thread id */
+    void        *jmp_buf;           /* setjmp buffer for exception handling */
+    void        *start;             /* thread entry point */
+    void        *param;             /* thread entry point parameter */
+    struct list  entry;             /* entry in TEB list */
+    char         debug_info[0x800]; /* debug_info structure */
+    char         signal_stack[];    /* signal stack */
+    /* char kernel_stack[] */
+};
+
+extern pthread_key_t thread_data_key;
+
+static inline struct thread_data *get_thread_data(void)
+{
+    return pthread_getspecific( thread_data_key );
+}
+
 /* thread private data, stored in NtCurrentTeb()->GdiTebBatch */
-struct ntdll_thread_data
+struct teb_data
 {
     void                     *cpu_data[16];  /* 1d4/02f0 reserved for CPU-specific data */
     SYSTEM_SERVICE_TABLE     *syscall_table; /* 214/0370 syscall table */
     struct syscall_frame     *syscall_frame; /* 218/0378 current syscall frame */
     int                       syscall_trace; /* 21c/0380 syscall trace flag */
-    int                       request_fd;    /* fd for sending server requests */
-    int                       reply_fd;      /* fd for receiving server replies */
-    int                       wait_fd[2];    /* fd for sleeping server requests */
-    int                       alert_fd;      /* inproc sync fd for user apc alerts */
-    BOOL                      allow_writes;  /* ThreadAllowWrites flags */
-    pthread_t                 pthread_id;    /* pthread thread id */
-    void                     *kernel_stack;  /* stack for thread startup and kernel syscalls */
-    struct list               entry;         /* entry in TEB list */
-    PRTL_THREAD_START_ROUTINE start;         /* thread entry point */
-    void                     *param;         /* thread entry point parameter */
-    void                     *jmp_buf;       /* setjmp buffer for exception handling */
-    int                      *fsync_apc_futex;
+#ifdef __SWITCH__
+    struct thread_data       *thread;
+#endif
 };
 
-C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );
+C_ASSERT( sizeof(struct teb_data) <= sizeof(((TEB *)0)->GdiTebBatch) );
 #ifdef _WIN64
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_table ) == 0x370 );
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_frame ) == 0x378 );
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_trace ) == 0x380 );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_table ) == 0x370 );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_frame ) == 0x378 );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_trace ) == 0x380 );
 #else
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_table ) == 0x214 );
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_frame ) == 0x218 );
-C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct ntdll_thread_data, syscall_trace ) == 0x21c );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_table ) == 0x214 );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_frame ) == 0x218 );
+C_ASSERT( offsetof( TEB, GdiTebBatch ) + offsetof( struct teb_data, syscall_trace ) == 0x21c );
 #endif
-
-static inline struct ntdll_thread_data *ntdll_get_thread_data(void)
-{
-    return (struct ntdll_thread_data *)&NtCurrentTeb()->GdiTebBatch;
-}
-
-static inline struct syscall_frame *get_syscall_frame(void)
-{
-    return ntdll_get_thread_data()->syscall_frame;
-}
 
 /* returns TRUE if the async is complete; FALSE if it should be restarted */
 typedef BOOL async_callback_t( void *user, ULONG_PTR *info, unsigned int *status );
@@ -147,16 +173,24 @@ struct async_fileio
 {
     async_callback_t    *callback;
     struct async_fileio *next;
-    HANDLE               handle;
+};
+
+struct pe_mapping_info
+{
+    HANDLE               shared_file;
+    UNICODE_STRING       nt_name;
+    ANSI_STRING          exp_name;
+    void                *version_res;
+    ULONG                version_len;
+    struct pe_image_info image;
+    char                 data[];
 };
 
 static const SIZE_T page_size = 0x1000;
-static const SIZE_T teb_size = 0x3800;  /* TEB64 + TEB32 + debug info */
 static const SIZE_T signal_stack_mask = 0xffff;
-static const SIZE_T signal_stack_size = 0x10000 - 0x3800;
-extern SIZE_T kernel_stack_size;
-static const SIZE_T kernel_stack_guard_size = 0x1000;
-static const SIZE_T min_kernel_stack  = 0x3000;
+static const SIZE_T signal_stack_size = 0x10000 - offsetof( struct thread_data, signal_stack );
+static const SIZE_T kernel_stack_size = 0x100000;
+static const SIZE_T min_kernel_stack  = 0x2000;
 static const LONG teb_offset = 0x2000;
 
 #define FILE_WRITE_TO_END_OF_FILE      ((LONGLONG)-1)
@@ -186,12 +220,13 @@ extern const char *wineloader;
 extern const char *user_name;
 extern const char **dll_paths;
 extern const char **system_dll_paths;
-extern pthread_key_t teb_key;
 extern PEB *peb;
+extern DWORD pid;
 extern USHORT *uctable;
 extern USHORT *lctable;
 extern SIZE_T startup_info_size;
 extern BOOL is_prefix_bootstrap;
+extern ULONG session_id;
 extern int main_argc;
 extern char **main_argv;
 extern WCHAR **main_wargv;
@@ -199,8 +234,6 @@ extern const WCHAR system_dir[];
 extern unsigned int supported_machines_count;
 extern USHORT supported_machines[8];
 extern BOOL process_exiting;
-extern BOOL terminate_process_running;
-extern LONG terminate_process_exit_code;
 extern HANDLE keyed_event;
 extern int inproc_device_fd;
 extern timeout_t server_start_time;
@@ -209,19 +242,6 @@ extern pthread_mutex_t fd_cache_mutex;
 extern struct _KUSER_SHARED_DATA *user_shared_data;
 extern ULONG process_cookie;
 
-extern BOOL process_termination_delay;
-extern BOOL fsync_help_simulated_pulse;
-extern BOOL localsystem_sid;
-extern BOOL simulate_writecopy;
-extern long long ram_reporting_bias;
-extern BOOL wine_allocs_2g_limit;
-extern char *release_reserved_memory_low_bound;
-extern BOOL alert_simulate_sched_quantum;
-extern BOOL fsync_simulate_sched_quantum;
-extern BOOL fsync_yield_to_waiters;
-
-extern BOOL ac_odyssey;
-
 extern void init_environment(void);
 extern void init_startup_info(void);
 extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
@@ -229,12 +249,13 @@ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_
                                   const struct pe_image_info *pe_info, DWORD *info_size );
 extern char *get_alternate_wineloader( WORD machine );
 extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
-extern NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
-                              ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,
-                              void **module, SIZE_T *size, ULONG_PTR limit_low, ULONG_PTR limit_high, off_t offset );
-extern BOOL is_builtin_path( const UNICODE_STRING *path, WORD *machine );
-extern NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **module );
-extern NTSTATUS load_start_exe( UNICODE_STRING *nt_name, void **module );
+extern NTSTATUS load_builtin( struct pe_mapping_info *pe_mapping, USHORT machine,
+                              SECTION_IMAGE_INFORMATION *info, void **module, SIZE_T *size,
+                              ULONG_PTR limit_low, ULONG_PTR limit_high, off_t offset );
+extern NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret );
+extern BOOL is_system_dir_path( const UNICODE_STRING *path, WORD *machine );
+extern NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine );
+extern NTSTATUS load_start_exe( UNICODE_STRING *nt_name );
 extern ULONG_PTR redirect_arm64ec_rva( void *module, ULONG_PTR rva, const IMAGE_ARM64EC_METADATA *metadata );
 extern void start_server( BOOL debug );
 
@@ -245,7 +266,6 @@ extern unsigned int server_select( const union select_op *select_op, data_size_t
                                    timeout_t abs_timeout, struct context_data *context, struct user_apc *user_apc );
 extern unsigned int server_wait( const union select_op *select_op, data_size_t size, UINT flags,
                                  const LARGE_INTEGER *timeout );
-extern int get_inproc_alert_fd(void);
 extern unsigned int server_wait_for_object( HANDLE handle, BOOL alertable, const LARGE_INTEGER *timeout );
 extern unsigned int server_queue_process_apc( HANDLE process, const union apc_call *call,
                                               union apc_result *result );
@@ -253,9 +273,9 @@ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *u
                                int *needs_close, enum server_fd_type *type, unsigned int *options );
 extern int wine_server_receive_fd( obj_handle_t *handle );
 extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
-extern size_t server_init_process(void);
+extern void server_init_process( struct thread_data *data );
 extern void server_init_process_done(void);
-extern void server_init_thread( void *entry_point, BOOL *suspend );
+extern void server_init_thread( struct thread_data *data );
 extern int server_pipe( int fd[2] );
 
 extern void fpux_to_fpu( I386_FLOATING_SAVE_AREA *fpu, const XSAVE_FORMAT *fpux );
@@ -277,75 +297,72 @@ extern void copy_xstate( XSAVE_AREA_HEADER *dst, XSAVE_AREA_HEADER *src, UINT64 
 
 extern void set_process_instrumentation_callback( void *callback );
 
-extern void *get_cpu_area( USHORT machine );
-extern void set_thread_id( TEB *teb, DWORD pid, DWORD tid );
+extern void *get_cpu_area( struct thread_data *data, USHORT machine );
 extern NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE_T commit_size );
 extern void DECLSPEC_NORETURN abort_thread( int status );
 extern void DECLSPEC_NORETURN abort_process( int status );
 extern void DECLSPEC_NORETURN exit_process( int status );
 extern void wait_suspend( CONTEXT *context );
-extern NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance, BOOL exception );
+extern NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
+                                  CONTEXT *context, BOOL first_chance );
 extern NTSTATUS set_thread_context( HANDLE handle, const void *context, BOOL *self, USHORT machine );
 extern NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT machine );
 extern unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
                                              data_size_t *ret_len );
 extern NTSTATUS system_time_precise( void *args );
 
-extern void *steamclient_handle_fault( LPCVOID addr, DWORD err );
 extern void *anon_mmap_fixed( void *start, size_t size, int prot, int flags );
 extern void *anon_mmap_alloc( size_t size, int prot );
 extern void virtual_init(void);
 extern ULONG_PTR get_system_affinity_mask(void);
+extern UINT_PTR get_host_page_size(void);
 extern void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 );
 extern NTSTATUS virtual_map_builtin_module( HANDLE mapping, void **module, SIZE_T *size,
                                             SECTION_IMAGE_INFORMATION *info, ULONG_PTR limit_low,
                                             ULONG_PTR limit_high, WORD machine, BOOL prefer_native, off_t offset );
-extern NTSTATUS virtual_map_module( HANDLE mapping, void **module, SIZE_T *size,
-                                    SECTION_IMAGE_INFORMATION *info, ULONG_PTR limit_low,
-                                    ULONG_PTR limit_high, USHORT machine );
+extern NTSTATUS virtual_map_main_module( HANDLE mapping, USHORT machine );
 extern NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_name,
                                              struct pe_image_info *info, void *so_handle );
 extern NTSTATUS virtual_relocate_module( void *module );
-extern TEB *virtual_alloc_first_teb(void);
-extern NTSTATUS virtual_alloc_teb( TEB **ret_teb );
-extern void virtual_free_teb( TEB *teb );
+extern struct thread_data *virtual_alloc_first_thread_data(void);
+extern void virtual_alloc_first_teb(void);
+extern NTSTATUS virtual_alloc_teb( struct thread_data *data );
+struct thread_data *virtual_alloc_thread_data(void);
+extern void virtual_free_thread_data( struct thread_data *data );
 extern NTSTATUS virtual_clear_tls_index( ULONG index );
-extern NTSTATUS virtual_set_tls_information( PROCESS_TLS_INFORMATION *t );
 extern NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, ULONG_PTR limit_high,
                                             SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page );
 extern void virtual_map_user_shared_data(void);
 extern void virtual_init_user_shared_data(void);
-extern NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack );
+extern NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, void *stack );
 extern unsigned int virtual_locked_server_call( void *req_ptr );
 extern ssize_t virtual_locked_read( int fd, void *addr, size_t size );
 extern ssize_t virtual_locked_pread( int fd, void *addr, size_t size, off_t offset );
 extern ssize_t virtual_locked_recvmsg( int fd, struct msghdr *hdr, int flags );
 extern BOOL virtual_is_valid_code_address( const void *addr, SIZE_T size );
-extern void *virtual_setup_exception( void *stack_ptr, size_t size, EXCEPTION_RECORD *rec );
+extern void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t size, EXCEPTION_RECORD *rec );
 extern BOOL virtual_check_buffer_for_read( const void *ptr, SIZE_T size );
 extern BOOL virtual_check_buffer_for_write( void *ptr, SIZE_T size );
 extern SIZE_T virtual_uninterrupted_read_memory( const void *addr, void *buffer, SIZE_T size );
 extern NTSTATUS virtual_uninterrupted_write_memory( void *addr, const void *buffer, SIZE_T size );
 extern void virtual_set_force_exec( BOOL enable );
 extern void virtual_enable_write_exceptions( BOOL enable );
-extern void virtual_set_large_address_space(void);
 extern void virtual_fill_image_information( const struct pe_image_info *pe_info,
                                             SECTION_IMAGE_INFORMATION *info );
 extern void *get_builtin_so_handle( void *module );
-extern NTSTATUS load_builtin_unixlib( void *module, const char *name );
+extern NTSTATUS set_builtin_unixlib_name( void *module, const char *name );
+extern BOOL is_emulated_code( ULONG_PTR ptr );
 
 extern NTSTATUS get_thread_ldt_entry( HANDLE handle, THREAD_DESCRIPTOR_INFORMATION *info, ULONG len );
 extern void *get_native_context( CONTEXT *context );
 extern void *get_wow_context( CONTEXT *context );
 extern BOOL get_thread_times( int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time,
                               LARGE_INTEGER *user_time );
-extern void signal_init_threading(void);
 extern NTSTATUS signal_alloc_thread( TEB *teb );
-extern void set_thread_teb( TEB *teb );
 extern void signal_free_thread( TEB *teb );
-extern void signal_init_process(void);
-extern void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, void *arg,
-                                                   BOOL suspend, TEB *teb );
+extern void signal_disable_syscall_dispatch(void);
+extern void signal_init_process( TEB *teb );
+extern void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, void *arg, TEB *teb );
 extern SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4];
 extern void __wine_syscall_dispatcher(void);
 extern void __wine_syscall_dispatcher_return(void);
@@ -375,13 +392,12 @@ extern NTSTATUS tape_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTI
                                       IO_STATUS_BLOCK *io, UINT code, void *in_buffer,
                                       UINT in_size, void *out_buffer, UINT out_size );
 
-extern struct async_fileio *alloc_fileio( DWORD size, async_callback_t callback, HANDLE handle );
+extern struct async_fileio *alloc_fileio( DWORD size, async_callback_t callback );
 extern void release_fileio( struct async_fileio *io );
 extern NTSTATUS errno_to_status( int err );
 extern NTSTATUS get_nt_and_unix_names( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nt_name,
                                        char **unix_name, UINT disposition, BOOL open_reparse );
 extern NTSTATUS unix_to_nt_file_name( const char *unix_name, WCHAR **nt, UINT disposition );
-extern NTSTATUS WINAPI unixcall_compat_wine_nt_to_unix_file_name( void *args );
 extern NTSTATUS get_full_path( char *name, const WCHAR *curdir, UNICODE_STRING *nt_name );
 extern NTSTATUS get_nt_path( const WCHAR *name, UNICODE_STRING *nt_name );
 extern NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MASK access,
@@ -389,14 +405,12 @@ extern NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MA
                                 ULONG options, void *ea_buffer, ULONG ea_length );
 extern NTSTATUS get_device_info( int fd, struct _FILE_FS_DEVICE_INFORMATION *info );
 extern void init_files(void);
-extern void fill_cpu_override(void);
 extern void init_cpu_info(void);
 extern void init_shared_data_cpuinfo( struct _KUSER_SHARED_DATA *data );
 extern void file_complete_async( HANDLE handle, unsigned int options, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
                                  IO_STATUS_BLOCK *io, NTSTATUS status, ULONG_PTR information );
 extern void set_async_direct_result( HANDLE *async_handle, unsigned int options, IO_STATUS_BLOCK *io,
                                      NTSTATUS status, ULONG_PTR information, BOOL mark_pending );
-extern struct cpu_topology_override *get_cpu_topology_override(void);
 
 extern NTSTATUS unixcall_wine_dbg_write( void *args );
 extern NTSTATUS unixcall_wine_server_call( void *args );
@@ -417,12 +431,11 @@ extern void close_inproc_sync( HANDLE handle );
 
 extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
                                           ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status );
-extern NTSTATUS call_user_exception_dispatcher( EXCEPTION_RECORD *rec, CONTEXT *context );
-extern void call_raise_user_exception_dispatcher(void);
+extern NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_RECORD *rec,
+                                                CONTEXT *context );
+extern void call_raise_user_exception_dispatcher( struct thread_data *data );
 
 #define IMAGE_DLLCHARACTERISTICS_PREFER_NATIVE 0x0010 /* Wine extension */
-
-extern const char * wine_debuginfostr_pc(void *pc);
 
 #define TICKSPERSEC 10000000
 #define NSECPERSEC 1000000000
@@ -448,36 +461,54 @@ static inline void ascii_to_unicode( WCHAR *dst, const char *src, size_t len )
     while (len--) *dst++ = (unsigned char)*src++;
 }
 
-static inline void *get_signal_stack(void)
+static inline void *get_kernel_stack( struct thread_data *data )
 {
-    return (void *)(((ULONG_PTR)NtCurrentTeb() & ~signal_stack_mask) + teb_size);
+    return data->signal_stack + signal_stack_size;
 }
 
-static inline BOOL is_inside_signal_stack( void *ptr )
+static inline struct teb_data *get_teb_data( struct thread_data *data )
 {
-    return ((char *)ptr >= (char *)get_signal_stack() &&
-            (char *)ptr < (char *)get_signal_stack() + signal_stack_size);
+    return data->teb ? (struct teb_data *)&data->teb->GdiTebBatch : NULL;
 }
 
-static inline BOOL is_inside_syscall_stack_guard( const char *stack_ptr )
+static inline struct syscall_frame *get_syscall_frame( struct thread_data *data )
 {
-    const char *kernel_stack = ntdll_get_thread_data()->kernel_stack;
-
-    return (stack_ptr >= kernel_stack && stack_ptr < kernel_stack + kernel_stack_guard_size);
+    return data->teb ? get_teb_data(data)->syscall_frame : NULL;
 }
 
-static inline BOOL is_inside_syscall( ULONG_PTR sp )
+static inline void alloc_syscall_frame( SIZE_T frame_size )
 {
-    return ((char *)sp >= (char *)ntdll_get_thread_data()->kernel_stack &&
-            (char *)sp <= (char *)get_syscall_frame());
+    struct thread_data *data = get_thread_data();
+    void *frame = (char *)get_kernel_stack(data) + kernel_stack_size - frame_size;
+    get_teb_data(data)->syscall_frame = frame;
 }
 
+static inline BOOL is_inside_signal_stack( struct thread_data *data, void *ptr )
+{
+    return ((char *)ptr >= data->signal_stack && (char *)ptr < data->signal_stack + signal_stack_size);
+}
+
+static inline BOOL is_inside_syscall( struct thread_data *data, ULONG_PTR sp )
+{
+    if (!data->teb) return TRUE;
+    return ((char *)sp >= (char *)get_kernel_stack( data ) &&
+            (char *)sp <= (char *)get_syscall_frame( data ));
+}
+
+static inline CLIENT_ID make_client_id( ULONG pid, ULONG tid )
+{
+    CLIENT_ID id = { .UniqueProcess = ULongToHandle(pid), .UniqueThread = ULongToHandle(tid) };
+    return id;
+}
+
+#ifdef __SWITCH__
 static inline BOOL is_ec_code( ULONG_PTR ptr )
 {
     const UINT64 *map = (const UINT64 *)peb->EcCodeBitMap;
     ULONG_PTR page = ptr / page_size;
-    return (map[page / 64] >> (page & 63)) & 1;
+    return map && ((map[page / 64] >> (page & 63)) & 1);
 }
+#endif
 
 static inline void mutex_lock( pthread_mutex_t *mutex )
 {
@@ -589,7 +620,8 @@ enum loadorder
 };
 
 extern void set_load_order_app_name( const WCHAR *app_name );
-extern enum loadorder get_load_order( const UNICODE_STRING *nt_name );
+extern enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir,
+                                      const struct pe_mapping_info *pe_mapping );
 
 static inline WCHAR ntdll_towupper( WCHAR ch )
 {
@@ -704,7 +736,7 @@ static inline WORD ldt_alloc_entry( LDT_ENTRY entry )
     for (idx = 0; idx < ARRAY_SIZE(ldt_bitmap); idx++)
     {
         if (ldt_bitmap[idx] == ~0u) continue;
-        idx = idx * 32 + ffs( ~ldt_bitmap[idx] ) - 1;
+        idx = idx * 32 + __builtin_ffs( ~ldt_bitmap[idx] ) - 1;
         return ldt_update_entry( (idx << 3) | 7, entry );
     }
     return 0;

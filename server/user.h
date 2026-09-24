@@ -57,7 +57,6 @@ struct key_repeat
     timeout_t            delay;            /* auto-repeat delay */
     timeout_t            period;           /* auto-repeat period */
     union hw_input       input;            /* the input to repeat */
-    unsigned int         flags;            /* the queue_keyboard_message flags */
     user_handle_t        win;              /* target window for input event */
     struct timeout_user *timeout;          /* timeout for repeat */
 };
@@ -79,11 +78,9 @@ struct desktop
     struct list          hotkeys;          /* list of registered hotkeys */
     struct list          pointers;         /* list of active pointers */
     struct timeout_user *close_timeout;    /* timeout before closing the desktop */
-    timeout_t            close_timeout_val;/* timeout duration before closing desktop */
     struct thread_input *foreground_input; /* thread input of foreground thread */
     process_id_t         foreground_pid;   /* id of the foreground process */
     unsigned int         users;            /* processes and threads using this desktop */
-    unsigned char        keystate[256];    /* asynchronous key state */
     unsigned char        alt_pressed;      /* last key press was Alt (used to determine msg on release) */
     struct key_repeat    key_repeat;       /* key auto-repeat */
     unsigned int         clip_flags;       /* last cursor clip flags */
@@ -122,8 +119,8 @@ extern void add_queue_hook_count( struct thread *thread, unsigned int index, int
 extern void inc_queue_paint_count( struct thread *thread, int incr );
 extern void queue_cleanup_window( struct thread *thread, user_handle_t win );
 extern int init_thread_queue( struct thread *thread );
-extern int attach_thread_input( struct thread *thread_from, struct thread *thread_to );
-extern void detach_thread_input( struct thread *thread_from );
+extern void attach_thread_input( struct msg_queue *queue_from, struct msg_queue *queue_to );
+extern void detach_thread_input( struct msg_queue *queue_from, struct msg_queue *queue_to, struct desktop *desktop );
 extern void set_clip_rectangle( struct desktop *desktop, const struct rectangle *rect,
                                 unsigned int flags, int reset );
 extern void update_cursor_pos( struct desktop *desktop );
@@ -155,7 +152,7 @@ extern int is_region_equal( const struct region *region1, const struct region *r
 extern void get_region_extents( const struct region *region, struct rectangle *rect );
 extern void offset_region( struct region *region, int x, int y );
 extern void mirror_region( const struct rectangle *client_rect, struct region *region );
-extern void scale_region( struct region *region, unsigned int dpi_from, unsigned int dpi_to );
+extern void scale_region( struct region *region, struct ratio dpi_from, struct ratio dpi_to );
 extern struct region *copy_region( struct region *dst, const struct region *src );
 extern struct region *intersect_region( struct region *dst, const struct region *src1,
                                         const struct region *src2 );
@@ -187,17 +184,19 @@ extern user_handle_t shallow_window_from_point( struct desktop *desktop, int x, 
 extern struct thread *window_thread_from_point( user_handle_t scope, int x, int y );
 extern user_handle_t find_window_to_repaint( user_handle_t parent, struct thread *thread );
 extern struct window_class *get_window_class( user_handle_t window );
+extern void set_window_rect_visible( user_handle_t window, struct rectangle rect );
 
 /* window class functions */
 
 extern void destroy_process_classes( struct process *process );
-extern struct window_class *grab_class( struct process *process, atom_t atom, mod_handle_t instance,
-                                        int *extra_bytes, struct obj_locator *locator );
+extern struct window_class *grab_class( struct process *process, atom_t atom, mod_handle_t instance, struct obj_locator *locator );
 extern void release_class( struct window_class *class );
 extern int is_desktop_class( struct window_class *class );
 extern int is_message_class( struct window_class *class );
 extern int get_class_style( struct window_class *class );
 extern atom_t get_class_atom( struct window_class *class );
+extern unsigned int get_class_fnid( struct window_class *class, data_size_t *extra_size, data_size_t *private_size );
+extern client_ptr_t get_class_wndproc( struct window_class *class, bool *ansi );
 extern client_ptr_t get_class_client_ptr( struct window_class *class );
 
 /* windows station functions */
@@ -208,7 +207,7 @@ extern int set_input_desktop( struct winstation *winstation, struct desktop *new
 extern struct desktop *get_desktop_obj( struct process *process, obj_handle_t handle, unsigned int access );
 extern struct winstation *get_process_winstation( struct process *process, unsigned int access );
 extern struct desktop *get_thread_desktop( struct thread *thread, unsigned int access );
-extern void connect_process_winstation( struct process *process, struct unicode_str *desktop_path,
+extern void connect_process_winstation( struct process *process, struct unicode_str desktop_name,
                                         struct thread *parent_thread, struct process *parent_process );
 extern void set_process_default_desktop( struct process *process, struct desktop *desktop,
                                          obj_handle_t handle );
@@ -233,27 +232,14 @@ static inline int point_in_rect( const struct rectangle *rect, int x, int y )
     return (x >= rect->left && x < rect->right && y >= rect->top && y < rect->bottom);
 }
 
-static inline void get_dpi_num_den( UINT dpi, UINT *num, UINT *den )
+static inline int scale_dpi( int val, struct ratio dpi_from, struct ratio dpi_to )
 {
-    if (!(*den = (dpi >> 16))) *den = 1;
-    *num = dpi & 0xffff;
-}
-
-static inline int scale_dpi( int val, unsigned int dpi_from, unsigned int dpi_to )
-{
-    unsigned int from_num, from_den, to_num, to_den;
-    unsigned int num, den;
-
-    get_dpi_num_den( dpi_from, &from_num, &from_den );
-    get_dpi_num_den( dpi_to, &to_num, &to_den );
-    num = to_num * from_den;
-    den = from_num * to_den;
-
+    unsigned int num = dpi_to.num * dpi_from.den, den = dpi_from.num * dpi_to.den;
     if (val >= 0) return (val * num + (den / 2)) / den;
     return (val * num - (den / 2)) / den;
 }
 
-static inline void scale_dpi_rect( struct rectangle *rect, unsigned int dpi_from, unsigned int dpi_to )
+static inline void scale_dpi_rect( struct rectangle *rect, struct ratio dpi_from, struct ratio dpi_to )
 {
     rect->left   = scale_dpi( rect->left, dpi_from, dpi_to );
     rect->top    = scale_dpi( rect->top, dpi_from, dpi_to );

@@ -274,7 +274,6 @@ extern int sort_func_list( ORDDEF **list, int count, int (*compare)(const void *
 extern unsigned int get_section_alignment(void);
 extern unsigned int get_args_size( const ORDDEF *odp );
 extern const char *asm_name( const char *func );
-extern const char *arm64_name( const char *func );
 extern const char *asm_globl( const char *func );
 extern const char *get_asm_ptr_keyword(void);
 extern const char *get_asm_string_keyword(void);
@@ -301,6 +300,7 @@ extern void output_imports( DLLSPEC *spec );
 extern void output_import_lib( DLLSPEC *spec, struct strarray files );
 extern void output_static_lib( const char *output_name, struct strarray files, int create );
 extern void output_exports( DLLSPEC *spec );
+extern void output_crt_sections(void);
 extern int load_res32_file( const char *name, DLLSPEC *spec );
 extern void output_resources( DLLSPEC *spec );
 extern void output_bin_resources( DLLSPEC *spec, unsigned int start_rva );

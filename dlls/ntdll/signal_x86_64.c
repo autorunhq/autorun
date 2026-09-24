@@ -29,7 +29,6 @@
 #include <setjmp.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "ddk/wdm.h"
@@ -74,14 +73,6 @@ __ASM_GLOBAL_FUNC( invoke_arm64ec_syscall,
                    "pushq %r10\n\t"         /* and return to syscall thunk */
                    "ret" )
 
-/**************************************************************************
- *		arm64ec_suspend_point
- *
- * x64 stub to support cooperative suspend when leaving a syscall callack.
- */
-__ASM_GLOBAL_FUNC( arm64ec_suspend_point,
-                   "ret" )
-
 /*******************************************************************
  *		KiUserExceptionDispatcher (NTDLL.@)
  */
@@ -91,7 +82,7 @@ __ASM_GLOBAL_FUNC( "EXP+#KiUserExceptionDispatcher",
                    "test %rax,%rax\n\t"
                    "jz 1f\n\t"
                    "subq $0x28,%rsp\n\t"
-                   "leaq 0x30+0x3b0+0xcd0(%rsp),%rcx\n\t" /* rec */
+                   "leaq 0x30+0x3b0+0x4d0(%rsp),%rcx\n\t" /* rec */
                    "leaq 0x30(%rsp),%rdx\n\t"             /* context */
                    "call *%rax\n"
                    "addq $0x28,%rsp\n"
@@ -102,22 +93,14 @@ __ASM_GLOBAL_FUNC( "EXP+#KiUserExceptionDispatcher",
 WINE_DEFAULT_DEBUG_CHANNEL(seh);
 WINE_DECLARE_DEBUG_CHANNEL(relay);
 
+
 /***********************************************************************
  *           virtual_unwind
  */
-static NTSTATUS virtual_unwind( ULONG type, DISPATCHER_CONTEXT *dispatch, CONTEXT *context, BOOL dump_backtrace )
+static NTSTATUS virtual_unwind( ULONG type, DISPATCHER_CONTEXT *dispatch, CONTEXT *context )
 {
-    LDR_DATA_TABLE_ENTRY *module = NULL;
+    LDR_DATA_TABLE_ENTRY *module;
     NTSTATUS status;
-
-    if (dump_backtrace)
-    {
-        if (!LdrFindEntryForAddress( (void *)context->Rip, &module ))
-            WINE_BACKTRACE_LOG( "%p: %s + %p.\n", (void *)context->Rip, debugstr_w(module->BaseDllName.Buffer),
-                                (void *)((char *)context->Rip - (char *)module->DllBase) );
-        else
-            WINE_BACKTRACE_LOG( "%p: unknown module.\n", (void *)context->Rip );
-    }
 
     dispatch->ImageBase = 0;
     dispatch->ScopeIndex = 0;
@@ -126,8 +109,8 @@ static NTSTATUS virtual_unwind( ULONG type, DISPATCHER_CONTEXT *dispatch, CONTEX
                                                       dispatch->HistoryTable );
 
     /* look for host system exception information */
-    if (!dispatch->FunctionEntry && ((!module && LdrFindEntryForAddress( (void *)context->Rip, &module ))
-        || module->Flags & LDR_WINE_INTERNAL))
+    if (!dispatch->FunctionEntry &&
+        (LdrFindEntryForAddress( (void *)context->Rip, &module ) || (module->Flags & LDR_WINE_INTERNAL)))
     {
         struct unwind_builtin_dll_params params = { type, dispatch, context };
 
@@ -267,7 +250,7 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
     nested_frame = 0;
     for (;;)
     {
-        status = virtual_unwind( UNW_FLAG_EHANDLER, &dispatch, &context, need_backtrace( rec->ExceptionCode ) );
+        status = virtual_unwind( UNW_FLAG_EHANDLER, &dispatch, &context );
         if (status != STATUS_SUCCESS) return status;
 
     unwind_done:
@@ -743,7 +726,7 @@ void WINAPI RtlUnwindEx( PVOID end_frame, PVOID target_ip, EXCEPTION_RECORD *rec
 
     for (;;)
     {
-        status = virtual_unwind( UNW_FLAG_UHANDLER, &dispatch, &new_context, FALSE );
+        status = virtual_unwind( UNW_FLAG_UHANDLER, &dispatch, &new_context );
         if (status != STATUS_SUCCESS) raise_status( status, rec );
 
     unwind_done:
@@ -792,9 +775,10 @@ void WINAPI RtlUnwindEx( PVOID end_frame, PVOID target_ip, EXCEPTION_RECORD *rec
         }
         else  /* hack: call builtin handlers registered in the tib list */
         {
-            while (is_valid_frame( (ULONG_PTR)teb_frame ) &&
-                   (ULONG64)teb_frame < new_context.Rsp &&
-                   (ULONG64)teb_frame < (ULONG64)end_frame)
+            ULONG_PTR last_frame = new_context.Rsp;
+            if (end_frame && (ULONG_PTR)end_frame < last_frame) last_frame = (ULONG_PTR)end_frame;
+
+            while (is_valid_frame( (ULONG_PTR)teb_frame ) && (ULONG_PTR)teb_frame < last_frame)
             {
                 TRACE( "calling TEB handler %p (rec=%p, frame=%p context=%p, dispatch=%p)\n",
                        teb_frame->Handler, rec, teb_frame, dispatch.ContextRecord, &dispatch );
@@ -822,7 +806,7 @@ void WINAPI RtlUnwindEx( PVOID end_frame, PVOID target_ip, EXCEPTION_RECORD *rec
                     break;
                 }
             }
-            if ((ULONG64)teb_frame == (ULONG64)end_frame && (ULONG64)end_frame < new_context.Rsp) break;
+            if ((ULONG_PTR)teb_frame == last_frame && last_frame < new_context.Rsp) break;
         }
 
         if (dispatch.EstablisherFrame == (ULONG64)end_frame) break;
@@ -854,12 +838,6 @@ __ASM_GLOBAL_FUNC( RtlRaiseException,
                    "movq 0x4f8(%rsp),%rax\n\t"  /* return address */
                    "movq %rax,0xf8(%rdx)\n\t"   /* context->Rip */
                    "movq %rax,0x10(%rcx)\n\t"   /* rec->ExceptionAddress */
-                   "xor %rax,%rax\n\t"
-                   "movq %rax,0x70(%rdx)\n\t"   /* Context->Dr7 */
-                   "movq %rax,0x48(%rdx)\n\t"   /* Context->Dr0 */
-                   "movq %rax,0x50(%rdx)\n\t"   /* Context->Dr1 */
-                   "movq %rax,0x58(%rdx)\n\t"   /* Context->Dr2 */
-                   "movq %rax,0x60(%rdx)\n\t"   /* Context->Dr3 */
                    "movl $1,%r8d\n\t"
                    "movq %gs:0x60,%rax\n\t"     /* Peb */
                    "cmpb $0,0x02(%rax)\n\t"     /* BeingDebugged */
@@ -888,13 +866,6 @@ BOOLEAN WINAPI RtlIsProcessorFeaturePresent( UINT feature )
     return feature < PROCESSOR_FEATURE_MAX && user_shared_data->ProcessorFeatures[feature];
 }
 
-/***********************************************************************
- *              RtlWow64SuspendThread (NTDLL.@)
- */
-NTSTATUS WINAPI RtlWow64SuspendThread( HANDLE thread, ULONG *count )
-{
-    return NtSuspendThread( thread, count );
-}
 
 /*************************************************************************
  *		RtlWalkFrameChain (NTDLL.@)

@@ -155,7 +155,7 @@ struct context_data
         struct { unsigned __int64 rax, rbx, rcx, rdx, rbp, rsi, rdi,
                                   r8, r9, r10, r11, r12, r13, r14, r15; } x86_64_regs;
         struct { unsigned int r[13]; } arm_regs;
-        struct { unsigned __int64 x[31]; } arm64_regs;
+        struct { unsigned __int64 x0[18], x19[12]; } arm64_regs;
     } integer;  /* selected by SERVER_CTX_INTEGER */
     union
     {
@@ -189,16 +189,21 @@ struct context_data
     {
         struct { struct { unsigned __int64 low, high; } ymm_high[16]; } regs;
     } ymm;                       /* selected by SERVER_CTX_YMM_REGISTERS */
+    union
+    {
+        unsigned __int64 arm64_x18;
+    } tls;                       /* selected by SERVER_CTX_TLS */
 };
 
-#define SERVER_CTX_CONTROL            0x01
-#define SERVER_CTX_INTEGER            0x02
-#define SERVER_CTX_SEGMENTS           0x04
-#define SERVER_CTX_FLOATING_POINT     0x08
-#define SERVER_CTX_DEBUG_REGISTERS    0x10
-#define SERVER_CTX_EXTENDED_REGISTERS 0x20
-#define SERVER_CTX_YMM_REGISTERS      0x40
-#define SERVER_CTX_EXEC_SPACE         0x80
+#define SERVER_CTX_CONTROL            0x0001
+#define SERVER_CTX_INTEGER            0x0002
+#define SERVER_CTX_SEGMENTS           0x0004
+#define SERVER_CTX_FLOATING_POINT     0x0008
+#define SERVER_CTX_DEBUG_REGISTERS    0x0010
+#define SERVER_CTX_EXTENDED_REGISTERS 0x0020
+#define SERVER_CTX_YMM_REGISTERS      0x0040
+#define SERVER_CTX_EXEC_SPACE         0x0080
+#define SERVER_CTX_TLS                0x0100
 
 /* structure used in sending an fd from client to server */
 struct send_fd
@@ -241,17 +246,17 @@ struct startup_info_data
     unsigned int flags;
     unsigned int show;
     process_id_t process_group_id;
+    data_size_t  imagepath_len;
     data_size_t  curdir_len;
     data_size_t  dllpath_len;
-    data_size_t  imagepath_len;
     data_size_t  cmdline_len;
     data_size_t  title_len;
     data_size_t  desktop_len;
     data_size_t  shellinfo_len;
     data_size_t  runtime_len;
+    /* VARARG(imagepath,unicode_str,imagepath_len); */
     /* VARARG(curdir,unicode_str,curdir_len); */
     /* VARARG(dllpath,unicode_str,dllpath_len); */
-    /* VARARG(imagepath,unicode_str,imagepath_len); */
     /* VARARG(cmdline,unicode_str,cmdline_len); */
     /* VARARG(title,unicode_str,title_len); */
     /* VARARG(desktop,unicode_str,desktop_len); */
@@ -265,6 +270,12 @@ struct property_data
     atom_t         atom;     /* property atom */
     int            string;   /* was atom a string originally? */
     lparam_t       data;     /* data stored in property */
+};
+
+struct ratio
+{
+    unsigned short num;
+    unsigned short den;
 };
 
 /* structure to specify window rectangles */
@@ -350,6 +361,7 @@ union hw_input
         unsigned int   flags;   /* event flags */
         unsigned int   time;    /* event time */
         lparam_t       info;    /* extra info */
+        unsigned int   raw_count; /* number of rawinput POINT in varargs */
     } mouse;
     struct
     {
@@ -906,8 +918,9 @@ struct monitor_info
 {
     struct rectangle raw;     /* host / physical position of the monitor rect */
     struct rectangle virt;    /* client / virtual position of the monitor rect */
-    unsigned int     flags;  /* MONITOR_FLAG_* flags for the monitor */
-    unsigned int     dpi;    /* physical DPI for the monitor */
+    unsigned int     flags;   /* MONITOR_FLAG_* flags for the monitor */
+    struct ratio     dpi;     /* effective DPI for the monitor */
+    struct ratio     raw_dpi; /* raw DPI for the monitor */
 };
 #define MONITOR_FLAG_PRIMARY  0x01
 #define MONITOR_FLAG_CLONE    0x02
@@ -996,7 +1009,6 @@ struct obj_locator
 struct directory_file_entry
 {
     data_size_t name_len;
-    /* VARARG(name,unicode_str,name_len); */
 };
 
 struct shared_cursor
@@ -1044,24 +1056,52 @@ typedef volatile struct
     unsigned __int64     keystate_serial;  /* keystate update counter at last sync */
 } input_shm_t;
 
-typedef volatile struct
+struct class_info
 {
     atom_t               atom;               /* class atom */
     unsigned int         style;              /* class style */
     unsigned int         cls_extra;          /* number of class extra bytes */
     unsigned int         win_extra;          /* number of window extra bytes */
+    user_handle_t        cursor;             /* default cursor */
+    user_handle_t        background;         /* default background */
+    user_handle_t        icon;               /* default icon */
+    user_handle_t        icon_small;         /* default cursor (small) */
     mod_handle_t         instance;           /* module instance */
+    client_ptr_t         wndproc;            /* class window proc */
+    client_ptr_t         menu_name;          /* pointer to menu name in client address space */
+};
+
+typedef volatile struct
+{
     data_size_t          name_offset;        /* offset in WCHAR of the unversioned class name, constant */
     data_size_t          name_len;           /* len in bytes of the class name, constant */
     WCHAR                name[MAX_ATOM_LEN]; /* class name, constant */
-    unsigned short       __pad;
+    unsigned short       local;              /* class is local, constant */
+    struct class_info    info;               /* class info (GCLP_*) */
     char                 extra[];            /* extra bytes storage */
 } class_shm_t;
+
+struct window_info
+{
+    lparam_t             id;               /* window id */
+    mod_handle_t         instance;         /* creator instance */
+    lparam_t             user_data;        /* user-specific data */
+    client_ptr_t         wndproc;          /* window proc */
+};
 
 typedef volatile struct
 {
     struct obj_locator   class;            /* object locator for the window class shared object */
     unsigned int         dpi_context;      /* DPI awareness context */
+    unsigned int         fnid;             /* builtin class FNID, or 0 */
+    unsigned int         ansi;             /* window wndproc is ansi */
+    int                  __pad;
+    struct ratio         dpi;              /* effective DPI of the window monitor */
+    struct ratio         raw_dpi;          /* raw DPI of the window monitor */
+    data_size_t          private_size;     /* length of private extra bytes range */
+    data_size_t          extra_size;       /* size of the extra info */
+    struct window_info   info;             /* window info (GWLP_*) */
+    char                 extra[];          /* extra bytes storage */
 } window_shm_t;
 
 typedef volatile union
@@ -1127,6 +1167,7 @@ typedef volatile struct
     unsigned int access;       /* wanted access rights */
     unsigned int flags;        /* thread creation flags */
     int          request_fd;   /* fd for request pipe */
+    int          is_system;    /* system thread (kernel mode only) */
     VARARG(objattr,object_attributes); /* object attributes */
 @REPLY
     thread_id_t  tid;          /* thread id */
@@ -1138,24 +1179,17 @@ typedef volatile struct
 @REQ(get_startup_info)
 @REPLY
     data_size_t  info_size;    /* size of startup info */
+    int          debugged;     /* being debugged? */
     unsigned short machine;    /* architecture for the new process */
     VARARG(info,startup_info,info_size); /* startup information */
     VARARG(env,unicode_str);   /* environment */
 @END
 
 
-struct cpu_topology_override
-{
-    unsigned int cpu_count;
-    unsigned char host_cpu_id[64];
-};
-
-
 /* Signal the end of the process initialization */
 @REQ(init_process_done)
     client_ptr_t teb;          /* TEB of new thread (in process address space) */
     client_ptr_t peb;          /* PEB of new process (in process address space) */
-    client_ptr_t ldt_copy;     /* address of LDT copy (in process address space) */
 @REPLY
     int          suspend;      /* is process suspended? */
 @END
@@ -1168,7 +1202,7 @@ struct cpu_topology_override
     int          debug_level;  /* new debug level */
     int          reply_fd;     /* fd for reply pipe */
     int          wait_fd;      /* fd for blocking calls pipe */
-    VARARG(cpu_override,cpu_topology_override); /* Overridden CPUs to host CPUs mapping. */
+    unsigned int page_size;    /* client page size */
 @REPLY
     process_id_t pid;          /* process id of the new thread's process */
     thread_id_t  tid;          /* thread id of the new thread */
@@ -1340,11 +1374,9 @@ struct cpu_topology_override
 
 /* Suspend a thread */
 @REQ(suspend_thread)
-    obj_handle_t handle;        /* thread handle */
-    obj_handle_t waited_handle; /* handle waited on */
+    obj_handle_t handle;       /* thread handle */
 @REPLY
-    int          count;         /* new suspend count */
-    obj_handle_t wait_handle;   /* handle to wait on */
+    int          count;        /* new suspend count */
 @END
 
 
@@ -1463,8 +1495,9 @@ struct cpu_topology_override
     VARARG(call,apc_call);     /* APC call arguments */
     VARARG(contexts,contexts); /* suspend context(s) */
 @END
-#define SELECT_ALERTABLE     1
-#define SELECT_INTERRUPTIBLE 2
+#define SELECT_ALERTABLE           1
+#define SELECT_INTERRUPTIBLE       2
+#define SELECT_COOPERATIVE_SUSPEND 4
 
 
 /* Create an event */
@@ -1620,9 +1653,11 @@ enum event_op { PULSE_EVENT, SET_EVENT, RESET_EVENT };
     obj_handle_t rootdir;       /* root directory */
     unsigned int sharing;       /* sharing flags */
     unsigned int options;       /* file options */
+    client_ptr_t async_user;    /* async user ptr, same as async_data.user */
     VARARG(filename,unicode_str); /* file name */
 @REPLY
     obj_handle_t handle;        /* handle to the file */
+    obj_handle_t wait;          /* handle to wait on for blocking create */
 @END
 
 
@@ -1839,8 +1874,10 @@ enum server_fd_type
     unsigned int flags;         /* SEC_* flags */
     obj_handle_t shared_file;   /* shared mapping file handle */
     data_size_t  name_len;      /* length of file name  */
+    data_size_t  ver_len;       /* length of version resource  */
     data_size_t  total;         /* total required buffer size in bytes */
     VARARG(image,pe_image_info);/* image info for SEC_IMAGE mappings */
+    VARARG(version,version_res,ver_len);/* version resource for SEC_IMAGE mappings */
     VARARG(name,unicode_str,name_len);  /* filename for SEC_IMAGE mappings */
     VARARG(exp_name,string);    /* exported name for SEC_IMAGE mappings */
 @END
@@ -2083,18 +2120,6 @@ struct process_info
 /* Flush a registry key */
 @REQ(flush_key)
     obj_handle_t hkey;         /* handle to the key */
-@REPLY
-    abstime_t   timestamp_counter; /* branch last change timestamp counter */
-    data_size_t total;             /* total length needed for data */
-    int         branch_count;      /* number of registry branches to flush */
-    VARARG(data,bytes);            /* registry data */
-@END
-
-
-/* Clear KEY_DIRTY after key flush */
-@REQ(flush_key_done)
-    abstime_t    timestamp_counter; /* timestamp counter returned from flush_key */
-    int          branch;            /* saved registry branch id */
 @END
 
 
@@ -2175,19 +2200,11 @@ struct process_info
 @END
 
 
-/* Return full registry branch non-volatile data for saving */
+/* Save a registry branch to a file */
 @REQ(save_registry)
-    obj_handle_t hkey;  /* key to save */
-@REPLY
-    data_size_t  total; /* total length needed for data */
-    VARARG(data,bytes); /* registry data */
+    obj_handle_t hkey;         /* key to save */
+    obj_handle_t file;         /* file to save to */
 @END
-enum prefix_type
-{
-    PREFIX_UNKNOWN,
-    PREFIX_32BIT,
-    PREFIX_64BIT,
-};
 
 
 /* Add a registry key change notification */
@@ -2413,8 +2430,8 @@ enum message_type
 @REQ(send_hardware_message)
     user_handle_t   win;       /* window handle */
     union hw_input  input;     /* input data */
-    unsigned int    flags;     /* flags (see ntuser.h) */
-    VARARG(report,bytes);      /* HID report data */
+    unsigned int    flags;     /* flags (see below) */
+    VARARG(extra,bytes);       /* HID report data / raw input data */
 @REPLY
     int             wait;      /* do we need to wait for a reply? */
     int             prev_x;    /* previous cursor position */
@@ -2422,16 +2439,8 @@ enum message_type
     int             new_x;     /* new cursor position */
     int             new_y;
 @END
-
-
-/* Control generating of mouse events from pointer events. */
-@REQ(track_mouse_from_pointer)
-    user_handle_t   win;        /* window handle */
-    unsigned int    msg;        /* message code */
-    unsigned int    pointer_id; /* pointer id */
-@REPLY
-    int             cursor_pos_updated; /* cursor position updated */
-@END
+#define SEND_HWMSG_INJECTED    0x01  /* message is injected from application */
+#define SEND_HWMSG_RAWINPUT    0x02  /* don't generate WM_INPUT x / y updates */
 
 
 /* Get a message from the current queue */
@@ -2655,12 +2664,14 @@ enum message_type
     unsigned int   dpi_context; /* thread DPI context */
     unsigned int   style;       /* window style */
     unsigned int   ex_style;    /* window extended style */
+    unsigned int   ansi;        /* window created as ansi */
+    struct ratio   dpi;         /* initial monitor DPI */
+    struct ratio   raw_dpi;     /* initial monitor raw DPI */
     VARARG(class,unicode_str);  /* class name */
 @REPLY
     user_handle_t  handle;      /* created window */
     user_handle_t  parent;      /* full handle of parent */
     user_handle_t  owner;       /* full handle of owner */
-    int            extra;       /* number of extra bytes */
     client_ptr_t   class_ptr;   /* pointer to class in client address space */
 @END
 
@@ -2697,7 +2708,6 @@ enum message_type
     data_size_t    size;        /* size of the info value to read */
 @REPLY
     user_handle_t  last_active; /* last active popup */
-    int            is_unicode;  /* ANSI or unicode */
     lparam_t       info;        /* current window info value */
 @END
 
@@ -2707,7 +2717,6 @@ enum message_type
     user_handle_t  handle;        /* handle to the window */
     unsigned int   style;         /* window style */
     unsigned int   ex_style;      /* window extended style */
-    short int      is_unicode;    /* ANSI or unicode */
 @REPLY
 @END
 
@@ -2718,8 +2727,18 @@ enum message_type
     int            offset;        /* offset of the info */
     data_size_t    size;          /* size of the info value to write */
     lparam_t       new_info;      /* new window info value */
+    unsigned int   new_ansi;      /* new window info is ansi */
+    unsigned int   internal;      /* set internal control info */
 @REPLY
     lparam_t       old_info;      /* previous window info value */
+    unsigned int   old_ansi;      /* previous window info is ansi */
+@END
+
+
+/* Set the window builtin class FNID */
+@REQ(set_window_fnid)
+    user_handle_t  handle;        /* handle to the window */
+    atom_t         atom;          /* class atom */
 @END
 
 
@@ -2771,7 +2790,7 @@ enum message_type
     user_handle_t  parent;        /* parent window */
     int            x;             /* point in parent coordinates */
     int            y;
-    int            dpi;           /* dpi for the point coordinates */
+    struct ratio   dpi;           /* dpi for the point coordinates */
 @REPLY
     int            count;         /* total count of children */
     VARARG(children,user_handles); /* children handles */
@@ -2796,7 +2815,6 @@ enum message_type
 @REQ(set_window_pos)
     unsigned short swp_flags;     /* SWP_* flags */
     unsigned short paint_flags;   /* paint flags (see below) */
-    unsigned int   monitor_dpi;   /* DPI of the window's monitor */
     user_handle_t  handle;        /* handle to the window */
     user_handle_t  previous;      /* previous window in Z order */
     struct rectangle window;      /* window rectangle (in parent coords) */
@@ -2815,10 +2833,11 @@ enum message_type
 @REQ(get_window_rectangles)
     user_handle_t  handle;        /* handle to the window */
     int            relative;      /* coords relative to (see below) */
-    int            dpi;           /* DPI to map to, or zero for per-monitor DPI */
+    struct ratio   dpi;           /* DPI to map to, or zero for per-monitor DPI */
 @REPLY
     struct rectangle window;      /* window rectangle */
     struct rectangle client;      /* client rectangle */
+    struct rectangle visible;     /* visible rectangle */
 @END
 enum coords_relative
 {
@@ -2849,7 +2868,7 @@ enum coords_relative
 @REQ(get_windows_offset)
     user_handle_t  from;          /* handle to the first window */
     user_handle_t  to;            /* handle to the second window */
-    int            dpi;           /* DPI to map to, or zero for per-monitor DPI */
+    struct ratio   dpi;           /* DPI to map to, or zero for per-monitor DPI */
 @REPLY
     int            x;             /* x coordinate offset */
     int            y;             /* y coordinate offset */
@@ -2967,11 +2986,9 @@ enum coords_relative
 
 /* Create a window station */
 @REQ(create_winstation)
-    unsigned int flags;           /* window station flags */
     unsigned int access;          /* wanted access rights */
-    unsigned int attributes;      /* object attributes */
-    obj_handle_t rootdir;         /* root directory */
-    VARARG(name,unicode_str);     /* object name */
+    unsigned int flags;           /* window station flags */
+    VARARG(objattr,object_attributes); /* object attributes */
 @REPLY
     obj_handle_t handle;          /* handle to the window station */
 @END
@@ -3028,10 +3045,9 @@ enum coords_relative
 
 /* Create a desktop */
 @REQ(create_desktop)
-    unsigned int flags;           /* desktop flags */
     unsigned int access;          /* wanted access rights */
-    unsigned int attributes;      /* object attributes */
-    VARARG(name,unicode_str);     /* object name */
+    unsigned int flags;           /* desktop flags */
+    VARARG(objattr,object_attributes); /* object attributes */
 @REPLY
     obj_handle_t handle;          /* handle to the desktop */
 @END
@@ -3093,7 +3109,6 @@ enum coords_relative
     obj_handle_t handle;          /* handle to the object */
     unsigned int flags;           /* information to set/get */
     unsigned int obj_flags;       /* new object flags */
-    timeout_t    close_timeout;   /* desktop close timeout */
 @REPLY
     int          is_desktop;      /* is object a desktop? */
     unsigned int old_obj_flags;   /* old object flags */
@@ -3101,7 +3116,6 @@ enum coords_relative
 @END
 #define SET_USER_OBJECT_SET_FLAGS       1
 #define SET_USER_OBJECT_GET_FULL_NAME   2
-#define SET_USER_OBJECT_SET_CLOSE_TIMEOUT 4
 
 
 /* Register a hotkey */
@@ -3309,14 +3323,12 @@ enum caret_state
 
 /* Create a window class */
 @REQ(create_class)
-    int            local;          /* is it a local class? */
     atom_t         atom;           /* class atom */
-    unsigned int   style;          /* class style */
-    mod_handle_t   instance;       /* module instance */
+    unsigned int   fnid;           /* FNID for builtin classes, or 0 */
+    unsigned int   ansi;           /* class wndproc is ansi */
     client_ptr_t   client_ptr;     /* pointer to class in client address space */
-    short int      cls_extra;      /* number of extra class bytes */
-    short int      win_extra;      /* number of window extra bytes */
     data_size_t    name_offset;    /* base class name offset for specified atom */
+    VARARG(info,class_info);       /* class info */
     VARARG(name,unicode_str);      /* class name */
 @REPLY
     struct obj_locator locator;    /* locator for the shared class object */
@@ -3331,6 +3343,8 @@ enum caret_state
     VARARG(name,unicode_str);      /* class name */
 @REPLY
     client_ptr_t   client_ptr;     /* pointer to class in client address space */
+    user_handle_t  background;     /* class default background */
+    client_ptr_t   menu_name;      /* pointer to menu name in client address space */
 @END
 
 
@@ -3340,6 +3354,7 @@ enum caret_state
     int            offset;        /* offset of the info */
     data_size_t    size;          /* size of the info value to write */
     lparam_t       new_info;      /* new class info value */
+    unsigned int   ansi;          /* new class info is ansi */
 @REPLY
     lparam_t       old_info;      /* previous class info value */
 @END
@@ -3616,13 +3631,11 @@ enum caret_state
 
 struct handle_info
 {
-    client_ptr_t object;
     process_id_t owner;
     obj_handle_t handle;
     unsigned int access;
     unsigned int attributes;
     unsigned int type;
-    unsigned int __pad;
 };
 
 /* Return a list of all opened handles */
@@ -3705,13 +3718,6 @@ struct handle_info
     VARARG(entries,directory_entries);
 @END
 
-@REQ(query_directory_file)
-    obj_handle_t   handle;
-    unsigned int   restart_scan;
-@REPLY
-    data_size_t    total_len;          /* total length needed for strings */
-    VARARG(entries,directory_file_entries);
-@END
 
 /* Create a symbolic link object */
 @REQ(create_symlink)
@@ -3874,7 +3880,6 @@ struct handle_info
 /* Make the current process a system process */
 @REQ(make_process_system)
     obj_handle_t handle;          /* handle to the process */
-    timeout_t    desktop_close_timeout; /* set timeout for desktop close */
 @REPLY
     obj_handle_t event;           /* event signaled when all user processes have exited */
 @END
@@ -4230,7 +4235,6 @@ enum inproc_sync_type
 @REPLY
     int           type;         /* inproc sync type */
     unsigned int access;        /* handle access rights */
-    unsigned int fsync_shm_idx;
 @END
 
 
@@ -4238,7 +4242,6 @@ enum inproc_sync_type
 @REQ(get_inproc_alert_fd)
 @REPLY
     obj_handle_t handle;        /* alert fd is in flight with this handle */
-    unsigned int fsync_shm_idx;
 @END
 
 
@@ -4333,22 +4336,20 @@ enum inproc_sync_type
     VARARG(runtime,bytes);              /* client runtime data */
 @END
 
-/* fsync definitions */
-#define FSYNC_SHM_PAGE_SIZE 0x10000
-#define FSYNC_USED_BY_SERVER 0x7eadfeef
 
-enum fsync_type
-{
-    FSYNC_SEMAPHORE = 1,
-    FSYNC_AUTO_EVENT,
-    FSYNC_MANUAL_EVENT,
-    FSYNC_MUTEX,
-    FSYNC_AUTO_SERVER,
-    FSYNC_MANUAL_SERVER,
-    FSYNC_QUEUE,
-};
-
-@REQ(fsync_free_shm_idx)
-    unsigned int shm_idx;
+/* Create a new ALPC object */
+@REQ(alpc_create_port)
+    unsigned int        flags;          /* flags in port attributes */
+    mem_size_t          max_msg_len;    /* max message length in port attributes */
+    VARARG(obj_attr,object_attributes); /* object attributes */
 @REPLY
+    obj_handle_t        handle;         /* handle to the ALPC port */
+@END
+
+@REQ(query_directory_file)
+    obj_handle_t   handle;
+    unsigned int   restart_scan;
+@REPLY
+    data_size_t    total_len;
+    VARARG(entries,bytes);
 @END

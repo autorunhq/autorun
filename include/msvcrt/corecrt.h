@@ -132,13 +132,13 @@
 # endif
 #endif
 
-#ifndef DECLSPEC_ALIGN
+#ifndef _CRT_ALIGN
 # ifdef __GNUC__
-#  define DECLSPEC_ALIGN(x) __attribute__((aligned(x)))
+#  define _CRT_ALIGN(x) __attribute__((aligned(x)))
 # elif __has_declspec_attribute(align) &&  !defined(MIDL_PASS)
-#  define DECLSPEC_ALIGN(x) __declspec(align(x))
+#  define _CRT_ALIGN(x) __declspec(align(x))
 # else
-#  define DECLSPEC_ALIGN(x)
+#  define _CRT_ALIGN(x)
 # endif
 #endif
 
@@ -154,8 +154,13 @@
 # endif
 #endif
 
+#ifndef _HAS_EXCEPTIONS
+#define _HAS_EXCEPTIONS 1
+#endif
+
 #define _ARGMAX 100
 #define _CRT_INT_MAX 0x7fffffff
+#define _TRUNCATE ((size_t)-1)
 
 #ifndef _MSVCRT_LONG_DEFINED
 #define _MSVCRT_LONG_DEFINED
@@ -213,7 +218,11 @@ typedef __msvcrt_long __time32_t;
 #endif
 
 #ifndef _TIME64_T_DEFINED
-typedef __int64 DECLSPEC_ALIGN(8) __time64_t;
+#if defined(_MSC_VER) || defined(__MINGW32__)
+typedef __int64 __time64_t;
+#else
+typedef __int64 _CRT_ALIGN(8) __time64_t;
+#endif
 #define _TIME64_T_DEFINED
 #endif
 
@@ -350,5 +359,7 @@ typedef struct threadlocaleinfostruct {
 #else
 #define __WINE_MALLOC
 #endif
+
+#define _SECURECRT_FILL_BUFFER_PATTERN 0xFE
 
 #endif /* __WINE_CORECRT_H */

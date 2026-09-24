@@ -198,7 +198,6 @@ LPITEMIDLIST  GetParentPidl(LPITEMIDLIST pidl);
 static LPITEMIDLIST GetPidlFromName(IShellFolder *psf,LPWSTR lpcstrFileName);
 static BOOL IsPidlFolder (LPSHELLFOLDER psf, LPCITEMIDLIST pidl);
 static UINT GetNumSelected( IDataObject *doSelected );
-static void COMCTL32_ReleaseStgMedium(STGMEDIUM medium);
 
 static INT_PTR CALLBACK FileOpenDlgProc95(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static INT_PTR FILEDLG95_HandleCustomDialogMessages(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -973,24 +972,63 @@ LRESULT SendCustomDlgNotificationMessage(HWND hwndParentDlg, UINT uCode)
 static INT_PTR FILEDLG95_Handle_GetFilePath(HWND hwnd, DWORD size, LPVOID result)
 {
     UINT len, total;
-    WCHAR *p, *buffer;
+    WCHAR *p, *buffer, *filename = NULL;
     FileOpenDlgInfos *fodInfos = get_filedlg_infoptr(hwnd);
+    LPITEMIDLIST pidlSelection, pidlAbsolute;
 
     TRACE("CDM_GETFILEPATH:\n");
 
     if ( ! (fodInfos->ofnInfos->Flags & OFN_EXPLORER ) )
         return -1;
 
-    /* get path and filenames */
-    len = SendMessageW( fodInfos->DlgInfos.hwndFileName, WM_GETTEXTLENGTH, 0, 0 );
-    buffer = malloc( (len + 2 + MAX_PATH) * sizeof(WCHAR) );
-    COMDLG32_GetDisplayNameOf( fodInfos->ShellInfos.pidlAbsCurrent, buffer );
-    if (len)
+    if (GetNumSelected(fodInfos->Shell.FOIDataObject) == 1)
     {
-        p = buffer + lstrlenW(buffer);
-        *p++ = '\\';
-        SendMessageW( fodInfos->DlgInfos.hwndFileName, WM_GETTEXT, len + 1, (LPARAM)p );
+        if (!(buffer = malloc(MAX_PATH * 2 * sizeof(WCHAR))))
+            return -1;
+
+        pidlSelection = GetPidlFromDataObject(fodInfos->Shell.FOIDataObject, 1);
+        pidlAbsolute = ILCombine(fodInfos->ShellInfos.pidlAbsCurrent, pidlSelection);
+        COMDLG32_GetDisplayNameOf(pidlAbsolute, buffer);
+        ILFree(pidlSelection);
+        ILFree(pidlAbsolute);
     }
+    else
+    {
+        /* get path and filenames */
+        len = SendMessageW( fodInfos->DlgInfos.hwndFileName, WM_GETTEXTLENGTH, 0, 0 );
+        if (len)
+        {
+            if (!(filename = malloc((len + 1) * sizeof(WCHAR))))
+                return -1;
+
+            SendMessageW( fodInfos->DlgInfos.hwndFileName, WM_GETTEXT, len + 1, (LPARAM)filename );
+        }
+        if (!(buffer = malloc((len + 2 + MAX_PATH) * sizeof(WCHAR))))
+        {
+            free(filename);
+            return -1;
+        }
+
+        if (len)
+        {
+            if (PathIsRelativeW( filename ))
+            {
+                COMDLG32_GetDisplayNameOf( fodInfos->ShellInfos.pidlAbsCurrent, buffer );
+                p = buffer + lstrlenW(buffer);
+                *p++ = '\\';
+                lstrcpyW( p, filename );
+            }
+            else
+            {
+                lstrcpyW( buffer, filename );
+            }
+        }
+        else
+        {
+            COMDLG32_GetDisplayNameOf( fodInfos->ShellInfos.pidlAbsCurrent, buffer );
+        }
+    }
+
     if (fodInfos->unicode)
     {
         total = lstrlenW( buffer) + 1;
@@ -1003,6 +1041,7 @@ static INT_PTR FILEDLG95_Handle_GetFilePath(HWND hwnd, DWORD size, LPVOID result
         if (total <= size) WideCharToMultiByte( CP_ACP, 0, buffer, -1, result, size, NULL, NULL );
         TRACE( "CDM_GETFILEPATH: returning %u %s\n", total, debugstr_a(result));
     }
+    free( filename );
     free( buffer );
     return total;
 }
@@ -1062,6 +1101,14 @@ static INT_PTR FILEDLG95_HandleCustomDialogMessages(HWND hwnd, UINT uMsg, WPARAM
             TRACE("CDM_SETCONTROLTEXT:\n");
 	    if ( lParam )
             {
+                if (wParam == edt1)
+                {
+                    if (fodInfos->unicode)
+                        SendMessageW(fodInfos->DlgInfos.hwndFileName, WM_SETTEXT, 0, lParam);
+                    else
+                        SendMessageA(fodInfos->DlgInfos.hwndFileName, WM_SETTEXT, 0, lParam);
+                }
+
                 if( fodInfos->unicode )
 	            SetDlgItemTextW( hwnd, (UINT) wParam, (LPWSTR) lParam );
                 else
@@ -3831,7 +3878,7 @@ void FILEDLG95_FILENAME_FillFromSelection (HWND hwnd)
 
 ret:
     free(lpstrAllFiles);
-    COMCTL32_ReleaseStgMedium(medium);
+    ReleaseStgMedium(&medium);
 }
 
 /***********************************************************************
@@ -3865,24 +3912,6 @@ static int FILEDLG95_FILENAME_GetFileNames (HWND hwnd, LPWSTR * lpstrFileList, U
  */
 
 /***********************************************************************
- * COMCTL32_ReleaseStgMedium
- *
- * like ReleaseStgMedium from ole32
- */
-static void COMCTL32_ReleaseStgMedium (STGMEDIUM medium)
-{
-      if(medium.pUnkForRelease)
-      {
-        IUnknown_Release(medium.pUnkForRelease);
-      }
-      else
-      {
-        GlobalUnlock(medium.hGlobal);
-        GlobalFree(medium.hGlobal);
-      }
-}
-
-/***********************************************************************
  *          GetPidlFromDataObject
  *
  * Return pidl(s) by number from the cached DataObject
@@ -3909,7 +3938,7 @@ LPITEMIDLIST GetPidlFromDataObject ( IDataObject *doSelected, UINT nPidlIndex)
       {
         pidl = ILClone((LPITEMIDLIST)(&((LPBYTE)cida)[cida->aoffset[nPidlIndex]]));
       }
-      COMCTL32_ReleaseStgMedium(medium);
+      ReleaseStgMedium(&medium);
     }
     return pidl;
 }
@@ -3935,7 +3964,7 @@ static UINT GetNumSelected( IDataObject *doSelected )
     {
       LPIDA cida = GlobalLock(medium.hGlobal);
       retVal = cida->cidl;
-      COMCTL32_ReleaseStgMedium(medium);
+      ReleaseStgMedium(&medium);
       return retVal;
     }
     return 0;

@@ -596,7 +596,6 @@ STDAPI ClrCreateManagedInstance(LPCWSTR pTypeName, REFIID riid, void **ppObject)
     HRESULT ret;
     ICLRRuntimeInfo *info;
     RuntimeHost *host;
-    MonoObject *obj;
     IUnknown *unk;
 
     TRACE("(%s,%s,%p)\n", debugstr_w(pTypeName), debugstr_guid(riid), ppObject);
@@ -612,10 +611,7 @@ STDAPI ClrCreateManagedInstance(LPCWSTR pTypeName, REFIID riid, void **ppObject)
     }
 
     if (SUCCEEDED(ret))
-        ret = RuntimeHost_CreateManagedInstance(host, pTypeName, NULL, &obj);
-
-    if (SUCCEEDED(ret))
-        ret = RuntimeHost_GetIUnknownForObject(host, obj, &unk);
+        ret = RuntimeHost_CreateManagedInstance(host, pTypeName, &unk);
 
     if (SUCCEEDED(ret))
     {
@@ -800,7 +796,7 @@ static BOOL invoke_appwiz(void)
     return ret;
 }
 
-static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path, BOOL ignore_version)
+static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path)
 {
     static const WCHAR support_msi_relative[] = {'\\','s','u','p','p','o','r','t','\\','w','i','n','e','m','o','n','o','-','s','u','p','p','o','r','t','.','m','s','i',0};
     UINT (WINAPI *pMsiOpenPackageW)(LPCWSTR,ULONG*);
@@ -838,7 +834,7 @@ static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path, BOOL ignore_vers
     if (res == ERROR_SUCCESS) {
         TRACE("found support msi version %s at %s\n", versionstringbuf, debugstr_w(msi_path));
 
-        if (ignore_version || compare_versions(WINE_MONO_VERSION, versionstringbuf) <= 0)
+        if (compare_versions(WINE_MONO_VERSION, versionstringbuf) <= 0)
         {
             ret = TRUE;
         }
@@ -922,12 +918,12 @@ static BOOL install_wine_mono(void)
 
     initresult = CoInitialize(NULL);
 
-    ret = get_support_msi(mono_path, support_msi_path, FALSE);
+    ret = get_support_msi(mono_path, support_msi_path);
     if (!ret)
     {
         /* Try looking outside c:\windows\mono */
         ret = (get_mono_path(mono_path, TRUE) &&
-            get_support_msi(mono_path, support_msi_path, TRUE));
+            get_support_msi(mono_path, support_msi_path));
     }
 
     if (ret)

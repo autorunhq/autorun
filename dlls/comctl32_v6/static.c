@@ -891,7 +891,7 @@ static void STATIC_PaintBitmapfn(HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style 
             rcClient.bottom = rcClient.top + bm.bmHeight;
         }
 
-        prev_mode = SetStretchBltMode( hdc, HALFTONE );
+        prev_mode = SetStretchBltMode(hdc, HALFTONE);
         if (extra->image_has_alpha)
             GdiAlphaBlend(hdc, rcClient.left, rcClient.top, rcClient.right - rcClient.left,
                    rcClient.bottom - rcClient.top, hMemDC,
@@ -900,7 +900,7 @@ static void STATIC_PaintBitmapfn(HWND hwnd, HDC hdc, HBRUSH hbrush, DWORD style 
             StretchBlt(hdc, rcClient.left, rcClient.top, rcClient.right - rcClient.left,
                    rcClient.bottom - rcClient.top, hMemDC,
                    0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
-        SetStretchBltMode( hdc, prev_mode );
+        SetStretchBltMode(hdc, prev_mode);
         SelectObject(hMemDC, oldbitmap);
         DeleteDC(hMemDC);
     }

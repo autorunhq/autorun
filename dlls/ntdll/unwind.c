@@ -25,7 +25,6 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "wine/exception.h"
@@ -80,92 +79,6 @@ static RTL_CRITICAL_SECTION_DEBUG dynamic_unwind_debug =
 };
 static RTL_CRITICAL_SECTION dynamic_unwind_section = { &dynamic_unwind_debug, -1, 0, 0, 0, 0 };
 
-struct module_exception_dir_entry
-{
-    void *exception_dir;
-    void *dllbase;
-    DWORD size_of_image;
-    DWORD exception_dir_size;
-};
-
-#define MAX_MODULE_EXCEPTION_DIR_ENTRIES 512
-
-struct module_exception_dir_table
-{
-    DWORD count;
-    DWORD max_count;
-    DWORD unk;
-    DWORD unk2;
-    struct module_exception_dir_entry entries[MAX_MODULE_EXCEPTION_DIR_ENTRIES];
-};
-struct module_exception_dir_table DECLSPEC_ALLOCATE(".mrdata") exception_dir_table = { 1, MAX_MODULE_EXCEPTION_DIR_ENTRIES };
-
-C_ASSERT( sizeof(struct module_exception_dir_entry) == 0x18 );
-C_ASSERT( offsetof(struct module_exception_dir_table, entries) == 0x10 );
-
-void register_module_exception_directory( void *module )
-{
-    SIZE_T size = sizeof(exception_dir_table);
-    struct module_exception_dir_entry e;
-    void *addr = &exception_dir_table;
-    IMAGE_NT_HEADERS *nt;
-    ULONG old_prot;
-    unsigned int i;
-
-    if (!(nt = RtlImageNtHeader( module ))) return;
-    e.exception_dir = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_EXCEPTION, &e.exception_dir_size );
-    if (!e.exception_dir) return;
-    e.size_of_image = nt->OptionalHeader.SizeOfImage;
-    e.dllbase = module;
-
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-
-    if (exception_dir_table.count == MAX_MODULE_EXCEPTION_DIR_ENTRIES) goto done;
-
-    NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, PAGE_READWRITE, &old_prot );
-    /* First entry is reserved for ntdll regardless of base address order. */
-    if (exception_dir_table.count <= 2)
-    {
-        MEMORY_BASIC_INFORMATION mbi;
-
-        NtQueryVirtualMemory( GetCurrentProcess(), LdrInitializeThunk, MemoryBasicInformation, &mbi, sizeof(mbi), NULL );
-        if (module == mbi.AllocationBase)
-        {
-            exception_dir_table.entries[0] = e;
-            goto done;
-        }
-    }
-    for (i = 1; i < exception_dir_table.count; ++i)
-        if ((ULONG_PTR)module < (ULONG_PTR)exception_dir_table.entries[i].dllbase) break;
-    memmove( &exception_dir_table.entries[i + 1], &exception_dir_table.entries[i],
-             sizeof(*exception_dir_table.entries) * (exception_dir_table.count - i) );
-    exception_dir_table.entries[i] = e;
-    ++exception_dir_table.count;
-done:
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
-}
-
-void unregister_module_exception_directory( void *module )
-{
-    SIZE_T size = sizeof(exception_dir_table);
-    void *addr = &exception_dir_table;
-    ULONG old_prot;
-    unsigned int i;
-
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    for (i = 1; i < exception_dir_table.count; ++i)
-    {
-        if (module == exception_dir_table.entries[i].dllbase)
-        {
-            NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, PAGE_READWRITE, &old_prot );
-            memmove( &exception_dir_table.entries[i], &exception_dir_table.entries[i + 1],
-                     sizeof(*exception_dir_table.entries) * (exception_dir_table.count - i - 1) );
-            --exception_dir_table.count;
-            break;
-        }
-    }
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
-}
 
 static RUNTIME_FUNCTION *lookup_dynamic_function_table( ULONG_PTR pc, ULONG_PTR *base, ULONG *count )
 {
@@ -467,16 +380,16 @@ static void restore_any_reg( int reg, int count, int type, int pos, ARM64_NT_CON
 
 static void do_pac_auth( ARM64_NT_CONTEXT *context )
 {
-    register DWORD64 x17 __asm__( "x17" ) = context->Lr;
-    register DWORD64 x16 __asm__( "x16" ) = context->Sp;
+    register DWORD64 x30 __asm__( "x30" ) = context->Lr;
 
-    /* This is the autib1716 instruction. The hint instruction is used here
-     * as gcc does not assemble autib1716 for pre armv8.3a targets. For
-     * pre-armv8.3a targets, this is just treated as a hint instruction, which
-     * is ignored. */
-    __asm__( "hint 0xe" : "+r"(x17) : "r"(x16) );
+    /* This is the xpaclri instruction. Assemble it through the hint
+     * instruction to make sure it builds with any toolchain, even if it
+     * doesn't support pointer authentication instructions, or if it might not
+     * know to emit them as hint instructions when targeting older versions
+     * than armv8.3. */
+    __asm__( "hint 0x7" : "+r"(x30) );
 
-    context->Lr = x17;
+    context->Lr = x30;
 }
 
 static void process_unwind_codes( BYTE *ptr, BYTE *end, ARM64_NT_CONTEXT *context,
@@ -2472,16 +2385,6 @@ __ASM_GLOBAL_IMPORT(RtlUnwind)
 void WINAPI _local_unwind( void *frame, void *target_ip )
 {
     RtlUnwind( frame, target_ip, NULL, NULL );
-}
-
-#else
-
-void register_module_exception_directory( void *module )
-{
-}
-
-void unregister_module_exception_directory( void *module )
-{
 }
 
 #endif  /* !__i386__ */

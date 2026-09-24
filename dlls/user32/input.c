@@ -31,7 +31,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 WINE_DECLARE_DEBUG_CHANNEL(keyboard);
-WINE_DECLARE_DEBUG_CHANNEL(rawinput);
 
 /***********************************************************************
  *           get_locale_kbd_layout
@@ -454,7 +453,6 @@ BOOL WINAPI UnloadKeyboardLayout( HKL layout )
 
 static DWORD CALLBACK devnotify_window_callbackW(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
 {
-    TRACE_(rawinput)("handle %p, flags %#lx, header %p\n", handle, flags, header);
     SendMessageTimeoutW(handle, WM_DEVICECHANGE, flags, (LPARAM)header, SMTO_ABORTIFHUNG, 2000, NULL);
     return 0;
 }
@@ -517,91 +515,6 @@ static DWORD CALLBACK devnotify_window_callbackA(HANDLE handle, DWORD flags, DEV
     return 0;
 }
 
-static BOOL steam_input_get_vid_pid( UINT slot, UINT16 *vid, UINT16 *pid )
-{
-    const char *info = getenv( "SteamVirtualGamepadInfo" );
-    char buffer[256];
-    UINT current;
-    FILE *file;
-
-    TRACE( "reading SteamVirtualGamepadInfo %s\n", debugstr_a(info) );
-
-    if (!info || !(file = fopen( info, "r" ))) return FALSE;
-    while (fscanf( file, "%255[^\n]\n", buffer ) == 1)
-    {
-        if (sscanf( buffer, "[slot %d]", &current )) continue;
-        if (current < slot) continue;
-        if (current > slot) break;
-        if (sscanf( buffer, "VID=0x%hx", vid )) continue;
-        if (sscanf( buffer, "PID=0x%hx", pid )) continue;
-    }
-
-    fclose( file );
-
-    return TRUE;
-}
-
-/* CW-Bug-Id: #23185 Emulate Steam Input native hooks for native SDL */
-static BOOL steam_input_devnotify(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header, BOOL ansi)
-{
-    char buffer[offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name[MAX_PATH])];
-    DEV_BROADCAST_DEVICEINTERFACE_W *copyW = (DEV_BROADCAST_DEVICEINTERFACE_W *)buffer;
-
-    if (flags & 0x8000)
-    {
-        switch (header->dbch_devicetype)
-        {
-        case DBT_DEVTYP_DEVICEINTERFACE:
-        {
-            static const WCHAR steam_input_idW[] = L"\\\\?\\HID#VID_28DE&PID_11FF&IG_";
-            const DEV_BROADCAST_DEVICEINTERFACE_W *ifaceW = (const DEV_BROADCAST_DEVICEINTERFACE_W *)header;
-
-            if (!wcsnicmp( ifaceW->dbcc_name, steam_input_idW, 29 ))
-            {
-                UINT size, slot;
-                const WCHAR *tmpW;
-                UINT16 vid, pid;
-
-                copyW->dbcc_devicetype = ifaceW->dbcc_devicetype;
-                copyW->dbcc_reserved = ifaceW->dbcc_reserved;
-                copyW->dbcc_classguid = ifaceW->dbcc_classguid;
-
-                if (swscanf( ifaceW->dbcc_name + 29, L"%02u", &slot ) != 1) slot = 0;
-                if (!steam_input_get_vid_pid( slot, &vid, &pid ))
-                {
-                    vid = 0x045e;
-                    pid = 0x028e;
-                }
-
-                size = swprintf( copyW->dbcc_name, MAX_PATH, L"\\\\.\\pipe\\HID#VID_045E&PID_028E&IG_00#%04X&%04X", vid, pid );
-                if ((tmpW = wcschr( ifaceW->dbcc_name + 29, '&' )))
-                {
-                    do copyW->dbcc_name[size++] = *tmpW++;
-                    while (*tmpW != '&' && size < MAX_PATH);
-                }
-                size += swprintf( copyW->dbcc_name + size, MAX_PATH - size, L"#%d#%u", slot, (UINT)GetCurrentProcessId() );
-
-                copyW->dbcc_size = offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name[size + 1]);
-                header = (DEV_BROADCAST_HDR *)copyW;
-            }
-        }
-        }
-    }
-
-    if (ansi) return devnotify_window_callbackA(handle, flags, header);
-    return devnotify_window_callbackW(handle, flags, header);
-}
-
-static DWORD CALLBACK steam_input_callbackW(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
-{
-    return steam_input_devnotify(handle, flags, header, FALSE);
-}
-
-static DWORD CALLBACK steam_input_callbackA(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
-{
-    return steam_input_devnotify(handle, flags, header, TRUE);
-}
-
 static DWORD CALLBACK devnotify_service_callback(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
 {
     FIXME("Support for service handles is not yet implemented!\n");
@@ -626,7 +539,7 @@ HDEVNOTIFY WINAPI RegisterDeviceNotificationW( HANDLE handle, void *filter, DWOR
     DEV_BROADCAST_HDR *header = filter;
     device_notify_callback callback;
 
-    TRACE_(rawinput)("handle %p, filter %p, flags %#lx\n", handle, filter, flags);
+    TRACE("handle %p, filter %p, flags %#lx\n", handle, filter, flags);
 
     if (flags & ~(DEVICE_NOTIFY_SERVICE_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES))
     {
@@ -643,9 +556,9 @@ HDEVNOTIFY WINAPI RegisterDeviceNotificationW( HANDLE handle, void *filter, DWOR
     if (flags & DEVICE_NOTIFY_SERVICE_HANDLE)
         callback = devnotify_service_callback;
     else if (IsWindowUnicode( handle ))
-        callback = steam_input_callbackW;
+        callback = devnotify_window_callbackW;
     else
-        callback = steam_input_callbackA;
+        callback = devnotify_window_callbackA;
 
     if (!header)
     {
@@ -733,8 +646,28 @@ LRESULT WINAPI DefRawInputProc( RAWINPUT **data, INT data_count, UINT header_siz
  */
 BOOL WINAPI CloseTouchInputHandle( HTOUCHINPUT handle )
 {
-    TRACE( "handle %p.\n", handle );
-    return TRUE;
+    FIXME( "handle %p stub!\n", handle );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+/*****************************************************************************
+ * GetTouchInputInfo (USER32.@)
+ */
+BOOL WINAPI GetTouchInputInfo( HTOUCHINPUT handle, UINT count, TOUCHINPUT *ptr, int size )
+{
+    FIXME( "handle %p, count %u, ptr %p, size %u stub!\n", handle, count, ptr, size );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+/**********************************************************************
+ * IsTouchWindow (USER32.@)
+ */
+BOOL WINAPI IsTouchWindow( HWND hwnd, ULONG *flags )
+{
+    FIXME( "hwnd %p, flags %p stub!\n", hwnd, flags );
+    return FALSE;
 }
 
 /*****************************************************************************
@@ -742,8 +675,8 @@ BOOL WINAPI CloseTouchInputHandle( HTOUCHINPUT handle )
  */
 BOOL WINAPI RegisterTouchWindow( HWND hwnd, ULONG flags )
 {
-    TRACE( "hwnd %p, flags %#lx.\n", hwnd, flags );
-    return NtUserCallTwoParam( (ULONG_PTR)hwnd, flags, NtUserCallTwoParam_RegisterTouchWindow );
+    FIXME( "hwnd %p, flags %#lx stub!\n", hwnd, flags );
+    return TRUE;
 }
 
 /*****************************************************************************
@@ -751,8 +684,8 @@ BOOL WINAPI RegisterTouchWindow( HWND hwnd, ULONG flags )
  */
 BOOL WINAPI UnregisterTouchWindow( HWND hwnd )
 {
-    TRACE( "hwnd %p.\n", hwnd );
-    return NtUserCallOneParam( (ULONG_PTR)hwnd, NtUserCallOneParam_UnregisterTouchWindow );
+    FIXME( "hwnd %p stub!\n", hwnd );
+    return TRUE;
 }
 
 /*****************************************************************************
@@ -809,13 +742,6 @@ BOOL WINAPI SetGestureConfig( HWND hwnd, DWORD reserved, UINT count,
     return FALSE;
 }
 
-BOOL WINAPI GetPointerDevice( HANDLE device, POINTER_DEVICE_INFO *info )
-{
-    FIXME( "device %p, info %p stub.\n", device, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
 BOOL WINAPI GetPointerDeviceProperties( HANDLE device, UINT32 *count,
                                         POINTER_DEVICE_PROPERTY *properties)
 {
@@ -824,26 +750,22 @@ BOOL WINAPI GetPointerDeviceProperties( HANDLE device, UINT32 *count,
     return FALSE;
 }
 
-BOOL WINAPI GetPointerDeviceRects( HANDLE device, RECT *device_rect, RECT *display_rect )
-{
-    FIXME( "device %p, device_rect %p, display_rect %p stub!\n",
-           device, device_rect, display_rect );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
 BOOL WINAPI GetPointerPenInfo( UINT32 id, POINTER_PEN_INFO *info )
 {
-    FIXME( "id %u, info %p stub!\n", id, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 count = 1;
+
+    TRACE( "id %u, info %p\n", id, info );
+
+    return NtUserGetPointerInfoList( id, PT_PEN, 0, 0, sizeof(*info), &count, &count, info );
 }
 
 BOOL WINAPI GetPointerTouchInfo( UINT32 id, POINTER_TOUCH_INFO *info )
 {
-    FIXME( "id %u, info %p stub!\n", id, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 count = 1;
+
+    TRACE( "id %u, info %p stub!\n", id, info );
+
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(*info), &count, &count, info );
 }
 
 BOOL WINAPI GetRawPointerDeviceData( UINT32 id, UINT32 hist_count, UINT32 prop_count,
@@ -857,23 +779,52 @@ BOOL WINAPI GetRawPointerDeviceData( UINT32 id, UINT32 hist_count, UINT32 prop_c
 
 BOOL WINAPI GetPointerTouchInfoHistory( UINT32 id, UINT32 *count, POINTER_TOUCH_INFO *info )
 {
-    FIXME( "id %u, count %p, info %p stub!\n", id, count, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 pointers = 1;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(*info), count, &pointers, info );
 }
 
-BOOL WINAPI GetPointerInfoHistory( UINT32 id, UINT32 *count, POINTER_INFO *info )
+BOOL WINAPI GetPointerPenInfoHistory( UINT32 id, UINT32 *count, POINTER_PEN_INFO *info )
 {
-    FIXME( "id %u, count %p, info %p stub.\n", id, count, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    UINT32 pointers = 1;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+
+    return NtUserGetPointerInfoList( id, PT_PEN, 0, 0, sizeof(*info), count, &pointers, info );
 }
 
-BOOL WINAPI SkipPointerFrameMessages( UINT32 id )
+BOOL WINAPI GetPointerFrameTouchInfo( UINT32 id, UINT32 *count, POINTER_TOUCH_INFO *info )
 {
-    FIXME( "id %u stub.\n", id );
-    return TRUE;
+    UINT32 entries = 1;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(*info), &entries, count, info );
 }
+
+BOOL WINAPI GetPointerFramePenInfo( UINT32 id, UINT32 *count, POINTER_PEN_INFO *info )
+{
+    UINT32 entries = 1;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+
+    return NtUserGetPointerInfoList( id, PT_PEN, 0, 0, sizeof(*info), &entries, count, info );
+}
+
+BOOL WINAPI GetPointerFrameTouchInfoHistory( UINT32 id, UINT32 *entries, UINT32 *pointers, POINTER_TOUCH_INFO *info )
+{
+    TRACE( "id %u, entries %p, pointers %p, info %p\n", id, entries, pointers, info );
+    return NtUserGetPointerInfoList( id, PT_TOUCH, 0, 0, sizeof(*info), entries, pointers, info );
+}
+
+BOOL WINAPI GetPointerFramePenInfoHistory( UINT32 id, UINT32 *entries, UINT32 *pointers, POINTER_PEN_INFO *info )
+{
+    TRACE( "id %u, entries %p, pointers %p, info %p\n", id, entries, pointers, info );
+    return NtUserGetPointerInfoList( id, PT_PEN, 0, 0, sizeof(*info), entries, pointers, info );
+}
+
 
 /*******************************************************************
  *           GetActiveWindow  (USER32.@)
@@ -933,4 +884,25 @@ HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE t
     FIXME( "type %ld, max_count %ld, mode %d stub!\n", type, max_count, mode);
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return NULL;
+}
+
+/***********************************************************************
+ *           DelegateInput (USER32.@)
+ *
+ * Undocumented. Function prototype might be wrong.
+ */
+UINT_PTR WINAPI DelegateInput(void *p1, void *p2, void *p3, void *p4, void *p5, void *p6)
+{
+    FIXME( "p1 %p p2 %p p3 %p p4 %p p5 %p p6 %p stub!\n", p1, p2, p3, p4, p5, p6 );
+    return 1;
+}
+
+/***********************************************************************
+ *           UndelegateInput (USER32.@)
+ *
+ * Undocumented. Function prototype might be wrong.
+ */
+void WINAPI UndelegateInput(void *p1, void *p2)
+{
+    FIXME( "p1 %p p2 %p stub!\n", p1, p2 );
 }

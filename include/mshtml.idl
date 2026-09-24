@@ -30287,6 +30287,46 @@ coclass DOMParser
 }
 
 /*****************************************************************************
+ *    IDOMXmlSerializer interface
+ */
+[
+    object,
+    oleautomation,
+    dual,
+    uuid(3051077d-98b5-11cf-bb82-00aa00bdce0b)
+]
+interface IDOMXmlSerializer : IDispatch
+{
+    [id(DISPID_IDOMXMLSERIALIZER_SERIALIZETOSTRING)]
+    HRESULT serializeToString([in] IHTMLDOMNode *node, [retval, out] BSTR *pString);
+}
+
+/*****************************************************************************
+ *    DispXMLSerializer dispinterface
+ */
+[
+    hidden,
+    uuid(305900ad-98b5-11cf-bb82-00aa00bdce0b)
+]
+dispinterface DispXMLSerializer
+{
+properties:
+methods:
+    [id(DISPID_IDOMXMLSERIALIZER_SERIALIZETOSTRING)]
+    BSTR serializeToString([in] IHTMLDOMNode *node);
+}
+
+[
+    noncreatable,
+    uuid(3051077e-98b5-11cf-bb82-00aa00bdce0b)
+]
+coclass XMLSerializer
+{
+    [default] dispinterface DispXMLSerializer;
+    interface IDOMXmlSerializer;
+}
+
+/*****************************************************************************
  *    IXMLGenericParse interface
  */
 [
@@ -30523,11 +30563,7 @@ interface IElementBehaviorFactory : IUnknown
 
 } /* library MSHTML */
 
-#ifdef MSHTML_MARSHALING_HACK
-#define IOleCommandTarget IUnknown
-#else
 interface IOleCommandTarget;
-#endif
 
 /*****************************************************************************
  *    IHTMLPrivateWindow interface
@@ -30535,7 +30571,7 @@ interface IOleCommandTarget;
 [
     object,
     uuid(3050f6dc-98b5-11cf-bb82-00aa00bdce0b),
- /* local, CXHACK 15579 */
+    local
 ]
 interface IHTMLPrivateWindow : IUnknown
 {
@@ -30544,7 +30580,7 @@ interface IHTMLPrivateWindow : IUnknown
     HRESULT SetPICSTarget(IOleCommandTarget *cmdtrg);
     HRESULT PICSComplete(int arg);
     HRESULT FindWindowByName(LPCWSTR name, IHTMLWindow2 **ret);
-    HRESULT GetAddressBarUrl([out, retval] BSTR *url);
+    HRESULT GetAddressBarUrl(BSTR *url);
 }
 
 /*****************************************************************************
@@ -30553,7 +30589,7 @@ interface IHTMLPrivateWindow : IUnknown
 [
     object,
     uuid(3050f804-98b5-11cf-bb82-00aa00bdce0b),
- /* local, CXHACK 15579 */
+    local
 ]
 interface IWebBrowserPriv : IUnknown
 {
@@ -30568,7 +30604,7 @@ interface IWebBrowserPriv : IUnknown
 [
     object,
     uuid(3ed72303-6ffc-4214-ba90-faf1862dec8a),
- /* local, CXHACK 15579 */
+    local
 ]
 interface IWebBrowserPriv2IE8 : IUnknown
 {
@@ -30590,7 +30626,7 @@ interface IWebBrowserPriv2IE8 : IUnknown
 [
     object,
     uuid(3ed72303-6ffc-4214-ba90-faf1862dec8a),
- /* local, CXHACK 15579 */
+    local
 ]
 interface IWebBrowserPriv2IE9 : IUnknown
 {
@@ -30598,7 +30634,3 @@ interface IWebBrowserPriv2IE9 : IUnknown
             VARIANT *headers, IBindCtx *bind_ctx, LPOLESTR url_fragment, DWORD unused);
     /* Probably more */
 }
-
-#ifdef MSHTML_MARSHALING_HACK
-#undef IOleCommandTarget
-#endif

@@ -162,6 +162,14 @@ static void flush_events(void)
     }
 }
 
+static void pump_messages(void)
+{
+    MSG msg;
+
+    while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+        DispatchMessageA(&msg);
+}
+
 static HWND create_foreground_window(void)
 {
     for (UINT retries = 5; retries; retries--)
@@ -849,11 +857,24 @@ static void test_process_vertices(void)
     struct vec4 *dst_data;
     struct vec3 *dst_data2;
     struct vec3 *src_data;
+    struct
+    {
+        struct vec3 p;
+        float w;
+    }
+    *src_data_w;
     IDirect3D7 *d3d7;
     D3DVIEWPORT7 vp;
     HWND window;
     HRESULT hr;
 
+    static D3DMATRIX ident =
+    {
+        1.0f,  0.0f, 0.0f, 0.0f,
+        0.0f,  1.0f, 0.0f, 0.0f,
+        0.0f,  0.0f, 1.0f, 0.0f,
+        0.0f,  0.0f, 0.0f, 1.0f,
+    };
     static D3DMATRIX world =
     {
         0.0f,  1.0f, 0.0f, 0.0f,
@@ -1078,6 +1099,100 @@ static void test_process_vertices(void)
             "Got unexpected vertex 2 {%.8e, %.8e, %.8e, %.8e}.\n",
             dst_data[2].x, dst_data[2].y, dst_data[2].z, dst_data[2].w);
     ok(compare_vec4(&dst_data[3], +2.560e+2f, +8.182e+1f, -3.091e+0f, +3.636e-1f, 4096),
+            "Got unexpected vertex 3 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[3].x, dst_data[3].y, dst_data[3].z, dst_data[3].w);
+    hr = IDirect3DVertexBuffer7_Unlock(dst_vb1);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Vertex blending. */
+    memset(&vp, 0, sizeof(vp));
+    vp.dwX = 64;
+    vp.dwY = 64;
+    vp.dwWidth = 128;
+    vp.dwHeight = 128;
+    vp.dvMinZ = 0.0f;
+    vp.dvMaxZ = 1.0f;
+    hr = IDirect3DDevice7_SetViewport(device, &vp);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD, &ident);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_VIEW, &ident);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_PROJECTION, &ident);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD1, &world);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    hr = IDirect3DDevice7_SetRenderState(device, D3DRENDERSTATE_VERTEXBLEND, D3DVBLEND_1WEIGHT);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    /* No weights specified. Windows just takes the values beyond position for weights as if it was D3DFVF_XYZB1. */
+    hr = IDirect3DVertexBuffer7_ProcessVertices(dst_vb1, D3DVOP_TRANSFORM, 0, 4, src_vb, 0, device, 0);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    hr = IDirect3DVertexBuffer7_Lock(dst_vb1, 0, (void **)&dst_data, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    ok(compare_vec4(&dst_data[0], +1.280e+2f, +1.280e+2f, +0.000e+0f, +1.000e+0f, 4096),
+            "Got unexpected vertex 0 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[0].x, dst_data[0].y, dst_data[0].z, dst_data[0].w);
+    todo_wine ok(compare_vec4(&dst_data[1], +1.4933e+2f, +6.400e+1f, +3.333e-1f, +3.333e-1f, 4096),
+            "Got unexpected vertex 1 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[1].x, dst_data[1].y, dst_data[1].z, dst_data[1].w);
+    todo_wine ok(compare_vec4(&dst_data[2], +7.680e+1f, +1.536e+2f, +6.000e-1f, +8.000e-1f, 4096),
+            "Got unexpected vertex 2 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[2].x, dst_data[2].y, dst_data[2].z, dst_data[2].w);
+    /* Not testing vertex 3 as it depends on random data past end of the source vertex buffer. */
+    hr = IDirect3DVertexBuffer7_Unlock(dst_vb1);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    IDirect3DVertexBuffer7_Release(src_vb);
+
+    /* Now with properly specified weights. */
+    vb_desc.dwSize = sizeof(vb_desc);
+    vb_desc.dwFVF = D3DFVF_XYZB1;
+    vb_desc.dwNumVertices = 4;
+    hr = IDirect3D7_CreateVertexBuffer(d3d7, &vb_desc, &src_vb, 0);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDirect3DVertexBuffer7_Lock(src_vb, 0, (void **)&src_data_w, NULL);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDirect3DVertexBuffer7_Lock(src_vb, 0, (void **)&src_data_w, NULL);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+    src_data_w[0].p.x = 0.0f;
+    src_data_w[0].p.y = 0.0f;
+    src_data_w[0].p.z = 0.0f;
+    src_data_w[0].w = 0.2f;
+    src_data_w[1].p.x = 1.0f;
+    src_data_w[1].p.y = 1.0f;
+    src_data_w[1].p.z = 1.0f;
+    src_data_w[1].w = 0.5f;
+    src_data_w[2].p.x = -1.0f;
+    src_data_w[2].p.y = -1.0f;
+    src_data_w[2].p.z = 0.5f;
+    src_data_w[2].w = 0.8f;
+    src_data_w[3].p.x = 0.5f;
+    src_data_w[3].p.y = -0.5f;
+    src_data_w[3].p.z = 0.25f;
+    src_data_w[3].w = 1.0f;
+    hr = IDirect3DVertexBuffer7_Unlock(src_vb);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDirect3DVertexBuffer7_ProcessVertices(dst_vb1, D3DVOP_TRANSFORM, 0, 4, src_vb, 0, device, 0);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDirect3DVertexBuffer7_Lock(dst_vb1, 0, (void **)&dst_data, NULL);
+    ok(hr == DD_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(compare_vec4(&dst_data[0], +1.280e+2f, +7.680e+1f, +8.000e-1f, +1.000e+0f, 4096),
+            "Got unexpected vertex 0 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[0].x, dst_data[0].y, dst_data[0].z, dst_data[0].w);
+    ok(compare_vec4(&dst_data[1], +1.707e+2f, +6.400e+1f, +6.667e-1f, +6.667e-1f, 4096),
+            "Got unexpected vertex 1 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[1].x, dst_data[1].y, dst_data[1].z, dst_data[1].w);
+    ok(compare_vec4(&dst_data[2], +6.982e+1f, +1.745e+2f, +5.455e-1f, +9.091e-1f, 4096),
+            "Got unexpected vertex 2 {%.8e, %.8e, %.8e, %.8e}.\n",
+            dst_data[2].x, dst_data[2].y, dst_data[2].z, dst_data[2].w);
+    ok(compare_vec4(&dst_data[3], +1.600e+2f, +1.600e+2f, +2.500e-1f, +1.000e+0f, 4096),
             "Got unexpected vertex 3 {%.8e, %.8e, %.8e, %.8e}.\n",
             dst_data[3].x, dst_data[3].y, dst_data[3].z, dst_data[3].w);
     hr = IDirect3DVertexBuffer7_Unlock(dst_vb1);
@@ -2747,6 +2862,7 @@ static void test_window_style(void)
     RECT fullscreen_rect, r;
     HWND window, window2;
     IDirectDraw7 *ddraw;
+    unsigned int i;
     HRESULT hr;
     ULONG ref;
     BOOL ret;
@@ -2957,10 +3073,19 @@ static void test_window_style(void)
     ok(tmp & WS_VISIBLE, "Expected WS_VISIBLE.\n");
     tmp = GetWindowLongA(window, GWL_EXSTYLE);
     ok(tmp & WS_EX_TOPMOST, "Expected WS_EX_TOPMOST.\n");
-    ret = ShowWindow(window, SW_HIDE);
-    ok(ret, "ShowWindow failed, error %#lx.\n", GetLastError());
-    ret = SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
-    ok(ret, "SetWindowPos failed, error %#lx.\n", GetLastError());
+    for (i = 0; i < 5; ++i)
+    {
+        /* Try a few times to hide the window. Something in Win11 26H1 shows it again and makes it
+         * topmost. This is in addition to the ddraw periodic check below, which only makes it
+         * topmost but not visible */
+        ret = SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_HIDEWINDOW);
+        ok(ret, "SetWindowPos failed, error %#lx.\n", GetLastError());
+        tmp = GetWindowLongA(window, GWL_STYLE);
+        if (!(tmp & WS_VISIBLE))
+            break;
+        Sleep(100);
+    }
+    ok(i < 5, "Failed to hide the window.\n");
     tmp = GetWindowLongA(window, GWL_STYLE);
     ok(!(tmp & WS_VISIBLE), "Got unexpected WS_VISIBLE.\n");
     tmp = GetWindowLongA(window, GWL_EXSTYLE);
@@ -4809,10 +4934,26 @@ static void test_lighting(void)
         {{ -9.0f,  -9.0f, -10.0f}, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
         {{ -9.0f, -11.0f, -10.0f}, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
     };
+    static struct vertex_normal_w
+    {
+        struct vec3 position;
+        float w;
+        struct vec3 normal;
+        DWORD diffuse;
+    }
+    translatedquadw[] =
+    {
+        {{-11.0f, -11.0f, -10.0f}, 0.2f, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
+        {{-11.0f,  -9.0f, -10.0f}, 0.4f, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
+        {{ -9.0f,  -9.0f, -10.0f}, 0.5f, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
+        {{ -9.0f, -11.0f, -10.0f}, 1.0f, {0.0f, 0.0f, -1.0f}, 0xff0000ff},
+    };
+
     static WORD indices[] = {0, 1, 2, 2, 3, 0};
     static const struct
     {
         D3DMATRIX *world_matrix;
+        D3DMATRIX *world_matrix2;
         void *quad;
         DWORD expected, expected_process_vertices;
         const char *message;
@@ -4820,14 +4961,16 @@ static void test_lighting(void)
     }
     tests[] =
     {
-        {&mat, nquad, 0x000000ff, 0xff0000ff, "Lit quad with light"},
-        {&mat_singular, nquad, 0x000000ff, 0xff000000, "Lit quad with singular world matrix", TRUE},
-        {&mat_transf, rotatedquad, 0x000000ff, 0xff0000ff, "Lit quad with transformation matrix"},
-        {&mat_nonaffine, translatedquad, 0x00000000, 0xff000000, "Lit quad with non-affine matrix"},
+        {&mat, NULL, nquad, 0x000000ff, 0xff0000ff, "Lit quad with light"},
+        {&mat_singular, NULL, nquad, 0x000000ff, 0xff000000, "Lit quad with singular world matrix", TRUE},
+        {&mat_transf, NULL, rotatedquad, 0x000000ff, 0xff0000ff, "Lit quad with transformation matrix"},
+        {&mat_nonaffine, NULL, translatedquad, 0x00000000, 0xff000000, "Lit quad with non-affine matrix"},
+        {&mat_transf, &mat, translatedquadw, 0x00ffffff, 0xff0000cc, "Lit quad with vertex blending"},
     };
 
+    IDirect3DVertexBuffer7 *src_vb1, *src_vb2, *src_vb3, *dst_vb;
     DWORD nfvf = D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_NORMAL;
-    IDirect3DVertexBuffer7 *src_vb1, *src_vb2, *dst_vb;
+    static struct vertex_normal_w *src_data3;
     DWORD fvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
     struct vertex_normal *src_data2;
     D3DVERTEXBUFFERDESC vb_desc;
@@ -4998,16 +5141,46 @@ static void test_lighting(void)
     hr = IDirect3DDevice7_LightEnable(device, 0, TRUE);
     ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
 
+    vb_desc.dwSize = sizeof(vb_desc);
+    vb_desc.dwFVF = D3DFVF_XYZB1 | D3DFVF_DIFFUSE | D3DFVF_NORMAL;
+    vb_desc.dwNumVertices = 2;
+    hr = IDirect3D7_CreateVertexBuffer(d3d, &vb_desc, &src_vb3, 0);
+    ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
     {
-        hr = IDirect3DVertexBuffer7_Lock(src_vb2, 0, (void **)&src_data2, NULL);
-        ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
-        memcpy(src_data2, tests[i].quad, sizeof(*src_data2));
-        hr = IDirect3DVertexBuffer7_Unlock(src_vb2);
-        ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+        DWORD fvf;
 
         hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD, tests[i].world_matrix);
         ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+        if (tests[i].world_matrix2)
+        {
+            hr = IDirect3DVertexBuffer7_Lock(src_vb3, 0, (void **)&src_data3, NULL);
+            ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+            memcpy(src_data3, tests[i].quad, sizeof(*src_data3));
+            hr = IDirect3DVertexBuffer7_Unlock(src_vb3);
+            ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+
+            hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD, tests[i].world_matrix);
+            ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD1, tests[i].world_matrix2);
+            ok(hr == DD_OK, "got %#lx.\n", hr);
+            hr = IDirect3DDevice7_SetRenderState(device, D3DRENDERSTATE_VERTEXBLEND, D3DVBLEND_1WEIGHT);
+            ok(hr == DD_OK, "got %#lx.\n", hr);
+            fvf = D3DFVF_XYZB1 | D3DFVF_DIFFUSE | D3DFVF_NORMAL;
+        }
+        else
+        {
+            hr = IDirect3DVertexBuffer7_Lock(src_vb2, 0, (void **)&src_data2, NULL);
+            ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+            memcpy(src_data2, tests[i].quad, sizeof(*src_data2));
+            hr = IDirect3DVertexBuffer7_Unlock(src_vb2);
+            ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
+
+            hr = IDirect3DDevice7_SetRenderState(device, D3DRENDERSTATE_VERTEXBLEND, D3DVBLEND_DISABLE);
+            ok(hr == DD_OK, "got %#lx.\n", hr);
+            fvf = nfvf;
+        }
 
         hr = IDirect3DDevice7_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xffffffff, 0.0, 0);
         ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
@@ -5016,10 +5189,10 @@ static void test_lighting(void)
         ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
 
         hr = IDirect3DVertexBuffer7_ProcessVertices(dst_vb, D3DVOP_TRANSFORM | D3DVOP_LIGHT, 0,
-                1, src_vb2, 0, device, 0);
+                1, tests[i].world_matrix2 ? src_vb3 : src_vb2, 0, device, 0);
         ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
 
-        hr = IDirect3DDevice7_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, nfvf, tests[i].quad,
+        hr = IDirect3DDevice7_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, fvf, tests[i].quad,
                 4, indices, 6, 0);
         ok(hr == D3D_OK, "Got unexpected hr %#lx.\n", hr);
 
@@ -5044,6 +5217,7 @@ static void test_lighting(void)
 
     IDirect3DVertexBuffer7_Release(src_vb1);
     IDirect3DVertexBuffer7_Release(src_vb2);
+    IDirect3DVertexBuffer7_Release(src_vb3);
     IDirect3DVertexBuffer7_Release(dst_vb);
 
     IDirectDrawSurface7_Release(rt);
@@ -15937,6 +16111,7 @@ static void test_map_synchronisation(void)
     unsigned int colour, i, j, tri_count;
     IDirect3DVertexBuffer7 *buffer;
     D3DVERTEXBUFFERDESC vb_desc;
+    BOOL small_buffer = FALSE;
     IDirect3DDevice7 *device;
     BOOL unsynchronised, ret;
     IDirectDrawSurface7 *rt;
@@ -16084,7 +16259,15 @@ static void test_map_synchronisation(void)
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
     {
         hr = IDirect3D7_CreateVertexBuffer(d3d, &vb_desc, &buffer, 0);
-        ok(SUCCEEDED(hr), "Failed to create vertex buffer, hr %#lx.\n", hr);
+        ok(SUCCEEDED(hr) || hr == D3DERR_TOOMANYVERTICES, "Failed to create vertex buffer, hr %#lx.\n", hr);
+        if (hr == D3DERR_TOOMANYVERTICES && vb_desc.dwNumVertices >= 65535)
+        {
+            trace("Test draw needs more than 64k vertices, test results might be flaky.\n");
+            small_buffer = TRUE;
+            vb_desc.dwNumVertices = 65534;
+            hr = IDirect3D7_CreateVertexBuffer(d3d, &vb_desc, &buffer, 0);
+            ok(SUCCEEDED(hr), "Failed to create vertex buffer, hr %#lx.\n", hr);
+        }
         hr = IDirect3DVertexBuffer7_Lock(buffer, DDLOCK_DISCARDCONTENTS, (void **)&quads, NULL);
         ok(SUCCEEDED(hr), "Failed to lock vertex buffer, hr %#lx.\n", hr);
         for (j = 0; j < vb_desc.dwNumVertices / 4; ++j)
@@ -16113,6 +16296,7 @@ static void test_map_synchronisation(void)
 
         colour = get_surface_color(rt, 320, 240);
         unsynchronised = compare_color(colour, 0x00ffff00, 1);
+        flaky_if(small_buffer && tests[i].unsynchronised)
         ok(tests[i].unsynchronised == unsynchronised, "Expected %s map for flags %#x.\n",
                 tests[i].unsynchronised ? "unsynchronised" : "synchronised", tests[i].flags);
 
@@ -18307,11 +18491,17 @@ static void test_caps(void)
         {
             .dwSize = sizeof(DDSURFACEDESC2),
             .dwFlags = DDSD_CAPS | DDSD_PIXELFORMAT | DDSD_WIDTH | DDSD_HEIGHT,
-            .ddsCaps.dwCaps = DDSCAPS_ZBUFFER,
-            .ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT),
-            .ddpfPixelFormat.dwFlags = DDPF_ZBUFFER,
-            .ddpfPixelFormat.dwZBufferBitDepth = depth_caps[i].depth,
-            .ddpfPixelFormat.dwZBitMask = depth_caps[i].mask,
+            .ddsCaps =
+            {
+                .dwCaps = DDSCAPS_ZBUFFER,
+            },
+            .ddpfPixelFormat =
+            {
+                .dwSize = sizeof(DDPIXELFORMAT),
+                .dwFlags = DDPF_ZBUFFER,
+                .dwZBufferBitDepth = depth_caps[i].depth,
+                .dwZBitMask = depth_caps[i].mask,
+            },
             .dwWidth = 64,
             .dwHeight = 64,
         };
@@ -18394,11 +18584,17 @@ static void test_caps(void)
         {
             .dwSize = sizeof(DDSURFACEDESC2),
             .dwFlags = DDSD_CAPS | DDSD_PIXELFORMAT | DDSD_WIDTH | DDSD_HEIGHT,
-            .ddsCaps.dwCaps = DDSCAPS_ZBUFFER,
-            .ddpfPixelFormat.dwSize = sizeof(DDPIXELFORMAT),
-            .ddpfPixelFormat.dwFlags = DDPF_ZBUFFER,
-            .ddpfPixelFormat.dwZBufferBitDepth = depth_caps[i].depth,
-            .ddpfPixelFormat.dwZBitMask = depth_caps[i].mask,
+            .ddsCaps =
+            {
+                .dwCaps = DDSCAPS_ZBUFFER,
+            },
+            .ddpfPixelFormat =
+            {
+                .dwSize = sizeof(DDPIXELFORMAT),
+                .dwFlags = DDPF_ZBUFFER,
+                .dwZBufferBitDepth = depth_caps[i].depth,
+                .dwZBitMask = depth_caps[i].mask,
+            },
             .dwWidth = 64,
             .dwHeight = 64,
         };
@@ -20918,6 +21114,137 @@ out:
     DestroyWindow(window);
 }
 
+static void check_surface_clipper(IDirectDrawSurface7 *surface,
+        IDirectDrawClipper *clipper, RECT *window_rect, DWORD style)
+{
+    unsigned int c;
+    DDBLTFX fx;
+    HRESULT hr;
+
+    memset(&fx, 0, sizeof(fx));
+    fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0xff00ff00;
+
+    fill_surface(surface, 0xffff0000);
+
+    /* Clippers with a region work. Clippers with a window work on Windows 98,
+     * but are ignored on modern windows. */
+
+    hr = IDirectDrawSurface7_SetClipper(surface, clipper);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    c = get_surface_color(surface, 101, 101);
+    ok(c == 0x00ff0000, "got %#x.\n", c);
+    hr = IDirectDrawSurface7_Blt(surface, NULL, NULL, NULL, DDBLT_COLORFILL | DDBLT_WAIT, &fx);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    c = get_surface_color(surface, 0, 0);
+    ok(c == 0x00ff0000, "got %#x.\n", c);
+    c = get_surface_color(surface, 101, 101);
+    ok(c == 0x0000ff00, "got %#x.\n", c);
+
+    hr = IDirectDrawSurface7_SetClipper(surface, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    clear_surface(surface, 0);
+}
+
+static void test_clipper_in_exclusive_fullscreen(void)
+{
+    static const struct
+    {
+        DWORD style;
+        BOOL parent;
+    }
+    tests[] =
+    {
+        { WS_POPUP },
+        { WS_POPUP, TRUE },
+        { WS_CHILD, TRUE },
+        { WS_OVERLAPPED },
+        { WS_CHILD | WS_VISIBLE, TRUE },
+        { WS_POPUP | WS_VISIBLE },
+    };
+    IDirectDrawSurface7 *primary, *offscreen;
+    IDirectDrawClipper *clipper;
+    DDSURFACEDESC2 surface_desc;
+    IDirectDraw7 *ddraw;
+    RGNDATA *rgn_data;
+    DWORD ret, style;
+    RECT window_rect;
+    ULONG refcount;
+    unsigned int i;
+    HWND window;
+    HRESULT hr;
+    HRGN rgn;
+
+    if (!(ddraw = create_ddraw()))
+    {
+        skip("Failed to create ddraw, skipping test.\n");
+        return;
+    }
+    hr = IDirectDraw7_CreateClipper(ddraw, 0, &clipper, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    window = CreateWindowA("static", "ddraw_fullscreen", WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, NULL, NULL, NULL, NULL);
+    pump_messages();
+    hr = IDirectDraw7_SetCooperativeLevel(ddraw, NULL, DDSCL_NORMAL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    hr = IDirectDraw7_SetCooperativeLevel(ddraw, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    pump_messages();
+
+    rgn = CreateRectRgn(100, 100, 200, 200);
+    ok(!!rgn, "Failed to create region.\n");
+    ret = GetRegionData(rgn, 0, NULL);
+    rgn_data = malloc(ret);
+    ret = GetRegionData(rgn, ret, rgn_data);
+    ok(!!ret, "Failed to get region data.\n");
+    DeleteObject(rgn);
+    hr = IDirectDrawClipper_SetClipList(clipper, rgn_data, 0);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    free(rgn_data);
+
+    memset(&surface_desc, 0, sizeof(surface_desc));
+    surface_desc.dwSize = sizeof(surface_desc);
+    surface_desc.dwFlags = DDSD_CAPS;
+    surface_desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    hr = IDirectDraw7_CreateSurface(ddraw, &surface_desc, &primary, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    surface_desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    surface_desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+    surface_desc.dwWidth = 640;
+    surface_desc.dwHeight = 480;
+    hr = IDirectDraw7_CreateSurface(ddraw, &surface_desc, &offscreen, NULL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("test %u", i);
+        style = tests[i].style;
+
+        winetest_push_context("primary");
+        check_surface_clipper(primary, clipper, &window_rect, style);
+        winetest_pop_context();
+
+        winetest_push_context("offscreen");
+        check_surface_clipper(offscreen, clipper, &window_rect, style);
+        winetest_pop_context();
+
+        winetest_pop_context();
+    }
+
+    hr = IDirectDraw7_SetCooperativeLevel(ddraw, NULL, DDSCL_NORMAL);
+    ok(hr == DD_OK, "got %#lx.\n", hr);
+    IDirectDrawClipper_Release(clipper);
+    refcount = IDirectDrawSurface7_Release(offscreen);
+    ok(!refcount, "Got unexpected refcount %lu.\n", refcount);
+    refcount = IDirectDrawSurface7_Release(primary);
+    ok(!refcount, "Got unexpected refcount %lu.\n", refcount);
+
+    IDirectDraw7_Release(ddraw);
+    DestroyWindow(window);
+    pump_messages();
+}
+
 START_TEST(ddraw7)
 {
     DDDEVICEIDENTIFIER2 identifier;
@@ -21101,4 +21428,5 @@ START_TEST(ddraw7)
     test_sysmem_x_channel();
     test_yuv_blit();
     test_blit_to_self();
+    test_clipper_in_exclusive_fullscreen();
 }

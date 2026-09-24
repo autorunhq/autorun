@@ -33,7 +33,6 @@
 #include <gst/audio/audio.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "winternl.h"
 #include "mferror.h"
 #include "mfapi.h"
@@ -104,10 +103,11 @@ static struct wg_transform *get_transform(wg_transform_t trans)
     return (struct wg_transform *)(ULONG_PTR)trans;
 }
 
-static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, guint stride,
+static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, gint stride,
         GstVideoInfo *info, GstVideoAlignment *align)
 {
     bool fix_nv12 = !plane_align && info->finfo->format == GST_VIDEO_FORMAT_NV12 && (info->width & 3) && (info->width & 3) != 3;
+    bool bottom_up = video_info->VideoFlags & MFVideoFlag_BottomUpLinearRep;
     const MFVideoArea *aperture = &video_info->MinimumDisplayAperture;
 
     gst_video_alignment_reset(align);
@@ -115,7 +115,7 @@ static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, 
     align->padding_right = ((plane_align + 1) - (info->width & plane_align)) & plane_align;
     align->padding_bottom = ((plane_align + 1) - (info->height & plane_align)) & plane_align;
 
-    if (!is_mf_video_area_empty(aperture) && !plane_align)
+    if (!is_mf_video_area_empty(aperture))
     {
         align->padding_right = max(align->padding_right, video_info->dwWidth - aperture->OffsetX.value - aperture->Area.cx);
         align->padding_bottom = max(align->padding_bottom, video_info->dwHeight - aperture->OffsetY.value - aperture->Area.cy);
@@ -134,6 +134,10 @@ static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, 
         gst_video_format_info_component(finfo, 0, comp);
         pixel_stride = finfo->pixel_stride[comp[0]];
 
+        bottom_up = stride < 0;
+        if (bottom_up)
+            stride = -stride;
+
         if (stride % pixel_stride)
             GST_ERROR("Stride %u not aligned to pixel size", stride);
         stride /= pixel_stride;
@@ -144,7 +148,7 @@ static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, 
             align->padding_right += stride - width;
     }
 
-    if (video_info->VideoFlags & MFVideoFlag_BottomUpLinearRep)
+    if (bottom_up)
     {
         gsize top = align->padding_top;
         align->padding_top = align->padding_bottom;
@@ -170,7 +174,7 @@ static void align_video_info_planes(MFVideoInfo *video_info, gsize plane_align, 
         gst_video_info_align(info, align);
     }
 
-    if (video_info->VideoFlags & MFVideoFlag_BottomUpLinearRep)
+    if (bottom_up)
     {
         for (guint i = 0; i < ARRAY_SIZE(info->offset); ++i)
         {
@@ -541,73 +545,6 @@ static GstCaps *transform_get_parsed_caps(GstCaps *caps, const char *media_type)
     return parsed_caps;
 }
 
-static GstBuffer *caps_get_buffer(const GstCaps *caps, const char *name, UINT32 *buffer_size)
-{
-    const GstStructure *structure = gst_caps_get_structure(caps, 0);
-    const GValue *buffer_value;
-
-    if ((buffer_value = gst_structure_get_value(structure, name)))
-    {
-        GstBuffer *buffer = gst_value_get_buffer(buffer_value);
-        *buffer_size = gst_buffer_get_size(buffer);
-        return buffer;
-    }
-
-    *buffer_size = 0;
-    return NULL;
-}
-
-static void push_vorbis_headers(struct wg_transform *transform)
-{
-    const uint8_t *ptr, *beg, *end;
-    GstBuffer *codec_data, *hdr;
-    UINT32 codec_data_size;
-    GstBufferMapInfo info;
-    int i, count, len;
-
-    if (!(codec_data = caps_get_buffer(transform->input_caps, "codec_data",
-            &codec_data_size)) || !codec_data_size) return;
-    gst_buffer_map(codec_data, &info, GST_MAP_READ);
-    ptr = info.data;
-    end = ptr + info.size;
-
-    for (len = 0, i = 0, count = *ptr++; ptr < end && i < count; i++)
-    {
-        while (ptr < end && *ptr++ == 0xff) len += 0xff;
-        len += ptr[-1];
-        GST_DEBUG("buffer %d: %u bytes", i, len);
-    }
-    if (len > end - ptr) goto failed;
-    beg = ptr;
-    ptr = info.data;
-
-    GST_DEBUG("%u stream headers, total length=%u bytes", count + 1, codec_data_size);
-    for (len = 0, i = 0, count = *ptr++; ptr < end && i < count; i++, len = 0)
-    {
-        while (ptr < end && *ptr++ == 0xff) len += 0xff;
-        len += ptr[-1];
-
-        if (!(hdr = gst_buffer_new_memdup(beg, len))) break;
-        GST_DEBUG("buffer %d: %u bytes", i, len);
-        GST_BUFFER_FLAG_SET(hdr, GST_BUFFER_FLAG_HEADER);
-        GST_MEMDUMP("data", beg, len);
-        gst_pad_push(transform->my_src, hdr);
-        beg += len;
-    }
-
-    if ((hdr = gst_buffer_new_memdup(beg, end - beg)))
-    {
-        GST_DEBUG("buffer %d: %zu bytes", i, end - beg);
-        GST_MEMDUMP("data", beg, end - beg);
-        GST_BUFFER_FLAG_SET(hdr, GST_BUFFER_FLAG_HEADER);
-        gst_pad_push(transform->my_src, hdr);
-    }
-
-failed:
-    gst_buffer_unmap(codec_data, &info);
-}
-
-
 static bool transform_create_decoder_elements(struct wg_transform *transform,
         const gchar *input_mime, const gchar *output_mime, GstElement **first, GstElement **last)
 {
@@ -619,10 +556,7 @@ static bool transform_create_decoder_elements(struct wg_transform *transform,
     char *str;
 
     if (!strcmp(input_mime, "audio/x-raw") || !strcmp(input_mime, "video/x-raw"))
-    {
-        transform->attrs.input_queue_length = 16;
         return true;
-    }
 
     if (!(parsed_caps = transform_get_parsed_caps(transform->input_caps, input_mime)))
         return false;
@@ -751,7 +685,6 @@ static bool transform_create_encoder_element(struct wg_transform *transform,
 NTSTATUS wg_transform_create(void *args)
 {
     struct wg_transform_create_params *params = args;
-    struct wg_media_type input_type;
     GstElement *first = NULL, *last = NULL;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     const gchar *input_mime, *output_mime;
@@ -773,46 +706,18 @@ NTSTATUS wg_transform_create(void *args)
         goto out;
     transform->attrs = params->attrs;
 
-    memcpy(&input_type, &params->input_type, sizeof(input_type));
-
-    if (IsEqualGUID(&input_type.major, &MFMediaType_Audio))
-    {
-        size_t data_size = input_type.u.audio->cbSize + sizeof(WAVEFORMATEX) - sizeof(HEAACWAVEINFO);
-
-        /* If an mfsrcsnk hack appended transcoded audio info to the user data, then restore it.
-         * This happens if the game depends on the input format belonging to a specific set of formats. */
-        if (input_type.u.audio->wFormatTag == WAVE_FORMAT_MPEG_HEAAC
-                && data_size >= sizeof(WAVEFORMATEXTENSIBLE))
-        {
-            const HEAACWAVEFORMAT *hwf = (HEAACWAVEFORMAT *)input_type.u.audio;
-            WAVEFORMATEXTENSIBLE audio;
-
-            memcpy(&audio, &hwf->pbAudioSpecificConfig[data_size - sizeof(audio)], sizeof(audio));
-            if (audio.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE
-                    && IsEqualGUID(&audio.SubFormat, &MFAudioFormat_Vorbis))
-            {
-                memmove((WAVEFORMATEXTENSIBLE *)input_type.u.audio + 1, hwf->pbAudioSpecificConfig,
-                        data_size - sizeof(audio));
-                memcpy(input_type.u.audio, &audio, sizeof(audio));
-            }
-        }
-    }
-
-    if (!(transform->input_caps = caps_from_media_type(&input_type)))
+    if (!(transform->input_caps = caps_from_media_type(&params->input_type)))
         goto out;
     GST_INFO("transform %p input caps %"GST_PTR_FORMAT, transform, transform->input_caps);
     input_mime = gst_structure_get_name(gst_caps_get_structure(transform->input_caps, 0));
-
-    if (!strcmp(input_mime, "video/x-h264"))
-        touch_h264_used_tag();
 
     if (!(transform->output_caps = caps_from_media_type(&params->output_type)))
         goto out;
     GST_INFO("transform %p output caps %"GST_PTR_FORMAT, transform, transform->output_caps);
     output_mime = gst_structure_get_name(gst_caps_get_structure(transform->output_caps, 0));
 
-    if (IsEqualGUID(&input_type.major, &MFMediaType_Video))
-        transform->input_info = input_type.u.video->videoInfo;
+    if (IsEqualGUID(&params->input_type.major, &MFMediaType_Video))
+        transform->input_info = params->input_type.u.video->videoInfo;
     if (IsEqualGUID(&params->output_type.major, &MFMediaType_Video))
         transform->output_info = params->output_type.u.video->videoInfo;
 
@@ -867,20 +772,6 @@ NTSTATUS wg_transform_create(void *args)
             || !push_event(transform->my_src, event))
         goto out;
 
-    /* Check that the caps event have been accepted */
-    if (!strcmp(input_mime, "video/x-h264"))
-    {
-        GstPad *peer;
-        if (!(peer = gst_pad_get_peer(transform->my_src)))
-            goto out;
-        else if (!gst_pad_has_current_caps(peer))
-        {
-            gst_object_unref(peer);
-            goto out;
-        }
-        gst_object_unref(peer);
-    }
-
     /* We need to use GST_FORMAT_TIME here because it's the only format
      * some elements such avdec_wmav2 correctly support. */
     gst_segment_init(&transform->segment, GST_FORMAT_TIME);
@@ -889,9 +780,6 @@ NTSTATUS wg_transform_create(void *args)
     if (!(event = gst_event_new_segment(&transform->segment))
             || !push_event(transform->my_src, event))
         goto out;
-
-    if (!strcmp(input_mime, "audio/x-vorbis"))
-        push_vorbis_headers(transform);
 
     GST_INFO("Created winegstreamer transform %p.", transform);
     params->transform = (wg_transform_t)(ULONG_PTR)transform;
@@ -1087,7 +975,7 @@ NTSTATUS wg_transform_push_data(void *args)
 }
 
 static NTSTATUS copy_video_buffer(GstBuffer *buffer, GstVideoInfo *src_video_info,
-        GstVideoInfo *dst_video_info, struct wg_sample *sample, gsize *total_size, GstBuffer **ret_buffer)
+        GstVideoInfo *dst_video_info, struct wg_sample *sample, gsize *total_size)
 {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     GstVideoFrame src_frame, dst_frame;
@@ -1125,10 +1013,7 @@ static NTSTATUS copy_video_buffer(GstBuffer *buffer, GstVideoInfo *src_video_inf
         gst_video_frame_unmap(&src_frame);
     }
 
-    if (status == STATUS_SUCCESS)
-        *ret_buffer = dst_buffer;
-    else
-        gst_buffer_unref(dst_buffer);
+    gst_buffer_unref(dst_buffer);
     return status;
 }
 
@@ -1221,70 +1106,17 @@ static bool sample_needs_buffer_copy(struct wg_sample *sample, GstBuffer *buffer
     return needs_copy;
 }
 
-enum fill_action
-{
-    FILL_RIGHT  = 1,
-    FILL_BOTTOM = 2,
-};
-
-static void fill_frame_padded_bits(GstBuffer *buffer, const GstVideoAlignment *align, const GstVideoInfo *info,
-        enum fill_action action)
-{
-    guint i, j, plane, padded_height, width, height, stride, pixel_stride, padding_bottom = align->padding_bottom;
-    GstVideoFrame frame;
-
-    if (!padding_bottom) action &= ~FILL_BOTTOM;
-    if (!align->padding_right) action &= ~FILL_RIGHT;
-
-    if (!action || !gst_video_frame_map(&frame, info, buffer, GST_MAP_WRITE)) return;
-
-    /* Windows uses the data in the last scanline for its bottom padding, and the last pixel
-     * in a row for right padding. GStreamer can do this, but it requires cropping first, then
-     * edge replication using videobox, so it has a larger performance cost than this hack. */
-    for (plane = 0; plane < GST_VIDEO_FRAME_N_PLANES(&frame); plane++)
-    {
-        gint comp[GST_VIDEO_MAX_COMPONENTS];
-
-        gst_video_format_info_component(frame.info.finfo, plane, comp);
-        height = GST_VIDEO_FRAME_COMP_HEIGHT(&frame, comp[0]);
-        stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, plane);
-
-        if (action & FILL_RIGHT)
-        {
-            guint8 *data = GST_VIDEO_FRAME_PLANE_DATA(&frame, plane);
-            pixel_stride = GST_VIDEO_FRAME_COMP_PSTRIDE(&frame, plane);
-            width = GST_VIDEO_FRAME_COMP_WIDTH(&frame, comp[0]) * pixel_stride;
-            data += width;
-            for (i = 0; i < height; i++)
-                for (j = 0; j < stride - width; j += pixel_stride)
-                    memcpy(data + i * stride + j, data + i * stride - pixel_stride, pixel_stride);
-        }
-
-        if (action & FILL_BOTTOM)
-        {
-            guint8 *data = GST_VIDEO_FRAME_PLANE_DATA(&frame, plane);
-            padded_height = GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT(frame.info.finfo, comp[0], info->height + padding_bottom);
-            data += height * stride;
-            for (i = 0; i < padded_height - height; i++) memcpy(data + i * stride, data - stride, stride);
-        }
-    }
-
-    gst_video_frame_unmap(&frame);
-}
-
 static NTSTATUS read_transform_output_video(struct wg_sample *sample, GstBuffer *buffer,
-        const GstVideoInfo *src_video_info, const GstVideoInfo *dst_video_info, const GstVideoAlignment *align)
+        GstVideoInfo *src_video_info, GstVideoInfo *dst_video_info)
 {
-    GstBuffer *dst_buffer = NULL;
     gsize total_size;
     NTSTATUS status;
     bool needs_copy;
-    const char *sgi;
 
     if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size)))
         status = STATUS_SUCCESS;
     else
-        status = copy_video_buffer(buffer, src_video_info, dst_video_info, sample, &total_size, &dst_buffer);
+        status = copy_video_buffer(buffer, src_video_info, dst_video_info, sample, &total_size);
 
     if (status)
     {
@@ -1292,21 +1124,6 @@ static NTSTATUS read_transform_output_video(struct wg_sample *sample, GstBuffer 
         sample->size = 0;
         return status;
     }
-
-    if ((sgi = getenv("SteamGameId")))
-    {
-        enum fill_action action = 0;
-
-        if (!strcmp(sgi, "1449280"))
-            action |= FILL_BOTTOM;
-        else if (!strcmp(sgi, "536280"))
-            action |= FILL_RIGHT;
-
-        fill_frame_padded_bits(dst_buffer ? dst_buffer : buffer, align, dst_video_info, action);
-    }
-
-    if (dst_buffer)
-        gst_buffer_unref(dst_buffer);
 
     set_sample_flags_from_buffer(sample, buffer, total_size);
 
@@ -1473,7 +1290,7 @@ NTSTATUS wg_transform_read_data(void *args)
 
     if (!strcmp(output_mime, "video/x-raw"))
         status = read_transform_output_video(sample, output_buffer,
-                &src_video_info, &dst_video_info, &align);
+                &src_video_info, &dst_video_info);
     else
         status = read_transform_output(sample, output_buffer);
 
@@ -1651,6 +1468,7 @@ static void wg_stepper_class_init(WgStepperClass *klass)
     gst_element_class_set_metadata(GST_ELEMENT_CLASS(klass), "winegstreamer buffer stepper", "Connector",
         "Hold incoming buffer for manual pushing", "Yuxuan Shui <yshui@codeweavers.com>");
     klass->parent_class.change_state = wg_stepper_change_state;
+    (void)wg_stepper_parent_class; /* silence unused variable warning */
 }
 
 static GstFlowReturn wg_stepper_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *buf)

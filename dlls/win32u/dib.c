@@ -69,7 +69,6 @@
 #include <assert.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
@@ -1348,6 +1347,11 @@ INT WINAPI NtGdiGetDIBitsInternal( HDC hdc, HBITMAP hbitmap, UINT startscan, UIN
     err = get_image_from_bitmap( bmp, src_info, bits ? &src_bits : NULL, bits ? &src : NULL );
 
     if (err) goto done;
+
+    if (!is_bitmapobj_dib( bmp ) && NtGdiGetDeviceCaps( hdc, TECHNOLOGY ) == DT_RASDISPLAY &&
+        src_info->bmiHeader.biBitCount != 1 && src_info->bmiHeader.biBitCount != 32 &&
+        !(src_info->bmiHeader.biBitCount == 8 && NtGdiGetDeviceCaps( hdc, BITSPIXEL ) == 8))
+        goto done;
 
     /* fill out the src colour table, if it needs one */
     if (src_info->bmiHeader.biBitCount <= 8 && src_info->bmiHeader.biClrUsed == 0)

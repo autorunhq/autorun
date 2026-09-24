@@ -64,13 +64,11 @@
 #ifdef HAVE_KQUEUE
 # include <sys/event.h>
 #endif
-
-#ifndef __SWITCH__
-# include "ntsync_tmp.h"
+#ifdef HAVE_LINUX_NTSYNC_H
+# include <linux/ntsync.h>
 #endif
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
 #include "ddk/wdm.h"
@@ -81,8 +79,6 @@
 #ifdef __SWITCH__
 #define munmap horizon_munmap
 #endif
-
-#include "fsync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
 
@@ -244,8 +240,8 @@ static inline int futex_wake_one( const LONG *addr )
 #endif /* __APPLE__ */
 
 /* create a struct security_descriptor and contained information in one contiguous piece of memory */
-unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
-                                      data_size_t *ret_len )
+unsigned int wine_server_alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
+                                                  data_size_t *ret_len )
 {
     unsigned int len = sizeof(**ret);
     SID *owner = NULL, *group = NULL;
@@ -806,11 +802,6 @@ void close_inproc_sync( HANDLE handle )
 {
     struct inproc_sync *cache;
 
-    if (do_fsync())
-    {
-        fsync_close( handle );
-        return;
-    }
     if (inproc_device_fd < 0) return;
     if ((cache = get_cached_inproc_sync( handle )))
     {
@@ -826,8 +817,6 @@ static NTSTATUS inproc_release_semaphore( HANDLE handle, ULONG count, ULONG *pre
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (do_fsync()) return fsync_release_semaphore( handle, count, prev_count );
-
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_SEMAPHORE, SEMAPHORE_MODIFY_STATE, &stack, &sync ))) return ret;
     ret = linux_release_semaphore_obj( sync->fd, count, prev_count );
@@ -839,8 +828,6 @@ static NTSTATUS inproc_query_semaphore( HANDLE handle, SEMAPHORE_BASIC_INFORMATI
 {
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
-
-    if (do_fsync()) return fsync_query_semaphore( handle, info );
 
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_SEMAPHORE, SEMAPHORE_QUERY_STATE, &stack, &sync ))) return ret;
@@ -854,8 +841,6 @@ static NTSTATUS inproc_set_event( HANDLE handle, LONG *prev_state )
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (do_fsync()) return fsync_set_event( handle, prev_state );
-
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_EVENT, EVENT_MODIFY_STATE, &stack, &sync ))) return ret;
     ret = linux_set_event_obj( sync->fd, prev_state );
@@ -867,8 +852,6 @@ static NTSTATUS inproc_reset_event( HANDLE handle, LONG *prev_state )
 {
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
-
-    if (do_fsync()) return fsync_reset_event( handle, prev_state );
 
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_EVENT, EVENT_MODIFY_STATE, &stack, &sync ))) return ret;
@@ -882,8 +865,6 @@ static NTSTATUS inproc_pulse_event( HANDLE handle, LONG *prev_state )
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (do_fsync()) return fsync_pulse_event( handle, prev_state );
-
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_EVENT, EVENT_MODIFY_STATE, &stack, &sync ))) return ret;
     ret = linux_pulse_event_obj( sync->fd, prev_state );
@@ -895,8 +876,6 @@ static NTSTATUS inproc_query_event( HANDLE handle, EVENT_BASIC_INFORMATION *info
 {
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
-
-    if (do_fsync()) return fsync_query_event( handle, info );
 
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_EVENT, EVENT_QUERY_STATE, &stack, &sync ))) return ret;
@@ -910,8 +889,6 @@ static NTSTATUS inproc_release_mutex( HANDLE handle, LONG *prev_count )
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (do_fsync()) return fsync_release_mutex( handle, prev_count );
-
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_MUTEX, 0, &stack, &sync ))) return ret;
     ret = linux_release_mutex_obj( sync->fd, prev_count );
@@ -924,8 +901,6 @@ static NTSTATUS inproc_query_mutex( HANDLE handle, MUTANT_BASIC_INFORMATION *inf
     struct inproc_sync stack, *sync;
     NTSTATUS ret;
 
-    if (do_fsync()) return fsync_query_mutex( handle, info );
-
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
     if ((ret = get_inproc_sync( handle, INPROC_SYNC_MUTEX, MUTANT_QUERY_STATE, &stack, &sync ))) return ret;
     ret = linux_query_mutex_obj( sync->fd, info );
@@ -933,9 +908,9 @@ static NTSTATUS inproc_query_mutex( HANDLE handle, MUTANT_BASIC_INFORMATION *inf
     return ret;
 }
 
-int get_inproc_alert_fd(void)
+static int get_inproc_alert_fd(void)
 {
-    struct ntdll_thread_data *data = ntdll_get_thread_data();
+    struct thread_data *data = get_thread_data();
     obj_handle_t token;
     sigset_t sigset;
     int fd;
@@ -948,12 +923,8 @@ int get_inproc_alert_fd(void)
         {
             if (!server_call_unlocked( req ))
             {
-                if (do_fsync()) data->alert_fd = fd = reply->fsync_shm_idx;
-                else
-                {
-                    data->alert_fd = fd = wine_server_receive_fd( &token );
-                    assert( token == reply->handle );
-                }
+                data->alert_fd = fd = wine_server_receive_fd( &token );
+                assert( token == reply->handle );
             }
         }
         SERVER_END_REQ;
@@ -970,8 +941,6 @@ static NTSTATUS inproc_wait( DWORD count, const HANDLE *handles, WAIT_TYPE type,
     struct inproc_sync *syncs[64], stack[ARRAY_SIZE(syncs)];
     int objs[ARRAY_SIZE(syncs)], alert_fd = 0;
     NTSTATUS ret;
-
-    if (do_fsync()) return fsync_wait_objects( count, handles, type != WaitAll, alertable, timeout );
 
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
 
@@ -1000,8 +969,6 @@ static NTSTATUS inproc_signal_and_wait( HANDLE signal, HANDLE wait,
     struct inproc_sync stack_signal, stack_wait, *signal_sync = &stack_signal, *wait_sync = &stack_wait;
     int alert_fd = 0;
     NTSTATUS ret;
-
-    if (do_fsync()) return fsync_signal_and_wait( signal, wait, alertable, timeout );
 
     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
 
@@ -1046,7 +1013,7 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
 
     *handle = 0;
     if (max <= 0 || initial < 0 || initial > max) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_semaphore )
     {
@@ -1172,7 +1139,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationEvent && type != SynchronizationEvent) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_event )
     {
@@ -1362,7 +1329,7 @@ NTSTATUS WINAPI NtCreateMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT
            attr ? debugstr_us(attr->ObjectName) : "(null)", owned );
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_mutex )
     {
@@ -1480,7 +1447,7 @@ NTSTATUS WINAPI NtCreateJobObject( HANDLE *handle, ACCESS_MASK access, const OBJ
     struct object_attributes *objattr;
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_job )
     {
@@ -1743,7 +1710,7 @@ NTSTATUS WINAPI NtCreateDebugObject( HANDLE *handle, ACCESS_MASK access,
 
     *handle = 0;
     if (flags & ~DEBUG_KILL_ON_CLOSE) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_debug_obj )
     {
@@ -1910,8 +1877,7 @@ NTSTATUS WINAPI NtWaitForDebugEvent( HANDLE handle, BOOLEAN alertable, LARGE_INT
             {
                 ret = event_data_to_state_change( &data, state );
                 state->NewState = data.code;
-                state->AppClientId.UniqueProcess = ULongToHandle( reply->pid );
-                state->AppClientId.UniqueThread  = ULongToHandle( reply->tid );
+                state->AppClientId = make_client_id( reply->pid, reply->tid );
             }
         }
         SERVER_END_REQ;
@@ -1953,7 +1919,7 @@ NTSTATUS WINAPI NtCreateDirectoryObject( HANDLE *handle, ACCESS_MASK access, OBJ
     struct object_attributes *objattr;
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_directory )
     {
@@ -2104,7 +2070,7 @@ NTSTATUS WINAPI NtCreateSymbolicLinkObject( HANDLE *handle, ACCESS_MASK access,
     *handle = 0;
     if (!target->MaximumLength) return STATUS_INVALID_PARAMETER;
     if (!target->Buffer) return STATUS_ACCESS_VIOLATION;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_symlink )
     {
@@ -2228,7 +2194,7 @@ NTSTATUS WINAPI NtCreateTimer( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationTimer && type != SynchronizationTimer) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_timer )
     {
@@ -2514,12 +2480,6 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
     /* if alertable, we need to query the server */
     if (alertable)
     {
-        if (do_fsync())
-        {
-            NTSTATUS ret = fsync_wait_objects( 0, NULL, TRUE, TRUE, timeout );
-            if (ret != STATUS_NOT_IMPLEMENTED)
-                return ret;
-        }
         /* Since server_wait will result in an unconditional implicit yield,
            we never return STATUS_NO_YIELD_PERFORMED */
         if ((status = server_wait( NULL, 0, SELECT_INTERRUPTIBLE | SELECT_ALERTABLE, timeout )) == STATUS_TIMEOUT)
@@ -2753,7 +2713,7 @@ NTSTATUS WINAPI NtCreateKeyedEvent( HANDLE *handle, ACCESS_MASK access,
            attr ? debugstr_us(attr->ObjectName) : "(null)", flags );
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_keyed_event )
     {
@@ -2865,7 +2825,7 @@ NTSTATUS WINAPI NtCreateIoCompletion( HANDLE *handle, ACCESS_MASK access, OBJECT
     TRACE( "(%p, %x, %p, %d)\n", handle, access, attr, threads );
 
     *handle = 0;
-    if ((status = alloc_object_attributes( attr, &objattr, &len ))) return status;
+    if ((status = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return status;
 
     SERVER_START_REQ( create_completion )
     {
@@ -2971,12 +2931,6 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
 
     TRACE( "(%p, %p, %p, %p, %p)\n", handle, key, value, io, timeout );
 
-    if (timeout && !timeout->QuadPart && inproc_device_fd >= 0)
-    {
-        status = NtWaitForSingleObject( handle, FALSE, timeout );
-        if (status != WAIT_OBJECT_0) return status;
-    }
-
     SERVER_START_REQ( remove_completion )
     {
         req->handle = wine_server_obj_handle( handle );
@@ -3025,12 +2979,6 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
     TRACE( "%p %p %u %p %p %u\n", handle, info, count, written, timeout, alertable );
 
     if (!count) return STATUS_INVALID_PARAMETER;
-
-    if (timeout && !timeout->QuadPart && inproc_device_fd >= 0)
-    {
-        status = NtWaitForSingleObject( handle, alertable, timeout );
-        if (status != WAIT_OBJECT_0) goto done;
-    }
 
     while (i < count)
     {
@@ -3157,7 +3105,7 @@ NTSTATUS WINAPI NtCreateSection( HANDLE *handle, ACCESS_MASK access, const OBJEC
         return STATUS_INVALID_PAGE_PROTECTION;
     }
 
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_mapping )
     {
@@ -3744,11 +3692,7 @@ static LONGLONG update_timeout( ULONGLONG end )
  */
 NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEGER *timeout )
 {
-    /* On Horizon the futex path uses address arbitration. Returning early
-     * instead would turn every contended critical section, SRW lock and
-     * condition variable into a busy spin that can starve the lock owner. */
-    union tid_alert_entry *entry = get_tid_alert_entry( NtCurrentTeb()->ClientId.UniqueThread );
-    BOOL waited = FALSE;
+    union tid_alert_entry *entry = get_tid_alert_entry( ULongToHandle(get_thread_data()->tid) );
 
     TRACE( "%p %s\n", address, debugstr_timeout( timeout ) );
 
@@ -3782,15 +3726,8 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
             else
                 ret = futex_wait( futex, 0, NULL );
 
-            if (!timeout || timeout->QuadPart)
-                waited = TRUE;
-
             if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
         }
-
-        if (alert_simulate_sched_quantum && waited)
-            usleep(0);
-
         return STATUS_ALERTED;
     }
 #elif defined(HAVE_KQUEUE)

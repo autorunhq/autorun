@@ -153,7 +153,7 @@ GpStatus WINGDIPAPI GdipSetImageAttributesColorMatrix(GpImageAttributes *imageat
     TRACE("(%p,%u,%i,%p,%p,%u)\n", imageattr, type, enableFlag, colorMatrix,
         grayMatrix, flags);
 
-    if(!imageattr || !is_valid_ColorAdjustType(type) || flags > ColorMatrixFlagsAltGray)
+    if(!imageattr || !is_valid_ColorAdjustType(type) || flags < ColorMatrixFlagsDefault || flags > ColorMatrixFlagsAltGray)
         return InvalidParameter;
 
     if (enableFlag)
@@ -225,7 +225,7 @@ GpStatus WINGDIPAPI GdipSetImageAttributesNoOp(GpImageAttributes *imageAttr,
 {
     TRACE("(%p,%u,%i)\n", imageAttr, type, enableFlag);
 
-    if (!is_valid_ColorAdjustType(type))
+    if (!imageAttr || !is_valid_ColorAdjustType(type))
         return InvalidParameter;
 
     imageAttr->noop[type] = enableFlag ? IMAGEATTR_NOOP_SET : IMAGEATTR_NOOP_CLEAR;

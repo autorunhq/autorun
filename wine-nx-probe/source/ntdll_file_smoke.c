@@ -82,12 +82,10 @@ static void park_forever(void)
 
 static int smoke_init_process(void)
 {
-    size_t info_size = server_init_process();
-    TEB *teb = NtCurrentTeb();
+    struct thread_data *data = virtual_alloc_first_thread_data();
+    server_init_process( data );
 
-    log_line( "[INFO] server_init_process info_size=%zu pid=%lu tid=%lu session=%u",
-              info_size, HandleToUlong( teb->ClientId.UniqueProcess ),
-              HandleToUlong( teb->ClientId.UniqueThread ), teb->Peb->SessionId );
+    log_line( "[INFO] server_init_process pid=%lu tid=%lu session=%u", pid, data->tid, session_id );
     return check_bool( "server_init_process machine",
                        supported_machines_count && native_machine == IMAGE_FILE_MACHINE_ARM64 );
 }
@@ -160,16 +158,18 @@ int main(int argc, char **argv)
     log_line( "[STEP] virtual_init" );
     virtual_init();
     log_line( "[OK] virtual_init" );
+    smoke_init_process();
+    main_image_info.Machine = IMAGE_FILE_MACHINE_ARM64;
     log_line( "[STEP] virtual_alloc_first_teb" );
-    teb = virtual_alloc_first_teb();
+    virtual_alloc_first_teb();
+    teb = NtCurrentTeb();
     if (!check_bool( "virtual_alloc_first_teb", teb && NtCurrentTeb() == teb && teb->Peb ))
     {
         log_line( "SUMMARY failures=%d overall=FAIL", failures );
         park_forever();
     }
 
-    if (smoke_init_process())
-        check_status( "init_process_done", smoke_init_process_done() );
+    check_status( "init_process_done", smoke_init_process_done() );
 
     status = smoke_open_unix_file( &handle );
     if (check_status( "open_unix_file", status ))
