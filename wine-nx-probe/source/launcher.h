@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #define LAUNCHER_MAX_USB_VOLUMES 5
+struct wine_nx_forwarder;
 
 struct wine_nx_launcher_usb_volume
 {
@@ -35,6 +36,8 @@ struct wine_nx_launcher_options
     int (*schedule_restart)(void);
     /* Install the 39-bit forwarder; returns 0 or the failing Result and step. */
     unsigned int (*install_forwarder)( const char **step );
+    unsigned int (*install_game_forwarder)( const struct wine_nx_forwarder *request, const char **step );
+    const char *launch_error;
     /* The global settings on entry, as the user left them on return. The
      * runtime keeps them; the launcher only says what they became. */
     int verbose;
@@ -61,10 +64,10 @@ void wine_nx_runtime_trace( const char *msg );
  * LAUNCHER_STATUS_* bits for what it could read; the rest is left alone. */
 int launcher_platform_status( int *hour, int *minute, int *battery, int *charging );
 
+int launcher_platform_prompt( const char *header, const char *initial, char *out, size_t size );
 #ifndef __SWITCH__
 /* A host build (tests/launcher_host.c) supplies what the Switch build takes from libnx. */
 int launcher_platform_font( const void **data, size_t *size );
-int launcher_platform_prompt( const char *header, const char *initial, char *out, size_t size );
 #endif
 
 #endif

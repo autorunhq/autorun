@@ -386,6 +386,7 @@ int ui_init( struct ui *ui, const void *font_data, size_t font_size, int animati
     ui_step( "controllers" );
     for (i = 0; i < SDL_NumJoysticks() && !ui->controller; i++)
         if (SDL_IsGameController( i )) ui->controller = SDL_GameControllerOpen( i );
+    ui->audio = launcher_audio_open();
     return 1;
 
 fail:
@@ -418,15 +419,9 @@ void ui_quit( struct ui *ui )
     memset( ui, 0, sizeof(*ui) );
 }
 
-int ui_set_sounds( struct ui *ui, int enabled )
+void ui_sound( struct ui *ui, enum launcher_sound sound )
 {
-    if (enabled && !ui->audio) ui->audio = launcher_audio_open();
-    else if (!enabled)
-    {
-        launcher_audio_close( ui->audio );
-        ui->audio = NULL;
-    }
-    return !enabled || ui->audio != NULL;
+    launcher_audio_play( ui->audio, sound );
 }
 
 /***********************************************************************
@@ -1055,13 +1050,13 @@ static void repeat_held( struct ui *ui )
 int ui_begin_frame( struct ui *ui )
 {
     if (!ui->running || !platform_running()) return ui->running = 0;
-    launcher_audio_tick( ui->audio );
     if (ui->background_tick) ui->background_tick( ui->background_data );
     if (ui->controller && !SDL_GameControllerGetAttached( ui->controller ))
     {
         SDL_GameControllerClose( ui->controller );
         ui->controller = NULL;
         ui->held = ui->stick_x = ui->stick_y = 0;
+        memset( ui->axes, 0, sizeof(ui->axes) );
         ui->trigger_left = ui->trigger_right = 0;
     }
     ui->scrolling_text = 0;
@@ -1150,18 +1145,6 @@ static int key_button( SDL_Keycode key )
     return UI_NONE;
 }
 
-static void input_sound( struct ui *ui, const struct ui_input *input )
-{
-    int button = input->button;
-    if (button == UI_B) launcher_audio_play( ui->audio, LAUNCHER_SOUND_BACK );
-    else if (button == UI_A || button == UI_X || button == UI_Y ||
-             button == UI_PLUS || button == UI_MINUS || input->touch == UI_TOUCH_TAP)
-        launcher_audio_play( ui->audio, LAUNCHER_SOUND_ACCEPT );
-    else if (button == UI_UP || button == UI_DOWN || button == UI_LEFT || button == UI_RIGHT ||
-             button == UI_L || button == UI_R || button == UI_ZL || button == UI_ZR || input->touch != UI_TOUCH_NONE)
-        launcher_audio_play( ui->audio, LAUNCHER_SOUND_MOVE );
-}
-
 int ui_poll( struct ui *ui, struct ui_input *input )
 {
     SDL_Event event;
@@ -1195,6 +1178,7 @@ int ui_poll( struct ui *ui, struct ui_input *input )
                          event.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT ? &ui->trigger_right : NULL;
             int value = event.caxis.value;
 
+            if (event.caxis.axis <= SDL_CONTROLLER_AXIS_RIGHTY) ui->axes[event.caxis.axis] = value;
             if (!latch) continue;
             if (value > -STICK_RELEASE && value < STICK_RELEASE) *latch = 0;
             if (*latch || (value > -STICK_PRESS && value < STICK_PRESS)) continue;
@@ -1238,7 +1222,7 @@ int ui_poll( struct ui *ui, struct ui_input *input )
             continue;
         }
         ui->busy_until = SDL_GetTicks() + 220;
-        if (input->button != UI_NONE) { input_sound( ui, input ); return 1; }
+        if (input->button != UI_NONE) return 1;
 
         input->touch = feed_touch( ui, type, x, y, &input->steps );
         if (input->touch == UI_TOUCH_NONE) continue;
@@ -1256,7 +1240,6 @@ int ui_poll( struct ui *ui, struct ui_input *input )
                     break;
                 }
             }
-        input_sound( ui, input );
         return 1;
     }
     return 0;
@@ -1282,7 +1265,7 @@ static int needs_animation( struct ui *ui )
     int moving = ui->highlight >= 0 && ui->last_highlight >= 0 && fabs( ui->highlight - ui->last_highlight ) > 0.2f;
 
     ui->last_highlight = ui->highlight;
-    return launcher_audio_tick( ui->audio ) || ui_animated( ui ) || (ui->animations && now - ui->fx_start < FADE_MS) || moving ||
+    return ui_animated( ui ) || (ui->animations && now - ui->fx_start < FADE_MS) || moving ||
            ui->scrolling_text || now < ui->busy_until || ui->held || ui->touch.active ||
            (ui->toast[0] && now < ui->toast_until + 50);
 }
@@ -1403,6 +1386,7 @@ static int ask_card( struct ui *ui, const char *title, const char *heading, cons
         ui_wait( ui );
     }
 done:
+    if (ui->running) ui_sound( ui, answer == UI_B ? LAUNCHER_SOUND_BACK : LAUNCHER_SOUND_ACCEPT );
     if (ui->screen && ui->snapshot)
     {
         SDL_SetRenderTarget( ui->renderer, ui->screen );
@@ -1444,6 +1428,7 @@ int ui_menu( struct ui *ui, const char *title, const char *const *items, int cou
     ui_start_screen( ui );
     while (ui_begin_frame( ui ))
     {
+        int previous = selection;
         while (ui_poll( ui, &input ))
         {
             if (input.button == UI_B || input.button == UI_PLUS) goto done;
@@ -1459,6 +1444,7 @@ int ui_menu( struct ui *ui, const char *title, const char *const *items, int cou
                 goto done;
             }
         }
+        if (selection != previous) ui_sound( ui, LAUNCHER_SOUND_MOVE );
         if (ui->snapshot)
         {
             SDL_RenderCopy( ui->renderer, ui->snapshot, NULL, NULL );
@@ -1487,6 +1473,7 @@ int ui_menu( struct ui *ui, const char *title, const char *const *items, int cou
         ui_wait( ui );
     }
 done:
+    if (ui->running) ui_sound( ui, chosen < 0 ? LAUNCHER_SOUND_BACK : LAUNCHER_SOUND_ACCEPT );
     ui->modal_depth--;
     return chosen;
 }
@@ -1600,20 +1587,9 @@ static SDL_Color ui_value_color( const struct ui *ui, const struct ui_row *row, 
     return current ? ui->value : ui->dim;
 }
 
-static int scroll_list( struct ui *ui, struct ui_list *list, int count, int visible, int row_height, Uint32 now )
+static int scroll_to( struct ui *ui, struct ui_list *list, int target, Uint32 now )
 {
-    int margin = visible > 2, max_top = count > visible ? count - visible : 0;
-    int target;
     float remaining;
-
-    if (list->selection < list->top + margin) list->top = list->selection - margin;
-    if (list->selection >= list->top + visible - margin)
-        list->top = list->selection - visible + margin + 1;
-    if (list->top > max_top) list->top = max_top;
-    if (list->top < 0) list->top = 0;
-    target = list->top * row_height;
-    list->scroll = clampf( list->scroll, 0, max_top * row_height );
-    list->scroll_from = clampf( list->scroll_from, 0, max_top * row_height );
     if (!ui->animations || !list->started_scroll)
     {
         list->scroll = list->scroll_from = list->scroll_target = target;
@@ -1638,6 +1614,27 @@ static int scroll_list( struct ui *ui, struct ui_list *list, int count, int visi
     return 0;
 }
 
+static int scroll_list( struct ui *ui, struct ui_list *list, int count, int visible, int row_height, Uint32 now )
+{
+    int margin = visible > 2, max_top = count > visible ? count - visible : 0;
+    if (list->selection < list->top + margin) list->top = list->selection - margin;
+    if (list->selection >= list->top + visible - margin)
+        list->top = list->selection - visible + margin + 1;
+    if (list->top > max_top) list->top = max_top;
+    if (list->top < 0) list->top = 0;
+    list->scroll = clampf( list->scroll, 0, max_top * row_height );
+    list->scroll_from = clampf( list->scroll_from, 0, max_top * row_height );
+    return scroll_to( ui, list, list->top * row_height, now );
+}
+
+static enum ui_action action_result( struct ui *ui, enum ui_action action )
+{
+    if (action != UI_ACTION_QUIT)
+        ui_sound( ui, action == UI_ACTION_BACK ? LAUNCHER_SOUND_BACK :
+                  action == UI_ACTION_LEFT || action == UI_ACTION_RIGHT ? LAUNCHER_SOUND_MOVE : LAUNCHER_SOUND_ACCEPT );
+    return action;
+}
+
 enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *title, const char *context,
                             const struct ui_row *rows, int count, int can_reset )
 {
@@ -1659,6 +1656,7 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
         const struct ui_row *row;
         struct ui_hint hints[6];
         int hint_count = 0, any_adjustable = 0;
+        int previous = list->selection, header = list->in_header;
         float bar;
 
         if (count <= 0) return UI_ACTION_BACK;
@@ -1680,19 +1678,19 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
             case UI_TOUCH_SWIPE_LEFT:
             case UI_TOUCH_SWIPE_RIGHT:
                 if (!row->disabled && row->adjustable)
-                    return input.touch == UI_TOUCH_SWIPE_LEFT ? UI_ACTION_LEFT : UI_ACTION_RIGHT;
+                    return action_result( ui, input.touch == UI_TOUCH_SWIPE_LEFT ? UI_ACTION_LEFT : UI_ACTION_RIGHT );
                 continue;
             case UI_TOUCH_TAP:
             {
                 int index = (input.y - LIST_TOP + (int)lroundf( list->scroll )) / ROW_HEIGHT;
 
-                if (input.y < UI_HEADER_HEIGHT) return UI_ACTION_BACK;
+                if (input.y < UI_HEADER_HEIGHT) return action_result( ui, UI_ACTION_BACK );
                 if (input.x < column_x || input.x >= column_x + column_w || input.y < LIST_TOP ||
                     input.y >= LIST_TOP + visible * ROW_HEIGHT || index < 0 || index >= count) continue;
                 list->selection = index;
                 if (rows[index].disabled) continue;
-                if (rows[index].adjustable) return input.x >= column_x + column_w / 2 ? UI_ACTION_RIGHT : UI_ACTION_LEFT;
-                return UI_ACTION_CHOOSE;
+                if (rows[index].adjustable) return action_result( ui, input.x >= column_x + column_w / 2 ? UI_ACTION_RIGHT : UI_ACTION_LEFT );
+                return action_result( ui, UI_ACTION_CHOOSE );
             }
             default:
                 break;
@@ -1703,17 +1701,18 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
             case UI_DOWN: direction = 1; break;
             case UI_L: list->selection = list->selection - visible < 0 ? 0 : list->selection - visible; break;
             case UI_R: list->selection = list->selection + visible >= count ? count - 1 : list->selection + visible; break;
-            case UI_LEFT: if (!list->in_header && !row->disabled && row->adjustable) return UI_ACTION_LEFT; break;
-            case UI_RIGHT: if (!list->in_header && !row->disabled && row->adjustable) return UI_ACTION_RIGHT; break;
+            case UI_LEFT: if (!list->in_header && !row->disabled && row->adjustable) return action_result( ui, UI_ACTION_LEFT ); break;
+            case UI_RIGHT: if (!list->in_header && !row->disabled && row->adjustable) return action_result( ui, UI_ACTION_RIGHT ); break;
             case UI_A:
-                if (list->in_header) return UI_ACTION_BACK;
-                if (!row->disabled) return UI_ACTION_CHOOSE;
+                if (list->in_header) return action_result( ui, UI_ACTION_BACK );
+                if (!row->disabled) return action_result( ui, UI_ACTION_CHOOSE );
                 break;
-            case UI_B: return UI_ACTION_BACK;
-            case UI_Y: if (can_reset && !row->disabled && row->adjustable) return UI_ACTION_RESET; break;
+            case UI_B: return action_result( ui, UI_ACTION_BACK );
+            case UI_Y: if (can_reset && !row->disabled && row->adjustable) return action_result( ui, UI_ACTION_RESET ); break;
             case UI_X:
                 if (row->help)
                 {
+                    ui_sound( ui, LAUNCHER_SOUND_ACCEPT );
                     ui_message( ui, row->label, row->help );
                     ui_start_screen( ui );
                 }
@@ -1737,6 +1736,7 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
         }
         if (!ui->running) break;
 
+        if (previous != list->selection || header != list->in_header) ui_sound( ui, LAUNCHER_SOUND_MOVE );
         scroll_list( ui, list, count, visible, ROW_HEIGHT, SDL_GetTicks() );
         scroll = (int)lroundf( list->scroll );
         row = rows + list->selection;
@@ -1852,6 +1852,17 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
 #define SET_SIDEBAR_PAD  26
 #define SET_ROW_X        (SET_SIDEBAR_X + SET_SIDEBAR_W + 32)
 #define SET_ROW_H        100
+#define DROPDOWN_ROW_H    48
+#define DROPDOWN_PADDING   8
+#define DROPDOWN_VISIBLE   5
+
+static int dropdown_scroll( const struct ui *ui, const struct ui_list *list, int count )
+{
+    int visible = count > 0 && count < DROPDOWN_VISIBLE ? count : DROPDOWN_VISIBLE;
+    int required = LIST_TOP + (list->selection + 1) * SET_ROW_H - 6 +
+                   visible * DROPDOWN_ROW_H + 2 * DROPDOWN_PADDING - (ui->height - 58);
+    return required > list->scroll_target ? required : list->scroll_target;
+}
 
 static void ui_switch( struct ui *ui, int x, int y, int on, int current, int disabled )
 {
@@ -1912,7 +1923,7 @@ static int settings_dropdown( struct ui *ui, const struct ui_list *anchor,
                               const struct ui_row *rows, int count, int selection,
                               int (*update)( void *data, int *selection ), void *data )
 {
-    const int panel_w = 430, row_h = 48, padding = 8, max_visible = 5;
+    const int panel_w = 430, row_h = DROPDOWN_ROW_H, padding = DROPDOWN_PADDING, max_visible = DROPDOWN_VISIBLE;
     struct ui_input input;
     struct ui_list motion = {0};
     SDL_Rect clip;
@@ -1947,6 +1958,7 @@ static int settings_dropdown( struct ui *ui, const struct ui_list *anchor,
             motion.selection = selection;
             scroll_list( ui, &motion, count, visible, row_h, SDL_GetTicks() );
         }
+        int previous = selection;
         while (ui_poll( ui, &input ))
         {
             int direction = 0;
@@ -1978,6 +1990,7 @@ static int settings_dropdown( struct ui *ui, const struct ui_list *anchor,
             }
         }
         if (!ui->running) break;
+        if (selection != previous) ui_sound( ui, LAUNCHER_SOUND_MOVE );
         motion.selection = selection;
         scroll_list( ui, &motion, count, visible, row_h, SDL_GetTicks() );
         scroll = (int)lroundf( motion.scroll );
@@ -2033,6 +2046,7 @@ static int settings_dropdown( struct ui *ui, const struct ui_list *anchor,
         ui_wait( ui );
     }
 done:
+    if (ui->running) ui_sound( ui, chosen < 0 ? LAUNCHER_SOUND_BACK : LAUNCHER_SOUND_ACCEPT );
     if (ui->screen && ui->snapshot)
     {
         SDL_SetRenderTarget( ui->renderer, ui->screen );
@@ -2063,7 +2077,7 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
     const int visible = (ui->height - LIST_TOP - 86) / SET_ROW_H;
     int row_w, controls_right, scroll, first, end, settled;
     int index[64], shown, i;
-    int deferred = -1;
+    int deferred = -1, deferred_scroll = 0;
     struct ui_input input;
     SDL_Rect clip;
 
@@ -2084,6 +2098,7 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
         if (*group >= group_count) *group = group_count - 1;
         if (*group < 0) *group = 0;
         int current_group = *group;
+        int previous = list->selection, focus = list->in_rows, header = list->in_header;
         /* The rows of this section, in the order they were given. */
         for (i = 0, shown = 0; i < count && shown < (int)(sizeof(index) / sizeof(index[0])); i++)
             if (rows[i].group == *group) index[shown++] = i;
@@ -2117,13 +2132,13 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
             case UI_TOUCH_SWIPE_LEFT:
             case UI_TOUCH_SWIPE_RIGHT:
                 if (!row->disabled && row->adjustable)
-                    return input.touch == UI_TOUCH_SWIPE_LEFT ? UI_ACTION_LEFT : UI_ACTION_RIGHT;
+                    return action_result( ui, input.touch == UI_TOUCH_SWIPE_LEFT ? UI_ACTION_LEFT : UI_ACTION_RIGHT );
                 continue;
             case UI_TOUCH_TAP:
             {
                 int in_list = (input.y - LIST_TOP + (int)lroundf( list->scroll )) / SET_ROW_H;
 
-                if (input.y < UI_HEADER_HEIGHT) return UI_ACTION_BACK;
+                if (input.y < UI_HEADER_HEIGHT) return action_result( ui, UI_ACTION_BACK );
                 /* A section under the finger, or a row of the one in focus. */
                 if (input.x >= SET_SIDEBAR_X && input.x < SET_SIDEBAR_X + SET_SIDEBAR_W && input.y >= LIST_TOP)
                 {
@@ -2141,14 +2156,14 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
                 list->selection = in_list;
                 row = rows + index[in_list];
                 if (row->disabled) continue;
-                if (row->adjustable) return input.x >= SET_ROW_X + row_w / 2 ? UI_ACTION_RIGHT : UI_ACTION_LEFT;
+                if (row->adjustable) return action_result( ui, input.x >= SET_ROW_X + row_w / 2 ? UI_ACTION_RIGHT : UI_ACTION_LEFT );
                 if (row->kind == UI_ROW_DROPDOWN)
                 {
-                    list->top = list->selection > 2 ? list->selection - 2 : 0;
+                    deferred_scroll = dropdown_scroll( ui, list, row->choices );
                     deferred = UI_ACTION_CHOOSE;
                     break;
                 }
-                return UI_ACTION_CHOOSE;
+                return action_result( ui, UI_ACTION_CHOOSE );
             }
             default:
                 break;
@@ -2161,40 +2176,41 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
             case UI_LEFT:
                 /* Holding a value, left changes it; otherwise it is the way back
                  * to the sections. */
-                if (list->editing || list->in_header) { if (list->editing) return UI_ACTION_LEFT; break; }
+                if (list->editing || list->in_header) { if (list->editing) return action_result( ui, UI_ACTION_LEFT ); break; }
                 if (list->in_rows) list->in_rows = 0;
                 break;
             case UI_RIGHT:
-                if (list->editing) return UI_ACTION_RIGHT;
+                if (list->editing) return action_result( ui, UI_ACTION_RIGHT );
                 if (list->in_header) break;
                 if (!list->in_rows && shown) list->in_rows = 1;
                 break;
             case UI_A:
-                if (list->in_header) return UI_ACTION_BACK;
+                if (list->in_header) return action_result( ui, UI_ACTION_BACK );
                 if (!list->in_rows) { if (shown) list->in_rows = 1; break; }
                 if (row->disabled) break;
                 /* A switch turns over where it stands. A row with a value of its
                  * own is taken hold of, and let go of the same way; everything
                  * else simply happens. */
-                if (row->kind == UI_ROW_SWITCH) return UI_ACTION_CHOOSE;
-                if (row->adjustable) { list->editing = !list->editing; break; }
+                if (row->kind == UI_ROW_SWITCH) return action_result( ui, UI_ACTION_CHOOSE );
+                if (row->adjustable) { ui_sound( ui, LAUNCHER_SOUND_ACCEPT ); list->editing = !list->editing; break; }
                 if (row->kind == UI_ROW_DROPDOWN)
                 {
-                    list->top = list->selection > 2 ? list->selection - 2 : 0;
+                    deferred_scroll = dropdown_scroll( ui, list, row->choices );
                     deferred = UI_ACTION_CHOOSE;
                     break;
                 }
-                return UI_ACTION_CHOOSE;
+                return action_result( ui, UI_ACTION_CHOOSE );
             case UI_B:
-                if (list->editing) { list->editing = 0; break; }
-                if (!list->in_header && list->in_rows) { list->in_rows = 0; break; }
-                return UI_ACTION_BACK;
+                if (list->editing) { ui_sound( ui, LAUNCHER_SOUND_BACK ); list->editing = 0; break; }
+                if (!list->in_header && list->in_rows) { ui_sound( ui, LAUNCHER_SOUND_BACK ); list->in_rows = 0; break; }
+                return action_result( ui, UI_ACTION_BACK );
             case UI_Y:
-                if (can_reset && list->in_rows && !row->disabled && row->adjustable) return UI_ACTION_RESET;
+                if (can_reset && list->in_rows && !row->disabled && row->adjustable) return action_result( ui, UI_ACTION_RESET );
                 break;
             case UI_X:
                 if (list->in_rows && row->help)
                 {
+                    ui_sound( ui, LAUNCHER_SOUND_ACCEPT );
                     ui_message( ui, row->label, row->help );
                     ui_start_screen( ui );
                 }
@@ -2229,6 +2245,8 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
             }
         }
         if (!ui->running) break;
+        if (previous != list->selection || focus != list->in_rows || header != list->in_header || current_group != *group)
+            ui_sound( ui, LAUNCHER_SOUND_MOVE );
         if (*group != current_group)
         {
             list->selection = list->top = list->started_scroll = 0;
@@ -2236,8 +2254,8 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
             deferred = -1;
             continue;
         }
-        settled = scroll_list( ui, list, deferred >= 0 && shown < list->top + visible ?
-                               list->top + visible : shown, visible, SET_ROW_H, SDL_GetTicks() );
+        settled = deferred >= 0 ? scroll_to( ui, list, deferred_scroll, SDL_GetTicks() ) :
+                  scroll_list( ui, list, shown, visible, SET_ROW_H, SDL_GetTicks() );
         scroll = (int)lroundf( list->scroll );
         row = rows + index[list->selection];
 
@@ -2388,7 +2406,7 @@ enum ui_action ui_settings_run( struct ui *ui, struct ui_list *list, const char 
         if (ui->footer_mark) ui->footer_mark( ui->header_status_data );
         ui_fade( ui );
         ui_present( ui );
-        if (deferred >= 0 && settled) return deferred;
+        if (deferred >= 0 && settled) return action_result( ui, deferred );
         ui_wait( ui );
     }
     return UI_ACTION_QUIT;

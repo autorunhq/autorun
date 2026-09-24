@@ -313,6 +313,47 @@ static enum steamgriddb_result download_image( const char *url, const char *outp
     return STEAMGRIDDB_OK;
 }
 
+enum steamgriddb_result steamgriddb_square_pictures( const char *key, long game_id,
+    struct steamgriddb_picture *pictures, int max, int *count )
+{
+    char url[512];
+    struct buffer body;
+    const char *cursor, *end, *start, *finish;
+    enum steamgriddb_result result;
+    if (!count || !pictures || max <= 0 || game_id <= 0) return STEAMGRIDDB_INVALID_RESPONSE;
+    *count = 0;
+    if (!key || !key[0]) return STEAMGRIDDB_NO_KEY;
+    snprintf( url, sizeof(url), "https://www.steamgriddb.com/api/v2/grids/game/%ld?dimensions=512x512,1024x1024&types=static&mimes=image/png&nsfw=false&humor=false", game_id );
+    if ((result = http_get( url, key, &body )) != STEAMGRIDDB_OK) return result;
+    if (!data_array( body.data, body.size, &cursor, &end ))
+    { free( body.data ); return STEAMGRIDDB_INVALID_RESPONSE; }
+    while (*count < max && next_object( &cursor, end, &start, &finish ))
+    {
+        struct steamgriddb_picture picture = {0};
+        if (!json_string( field( start, finish, "url" ), finish, picture.url, sizeof(picture.url) ) ||
+            strncmp( picture.url, "https://", 8 )) continue;
+        json_string( field( start, finish, "name" ), finish, picture.author, sizeof(picture.author) );
+        pictures[(*count)++] = picture;
+    }
+    free( body.data );
+    return *count ? STEAMGRIDDB_OK : STEAMGRIDDB_NOT_FOUND;
+}
+
+enum steamgriddb_result steamgriddb_picture_data( const char *url, unsigned char **data, size_t *size )
+{
+    struct buffer body;
+    enum steamgriddb_result result;
+    *data = NULL;
+    *size = 0;
+    if (!url || strncmp( url, "https://", 8 )) return STEAMGRIDDB_INVALID_RESPONSE;
+    if ((result = http_get( url, NULL, &body )) != STEAMGRIDDB_OK) return result;
+    if (body.size < 8 || memcmp( body.data, "\x89PNG\r\n\x1a\n", 8 ))
+    { free( body.data ); return STEAMGRIDDB_INVALID_RESPONSE; }
+    *data = body.data;
+    *size = body.size;
+    return STEAMGRIDDB_OK;
+}
+
 enum steamgriddb_result steamgriddb_download_game_bundle( const char *key, long game_id,
                                                           const char *square_path, const char *portrait_path,
                                                           const char *hero_path )

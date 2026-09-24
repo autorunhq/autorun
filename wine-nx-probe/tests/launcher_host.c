@@ -6,6 +6,7 @@
  * are relative there). A script of steps drives it, one step per line:
  *   key NAME    press a key (up, down, left, right, a, b, x, y, plus, minus, l, r, zl, zr)
  *   trigger NAME VALUE    send a controller trigger axis event (zl or zr, 0 to 32767)
+ *   axis NAME VALUE    move the left stick (x or y, -32768 to 32767)
  *   tap X Y     tap the touch screen
  *   wait N      let N frames pass
  *   shot FILE   save the next frame as a PNG
@@ -29,6 +30,8 @@
 #include "launcher_catalog.h"
 #include "launcher_ui.h"
 #include "launcher_update.h"
+#include "forwarder.h"
+#include "launcher_image.h"
 #include "dxvk_releases.h"
 
 static char script[256][300];
@@ -356,6 +359,17 @@ static void on_frame( SDL_Renderer *renderer )
             wait_frames = 1;
             return;
         }
+        if (sscanf( line, "axis %255s %d", arg, &x ) == 2)
+        {
+            SDL_Event event = { .type = SDL_CONTROLLERAXISMOTION };
+            assert( !strcmp( arg, "x" ) || !strcmp( arg, "y" ) );
+            assert( x >= -32768 && x <= 32767 );
+            event.caxis.axis = !strcmp( arg, "x" ) ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_LEFTY;
+            event.caxis.value = x;
+            SDL_PushEvent( &event );
+            wait_frames = 1;
+            return;
+        }
         if (sscanf( line, "trigger %255s %d", arg, &x ) == 2)
         {
             SDL_Event event = { .type = SDL_CONTROLLERAXISMOTION };
@@ -462,13 +476,27 @@ static unsigned int install_forwarder( const char **step )
 }
 
 
+static unsigned int install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
+{
+    struct launcher_icon icon = {0};
+    assert( request->game_id && request->name[0] && request->author );
+    assert( launcher_image_decode( request->icon, request->icon_size, &icon ) );
+    assert( icon.width == 256 && icon.height == 256 );
+    launcher_icon_free( &icon );
+    printf( "forwarder game=%u name='%s' author='%s' JPEG=%zu\n",
+            request->game_id, request->name, request->author, request->icon_size );
+    *step = NULL;
+    return 0;
+}
+
 int main( int argc, char **argv )
 {
     struct wine_nx_launcher_options options = { .runtime_dir = "sdmc:/switch/wine", .build = "nx-host-test",
                                                 .emummc = -1, .address_space_bits = 39,
                                                 .low_window = 1, .four_cores_available = 1,
                                                 .machine_of = machine_of, .vulkan = 1,
-                                                .install_forwarder = install_forwarder };
+                                                .install_forwarder = install_forwarder,
+                                                .install_game_forwarder = install_game_forwarder };
     char target[512] = "", line[300];
     FILE *file;
     int chosen;

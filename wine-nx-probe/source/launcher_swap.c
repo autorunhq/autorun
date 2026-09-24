@@ -61,7 +61,8 @@ void launcher_swap_test( struct ui *ui, const char *directory, unsigned int mega
         int fill;
         if (!ui_begin_frame( ui )) SDL_AtomicSet( &job.cancel, 1 );
         while (ui_poll( ui, &input ))
-            if (input.button == UI_B) SDL_AtomicSet( &job.cancel, 1 );
+            if (input.button == UI_B && !SDL_AtomicGet( &job.cancel ))
+            { ui_sound( ui, LAUNCHER_SOUND_BACK ); SDL_AtomicSet( &job.cancel, 1 ); }
         SDL_LockMutex( job.mutex );
         phase = job.phase;
         current = job.current;

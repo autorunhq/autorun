@@ -4,6 +4,13 @@
 #include <stddef.h>
 
 #define STEAMGRIDDB_MAX_GAMES 12
+#define STEAMGRIDDB_MAX_PICTURES 24
+
+struct steamgriddb_picture
+{
+    char url[768];
+    char author[96];
+};
 
 struct steamgriddb_game
 {
@@ -36,5 +43,8 @@ enum steamgriddb_result steamgriddb_download_game_bundle( const char *api_key, l
                                                           const char *portrait_path,
                                                           const char *hero_path );
 const char *steamgriddb_result_message( enum steamgriddb_result result );
+enum steamgriddb_result steamgriddb_square_pictures( const char *key, long game_id,
+    struct steamgriddb_picture *pictures, int max, int *count );
+enum steamgriddb_result steamgriddb_picture_data( const char *url, unsigned char **data, size_t *size );
 
 #endif

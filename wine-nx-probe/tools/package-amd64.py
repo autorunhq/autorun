@@ -331,6 +331,7 @@ if lsfg_revision:
     (stage / 'lsfg').mkdir()
 for source, name in ((probe.parent / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (probe / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
+                     (probe / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
                      (probe.parent / 'dlls/winebox64ec/LICENSE.FEX', 'FEX-MIT.txt')):
     stage_file(source, licenses / name)
 if args.dxvk:

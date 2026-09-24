@@ -326,13 +326,14 @@ void launcher_update_open( struct launcher_update *u )
             {
                 if (u->job == 2)
                 {
-                    if (!SDL_AtomicGet( &u->committing )) SDL_AtomicSet( &u->cancel, 1 );
+                    if (!SDL_AtomicGet( &u->committing )) { ui_sound( u->ui, LAUNCHER_SOUND_BACK ); SDL_AtomicSet( &u->cancel, 1 ); }
                 }
-                else goto done;
+                else { ui_sound( u->ui, LAUNCHER_SOUND_BACK ); goto done; }
             }
-            if (input.button == UI_X && !u->job && !u->fatal) start_job( u, 1 );
+            if (input.button == UI_X && !u->job && !u->fatal) { ui_sound( u->ui, LAUNCHER_SOUND_ACCEPT ); start_job( u, 1 ); }
             if (input.button == UI_A && !u->job && !u->error && u->available)
             {
+                ui_sound( u->ui, LAUNCHER_SOUND_ACCEPT );
                 ui_progress_end( u->ui );
                 if (!u->restart) ui_message( u->ui, "Restart unavailable",
                     "Start Autorun through its forwarder or the Homebrew Menu to install an update." );

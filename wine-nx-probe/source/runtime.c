@@ -27,6 +27,8 @@
 #include "low_window.h"
 #include "autorun_install.h"
 #include "forwarder.h"
+#include "forwarder_launch.h"
+#include "launcher_catalog.h"
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "fex_options.h"
@@ -88,9 +90,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2627"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2629"
 #elif defined(WINE_NX_FEX)
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2627"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2629"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
@@ -3621,6 +3623,52 @@ static unsigned int launcher_install_forwarder( const char **step )
     return rc;
 }
 
+static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
+{
+    bool installed = false;
+    Result rc;
+    *step = "reading " AUTORUN_NRO;
+    if (access( AUTORUN_NRO, R_OK )) return MAKERESULT( Module_Libnx, LibnxError_NotFound );
+    *step = "checking the Autorun forwarder";
+    if (R_FAILED( rc = nsInitialize() )) return rc;
+    rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
+    nsExit();
+    if (R_FAILED( rc )) return rc;
+    if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    wine_nx_forwarder_report = log_line_plain;
+    return wine_nx_forwarder_install( request, step );
+}
+
+static int runtime_forwarded_game( char *target, size_t size )
+{
+    struct autorun_game_launch launch = {0};
+    struct launcher_catalog *catalog;
+    AppletStorage storage;
+    s64 bytes = 0;
+    Result rc;
+    int found = 0, i;
+
+    if (R_FAILED( appletPopLaunchParameter( &storage, AppletLaunchParameterKind_UserChannel ) )) return 0;
+    rc = appletStorageGetSize( &storage, &bytes );
+    if (R_SUCCEEDED( rc ) && bytes == sizeof(launch)) rc = appletStorageRead( &storage, 0, &launch, sizeof(launch) );
+    appletStorageClose( &storage );
+    if (R_FAILED( rc ) || !autorun_game_launch_valid( &launch, bytes )) return -1;
+    if (!(catalog = malloc( sizeof(*catalog) ))) return -1;
+    if (launcher_catalog_load( catalog, RUNTIME_DIR "/" LAUNCHER_CATALOG_FILE ) == LAUNCHER_CATALOG_OK)
+        for (i = 0; i < catalog->count; i++)
+            if (catalog->entries[i].id == launch.game_id)
+            {
+                if (strlen( catalog->entries[i].path ) < size)
+                {
+                    strcpy( target, catalog->entries[i].path );
+                    found = 1;
+                }
+                break;
+            }
+    free( catalog );
+    return found ? 1 : -1;
+}
+
 static unsigned long long runtime_title_id( void )
 {
     u64 id = 0;
@@ -3643,7 +3691,8 @@ int main( int argc, char **argv )
     unsigned int status;
     unsigned int ldr_status = STATUS_INVALID_IMAGE_FORMAT;
     unsigned int attach_status = STATUS_INVALID_IMAGE_FORMAT;
-    int autorun, resumed_program = 0;
+    int autorun, resumed_program = 0, forwarded_game;
+    const char *launch_error = NULL;
     int low_window_available;
     USHORT target_machine;
     int sd_cache = wine_nx_sd_cache_install();  /* before any file on the card is opened */
@@ -3813,22 +3862,27 @@ int main( int argc, char **argv )
         wine_nx_usb_wait();
     }
 #endif
-    if (read_first_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target, sizeof(target) ) && target[0])
+    forwarded_game = runtime_forwarded_game( target, sizeof(target) );
+    if (forwarded_game < 0) launch_error = "This shortcut no longer matches a game in the library. Create it again from the game's Library settings.";
+    else if (forwarded_game > 0 && access( target, R_OK ))
+    {
+        launch_error = "The shortcut's game is unavailable. Connect its USB drive or use Locate executable in the game's Library settings.";
+        forwarded_game = -1;
+    }
+    if (forwarded_game > 0) autorun = 1;
+    if (!forwarded_game && read_first_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target, sizeof(target) ) && target[0])
     {
         remove( WINE_NX_RUNTIME_ROOT "/run-next.txt" );
         autorun = resumed_program = 1;
         log_line( "[SETUP] resuming %s", target );
     }
-    if (resumed_program || (argc > 1 && argv[1] && argv[1][0]))
+    if (forwarded_game > 0 || resumed_program || (!forwarded_game && argc > 1 && argv[1] && argv[1][0]))
     {
         const char *name;
 
-        if (!resumed_program) snprintf( target, sizeof(target), "%s", argv[1] );
+        if (!resumed_program && !forwarded_game) snprintf( target, sizeof(target), "%s", argv[1] );
         name = strrchr( target, '/' );
-        /* The one thing the screen is told, before the game has it. */
-        wine_nx_console_quiet = 0;
         log_line( "[TARGET] starting %s", name ? name + 1 : target );
-        wine_nx_console_quiet = 1;
     }
     else
     {
@@ -3848,6 +3902,8 @@ int main( int argc, char **argv )
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
+            .install_game_forwarder = launcher_install_game_forwarder,
+            .launch_error = launch_error,
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
 #ifdef WINE_NX_MESA_SWITCH
             .vulkan = 1,

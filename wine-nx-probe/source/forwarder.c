@@ -20,6 +20,7 @@
 #include <switch.h>
 
 #include "forwarder.h"
+#include "forwarder_launch.h"
 
 /* Where a line about what was written goes, when the runtime gives it one. */
 void (*wine_nx_forwarder_report)( const char *line );
@@ -936,6 +937,13 @@ unsigned long long wine_nx_forwarder_title_id( const char *nro_path, const char 
     return 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
 }
 
+unsigned long long wine_nx_forwarder_game_title_id( unsigned int game_id )
+{
+    char args[64];
+    snprintf( args, sizeof(args), "--library-game=%u", game_id );
+    return wine_nx_forwarder_title_id( AUTORUN_NRO, args );
+}
+
 static Result forwarder_build_and_install( const struct wine_nx_forwarder *request, u64 tid, u64 old_tid,
                                            u64 plain_tid, const u8 *header_key,
                                            const char **step )
@@ -946,6 +954,8 @@ static Result forwarder_build_and_install( const struct wine_nx_forwarder *reque
     u8 *npdm = NULL;
     NacpStruct *nacp = NULL;
     char args[1024], cnmt_name[40];
+    struct autorun_game_launch launch = autorun_game_launch_make( request->game_id );
+    int romfs_count = request->game_id ? 1 : 2;
     struct cnmt_header cnmt_header;
     NcmApplicationMetaExtendedHeader extended;
     NcmPackagedContentInfo contents[2];
@@ -983,9 +993,14 @@ static Result forwarder_build_and_install( const struct wine_nx_forwarder *reque
     exefs[1] = (struct file_entry){ "main.npdm", npdm, wine_nx_hbl_npdm_size };
     romfs[0] = (struct file_entry){ "/nextArgv", args, strlen( args ) };
     romfs[1] = (struct file_entry){ "/nextNroPath", request->nro_path, strlen( request->nro_path ) };
+    if (request->game_id)
+    {
+        exefs[0] = (struct file_entry){ "main", wine_nx_game_forwarder_main, wine_nx_game_forwarder_main_size };
+        romfs[0] = (struct file_entry){ "/game", &launch, sizeof(launch) };
+    }
     if (!buf_zero( &program, sizeof(*header) ) ||
         !nca_write_pfs0( header, 0, exefs, 2, PFS0_EXEFS_HASH_BLOCK, &program ) ||
-        !nca_write_romfs( header, 1, romfs, 2, &program ))
+        !nca_write_romfs( header, 1, romfs, romfs_count, &program ))
     { rc = MAKERESULT( Module_Libnx, LibnxError_OutOfMemory ); goto done; }
     nca_finish( header, tid, NCA_CONTENT_PROGRAM, header_key, &program );
 
@@ -1187,7 +1202,10 @@ unsigned int wine_nx_forwarder_install( const struct wine_nx_forwarder *request,
 
     if (!step) step = &ignored;
     *step = "starting";
-    if (!request || !request->nro_path || !request->icon || !request->icon_size)
+    if (!request || !request->nro_path || !request->icon || !request->icon_size ||
+        request->icon_size > 0x20000 || !request->name || !request->name[0] ||
+        strlen( request->name ) >= 0x200 || !request->author || strlen( request->author ) >= 0x100 ||
+        strlen( request->nro_path ) + (request->args ? strlen( request->args ) + 1 : 0) >= 1024)
         return MAKERESULT( Module_Libnx, LibnxError_BadInput );
 
     forwarder_hash( request->nro_path, request->args, FORWARDER_GENERATION, hash );
@@ -1200,6 +1218,11 @@ unsigned int wine_nx_forwarder_install( const struct wine_nx_forwarder *request,
      * made for the same NRO, so they are taken away rather than left behind. */
     forwarder_hash( request->nro_path, request->args, 0, hash );
     plain_tid = 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
+    if (request->game_id)
+    {
+        tid = old_tid = plain_tid = wine_nx_forwarder_game_title_id( request->game_id );
+        if (tid == AUTORUN_TITLE_ID) return MAKERESULT( Module_Libnx, LibnxError_BadInput );
+    }
     *step = "asking for the console's key";
     if (R_FAILED( rc = splCryptoInitialize() )) return rc;
     if (R_SUCCEEDED( rc = splCryptoGenerateAesKek( HEADER_KEK_SRC, 0, 0, header_kek ) ) &&

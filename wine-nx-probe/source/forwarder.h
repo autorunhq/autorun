@@ -19,9 +19,11 @@ struct wine_nx_forwarder
     const char *author;
     const unsigned char *icon;  /* a 256x256 JPEG */
     size_t icon_size;
+    unsigned int game_id;
 };
 
 unsigned long long wine_nx_forwarder_title_id( const char *nro_path, const char *args );
+unsigned long long wine_nx_forwarder_game_title_id( unsigned int game_id );
 
 /* Where the installer says what the console made of what it wrote. */
 extern void (*wine_nx_forwarder_report)( const char *line );
@@ -35,6 +37,8 @@ unsigned int wine_nx_forwarder_install( const struct wine_nx_forwarder *request,
 #ifndef WINE_NX_FORWARDER_EMBED_EXTERN
 extern const unsigned char wine_nx_hbl_main[];
 extern const size_t wine_nx_hbl_main_size;
+extern const unsigned char wine_nx_game_forwarder_main[];
+extern const size_t wine_nx_game_forwarder_main_size;
 extern const unsigned char wine_nx_hbl_npdm[];
 extern const size_t wine_nx_hbl_npdm_size;
 extern const unsigned char wine_nx_icon_any[];

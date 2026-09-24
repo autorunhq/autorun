@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +180,15 @@ enum launcher_catalog_result launcher_catalog_load( struct launcher_catalog *cat
         if (!(equals = strchr( line, '=' ))) { invalid = 1; break; }
         *equals = 0; key = line; value = equals + 1; trim( key ); trim( value );
         if (!strcmp( key, "version" ) && !entry) version = atoi( value );
+        else if (!strcmp( key, "next-id" ) && !entry)
+        {
+            char *end;
+            unsigned long id;
+            errno = 0;
+            id = strtoul( value, &end, 10 );
+            if (errno || *end || !id || id >= UINT_MAX) { invalid = 1; break; }
+            parsed.next_id = id;
+        }
         else if (!entry) { invalid = 1; break; }
         else if (!strcmp( key, "path" )) invalid |= !copy_value( entry->path, sizeof(entry->path), value );
         else if (!strcmp( key, "title" )) invalid |= !copy_value( entry->title, sizeof(entry->title), value );
@@ -216,7 +226,7 @@ int launcher_catalog_save( const struct launcher_catalog *catalog, const char *p
     if ((size_t)snprintf( temp, sizeof(temp), "%s.tmp", path ) >= sizeof(temp) ||
         (size_t)snprintf( backup, sizeof(backup), "%s.bak", path ) >= sizeof(backup)) return 0;
     if (!(file = fopen( temp, "w" ))) return 0;
-    ok &= fprintf( file, "version=%d\n", LAUNCHER_CATALOG_VERSION ) > 0;
+    ok &= fprintf( file, "version=%d\nnext-id=%u\n", LAUNCHER_CATALOG_VERSION, catalog->next_id ) > 0;
     for (i = 0; ok && i < catalog->count; i++)
     {
         const struct launcher_catalog_entry *entry = &catalog->entries[i];
@@ -229,7 +239,8 @@ int launcher_catalog_save( const struct launcher_catalog *catalog, const char *p
         if (entry->portrait_art[0]) ok &= write_value( file, "portrait-art", entry->portrait_art );
         if (entry->hero_art[0]) ok &= write_value( file, "hero-art", entry->hero_art );
     }
-    if (fflush( file ) || fclose( file )) ok = 0;
+    if (fflush( file )) ok = 0;
+    if (fclose( file )) ok = 0;
     if (!ok) { remove( temp ); return 0; }
     remove( backup );
     rename( path, backup );

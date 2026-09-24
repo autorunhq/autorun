@@ -600,6 +600,11 @@ target_compile_definitions(wine-nx-hbl PRIVATE VERSION="3.0.0")
 target_link_options(wine-nx-hbl PRIVATE -Wl,-wrap,exit)
 target_link_libraries(wine-nx-hbl PRIVATE nx)
 
+add_executable(autorun-game-forwarder source/game_forwarder.c)
+set_target_properties(autorun-game-forwarder PROPERTIES SUFFIX ".elf" C_STANDARD 11)
+target_link_options(autorun-game-forwarder PRIVATE -Wl,--gc-sections)
+target_link_libraries(autorun-game-forwarder PRIVATE nx)
+
 add_executable(wine-nx-runtime
     source/runtime.c
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
@@ -610,6 +615,8 @@ add_executable(wine-nx-runtime
     source/launcher_svg.c
     source/launcher_ui.c
     source/launcher_audio.c
+    source/launcher_forwarder.c
+    source/launcher_image.c
     source/steamgriddb.c
     source/dxvk_releases.c
     source/autorun_update.c
@@ -663,6 +670,13 @@ find_program(NPDMTOOL npdmtool HINTS "$ENV{DEVKITPRO}/tools/bin" "/opt/devkitpro
 if(ELF2NSO AND NPDMTOOL)
     set(HBL_NSO "${CMAKE_CURRENT_BINARY_DIR}/hbl-main")
     set(HBL_NPDM "${CMAKE_CURRENT_BINARY_DIR}/hbl-main.npdm")
+    set(GAME_FORWARDER_NSO "${CMAKE_CURRENT_BINARY_DIR}/game-forwarder-main")
+    add_custom_command(
+        OUTPUT "${GAME_FORWARDER_NSO}"
+        COMMAND "${ELF2NSO}" "$<TARGET_FILE:autorun-game-forwarder>" "${GAME_FORWARDER_NSO}"
+        DEPENDS autorun-game-forwarder
+        VERBATIM
+    )
     add_custom_command(
         OUTPUT "${HBL_NSO}"
         COMMAND "${ELF2NSO}" "$<TARGET_FILE:wine-nx-hbl>" "${HBL_NSO}"
@@ -681,10 +695,11 @@ if(ELF2NSO AND NPDMTOOL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
                 "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
                 wine_nx_hbl_main "${HBL_NSO}"
+                wine_nx_game_forwarder_main "${GAME_FORWARDER_NSO}"
                 wine_nx_hbl_npdm "${HBL_NPDM}"
                 wine_nx_icon_any "${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
                 wine_nx_logo "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.png"
-        DEPENDS "${HBL_NSO}" "${HBL_NPDM}"
+        DEPENDS "${HBL_NSO}" "${HBL_NPDM}" "${GAME_FORWARDER_NSO}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.png"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
@@ -844,6 +859,7 @@ target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCrea
 find_library(SWITCH_FREETYPE freetype HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_HARFBUZZ harfbuzz HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_PNG png HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
+find_library(SWITCH_TURBOJPEG turbojpeg HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 find_library(SWITCH_BZ2 bz2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_Z z HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_ZSTD zstd HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
@@ -939,7 +955,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)
@@ -948,7 +964,7 @@ set_property(SOURCE source/launcher.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_N
 target_link_libraries(wine-nx-runtime PRIVATE
     ${SWITCH_SDL2_TTF} ${SWITCH_SDL2}
     ${SWITCH_CURL} ${SWITCH_MBEDTLS} ${SWITCH_MBEDX509} ${SWITCH_MBEDCRYPTO} ${SWITCH_MINIZIP}
-    ${SWITCH_FREETYPE} ${SWITCH_PNG} ${SWITCH_BZ2} ${SWITCH_Z} ${SWITCH_ZSTD} ${SWITCH_HARFBUZZ}
+    ${SWITCH_FREETYPE} ${SWITCH_PNG} ${SWITCH_TURBOJPEG} ${SWITCH_BZ2} ${SWITCH_Z} ${SWITCH_ZSTD} ${SWITCH_HARFBUZZ}
     ${SWITCH_EGL} ${SWITCH_GLAPI} ${SWITCH_DRM_NOUVEAU} stdc++ nx m)
 
 find_program(NACPTOOL nacptool HINTS "$ENV{DEVKITPRO}/tools/bin" "/opt/devkitpro/tools/bin")

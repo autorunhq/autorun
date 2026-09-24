@@ -8,6 +8,7 @@
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include "launcher_audio.h"
 
 /* SDL names controller buttons by position: Nintendo's A, on the right, is SDL's B. */
 enum ui_button
@@ -116,6 +117,7 @@ struct ui
     int held;
     Uint32 held_since, held_last;
     int stick_x, stick_y;
+    Sint16 axes[4];
     int trigger_left, trigger_right;
     struct
     {
@@ -143,7 +145,7 @@ struct ui
 
 int  ui_init( struct ui *ui, const void *font_data, size_t font_size, int animations );
 void ui_quit( struct ui *ui );
-int ui_set_sounds( struct ui *ui, int enabled );
+void ui_sound( struct ui *ui, enum launcher_sound sound );
 /* Why ui_init failed. */
 const char *ui_error(void);
 /* Whether SDL got as far as a window, so the screen was in EGL's hands. */
@@ -246,6 +248,7 @@ struct ui_row
     unsigned char kind; /* enum ui_row_kind, for ui_settings_run */
     unsigned char value_tone;
     unsigned char on;   /* UI_ROW_SWITCH: which way it is set */
+    unsigned char choices; /* dropdown rows; zero for a live catalog */
     unsigned char group;/* which section it belongs to */
 };
 

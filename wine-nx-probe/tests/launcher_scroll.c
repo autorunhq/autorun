@@ -155,6 +155,18 @@ int main( int argc, char **argv )
     assert( scroll_list( &ui, &list, 20, 2, 48, 4016 ) && list.top == 4 );
     list.selection = 5;
     assert( scroll_list( &ui, &list, 20, 2, 48, 4032 ) && list.top == 4 );
+    ui.height = 720;
+    for (int count = 1; count <= 5; count++)
+    {
+        list = (struct ui_list){ .selection = 7, .scroll = 300, .scroll_target = 300, .started_scroll = 1 };
+        int target = dropdown_scroll( &ui, &list, count );
+        assert( target >= 300 );
+        assert( LIST_TOP + (list.selection + 1) * SET_ROW_H - target - 6 + count * 48 + 16 == ui.height - 58 );
+        assert( !scroll_to( &ui, &list, target, 5000 ) );
+        assert( scroll_to( &ui, &list, target, 5000 + FADE_MS ) && list.scroll == target );
+    }
+    list = (struct ui_list){ .selection = 1, .scroll_target = 0 };
+    assert( !dropdown_scroll( &ui, &list, 3 ) );
     assert( argc == 2 );
     test_text_clip( argv[1] );
     puts( "launcher scrolling: timing, bounds, lookahead, retargeting, hit positions, clipping and selected runtime names passed" );

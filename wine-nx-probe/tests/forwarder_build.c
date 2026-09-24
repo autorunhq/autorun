@@ -156,6 +156,8 @@ int hosversionAtLeast( int major, int minor, int micro ) { (void)major; (void)mi
  * shape, with an NPDM taken from the one devkitPro's npdmtool wrote. */
 const unsigned char *wine_nx_hbl_main;
 size_t wine_nx_hbl_main_size;
+const unsigned char *wine_nx_game_forwarder_main;
+size_t wine_nx_game_forwarder_main_size;
 const unsigned char *wine_nx_hbl_npdm;
 size_t wine_nx_hbl_npdm_size;
 const unsigned char *wine_nx_icon_any;
@@ -285,7 +287,7 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
-static void check_exefs_npdm( const u8 *data, u64 tid )
+static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
 {
     const struct nca_header *header = nca_of( data );
     u64 start = (u64)header->fs_table[0].media_start_offset * 0x200;
@@ -296,6 +298,7 @@ static void check_exefs_npdm( const u8 *data, u64 tid )
     const char *strings = (const char *)(entries + pfs->total_files);
     const u8 *files = (const u8 *)strings + pfs->string_table_size;
     const struct npdm_meta *meta = NULL;
+    u8 *npdm = NULL;
     const struct npdm_aci0 *aci0;
     const struct npdm_acid *acid;
     u32 i;
@@ -304,7 +307,18 @@ static void check_exefs_npdm( const u8 *data, u64 tid )
     assert( pfs->total_files == 2 );
     for (i = 0; i < pfs->total_files; i++)
         if (!strcmp( strings + entries[i].name_offset, "main.npdm" ))
-            meta = (const struct npdm_meta *)(files + entries[i].data_offset);
+        {
+            npdm = malloc( entries[i].data_size );
+            assert( npdm );
+            memcpy( npdm, files + entries[i].data_offset, entries[i].data_size );
+            meta = (const struct npdm_meta *)npdm;
+        }
+        else if (!strcmp( strings + entries[i].name_offset, "main" ))
+        {
+            assert( entries[i].data_size == (relay ? wine_nx_game_forwarder_main_size : wine_nx_hbl_main_size) );
+            assert( !memcmp( files + entries[i].data_offset, relay ? wine_nx_game_forwarder_main : wine_nx_hbl_main,
+                             entries[i].data_size ) );
+        }
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
     /* The three bits that decide where the program's address space begins. */
@@ -338,6 +352,7 @@ static void check_exefs_npdm( const u8 *data, u64 tid )
         assert( found == 2 );
         assert( cores == 2 );
     }
+    free( npdm );
 }
 
 static void check_control( const u8 *data, size_t size, const char *name, const char *author,
@@ -415,6 +430,8 @@ int main( int argc, char **argv )
     wine_nx_icon_any = load_file( argv[2], &wine_nx_icon_any_size );
     wine_nx_hbl_main_size = 4096;
     wine_nx_hbl_main = calloc( 1, wine_nx_hbl_main_size );
+    wine_nx_game_forwarder_main = (const unsigned char *)"game relay";
+    wine_nx_game_forwarder_main_size = 10;
     snprintf( shim_out_dir, sizeof(shim_out_dir), "%s", argv[3] );
 
     /* The builder reads the NACP out of this, so it has to be a real file. */
@@ -455,7 +472,7 @@ int main( int argc, char **argv )
     control = read_nca( 2, &control_size );
     meta = read_nca( 3, &meta_size );
     check_program( program, program_size, nro_file );
-    check_exefs_npdm( program, tid );
+    check_exefs_npdm( program, tid, 0 );
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     assert( nca_of( meta )->content_type == NCA_CONTENT_META );
     assert( nca_of( meta )->fs_header[0].fs_type == NCA_FS_PFS0 );
@@ -467,8 +484,42 @@ int main( int argc, char **argv )
 
     assert( !wine_nx_forwarder_install( &request, &step ) );
     program = read_nca( 4, &program_size );
-    check_exefs_npdm( program, tid );
+    check_exefs_npdm( program, tid, 0 );
     free( program );
+
+    request.game_id = 42;
+    placeholders = registered = deleted_completely_count = deleted_after_write = 0;
+    tid = wine_nx_forwarder_game_title_id( 42 );
+    assert( tid != wine_nx_forwarder_title_id( nro_file, NULL ) );
+    assert( tid != wine_nx_forwarder_game_title_id( 43 ) );
+    assert( !wine_nx_forwarder_install( &request, &step ) );
+    assert( deleted_completely_count == 1 && deleted_completely[0] == tid );
+    program = read_nca( 1, &program_size );
+    check_exefs_npdm( program, tid, 1 );
+    {
+        const struct nca_header *header = nca_of( program );
+        const struct integrity_level *levels = header->fs_header[1].hash_data.integrity_meta_info.info_level_hash.levels;
+        const u8 *base = program + (u64)header->fs_table[1].media_start_offset * 0x200 + levels[5].logical_offset;
+        const romfs_header *romfs = (const romfs_header *)base;
+        const romfs_dir *root = (const romfs_dir *)(base + romfs->dirTableOff);
+        romfs_file file;
+        struct autorun_game_launch launch;
+        memcpy( &file, base + romfs->fileTableOff + root->childFile, sizeof(file) );
+        assert( file.nameLen == 4 && file.sibling == 0xffffffff );
+        assert( !memcmp( base + romfs->fileTableOff + root->childFile + sizeof(file), "game", 4 ) );
+        assert( file.dataSize == sizeof(launch) );
+        memcpy( &launch, base + romfs->fileDataOff + file.dataOff, sizeof(launch) );
+        assert( autorun_game_launch_valid( &launch, file.dataSize ) && launch.game_id == 42 );
+        assert( !autorun_game_launch_valid( &launch, sizeof(launch) - 1 ) );
+        launch.version++;
+        assert( !autorun_game_launch_valid( &launch, sizeof(launch) ) );
+        launch = autorun_game_launch_make( 0 );
+        assert( !autorun_game_launch_valid( &launch, sizeof(launch) ) );
+    }
+    free( program );
+    control = read_nca( 2, &control_size );
+    check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
+    free( control );
 
     puts( "forwarder: title ids, program exefs and romfs, the address space and ForceDebug in the NPDM, the "
           "four-core permissions, control romfs and the NACP it inherits, and taking the old entry away before writing passed" );

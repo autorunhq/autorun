@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -110,6 +111,9 @@ int main(void)
     assert( read.count == 0 );
     assert( launcher_catalog_save( &read, path ) );
     assert( launcher_catalog_load( &written, path ) == LAUNCHER_CATALOG_OK && written.count == 0 );
+    assert( written.next_id == 2 );
+    assert( launcher_catalog_add( &written, "ums0:/Another/Game.exe", "Another" ) == 0 );
+    assert( written.entries[0].id == 2 );
 
     fd = mkstemp( legacy );
     assert( fd >= 0 );

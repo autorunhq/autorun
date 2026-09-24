@@ -25,8 +25,6 @@
 #include <strings.h>
 #include <sys/stat.h>
 
-#include <png.h>
-
 #ifdef __SWITCH__
 #include <switch.h>
 #endif
@@ -42,6 +40,8 @@
 #include "key_names.h"
 #include "launcher_settings.h"
 #include "launcher_ui.h"
+#include "launcher_forwarder.h"
+#include "launcher_image.h"
 #include "launcher_update.h"
 #include "launcher_setup.h"
 #include "launcher_graphics.h"
@@ -537,18 +537,22 @@ static int save_library( struct launcher *l )
 {
     char path[512];
     int i;
+    unsigned int next_id = l->catalog.next_id, next_order = l->catalog.next_order;
     launcher_catalog_init( &l->catalog );
+    l->catalog.next_id = next_id;
+    l->catalog.next_order = next_order;
     for (i = 0; i < l->program_count; i++)
     {
-        const struct program *p = &l->programs[i];
+        struct program *p = &l->programs[i];
         struct launcher_catalog_entry *entry;
-        int index;
         if (p->removed || !p->added) continue;
-        index = launcher_catalog_add( &l->catalog, p->path, p->title );
-        if (index < 0) continue;
-        entry = &l->catalog.entries[index];
-        if (p->catalog_id) entry->id = p->catalog_id;
-        if (p->added_order) entry->added_order = p->added_order;
+        entry = &l->catalog.entries[l->catalog.count++];
+        if (!p->catalog_id) p->catalog_id = l->catalog.next_id++;
+        if (!p->added_order) p->added_order = l->catalog.next_order++;
+        entry->id = p->catalog_id;
+        entry->added_order = p->added_order;
+        snprintf( entry->path, sizeof(entry->path), "%s", p->path );
+        snprintf( entry->title, sizeof(entry->title), "%s", p->title );
         entry->launched_order = p->launched_order;
         entry->favorite = p->favorite;
         snprintf( entry->square_art, sizeof(entry->square_art), "%s", p->square_art );
@@ -709,34 +713,15 @@ static void enable_program_dxvk( struct launcher *l, struct program *p )
 
 static int decode_png( struct launcher_icon *icon )
 {
-    png_image image;
-    unsigned char *rgba;
-
-    memset( &image, 0, sizeof(image) );
-    image.version = PNG_IMAGE_VERSION;
-    if (!png_image_begin_read_from_memory( &image, icon->data, icon->size )) return 0;
-    if (image.width > LAUNCHER_ICON_MAX_SIDE || image.height > LAUNCHER_ICON_MAX_SIDE)
+    struct launcher_icon decoded = {0};
+    if (!launcher_image_decode( icon->data, icon->size, &decoded )) return 0;
+    if (decoded.width > LAUNCHER_ICON_MAX_SIDE || decoded.height > LAUNCHER_ICON_MAX_SIDE)
     {
-        png_image_free( &image );
+        launcher_icon_free( &decoded );
         return 0;
     }
-    image.format = PNG_FORMAT_RGBA;
-    if (!(rgba = malloc( PNG_IMAGE_SIZE( image ) )))
-    {
-        png_image_free( &image );
-        return 0;
-    }
-    if (!png_image_finish_read( &image, NULL, rgba, 0, NULL ))
-    {
-        free( rgba );
-        return 0;
-    }
-    free( icon->data );
-    icon->kind = LAUNCHER_ICON_RGBA;
-    icon->data = rgba;
-    icon->width = image.width;
-    icon->height = image.height;
-    icon->size = PNG_IMAGE_SIZE( image );
+    launcher_icon_free( icon );
+    *icon = decoded;
     return 1;
 }
 
@@ -770,31 +755,7 @@ static SDL_Texture *load_logo( struct launcher *l )
 /* Cover files are optional. Decode on the existing worker, with bounded input. */
 static int read_cover( const char *path, struct launcher_icon *icon )
 {
-    png_image png = {0};
-    struct stat st;
-    if (!path[0] || stat( path, &st ) || st.st_size > 16 * 1024 * 1024) return 0;
-    png.version = PNG_IMAGE_VERSION;
-    if (!png_image_begin_read_from_file( &png, path )) return 0;
-    if (!png.width || !png.height || png.width > 2048 || png.height > 2048)
-    {
-        png_image_free( &png );
-        return 0;
-    }
-    png.format = PNG_FORMAT_RGBA;
-    memset( icon, 0, sizeof(*icon) );
-    icon->data = malloc( PNG_IMAGE_SIZE( png ) );
-    if (!icon->data || !png_image_finish_read( &png, NULL, icon->data, 0, NULL ))
-    {
-        free( icon->data );
-        memset( icon, 0, sizeof(*icon) );
-        png_image_free( &png );
-        return 0;
-    }
-    icon->kind = LAUNCHER_ICON_RGBA;
-    icon->width = png.width;
-    icon->height = png.height;
-    icon->size = PNG_IMAGE_SIZE( png );
-    png_image_free( &png );
+    if (!launcher_image_load( path, icon )) return 0;
     if (!launcher_icon_fit( icon, 512 )) { launcher_icon_free( icon ); return 0; }
     return 1;
 }
@@ -1683,7 +1644,7 @@ static void draw_home( struct launcher *l )
 
 enum program_row
 {
-    ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
+    ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
@@ -1692,11 +1653,12 @@ enum program_row
 };
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
+static int pick_forwarder_icon( void *opaque, char *target, size_t size );
 static void save_look( struct launcher *l );
 
 static void quick_setup( struct launcher *l )
 {
-    int result = launcher_setup_run( &l->ui, l->options );
+    int result = launcher_setup_run( &l->ui, l->options, l->logo );
     launcher_kv_set( &l->look, "setup-offered", "1" );
     if (result) launcher_kv_set( &l->look, "setup-complete", "1" );
     save_look( l );
@@ -2250,6 +2212,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         row->kind = UI_ROW_SWITCH;
         row->on = p->favorite;
         ADD_ROW( ROW_ARTWORK, SECTION_LIBRARY, "Download artwork", "Takes the highest-rated square, portrait and hero pictures for this game from SteamGridDB." );
+        ADD_ROW( ROW_FORWARDER, SECTION_LIBRARY, "Create game forwarder", "A HOME Menu icon that launches this library game directly with its own settings." );
+        row->disabled = !p->added || !l->options->install_game_forwarder;
         if (p->missing) ADD_ROW( ROW_LOCATE, SECTION_LIBRARY, "Locate executable", "Choose the game's executable at its new location." );
         ADD_ROW( ROW_TITLE, SECTION_GENERAL, "Title",
                  "The name shown in the library. Y goes back to the name in the program's own resources." );
@@ -2272,6 +2236,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         {
             ADD_ROW( ROW_CPU, SECTION_EMULATION, "CPU translator", "Translator used to run this program." );
             row->kind = UI_ROW_DROPDOWN;
+            row->choices = 2;
             snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
         }
 #endif
@@ -2287,6 +2252,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
                  "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
         row->kind = UI_ROW_DROPDOWN;
+        row->choices = 2;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
 
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
@@ -2341,12 +2307,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                      "The DXVK HUD does not cover VKD3D's D3D12 rendering." );
             row->kind = UI_ROW_DROPDOWN;
             snprintf( row->value, sizeof(row->value), "%s", launcher_hud_labels[p->settings.dxvk_hud] );
+            row->choices = LAUNCHER_HUD_COUNT;
 
             ADD_ROW( ROW_FRAME_LIMIT, SECTION_GRAPHICS, "Frame rate limit",
                      "Limits real game frames in Vulkan, DXVK and VKD3D. Off adds no cap. "
                      "VSync and the game's own limit still apply." );
             row->kind = UI_ROW_DROPDOWN;
             snprintf( row->value, sizeof(row->value), "%s", launcher_frame_limit_labels[p->settings.frame_limit] );
+            row->choices = LAUNCHER_FRAME_LIMIT_COUNT;
 
             ADD_ROW( ROW_VSYNC, SECTION_GRAPHICS, "VSync",
                      "Synchronizes Vulkan, DXVK and VKD3D presentation to the display. LSFG-VK always uses synchronized presentation." );
@@ -2360,6 +2328,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                      "pixels for pixel art, leaving wider black bars." );
             row->kind = UI_ROW_DROPDOWN;
             snprintf( row->value, sizeof(row->value), "%s", launcher_upscaling_labels[p->settings.upscaling] );
+            row->choices = LAUNCHER_UPSCALING_COUNT;
 
             if (p->settings.upscaling == 1)
             {
@@ -2368,6 +2337,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                          "as the first pass drew it." );
                 row->kind = UI_ROW_DROPDOWN;
                 snprintf( row->value, sizeof(row->value), "%s", launcher_sharpness_labels[p->settings.upscaling_sharpness] );
+                row->choices = LAUNCHER_SHARPNESS_COUNT;
             }
         }
 
@@ -2413,6 +2383,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         row->kind = UI_ROW_DROPDOWN;
         snprintf( row->value, sizeof(row->value), "%s",
                   launcher_lsfg_flow_labels[p->settings.lsfg_flow] );
+        row->choices = 3;
 #endif
 
         {
@@ -2495,6 +2466,22 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
         case ROW_ARTWORK:
             if (action == UI_ACTION_CHOOSE) download_artwork( l, p );
+            break;
+
+        case ROW_FORWARDER:
+            if (action == UI_ACTION_CHOOSE && p->added && save_library( l ))
+            {
+                char key[256] = "", previous[256];
+                struct launcher_forwarder_game game = { p->catalog_id, p->title, p->path, p->square_art };
+                launcher_kv_get( &l->look, "steamgriddb-key", key, sizeof(key) );
+                strcpy( previous, key );
+                launcher_forwarder_run( ui, l->options, &game, key, sizeof(key), pick_forwarder_icon, l );
+                if (strcmp( key, previous ))
+                {
+                    launcher_kv_set( &l->look, "steamgriddb-key", key );
+                    save_look( l );
+                }
+            }
             break;
 
         case ROW_LOCATE:
@@ -2807,7 +2794,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD, SET_SOUNDS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
     SET_CONTROLS, SET_STEAMGRIDDB,
     SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
@@ -3126,9 +3113,9 @@ static void credits_screen( struct launcher *l )
     const SDL_Color background = { 5, 8, 10, 255 }, accent = { 151, 200, 181, 255 };
     const int logo_width = 320, title_gap = 256, entry_height = 92, section_height = 132;
     int logo_height = 0, width, height, y, end_y = ui->height / 2 - 50 + title_gap;
-    int old_hide_overlays = ui->hide_overlays, done = 0;
-    Uint32 started = SDL_GetTicks(), finished = 0;
-    float scroll, distance;
+    int old_hide_overlays = ui->hide_overlays, done = 0, manual = 0;
+    Uint32 previous = SDL_GetTicks(), finished = 0;
+    float scroll = 0, distance;
     size_t i;
 
     if (l->logo && !SDL_QueryTexture( l->logo, NULL, NULL, &width, &height ) && width > 0)
@@ -3143,13 +3130,36 @@ static void credits_screen( struct launcher *l )
     while (!done && ui_begin_frame( ui ))
     {
         Uint32 now = SDL_GetTicks();
+        float elapsed = now - previous, speed = 0;
+        previous = now;
+        if (elapsed > 50) elapsed = 50;
 
         while (ui_poll( ui, &input ))
+        {
             if (input.button == UI_B || input.button == UI_PLUS || input.touch == UI_TOUCH_TAP ||
-                (finished && input.button == UI_A)) done = 1;
+                (scroll >= distance && input.button == UI_A)) done = 1;
+            if ((input.button == UI_UP || input.button == UI_DOWN) && abs(ui->axes[SDL_CONTROLLER_AXIS_LEFTY]) < 6000)
+            {
+                manual = 1;
+                scroll += input.button == UI_UP ? -72 : 72;
+            }
+            if (input.touch == UI_TOUCH_SCROLL_UP || input.touch == UI_TOUCH_SCROLL_DOWN)
+            {
+                manual = 1;
+                scroll += (input.touch == UI_TOUCH_SCROLL_UP ? 1 : -1) * input.steps * 36;
+            }
+        }
+        for (i = 0; i < 4; i++) if (abs(ui->axes[i]) > 6000) manual = 1;
         if (done || !ui->running) break;
-        scroll = (now - started) * 0.0744f;
-        if (scroll >= distance)
+        if (!manual) speed = 0.08184f;
+        else if (abs(ui->axes[SDL_CONTROLLER_AXIS_LEFTY]) > 6000)
+        {
+            int axis = ui->axes[SDL_CONTROLLER_AXIS_LEFTY];
+            speed = (axis > 0 ? 1 : -1) * 0.65f * (abs(axis) - 6000) / (32768 - 6000);
+        }
+        scroll = fmaxf(0, fminf(distance, scroll + speed * elapsed));
+        if (manual) finished = 0;
+        else if (scroll >= distance)
         {
             scroll = distance;
             if (!finished) finished = now;
@@ -3202,10 +3212,11 @@ static void credits_screen( struct launcher *l )
         ui_fade( ui );
         if (finished && now - finished > 4600)
             ui_fill( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 5, 8, 10, (now - finished - 4600) * 255 / 400 } );
-        ui->scrolling_text = 1;
+        ui->scrolling_text = !manual || speed != 0;
         ui_present( ui );
         ui_wait( ui );
     }
+    if (done) ui_sound( ui, LAUNCHER_SOUND_BACK );
     ui->hide_overlays = old_hide_overlays;
     ui_start_screen( ui );
 }
@@ -3237,7 +3248,6 @@ static void settings_menu( struct launcher *l )
             [SET_SWKBD] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
-            [SET_SOUNDS] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
@@ -3299,11 +3309,6 @@ static void settings_menu( struct launcher *l )
                   launcher_kv_get( &l->look, "steamgriddb-key", path, sizeof(path) ) && path[0] ? "Configured" : "Not set" );
         rows[SET_STEAMGRIDDB].help = "Used to automatically download the community's highest-rated square, portrait and hero artwork.";
         rows[SET_STEAMGRIDDB].adjustable = 0;
-        snprintf( rows[SET_SOUNDS].label, sizeof(rows[0].label), "Interface sounds" );
-        rows[SET_SOUNDS].kind = UI_ROW_SWITCH;
-        rows[SET_SOUNDS].on = !!launcher_kv_get_int( &l->look, "interface-sounds", 1 );
-        snprintf( rows[SET_SOUNDS].value, sizeof(rows[0].value), "%s", on_off[rows[SET_SOUNDS].on] );
-        rows[SET_SOUNDS].help = "Sounds for navigation, selection and going back.";
         snprintf( rows[SET_UPDATE].label, sizeof(rows[0].label), "Check for update" );
         rows[SET_UPDATE].kind = UI_ROW_ACTION;
         rows[SET_UPDATE].adjustable = 0;
@@ -3379,11 +3384,6 @@ static void settings_menu( struct launcher *l )
         {
         case SET_HIDDEN: l->show_hidden = !l->show_hidden; break;
         case SET_HIDE_MISSING: l->hide_missing = !l->hide_missing; break;
-        case SET_SOUNDS:
-            launcher_kv_set( &l->look, "interface-sounds", rows[SET_SOUNDS].on ? "0" : "1" );
-            if (!ui_set_sounds( ui, !rows[SET_SOUNDS].on ))
-                ui_toast( ui, "Audio output is unavailable", 2400 );
-            break;
         /* The runtime keeps these: it owns the settings file and writes every
          * one of them at once when the launcher closes. */
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
@@ -3539,7 +3539,7 @@ static int compare_files( const void *a, const void *b )
     return strcasecmp( x->name, y->name );
 }
 
-static int read_dir( struct launcher *l, const char *dir, int *count )
+static int read_dir( struct launcher *l, const char *dir, int *count, int images )
 {
     struct dirent *entry;
     DIR *handle;
@@ -3559,9 +3559,14 @@ static int read_dir( struct launcher *l, const char *dir, int *count )
         else if (entry->d_type == DT_REG) file->is_dir = 0;
         else if (stat( path, &st )) continue;
         else file->is_dir = S_ISDIR( st.st_mode );
-        if (!file->is_dir && !launcher_is_exe( entry->d_name )) continue;
+        if (!file->is_dir)
+        {
+            const char *extension = strrchr( entry->d_name, '.' );
+            if (images ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
+                                        strcasecmp( extension, ".jpeg" ))) : !launcher_is_exe( entry->d_name )) continue;
+        }
         snprintf( file->name, sizeof(file->name), "%s", entry->d_name );
-        file->supported = file->is_dir || !l->options->machine_of( path, &file->machine );
+        file->supported = images || file->is_dir || !l->options->machine_of( path, &file->machine );
         (*count)++;
     }
     closedir( handle );
@@ -3590,7 +3595,7 @@ static int path_below( const char *path, const char *root )
 
 /* Choose the filesystem before showing any folders. The saved directory is
  * kept within the chosen filesystem, but never skips this screen. */
-static int file_browser_storage( struct launcher *l, char *dir, size_t size )
+static int file_browser_storage( struct launcher *l, char *dir, size_t size, const char *title )
 {
     struct ui *ui = &l->ui;
     static const char *const usb_paths[] = { "ums0:/", "ums1:/", "ums2:/", "ums3:/", "ums4:/" };
@@ -3628,7 +3633,7 @@ static int file_browser_storage( struct launcher *l, char *dir, size_t size )
         else
             snprintf( rows[1].value, sizeof(rows[1].value), "Not connected" );
 
-        action = ui_list_run( ui, &list, "Add Game", "Choose storage", rows, 2, 0 );
+        action = ui_list_run( ui, &list, title, "Choose storage", rows, 2, 0 );
         if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return 0;
         if (action != UI_ACTION_CHOOSE) continue;
         if (!list.selection)
@@ -3676,7 +3681,7 @@ static int file_browser_storage( struct launcher *l, char *dir, size_t size )
     }
 }
 
-static int file_browser_pick( struct launcher *l, char *target, size_t size )
+static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, int images )
 {
     struct ui *ui = &l->ui;
     char dir[512], came_from[256] = "", dos[512], path[512];
@@ -3685,7 +3690,7 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
     {
         int choose_storage = 0;
 
-        if (!file_browser_storage( l, dir, sizeof(dir) ))
+        if (!file_browser_storage( l, dir, sizeof(dir), images ? "Choose icon" : "Add Game" ))
         {
             save_look( l );
             return 0;
@@ -3696,7 +3701,7 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
             struct ui_list list = {0};
             int count, has_up, readable, rows, i, reload = 0;
 
-            while (!(readable = read_dir( l, dir, &count )) && !is_root( dir )) parent_dir( dir );
+            while (!(readable = read_dir( l, dir, &count, images )) && !is_root( dir )) parent_dir( dir );
             if (!readable)
             {
                 choose_storage = 1;
@@ -3731,13 +3736,13 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
                     snprintf( row->value, sizeof(row->value), "Cannot run here" );
                     row->disabled = 1;
                 }
-                else snprintf( row->value, sizeof(row->value), "%s", launcher_machine_name( files[i].machine ) );
+                else snprintf( row->value, sizeof(row->value), "%s", images ? "Image" : launcher_machine_name( files[i].machine ) );
                 if (came_from[0] && !strcasecmp( files[i].name, came_from )) list.selection = rows;
             }
             if (!rows)
             {
                 memset( file_rows, 0, sizeof(file_rows[0]) );
-                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "No folders or programs here" );
+                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s", images ? "No folders or images here" : "No folders or programs here" );
                 file_rows[0].disabled = 1;
                 rows = 1;
             }
@@ -3747,7 +3752,7 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
 
             while (!reload)
             {
-                enum ui_action action = ui_list_run( ui, &list, "Files", dos, file_rows, rows, 0 );
+                enum ui_action action = ui_list_run( ui, &list, images ? "Choose icon" : "Files", dos, file_rows, rows, 0 );
                 int index = list.selection - has_up;
 
                 if (action == UI_ACTION_QUIT) return 0;
@@ -3767,7 +3772,7 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
                 if (index < 0 || index >= count) continue;
                 join_path( path, sizeof(path), dir, files[index].name );
                 launcher_log( "[LAUNCHER] Browser chose %s (%s)", path,
-                              files[index].is_dir ? "folder" : "program" );
+                              files[index].is_dir ? "folder" : images ? "image" : "program" );
                 if (files[index].is_dir)
                 {
                     snprintf( dir, sizeof(dir), "%s", path );
@@ -3782,6 +3787,23 @@ static int file_browser_pick( struct launcher *l, char *target, size_t size )
             }
         }
     }
+}
+
+static int file_browser_pick( struct launcher *l, char *target, size_t size )
+{
+    return file_browser_pick_kind( l, target, size, 0 );
+}
+
+static int pick_forwarder_icon( void *opaque, char *target, size_t size )
+{
+    struct launcher *l = opaque;
+    char previous[sizeof(l->browse_dir)];
+    int result;
+    strcpy( previous, l->browse_dir );
+    result = file_browser_pick_kind( l, target, size, 1 );
+    strcpy( l->browse_dir, previous );
+    save_look( l );
+    return result;
 }
 
 /* A program started from the file browser and left out of the library: a
@@ -3950,6 +3972,8 @@ static int run_library( struct launcher *l, char *target, size_t size )
     while (ui_begin_frame( ui ))
     {
         struct grid g;
+        int previous = current_index( l, home ), previous_home = home;
+        int previous_zone = l->zone, previous_header = l->header_focus;
 
         grid_layout( l, &g );
         pump_icons( l );
@@ -4015,6 +4039,9 @@ static int run_library( struct launcher *l, char *target, size_t size )
             }
 
             /* A on the header acts on the item the D-pad is on, whatever the view. */
+            if (input.button == UI_A || input.button == UI_PLUS || input.button == UI_MINUS ||
+                (input.button == UI_Y && p)) ui_sound( ui, LAUNCHER_SOUND_ACCEPT );
+            else if (input.button == UI_B) ui_sound( ui, LAUNCHER_SOUND_BACK );
             if (input.button == UI_A && l->zone == ZONE_HEADER)
             {
                 switch (l->header_focus)
@@ -4192,6 +4219,8 @@ static int run_library( struct launcher *l, char *target, size_t size )
             if (!ui->running) return 0;
         }
         if (!ui->running) break;
+        if (previous != current_index( l, home ) || previous_home != home ||
+            previous_zone != l->zone || previous_header != l->header_focus) ui_sound( ui, LAUNCHER_SOUND_MOVE );
         if (SDL_AtomicCAS( &l->usb_changed, 1, 0 ))
         {
             int keep = current_index( l, home );
@@ -4264,7 +4293,6 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     }
     /* ui_init starts from a cleared screen, so the clock and the battery are
      * handed to it once it stands. */
-    ui_set_sounds( &l->ui, launcher_kv_get_int( &l->look, "interface-sounds", 1 ) );
     l->ui.header_status = header_status;
     l->ui.header_status_data = l;
     l->ui.footer_mark = footer_mark;
@@ -4322,6 +4350,7 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     l->ui.background_tick = launcher_update_tick;
     l->ui.background_data = l->update;
     if (options->install_forwarder && !launcher_kv_get_int( &l->look, "setup-offered", 0 )) quick_setup( l );
+    if (options->launch_error) ui_message( &l->ui, "Game unavailable", options->launch_error );
     ret = l->ui.running ? run_library( l, target, target_size ) : 0;
     l->ui.background_tick = NULL;
     launcher_update_destroy( l->update );
