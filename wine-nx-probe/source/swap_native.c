@@ -3,7 +3,7 @@
 #include "swap_ipc.h"
 #include <sys/reent.h>
 #include <malloc.h>
-#include <stdio.h>
+#include "native_heap.h"
 
 __thread unsigned int wine_nx_swap_native_io;
 
@@ -245,12 +245,8 @@ void __wrap_svcSignalProcessWideKey( u32 *key, s32 count )
 
 extern void *__real__malloc_r( struct _reent *, size_t );
 extern void *__real__calloc_r( struct _reent *, size_t, size_t );
-extern void *__real__realloc_r( struct _reent *, void *, size_t );
-extern void *__real__memalign_r( struct _reent *, size_t, size_t );
 static __thread unsigned int allocator_depth;
 static __thread unsigned int allocator_deferred;
-static unsigned long long allocation_failures, largest_failed_allocation;
-
 void horizon_swap_native_begin(void) { allocator_deferred++; }
 void horizon_swap_native_end(void) { allocator_deferred--; }
 
@@ -275,43 +271,6 @@ int horizon_swap_native_reclaim( size_t size, size_t *budget )
     return freed != 0;
 }
 
-void horizon_swap_native_failed( size_t size )
-{
-    unsigned long long largest;
-    if (!size || allocator_depth > 1 || allocator_deferred || !horizon_swap_enabled()) return;
-    largest = __atomic_load_n( &largest_failed_allocation, __ATOMIC_RELAXED );
-    while (size > largest && !__atomic_compare_exchange_n( &largest_failed_allocation, &largest,
-                                                          size, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) {}
-    __atomic_add_fetch( &allocation_failures, 1, __ATOMIC_RELEASE );
-}
-
-void horizon_swap_native_report(void)
-{
-    extern char *fake_heap_start, *fake_heap_end;
-    extern void wine_nx_runtime_trace( const char * );
-    static unsigned long long reported;
-    unsigned long long failures = __atomic_load_n( &allocation_failures, __ATOMIC_ACQUIRE );
-    unsigned long long previous = __atomic_load_n( &reported, __ATOMIC_RELAXED );
-    struct mallinfo heap;
-    size_t heap_size, uncommitted;
-    char line[224];
-    do
-    {
-        if (failures <= previous) return;
-    } while (!__atomic_compare_exchange_n( &reported, &previous, failures, 0,
-                                           __ATOMIC_RELAXED, __ATOMIC_RELAXED ));
-    heap = mallinfo();
-    heap_size = fake_heap_end - fake_heap_start;
-    uncommitted = heap_size > heap.arena ? heap_size - heap.arena : 0;
-    snprintf( line, sizeof(line), "[SWAP-NATIVE] failures=%llu largest_failed_kb=%llu "
-              "free_kb=%llu tail_kb=%llu holes=%llu", failures,
-              __atomic_load_n( &largest_failed_allocation, __ATOMIC_RELAXED ) / 1024,
-              (unsigned long long)(heap.fordblks + uncommitted) / 1024,
-              (unsigned long long)(heap.keepcost + uncommitted) / 1024,
-              (unsigned long long)heap.ordblks );
-    wine_nx_runtime_trace( line );
-}
-
 void *__wrap__malloc_r( struct _reent *reent, size_t size )
 {
     void *ptr;
@@ -320,7 +279,6 @@ void *__wrap__malloc_r( struct _reent *reent, size_t size )
     ptr = __real__malloc_r( reent, size );
     while (!ptr && allocator_depth == 1 && horizon_swap_native_reclaim( size, &budget ))
         ptr = __real__malloc_r( reent, size );
-    if (!ptr) horizon_swap_native_failed( size );
     allocator_depth--;
     return ptr;
 }
@@ -334,7 +292,6 @@ void *__wrap__calloc_r( struct _reent *reent, size_t count, size_t size )
     while (!ptr && size && allocator_depth == 1 && count <= SIZE_MAX / size &&
            horizon_swap_native_reclaim( count * size, &budget ))
         ptr = __real__calloc_r( reent, count, size );
-    if (!ptr && size && count <= SIZE_MAX / size) horizon_swap_native_failed( count * size );
     allocator_depth--;
     return ptr;
 }
@@ -344,10 +301,9 @@ void *__wrap__realloc_r( struct _reent *reent, void *old, size_t size )
     void *ptr;
     size_t budget = SIZE_MAX;
     allocator_depth++;
-    ptr = __real__realloc_r( reent, old, size );
+    ptr = wine_nx_native_realloc( reent, old, size );
     while (!ptr && allocator_depth == 1 && horizon_swap_native_reclaim( size, &budget ))
-        ptr = __real__realloc_r( reent, old, size );
-    if (!ptr) horizon_swap_native_failed( size );
+        ptr = wine_nx_native_realloc( reent, old, size );
     allocator_depth--;
     return ptr;
 }
@@ -357,11 +313,10 @@ void *__wrap__memalign_r( struct _reent *reent, size_t align, size_t size )
     void *ptr;
     size_t budget = SIZE_MAX;
     allocator_depth++;
-    ptr = __real__memalign_r( reent, align, size );
+    ptr = wine_nx_native_memalign( reent, align, size );
     while (!ptr && allocator_depth == 1 && align && !(align & (align - 1)) &&
            horizon_swap_native_reclaim( size, &budget ))
-        ptr = __real__memalign_r( reent, align, size );
-    if (!ptr && align && !(align & (align - 1))) horizon_swap_native_failed( size );
+        ptr = wine_nx_native_memalign( reent, align, size );
     allocator_depth--;
     return ptr;
 }

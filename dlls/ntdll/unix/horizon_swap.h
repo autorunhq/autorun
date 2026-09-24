@@ -75,8 +75,6 @@ size_t horizon_swap_reclaim( size_t size );
 int horizon_swap_native_reclaim( size_t size, size_t *budget );
 void horizon_swap_native_begin(void);
 void horizon_swap_native_end(void);
-void horizon_swap_native_failed( size_t size );
-void horizon_swap_native_report(void);
 struct horizon_swap_pin
 {
     const void *addr;

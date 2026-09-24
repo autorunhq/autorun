@@ -15,13 +15,16 @@ fixture = r'''
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include "native_heap.h"
 #define MiB ((size_t)1048576)
-struct _reent { int unused; };
-struct mallinfo { size_t arena, fordblks, keepcost, ordblks; };
+struct _reent { int _errno; };
+struct mallinfo { size_t arena, fordblks, keepcost, ordblks, uordblks; };
 static char heap_area[512 * 1048576], result;
 char *fake_heap_start = heap_area, *fake_heap_end = heap_area + sizeof(heap_area);
 static struct mallinfo heap;
-static unsigned int attempts, fail_attempts, reclaims, reports;
+static unsigned int attempts, fail_attempts, reclaims;
+static unsigned int heap_lock;
 static size_t reclaimed;
 static size_t idle_pages;
 static int active = 1, locked, nested;
@@ -42,7 +45,8 @@ static size_t swap_reclaim_locked(size_t size)
     return size;
 }
 /* RECLAIM_IMPLEMENTATION */
-void wine_nx_runtime_trace(const char *line) { assert(strstr(line, "[SWAP-NATIVE]")); reports++; }
+void *__wrap__malloc_r(struct _reent *, size_t);
+void wine_nx_runtime_trace(const char *line) { (void)line; assert(!heap_lock); }
 /* IMPLEMENTATION */
 static void *allocate(void)
 {
@@ -54,9 +58,9 @@ void *__real__malloc_r(struct _reent *r, size_t size)
 { (void)r; (void)size; return allocate(); }
 void *__real__calloc_r(struct _reent *r, size_t count, size_t size)
 { (void)r; if (size && count > SIZE_MAX / size) return NULL; return allocate(); }
-void *__real__realloc_r(struct _reent *r, void *old, size_t size)
+void *wine_nx_native_realloc(struct _reent *r, void *old, size_t size)
 { (void)r; assert(old == &result); return size ? allocate() : NULL; }
-void *__real__memalign_r(struct _reent *r, size_t align, size_t size)
+void *wine_nx_native_memalign(struct _reent *r, size_t align, size_t size)
 {
     if (!align || (align & (align - 1))) return NULL;
     if (nested) return __wrap__malloc_r(r, size);
@@ -64,9 +68,9 @@ void *__real__memalign_r(struct _reent *r, size_t align, size_t size)
 }
 static void reset(unsigned int failures)
 {
-    assert(!allocator_depth && !allocator_deferred);
-    heap = (struct mallinfo){512 * MiB, 300 * MiB, 4 * MiB, 200};
-    attempts = reclaims = reports = 0;
+    assert(!allocator_depth && !allocator_deferred && !heap_lock);
+    heap = (struct mallinfo){512 * MiB, 300 * MiB, 4 * MiB, 200, 212 * MiB};
+    attempts = reclaims = 0;
     reclaimed = idle_pages = 0;
     fail_attempts = failures;
     locked = nested = 0;
@@ -74,7 +78,7 @@ static void reset(unsigned int failures)
 }
 int main(void)
 {
-    struct _reent r;
+    struct _reent r = {ENOMEM};
     size_t budget;
     reset(0);
     assert(__wrap__malloc_r(&r, 1) == &result && !reclaims);
@@ -87,9 +91,6 @@ int main(void)
     reset(100);
     assert(!__wrap__memalign_r(&r, 65536, 256 * MiB));
     assert(reclaimed == 16 * MiB && reclaims == 8 && attempts == 9);
-    horizon_swap_native_report();
-    horizon_swap_native_report();
-    assert(reports == 1);
     reset(3);
     heap.fordblks = 0;
     assert(__wrap__calloc_r(&r, 2, 4 * MiB) == &result);
@@ -105,6 +106,7 @@ int main(void)
     reset(100);
     active = 0;
     assert(!__wrap__malloc_r(&r, MiB) && !reclaims);
+    assert(r._errno == ENOMEM);
     reset(100);
     locked = 1;
     assert(!__wrap__malloc_r(&r, MiB) && attempts == 1 && !reclaims);
@@ -122,12 +124,17 @@ int main(void)
     assert(horizon_swap_native_reclaim(MiB, &budget) && reclaims == 1);
     assert(__wrap__memalign_r(&r, 4096, MiB) == &result);
     assert(!allocator_depth && !allocator_deferred);
-    puts("native allocation: bounded fragmentation recovery, retries, driver deferral, recursion and overflow passed");
+    reset(100);
+    active = 0;
+    nested = 1;
+    assert(!__wrap__memalign_r(&r, 65536, MiB));
+    assert(!reclaims && !allocator_depth && r._errno == ENOMEM);
+    puts("native allocation: recovery, deferral, recursion and overflow passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='autorun-native-swap-') as tmp:
     unit, binary = Path(tmp) / 'native.c', Path(tmp) / 'native'
     unit.write_text(fixture.replace('/* IMPLEMENTATION */', source).replace('/* RECLAIM_IMPLEMENTATION */', reclaim))
     subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', str(unit), '-o', str(binary)], check=True)
+                    '-fsanitize=address,undefined', '-I', str(root / 'source'), str(unit), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

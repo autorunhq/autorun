@@ -9,7 +9,7 @@ source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
 
 
 def function(name):
-    start = re.search(rf'^.*\b{re.escape(name)}\([^\n]*\)\n\{{', source, re.M).start()
+    start = re.search(rf'^.*\b{re.escape(name)}\([^;{{}}]*\)\n\{{', source, re.M).start()
     brace = source.index('{', start)
     depth = 1
     end = brace + 1

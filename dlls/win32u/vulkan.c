@@ -1487,7 +1487,6 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         if (reclaim_host_memory) horizon_swap_native_end();
     } while (res == VK_ERROR_OUT_OF_HOST_MEMORY && reclaim_host_memory &&
              horizon_swap_native_reclaim( alloc_info->allocationSize, &reclaim_budget ));
-    if (res == VK_ERROR_OUT_OF_HOST_MEMORY) horizon_swap_native_failed( alloc_info->allocationSize );
 #endif
     if (res) goto failed;
 
@@ -1570,9 +1569,6 @@ failed:
         nx_vk_trace( "[NXVK] vkAllocateMemory of %llu bytes of memory type %u failed: %d%s",
                      (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, res,
                      mapping ? " (with an imported host mapping)" : "" );
-#ifdef WINE_NX_SWAP_POC
-        horizon_swap_native_report();
-#endif
     }
 #endif
     if (host_device_memory) device->p_vkFreeMemory( device->host.device, host_device_memory, NULL );

@@ -87,7 +87,7 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2623"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2625"
 #elif defined(WINE_NX_FEX)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2609"
 #elif defined(WINE_NX_AMD64)
@@ -1488,7 +1488,6 @@ static void runtime_report_interpreter(void)
             wine_nx_thread_report();
 #ifdef WINE_NX_SWAP_POC
             horizon_swap_report();
-            horizon_swap_native_report();
 #endif
         }
         return;
