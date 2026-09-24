@@ -20,4 +20,5 @@ def extract(signature):
 result = extract("NTSTATUS signal_set_full_context")
 result += "\n"
 result += extract("NTSTATUS call_user_exception_dispatcher")
+result = result.replace(" struct thread_data *data,", "")
 Path(sys.argv[2]).write_text(result, encoding="utf-8")

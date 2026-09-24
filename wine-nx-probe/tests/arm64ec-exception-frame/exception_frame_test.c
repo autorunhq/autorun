@@ -18,7 +18,7 @@ typedef void *HANDLE;
 #define STATUS_PARTIAL_COPY      ((NTSTATUS)0x8000000d)
 #define CONTEXT_ARM64_FULL       0x00400007
 #define NtCurrentProcess()       ((HANDLE)(uintptr_t)-1)
-#define NtCurrentTeb()           ((void *)(uintptr_t)0x77770000)
+#define NtCurrentTeb()           (&test_teb)
 #define C_ASSERT(e)              _Static_assert((e), #e)
 #define X18 X[18]
 
@@ -58,6 +58,7 @@ typedef struct _EXCEPTION_RECORD
 } EXCEPTION_RECORD;
 
 struct test_peb { void *EcCodeBitMap; };
+static struct { struct { void *StackBase, *StackLimit; } Tib; } test_teb;
 struct test_peb test_peb;
 struct test_peb *peb = &test_peb;
 void *pKiUserEmulationDispatcher;
@@ -85,6 +86,8 @@ static CONTEXT continued;
 static int arm64ec;
 static uintptr_t address_start, address_end;
 static unsigned int failures;
+static int expect_local_frame;
+static unsigned char dispatched_frame[0x470];
 
 int is_arm64ec(void)
 {
@@ -113,6 +116,7 @@ NTSTATUS NtWriteVirtualMemory( HANDLE process, void *address, const void *buffer
     record->address = address;
     record->size = size;
     memcpy( record->data, buffer, size );
+    if (expect_local_frame) return STATUS_UNSUCCESSFUL;
     if (call == fail_write_call) return fail_write_status;
     if (call == partial_write_call)
     {
@@ -128,6 +132,7 @@ void horizon_continue_context( const CONTEXT *context )
 {
     ++continue_count;
     continued = *context;
+    if (expect_local_frame) memcpy( dispatched_frame, (void *)context->Sp, sizeof(dispatched_frame) );
 }
 
 void horizon_trace( const char *format, ... )
@@ -329,6 +334,38 @@ static void test_exception_errors_and_guest_route(void)
             write_count == 2 && !continue_count );
 }
 
+static void test_exception_on_user_stack(void)
+{
+    CONTEXT context = make_context( 0x25000, 0 );
+    EXCEPTION_RECORD record;
+    CONTEXT_EX extra;
+
+    context.Sp = (uintptr_t)&context;
+    test_teb.Tib.StackBase = &context + 1;
+    test_teb.Tib.StackLimit = (void *)(context.Sp - 0x100000);
+    init_exception( &record );
+    for (arm64ec = 0; arm64ec <= 1; arm64ec++)
+    {
+        reset_mocks();
+        set_ec( (uintptr_t)pKiUserExceptionDispatcher, 1 );
+        expect_local_frame = 1;
+        report( "exception-user-stack-dispatch", call_user_exception_dispatcher( &record, &context ) == STATUS_UNSUCCESSFUL &&
+                !write_count && continue_count == 1 && continued.Sp && !(continued.Sp & 15) &&
+                continued.Sp + sizeof(dispatched_frame) <= context.Sp &&
+                continued.Pc == (uintptr_t)pKiUserExceptionDispatcher );
+        memcpy( &extra, dispatched_frame + 0x390, sizeof(extra) );
+        report( "exception-user-stack-context", !memcmp( dispatched_frame, &context, sizeof(context) ) &&
+                !memcmp( dispatched_frame + 0x3b0, &record, sizeof(record) ) &&
+                extra.Legacy.Offset == -0x390 && extra.Legacy.Length == 0x390 &&
+                !memcmp( dispatched_frame + 0x450, &context.Sp, sizeof(context.Sp) ) &&
+                !memcmp( dispatched_frame + 0x458, &context.Pc, sizeof(context.Pc) ) );
+        expect_local_frame = 0;
+        set_ec( (uintptr_t)pKiUserExceptionDispatcher, 0 );
+    }
+    test_teb.Tib.StackBase = test_teb.Tib.StackLimit = NULL;
+    arm64ec = 1;
+}
+
 static void test_exception_validation_and_bounds(void)
 {
     _Alignas(16) unsigned char stack[0x1000];
@@ -365,6 +402,7 @@ int main(void)
     test_guest_route_and_writes();
     test_arm64ec_bounds();
     test_exception_frame();
+    test_exception_on_user_stack();
     test_exception_errors_and_guest_route();
     test_exception_validation_and_bounds();
     printf( "RESULT %s\n", failures ? "FAIL" : "PASS" );

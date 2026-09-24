@@ -219,10 +219,18 @@ NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_REC
     frame.context_ex.XState.Offset = offsetof(typeof(frame), redzone) - sizeof(CONTEXT);
     frame.context_ex.All.Length = offsetof(typeof(frame), redzone);
     frame.context_ex.All.Offset = -(LONG)sizeof(CONTEXT);
-    status = NtWriteVirtualMemory( NtCurrentProcess(), (void *)stack, &frame, sizeof(frame), &written );
-    if (status) return status;
-    if (written != sizeof(frame)) return STATUS_PARTIAL_COPY;
     resume = *context;
+    /* Horizon syscalls share the user stack; keep their live call frames intact. */
+    if ((ULONG_PTR)&frame >= (ULONG_PTR)NtCurrentTeb()->Tib.StackLimit &&
+        (ULONG_PTR)(&frame + 1) <= context->Sp &&
+        context->Sp <= (ULONG_PTR)NtCurrentTeb()->Tib.StackBase)
+        stack = (ULONG_PTR)&frame;
+    else
+    {
+        status = NtWriteVirtualMemory( NtCurrentProcess(), (void *)stack, &frame, sizeof(frame), &written );
+        if (status) return status;
+        if (written != sizeof(frame)) return STATUS_PARTIAL_COPY;
+    }
     resume.Sp = stack;
     resume.Pc = (ULONG_PTR)pKiUserExceptionDispatcher;
     resume.X18 = (ULONG_PTR)NtCurrentTeb();
