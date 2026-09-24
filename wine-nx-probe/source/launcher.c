@@ -1872,7 +1872,7 @@ static int prepare_program_graphics( struct launcher *l, struct program *p )
 static int start_program( struct launcher *l, struct program *p, char *target, size_t size )
 {
     struct ui *ui = &l->ui;
-    char path[512], text[160];
+    char path[512];
 
     if (!file_exists( p->path ) || l->options->machine_of( p->path, &p->machine ))
     {
@@ -1892,14 +1892,10 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     p->launched_order = l->catalog.next_order++;
     save_library( l );
 
-    /* The last frame before Wine starts; the screen stays dark until it shows a window. */
-    snprintf( text, sizeof(text), "Starting %s", p->title );
     ui_background( ui );
-    ui_header( ui, "Library", p->dos );
-    ui_text_fit( ui, ui->large, (ui->width - (ui_text_width( ui, ui->large, text ) < ui->width - 120 ?
-                                             ui_text_width( ui, ui->large, text ) : ui->width - 120)) / 2,
-                 ui->height / 2 - 40, ui->width - 120, text, ui->value, 0 );
-    ui_text_centered( ui, ui->small, ui->width / 2, ui->height / 2 + 24, "Wine is getting ready...", ui->dim );
+    ui_text_centered( ui, ui->large, ui->width / 2, (ui->height - TTF_FontHeight( ui->large )) / 2,
+                      "Starting game...", ui->value );
+    ui->hide_overlays = 1;
     ui_present( ui );
 
     snprintf( target, size, "%s", p->path );
@@ -2811,7 +2807,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD, SET_SOUNDS,
     SET_CONTROLS, SET_STEAMGRIDDB,
     SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
@@ -3241,6 +3237,7 @@ static void settings_menu( struct launcher *l )
             [SET_SWKBD] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
+            [SET_SOUNDS] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
@@ -3302,6 +3299,11 @@ static void settings_menu( struct launcher *l )
                   launcher_kv_get( &l->look, "steamgriddb-key", path, sizeof(path) ) && path[0] ? "Configured" : "Not set" );
         rows[SET_STEAMGRIDDB].help = "Used to automatically download the community's highest-rated square, portrait and hero artwork.";
         rows[SET_STEAMGRIDDB].adjustable = 0;
+        snprintf( rows[SET_SOUNDS].label, sizeof(rows[0].label), "Interface sounds" );
+        rows[SET_SOUNDS].kind = UI_ROW_SWITCH;
+        rows[SET_SOUNDS].on = !!launcher_kv_get_int( &l->look, "interface-sounds", 1 );
+        snprintf( rows[SET_SOUNDS].value, sizeof(rows[0].value), "%s", on_off[rows[SET_SOUNDS].on] );
+        rows[SET_SOUNDS].help = "Sounds for navigation, selection and going back.";
         snprintf( rows[SET_UPDATE].label, sizeof(rows[0].label), "Check for update" );
         rows[SET_UPDATE].kind = UI_ROW_ACTION;
         rows[SET_UPDATE].adjustable = 0;
@@ -3377,6 +3379,11 @@ static void settings_menu( struct launcher *l )
         {
         case SET_HIDDEN: l->show_hidden = !l->show_hidden; break;
         case SET_HIDE_MISSING: l->hide_missing = !l->hide_missing; break;
+        case SET_SOUNDS:
+            launcher_kv_set( &l->look, "interface-sounds", rows[SET_SOUNDS].on ? "0" : "1" );
+            if (!ui_set_sounds( ui, !rows[SET_SOUNDS].on ))
+                ui_toast( ui, "Audio output is unavailable", 2400 );
+            break;
         /* The runtime keeps these: it owns the settings file and writes every
          * one of them at once when the launcher closes. */
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
@@ -4257,6 +4264,7 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     }
     /* ui_init starts from a cleared screen, so the clock and the battery are
      * handed to it once it stands. */
+    ui_set_sounds( &l->ui, launcher_kv_get_int( &l->look, "interface-sounds", 1 ) );
     l->ui.header_status = header_status;
     l->ui.header_status_data = l;
     l->ui.footer_mark = footer_mark;

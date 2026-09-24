@@ -5,6 +5,7 @@
 # returned. Screenshots go to $LAUNCHER_SHOTS when it is set.
 # Needs Homebrew's sdl2 (sdl2-compat), sdl3, sdl2_ttf and libpng.
 set -eu
+export SDL_AUDIODRIVER=dummy
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 probe="$root/wine-nx-probe"
 # Two programs to stand in for games, out of whichever stage the card was last
@@ -49,10 +50,14 @@ else
 fi
 "$build/launcher_catalog"
 
+clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+    $(sdl2-config --cflags) "$probe/tests/launcher_audio.c" $(sdl2-config --libs) -lm -o "$build/launcher_audio"
+"$build/launcher_audio"
+
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$probe/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
     -DLTC_NOTHING -DLTC_SHA256 -DLTC_NO_TEST -DARGTYPE=4 -I "$root/libs/tomcrypt/src/headers" \
-    "$probe/tests/launcher_host.c" "$probe/source/launcher.c" "$probe/source/launcher_catalog.c" "$probe/source/launcher_ui.c" \
+    "$probe/tests/launcher_host.c" "$probe/source/launcher.c" "$probe/source/launcher_catalog.c" "$probe/source/launcher_ui.c" "$probe/source/launcher_audio.c" \
     "$probe/source/launcher_graphics.c" \
     "$probe/source/launcher_setup.c" "$probe/source/setup_boot.c" \
     "$root/libs/tomcrypt/src/hashes/sha2/sha256.c" \

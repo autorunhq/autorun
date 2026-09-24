@@ -12,6 +12,7 @@
 
 #include "launcher_svg.h"
 #include "launcher_ui.h"
+#include "launcher_audio.h"
 
 #define FADE_MS          160
 #define REPEAT_DELAY_MS  360
@@ -397,6 +398,7 @@ void ui_quit( struct ui *ui )
 {
     int i;
 
+    launcher_audio_close( ui->audio );
     for (i = 0; i < UI_TEXT_CACHE; i++)
         if (ui->cache[i].texture) SDL_DestroyTexture( ui->cache[i].texture );
     for (i = 0; i < GLYPH_COUNT; i++)
@@ -414,6 +416,17 @@ void ui_quit( struct ui *ui )
     if (TTF_WasInit()) TTF_Quit();
     SDL_Quit();
     memset( ui, 0, sizeof(*ui) );
+}
+
+int ui_set_sounds( struct ui *ui, int enabled )
+{
+    if (enabled && !ui->audio) ui->audio = launcher_audio_open();
+    else if (!enabled)
+    {
+        launcher_audio_close( ui->audio );
+        ui->audio = NULL;
+    }
+    return !enabled || ui->audio != NULL;
 }
 
 /***********************************************************************
@@ -1042,6 +1055,7 @@ static void repeat_held( struct ui *ui )
 int ui_begin_frame( struct ui *ui )
 {
     if (!ui->running || !platform_running()) return ui->running = 0;
+    launcher_audio_tick( ui->audio );
     if (ui->background_tick) ui->background_tick( ui->background_data );
     if (ui->controller && !SDL_GameControllerGetAttached( ui->controller ))
     {
@@ -1136,6 +1150,18 @@ static int key_button( SDL_Keycode key )
     return UI_NONE;
 }
 
+static void input_sound( struct ui *ui, const struct ui_input *input )
+{
+    int button = input->button;
+    if (button == UI_B) launcher_audio_play( ui->audio, LAUNCHER_SOUND_BACK );
+    else if (button == UI_A || button == UI_X || button == UI_Y ||
+             button == UI_PLUS || button == UI_MINUS || input->touch == UI_TOUCH_TAP)
+        launcher_audio_play( ui->audio, LAUNCHER_SOUND_ACCEPT );
+    else if (button == UI_UP || button == UI_DOWN || button == UI_LEFT || button == UI_RIGHT ||
+             button == UI_L || button == UI_R || button == UI_ZL || button == UI_ZR || input->touch != UI_TOUCH_NONE)
+        launcher_audio_play( ui->audio, LAUNCHER_SOUND_MOVE );
+}
+
 int ui_poll( struct ui *ui, struct ui_input *input )
 {
     SDL_Event event;
@@ -1212,7 +1238,7 @@ int ui_poll( struct ui *ui, struct ui_input *input )
             continue;
         }
         ui->busy_until = SDL_GetTicks() + 220;
-        if (input->button != UI_NONE) return 1;
+        if (input->button != UI_NONE) { input_sound( ui, input ); return 1; }
 
         input->touch = feed_touch( ui, type, x, y, &input->steps );
         if (input->touch == UI_TOUCH_NONE) continue;
@@ -1230,6 +1256,7 @@ int ui_poll( struct ui *ui, struct ui_input *input )
                     break;
                 }
             }
+        input_sound( ui, input );
         return 1;
     }
     return 0;
@@ -1255,7 +1282,7 @@ static int needs_animation( struct ui *ui )
     int moving = ui->highlight >= 0 && ui->last_highlight >= 0 && fabs( ui->highlight - ui->last_highlight ) > 0.2f;
 
     ui->last_highlight = ui->highlight;
-    return ui_animated( ui ) || (ui->animations && now - ui->fx_start < FADE_MS) || moving ||
+    return launcher_audio_tick( ui->audio ) || ui_animated( ui ) || (ui->animations && now - ui->fx_start < FADE_MS) || moving ||
            ui->scrolling_text || now < ui->busy_until || ui->held || ui->touch.active ||
            (ui->toast[0] && now < ui->toast_until + 50);
 }

@@ -77,6 +77,7 @@ struct ui_text_entry
 struct ui
 {
     SDL_Window *window;
+    struct launcher_audio *audio;
     SDL_Renderer *renderer;
     int width, height;
     TTF_Font *small, *normal, *large;
@@ -142,6 +143,7 @@ struct ui
 
 int  ui_init( struct ui *ui, const void *font_data, size_t font_size, int animations );
 void ui_quit( struct ui *ui );
+int ui_set_sounds( struct ui *ui, int enabled );
 /* Why ui_init failed. */
 const char *ui_error(void);
 /* Whether SDL got as far as a window, so the screen was in EGL's hands. */

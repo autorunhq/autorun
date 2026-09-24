@@ -609,6 +609,7 @@ add_executable(wine-nx-runtime
     source/launcher_console.c
     source/launcher_svg.c
     source/launcher_ui.c
+    source/launcher_audio.c
     source/steamgriddb.c
     source/dxvk_releases.c
     source/autorun_update.c
@@ -938,7 +939,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)
