@@ -32,7 +32,7 @@ fixture = r'''
 struct horizon_server_request_header { int req; unsigned request_size, reply_size; };
 struct horizon_server_reply_header { unsigned error, reply_size; };
 #include "horizon_completion.h"
-enum { HORIZON_SERVER_OBJECT_THREAD, HORIZON_SERVER_OBJECT_FILE };
+enum { HORIZON_SERVER_OBJECT_THREAD, HORIZON_SERVER_OBJECT_FILE, HORIZON_SERVER_OBJECT_TIMER };
 struct horizon_user_apc { struct horizon_user_apc *next; };
 struct horizon_server_object {
     unsigned id, refs;
@@ -48,6 +48,7 @@ static struct horizon_server_object *horizon_server_threads;
 static unsigned horizon_server_running_threads;
 static struct { unsigned thread_objects; } horizon_lifecycle;
 static int horizon_registry;
+static void horizon_server_unlink_timer_locked(struct horizon_server_object *o) { (void)o; assert(0); }
 static unsigned long long horizon_get_system_affinity_mask(void) { return 7; }
 static long long horizon_server_now(void) { return 12345; }
 static void horizon_reg_release(int *registry, void *key) { (void)registry; (void)key; assert(0); }

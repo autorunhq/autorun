@@ -45,6 +45,7 @@ struct horizon_server_object
     int signaled;
     long long timer_when;
     unsigned int timer_period;
+    struct horizon_server_object *timer_next;
 };
 struct horizon_server_handle_entry
 {
@@ -60,13 +61,13 @@ struct horizon_cancel_timer_reply { struct { unsigned int error; } header; int s
 
 static long long clock_ns100 = 130000000000000000LL;   /* an ordinary NT time */
 static void NtQuerySystemTime( LARGE_INTEGER *now ) { now->QuadPart = clock_ns100; }
-static void horizon_server_signal_changed_locked(void) {}
+static void horizon_sync_notify_object_locked(struct horizon_server_object *o, int satisfy) { (void)o; (void)satisfy; }
 
 static struct horizon_server_object objects[2];
 static struct horizon_server_handle_entry entries[2] = {
     { &entries[1], 1, &objects[0] }, { NULL, 2, &objects[1] } };
 static struct horizon_server_handle_entry *horizon_server_handles = entries;
-static int horizon_server_timers_armed;
+static struct horizon_server_object *horizon_server_timers;
 
 static struct horizon_server_handle_entry *horizon_server_find_handle_locked( unsigned int handle )
 {
@@ -103,7 +104,8 @@ static int pthread_mutex_unlock( void *m ) { (void)m; return 0; }
 static int horizon_server_objects_mutex;
 '''
 
-for name in ['static void horizon_server_update_timers_locked(',
+for name in ['static void horizon_server_unlink_timer_locked(',
+             'static void horizon_server_update_timers_locked(',
              'static int horizon_server_handle_polls_locked(',
              'static int horizon_server_handle_set_timer(',
              'static int horizon_server_handle_cancel_timer(']:
@@ -200,10 +202,10 @@ int main(void)
 
     /* With no timer running the pass has nothing to walk. */
     cancel_timer( 1 );
-    horizon_server_timers_armed = 0;
+    assert( !horizon_server_timers );
     set_timer( 2, -MS, 0 );  /* not a timer: refused, and nothing is armed */
     assert( last_reply.header.error == HORIZON_STATUS_INVALID_HANDLE );
-    assert( !horizon_server_timers_armed );
+    assert( !horizon_server_timers );
 
     puts( "Waitable timers: set does not signal, expiry does, reset, previous state, periods, "
           "manual reset, cancel and absolute times passed" );

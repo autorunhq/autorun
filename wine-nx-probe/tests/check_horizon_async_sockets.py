@@ -48,7 +48,7 @@ defines = '\n'.join(line for line in source.splitlines()
 select = definition('horizon_server_handle_select')
 assert select.index('horizon_server_async_result_locked') < select.index('for (int initial')
 assert select.index('horizon_server_async_apc_locked') < select.index('HORIZON_SELECT_ALERTABLE')
-assert '!(initial && signals)' in select
+assert select.index('horizon_server_signal_object_locked') < select.index('horizon_server_async_apc_locked')
 # Closing a socket cancels what waits on it; the ioctl handler tells what ends at once.
 assert 'horizon_async_cancel( &horizon_asyncs, handle' in definition('horizon_server_close_object_handle')
 ioctl = definition('horizon_server_handle_ioctl')
@@ -61,7 +61,7 @@ assert 'horizon_server_find_io_object_locked' in definition('horizon_server_hand
 
 functions = '\n\n'.join(definition(name) for name in (
     'horizon_sock_errno_status', 'horizon_ws_sockaddr_to_unix_for', 'horizon_ws_sockaddr_from_unix_as',
-    'horizon_server_get_sock_fd', 'horizon_sock_ioctl_create', 'horizon_report_connect',
+    'horizon_server_get_sock_fd', 'horizon_sock_ioctl_create',
     'horizon_sock_ioctl_connect',
     'horizon_sock_ioctl_family',
     'horizon_server_async_create_locked', 'horizon_server_async_free_locked',
@@ -139,7 +139,7 @@ static void horizon_report_async( const char *what, const struct horizon_async *
 { (void)what; (void)async; (void)status; }
 static unsigned long long horizon_async_now( void ) { return fake_now; }
 static void horizon_sock_poller_start( void ) {}
-static void horizon_server_signal_changed_locked( void ) { woken++; }
+static void horizon_sync_notify_object_locked(struct horizon_server_object *o, int satisfy) { (void)o; (void)satisfy; woken++; }
 static void horizon_server_free_object( struct horizon_server_object *object ) { (void)object; freed++; }
 static void horizon_client_forget_fd( unsigned int handle ) { forgotten[nforgotten++] = handle; }
 

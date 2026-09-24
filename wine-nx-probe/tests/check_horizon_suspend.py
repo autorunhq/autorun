@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import tempfile
+from horizon_sync_fixture import legacy_sync_support
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
@@ -47,7 +48,7 @@ struct horizon_server_object {
     unsigned thread_context_count;
     int thread_context_valid;
 };
-struct horizon_server_connection { int reply_fd; struct horizon_server_object *thread; };
+struct horizon_server_connection { int reply_fd; struct horizon_server_object *thread; void *direct_reply; };
 struct horizon_user_apc { unsigned size; unsigned char call[HORIZON_APC_CALL_SIZE]; };
 static struct horizon_server_object target;
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -75,14 +76,17 @@ static int horizon_server_sync_reply(struct horizon_server_connection *c, const 
 static void horizon_server_async_result_locked(const void *r, const void *d, unsigned s) { (void)r; (void)d; (void)s; }
 static int horizon_server_select_polls_locked(const void *r, const void *d, unsigned s) { (void)r; (void)d; (void)s; return 0; }
 static int horizon_server_select_signals(const void *r, const void *d, unsigned s) { (void)r; (void)d; (void)s; return 0; }
+static unsigned horizon_server_wait_object_locked(unsigned h, int consume) { (void)h; (void)consume; assert(0); return 0; }
+static unsigned horizon_server_signal_object_locked(unsigned h) { (void)h; assert(0); return 0; }
 static unsigned horizon_server_async_apc_locked(void *c, void *d) { (void)c; (void)d; return 0; }
 static struct horizon_user_apc *horizon_server_take_user_apc_locked(void *t) { (void)t; return NULL; }
 static void horizon_report_user_apc(const char *m, unsigned tid, unsigned size, unsigned status) { (void)m; (void)tid; (void)size; (void)status; }
 static void horizon_server_update_timers_locked(void) {}
-static unsigned horizon_server_select_status(const void *r, const void *d, unsigned s, int i) { (void)r; (void)d; (void)s; (void)i; return STATUS_TIMEOUT; }
+static unsigned horizon_server_select_status(const void *r, const void *d, unsigned s) { (void)r; (void)d; (void)s; return STATUS_TIMEOUT; }
 NTSTATUS WINAPI NtQueryPerformanceCounter(LARGE_INTEGER *n, LARGE_INTEGER *p) { (void)p; n->QuadPart = 0; return 0; }
 NTSTATUS WINAPI NtQuerySystemTime(LARGE_INTEGER *n) { n->QuadPart = 0; return 0; }
 '''
+fixture += legacy_sync_support(source)
 functions = '\n'.join(block(source, name) for name in (
     'static void horizon_server_set_suspend_doorbell_locked(',
     'static int horizon_server_handle_resume_thread(',

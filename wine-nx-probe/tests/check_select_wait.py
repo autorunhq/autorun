@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
+from horizon_sync_fixture import legacy_sync_support
 source = (Path(__file__).resolve().parents[2] / 'dlls/ntdll/unix/horizon.c').read_text()
 def extract(start, end):
     return source[source.index(start):source.index(end, source.index(start))]
@@ -25,13 +26,14 @@ fixture = r'''
 #define HORIZON_STATUS_KERNEL_APC 0x100
 #define HORIZON_SELECT_ALERTABLE 1
 #define HORIZON_APC_CALL_SIZE 64
+#define HORIZON_APC_RESULT_SIZE 64
 #define TRUE 1
 #define FALSE 0
 #define TRACE(...) ((void)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
 typedef struct { long long QuadPart; } LARGE_INTEGER;
 struct horizon_server_object { struct { unsigned tid; } thread; };
-struct horizon_server_connection { int reply_fd; unsigned tid; struct horizon_server_object *thread; };
+struct horizon_server_connection { int reply_fd; unsigned tid; struct horizon_server_object *thread; void *direct_reply; };
 struct horizon_select_request { struct { unsigned reply_size; } header; int flags; long long timeout;
                                 unsigned size; unsigned prev_apc; };
 struct horizon_select_reply { struct { unsigned error, reply_size; } header; unsigned apc_handle; unsigned signaled; };
@@ -67,10 +69,11 @@ static unsigned timer_passes;
 static void horizon_server_update_timers_locked(void) { assert_locked(); timer_passes++; }
 static long long ticks, first_timeout, last_timeout;
 static unsigned calls, ready_after, signals, sleeps, reply_status;
+static unsigned horizon_server_signal_object_locked(unsigned handle) { (void)handle; signals++; return 0; }
 static int queue_wait;
 static unsigned horizon_server_select_status(const struct horizon_select_request *r,
- const unsigned char *d, unsigned n, int initial) {
-    (void)r; (void)d; (void)n; assert_locked(); signals += initial;
+ const unsigned char *d, unsigned n) {
+    (void)r; (void)d; (void)n; assert_locked();
     return ++calls >= ready_after ? 0 : HORIZON_STATUS_TIMEOUT;
 }
 static int horizon_server_select_polls_locked(const struct horizon_select_request *r,
@@ -80,6 +83,7 @@ static int horizon_server_select_polls_locked(const struct horizon_select_reques
 /* The sleeper is woken by an object change a millisecond later at most. */
 static void horizon_server_sleep_locked(long long timeout) {
     assert_locked(); assert(timeout > 0);
+    if (timeout > HORIZON_SERVER_WAIT_SLICE) timeout = HORIZON_SERVER_WAIT_SLICE;
     if (!sleeps++) first_timeout = timeout;
     last_timeout = timeout;
     ticks += timeout < 10000 ? timeout : 10000;
@@ -98,15 +102,16 @@ static int horizon_server_sync_reply(struct horizon_server_connection *connectio
     reply_status = ((const struct horizon_select_reply *)data)->header.error; return 0;
 }
 '''
+fixture += legacy_sync_support(source)
 tests = r'''
 static void run(long long timeout, unsigned ready, unsigned expected, unsigned attempts) {
     struct horizon_select_request r = { .header = { 64 }, .timeout = timeout, .size = 8 };
     struct horizon_server_object t = { { 4 } };
-    struct horizon_server_connection c = { 1, 4, &t };
+    struct horizon_server_connection c = { .reply_fd = 1, .tid = 4, .thread = &t };
     ticks = 100000; calls = signals = sleeps = 0; ready_after = ready;
     timer_passes = 0;
     horizon_server_handle_select(&c, (const unsigned char *)&r, NULL, 0);
-    assert(reply_status == expected && calls == attempts && signals == 1 && sleeps == attempts - 1);
+    assert(reply_status == expected && calls == attempts && !signals && sleeps == attempts - 1);
     assert(timer_passes == attempts); /* every attempt sees the timers that came due */
 }
 int main(void) {
@@ -141,7 +146,7 @@ int main(void) {
     {
         struct horizon_select_request r = { .header = { 64 }, .timeout = 0x7fffffffffffffffLL, .size = 8 };
         struct horizon_server_object t = { { 4 } };
-        struct horizon_server_connection c = { 1, 4, &t };
+        struct horizon_server_connection c = { .reply_fd = 1, .tid = 4, .thread = &t };
         horizon_server_handle_select(&c, (const unsigned char *)&r, NULL, 0);
         assert(reply_status == HORIZON_STATUS_KERNEL_APC && async_given == 1 && calls == 2);
         /* and its result comes back with the next select, taken before anything else. */
@@ -150,14 +155,16 @@ int main(void) {
         assert(results_taken == 1 && reply_status == 0);
         /* A signal-and-wait signals before an APC can interrupt it. */
         signal_and_wait = 1; async_ready_on = 1; calls = signals = 0; ready_after = 100; r.prev_apc = 0;
-        horizon_server_handle_select(&c, (const unsigned char *)&r, NULL, 0);
-        assert(reply_status == HORIZON_STATUS_KERNEL_APC && signals == 1 && calls == 1 && async_given == 2);
+        struct horizon_select_signal_and_wait_op sw = { .wait = 0, .signal = 1 };
+        r.size = sizeof(sw);
+        horizon_server_handle_select(&c, (const unsigned char *)&r, (const void *)&sw, sizeof(sw));
+        assert(reply_status == HORIZON_STATUS_KERNEL_APC && signals == 1 && !calls && async_given == 2);
     }
     puts("Horizon waits: deadlines, infinite pending, queue polling, signal once, wait-any index, atomic wait-all, abandoned, system APCs passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='wine-nx-wait-test-') as tmp:
     c = Path(tmp) / 'test.c'; exe = Path(tmp) / 'test'
-    c.write_text(fixture + extract('static unsigned int horizon_server_select_wait(', 'static unsigned int horizon_server_select_signal_and_wait(') + extract('static int horizon_server_handle_select(', 'int horizon_server_sync_call(') + tests)
+    c.write_text(fixture + extract('static unsigned int horizon_server_select_wait(', 'static unsigned int horizon_server_select_status(') + extract('static int horizon_server_handle_select(', 'int horizon_server_sync_call(') + tests)
     subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

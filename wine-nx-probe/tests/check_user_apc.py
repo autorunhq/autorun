@@ -28,7 +28,7 @@ def function(source, name):
 # STATUS_USER_APC and the call itself, which is what server_select hands back.
 select = function(horizon, 'static int horizon_server_handle_select')
 assert select.index('HORIZON_SELECT_ALERTABLE') < select.index('horizon_server_select_status')
-assert select.index('horizon_server_take_user_apc_locked') < select.index('horizon_server_sleep_locked')
+assert select.index('horizon_server_take_user_apc_locked') < select.rindex('horizon_server_sleep_locked')
 assert 'HORIZON_STATUS_USER_APC' in select and 'apc->call' in select
 # The queue is emptied with the thread, not left behind.
 assert 'object->apc_first' in function(horizon, 'static void horizon_server_free_object')
@@ -45,7 +45,18 @@ fixture = r'''
 #define HORIZON_STATUS_INVALID_PARAMETER ((unsigned int)0xc000000d)
 
 static int woken;
-static void horizon_server_signal_changed_locked( void ) { woken++; }
+static void horizon_sync_notify_legacy_locked( void ) { woken++; }
+#define HORIZON_SELECT_ALERTABLE 1
+struct horizon_server_connection { struct horizon_server_object *thread; };
+struct horizon_select_request { unsigned flags; };
+struct horizon_sync_waiter {
+    struct horizon_server_connection *connection;
+    const struct horizon_select_request *request;
+    struct horizon_sync_waiter *next;
+    int notified;
+};
+static struct horizon_sync_waiter *horizon_sync_waiters;
+static void horizon_sync_notify_locked(struct horizon_sync_waiter *w) { w->notified++; }
 
 @STRUCTS@
 
@@ -59,6 +70,13 @@ struct horizon_server_object
 int main( void )
 {
     struct horizon_server_object thread = { 0 };
+    struct horizon_server_object unrelated = { 0 };
+    struct horizon_server_connection own = { &thread }, other = { &unrelated };
+    struct horizon_select_request alertable = { HORIZON_SELECT_ALERTABLE }, plain = { 0 };
+    struct horizon_sync_waiter waits[3] = {
+        { &own, &alertable, &waits[1], 0 }, { &own, &plain, &waits[2], 0 }, { &other, &alertable, NULL, 0 }
+    };
+    horizon_sync_waiters = waits;
     struct horizon_user_apc *apc;
     unsigned char call[40];
     unsigned int i;
@@ -71,6 +89,7 @@ int main( void )
     for (i = 0; i < sizeof(call); i++) call[i] = (unsigned char)(i + 1);
     assert( !horizon_server_queue_user_apc_locked( &thread, call, sizeof(call) ) );
     assert( woken == 1 );
+    assert(waits[0].notified == 1 && !waits[1].notified && !waits[2].notified);
     call[0] = 0xaa;
     assert( !horizon_server_queue_user_apc_locked( &thread, call, sizeof(call) ) );
 

@@ -2250,7 +2250,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
-                 "Horizon handles waits directly, reducing server overhead. Standard uses the original request path." );
+                 "Horizon uses direct synchronization and targeted wakeups. Standard uses server requests." );
         row->kind = UI_ROW_DROPDOWN;
         row->choices = 2;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );

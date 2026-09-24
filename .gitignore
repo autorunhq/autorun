@@ -21,3 +21,5 @@ wine-nx-probe/build-switch-wow64/
 /wine-nx-probe/**/__pycache__/
 
 debug
+/autom4te.cache/
+*~

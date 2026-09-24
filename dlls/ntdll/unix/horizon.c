@@ -3184,6 +3184,15 @@ struct horizon_session_view
 };
 
 struct horizon_server_object;
+struct horizon_sync_waiter;
+
+struct horizon_sync_link
+{
+    struct horizon_sync_link *next, *prev;
+    struct horizon_server_object *object;
+    struct horizon_server_object *source;
+    struct horizon_sync_waiter *waiter;
+};
 
 struct horizon_server_connection
 {
@@ -3208,6 +3217,18 @@ struct horizon_server_connection
     size_t direct_size;
 };
 
+struct horizon_sync_waiter
+{
+    struct horizon_sync_waiter *next, **prev;
+    struct horizon_server_connection *connection;
+    const struct horizon_select_request *request;
+    const unsigned char *data;
+    unsigned int data_size, count, status;
+    int queued, notified, completed;
+    pthread_cond_t cond;
+    struct horizon_sync_link *links;
+};
+
 /* An apc_call is a few dozen bytes; anything larger is not one. */
 #define HORIZON_USER_APC_MAX 512
 
@@ -3227,13 +3248,18 @@ struct horizon_server_object
     unsigned int id;
     int type;
     unsigned int refs;
+    struct horizon_sync_link *waiters;
     int manual_reset;
     int signaled;
     unsigned int count;
     unsigned int max;
     struct horizon_mutex_state mutex;
     struct horizon_thread_state thread;
-    struct horizon_server_object *thread_next;
+    union
+    {
+        struct horizon_server_object *thread_next;
+        struct horizon_server_object *timer_next;
+    };
 #ifndef HORIZON_STANDALONE_SYNTAX
     struct context_data *thread_contexts;
 #endif
@@ -3314,18 +3340,41 @@ static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
  * each change that can signal an object wakes them. */
 static pthread_cond_t horizon_server_objects_cond = PTHREAD_COND_INITIALIZER;
 static unsigned int horizon_server_sleepers;  /* guarded by horizon_server_objects_mutex */
+static struct horizon_sync_waiter *horizon_sync_waiters;
+static void horizon_sync_notify_object_locked( struct horizon_server_object *object, int satisfy );
+static void horizon_sync_notify_async_locked(void);
+
+static void horizon_sync_notify_legacy_locked(void)
+{
+    if (!horizon_server_sleepers) return;
+    pthread_cond_broadcast( &horizon_server_objects_cond );
+}
+
+static void horizon_sync_notify_locked( struct horizon_sync_waiter *waiter )
+{
+    if (waiter->notified) return;
+    waiter->notified = 1;
+    pthread_cond_signal( &waiter->cond );
+}
+
+static void horizon_server_sync_lock( const struct horizon_server_connection *connection )
+{
+    if (!connection->direct_reply) pthread_mutex_lock( &horizon_server_objects_mutex );
+}
 
 /* Longest sleep between rechecks, a safety net for changes nothing wakes (100ns). */
 #define HORIZON_SERVER_WAIT_SLICE    200000LL
-/* Message queues become signaled without a wakeup (window timers, input): waits
- * on them recheck this often (100ns). */
+/* Legacy message and timer waits recheck every millisecond (100ns units). */
 #define HORIZON_SERVER_POLL_INTERVAL 10000LL
 
 /* Called with horizon_server_objects_mutex held after an object may have become
  * signaled or a suspended thread may start. */
 static void horizon_server_signal_changed_locked(void)
 {
-    if (horizon_server_sleepers) pthread_cond_broadcast( &horizon_server_objects_cond );
+    struct horizon_sync_waiter *waiter;
+
+    horizon_sync_notify_legacy_locked();
+    for (waiter = horizon_sync_waiters; waiter; waiter = waiter->next) horizon_sync_notify_locked( waiter );
 }
 
 /* Sleeps with horizon_server_objects_mutex held until an object changes or
@@ -3340,9 +3389,7 @@ static void horizon_server_sleep_locked( long long timeout )
                         (u64)timeout * 100 );
     horizon_server_sleepers--;
 }
-/* A server thread waiting for a client's objects holds the object lock while it
- * sleeps in slices. Asked to stop, it has to let the lock go first: parked or
- * ended holding it, no other thread could reach its own stopping place. */
+/* A thread parked at a quit safe point must not retain the object lock. */
 static void horizon_server_quit_check_locked( void )
 {
     extern volatile int wine_nx_quit_requested __attribute__((weak));
@@ -3355,8 +3402,7 @@ static void horizon_server_quit_check_locked( void )
 }
 
 static struct horizon_server_handle_entry *horizon_server_handles;
-/* Whether any waitable timer is running, so waits skip the walk otherwise. */
-static int horizon_server_timers_armed;
+static struct horizon_server_object *horizon_server_timers;
 /* The same entries by handle value, which only grows. Requests look their
  * handles up, and walking every open handle made each lookup slower as the
  * number of handles grew. */
@@ -4533,10 +4579,24 @@ static struct horizon_server_handle_entry *horizon_server_create_handle_for_obje
     return entry;
 }
 
+static void horizon_server_unlink_timer_locked( struct horizon_server_object *timer )
+{
+    struct horizon_server_object **ptr;
+
+    for (ptr = &horizon_server_timers; *ptr; ptr = &(*ptr)->timer_next)
+        if (*ptr == timer)
+        {
+            *ptr = timer->timer_next;
+            timer->timer_next = NULL;
+            return;
+        }
+}
+
 /* Callers hold horizon_server_objects_mutex. */
 static void horizon_server_free_object( struct horizon_server_object *object )
 {
     if (!object) return;
+    if (object->type == HORIZON_SERVER_OBJECT_TIMER) horizon_server_unlink_timer_locked( object );
     if (object->type == HORIZON_SERVER_OBJECT_THREAD)
     {
         struct horizon_server_object **ptr;
@@ -4572,6 +4632,44 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     free( object );
 }
 
+static pthread_key_t horizon_sync_thread_key;
+static pthread_once_t horizon_sync_thread_once = PTHREAD_ONCE_INIT;
+static int horizon_sync_thread_key_valid;
+static __thread struct horizon_server_object *horizon_sync_thread;
+
+static void horizon_sync_release_thread( void *ptr )
+{
+    struct horizon_server_object *thread = ptr;
+
+    horizon_sync_thread = NULL;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!--thread->refs) horizon_server_free_object( thread );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+static void horizon_sync_init_thread_key(void)
+{
+    horizon_sync_thread_key_valid = !pthread_key_create( &horizon_sync_thread_key, horizon_sync_release_thread );
+}
+
+static struct horizon_server_object *horizon_sync_get_thread_locked( unsigned int tid )
+{
+    struct horizon_server_object *thread = horizon_sync_thread;
+
+    if (thread && thread->thread.tid == tid) return thread->thread.terminated ? NULL : thread;
+    if (thread)
+    {
+        if (pthread_setspecific( horizon_sync_thread_key, NULL )) return NULL;
+        horizon_sync_thread = NULL;
+        if (!--thread->refs) horizon_server_free_object( thread );
+    }
+    for (thread = horizon_server_threads; thread; thread = thread->thread_next)
+        if (thread->thread.tid == tid && !thread->thread.terminated) break;
+    if (!thread || pthread_setspecific( horizon_sync_thread_key, thread )) return NULL;
+    thread->refs++;
+    return horizon_sync_thread = thread;
+}
+
 static unsigned int horizon_server_errno_status( int error );
 
 static int horizon_server_object_has_handles_locked( const struct horizon_server_object *object )
@@ -4596,17 +4694,18 @@ static unsigned int horizon_server_close_object_handle( unsigned int handle )
     {
         object = entry->object;
         horizon_server_unlink_handle_locked( entry );
+        if (object) horizon_sync_notify_object_locked( object, 0 );
         /* What waits on a socket that is closed ends, as wineserver ends it. */
         if (object && object->type == HORIZON_SERVER_OBJECT_SOCK && horizon_asyncs.head &&
             horizon_async_cancel( &horizon_asyncs, handle, 0, 0, horizon_async_now(), 1 ))
-            horizon_server_signal_changed_locked();
+            horizon_sync_notify_async_locked();
         /* server/completion.c's close_handle: closing a port's last handle
          * abandons the waits on it. */
         if (object && object->type == HORIZON_SERVER_OBJECT_COMPLETION &&
             !horizon_server_object_has_handles_locked( object ))
         {
             object->completion_closed = 1;
-            horizon_server_signal_changed_locked();
+            horizon_sync_notify_object_locked( object, 1 );
         }
         if (object && object->reg_key)
             horizon_reg_handle_closed( &horizon_registry, object->reg_key, handle );
@@ -5723,6 +5822,15 @@ static void horizon_server_refresh_queue_locked( struct horizon_msgq *queue, uns
         external |= HORIZON_MSGQ_QS_TIMER;
     horizon_msgq_update( queue, external );
 
+    if (queue->sync)
+    {
+        struct horizon_server_object *sync = queue->sync;
+        int signaled = !!horizon_msgq_signaled( queue );
+
+        if (signaled && !sync->signaled) horizon_sync_notify_object_locked( sync, 0 );
+        sync->signaled = signaled;
+    }
+
     if (!(shared = horizon_server_shared_object_locked( locator )) || shared->id != queue->shm_id) return;
     shm = &shared->shm.queue;
     if (shm->wake_bits == queue->wake_bits && shm->changed_bits == queue->changed_bits &&
@@ -5748,6 +5856,14 @@ static void horizon_server_refresh_queues_locked(void)
         horizon_server_refresh_queue_locked( queue, now );
 }
 
+static void horizon_server_refresh_wait_queue_locked( struct horizon_msgq *queue )
+{
+    unsigned long long now = horizon_server_timer_clock();
+
+    if (horizon_msgq_expire( &horizon_msg_queues, now )) horizon_server_refresh_queues_locked();
+    else horizon_server_refresh_queue_locked( queue, now );
+}
+
 static void horizon_server_destroy_queue_locked( unsigned int tid )
 {
     struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
@@ -5764,6 +5880,7 @@ static void horizon_server_destroy_queue_locked( unsigned int tid )
     if (sync)
     {
         sync->queue_tid = 0;
+        horizon_sync_notify_object_locked( sync, 0 );
         if (!--sync->refs) horizon_server_free_object( sync );
     }
     horizon_server_refresh_queues_locked();
@@ -5989,40 +6106,37 @@ static unsigned int horizon_server_current_tid(void)
     return horizon_server_current ? horizon_server_current->tid : 0;
 }
 
-/* Signals the timers whose time has come and moves a periodic one on. Need
- * for Speed Most Wanted paces its streaming thread with SetWaitableTimer and
- * WaitForSingleObject; signalling a timer as it was set returned every wait at
- * once, 70000 times a second on one core, and the game lost its pacing. */
+/* Signal expired timers and advance periodic deadlines. */
 static void horizon_server_update_timers_locked(void)
 {
-    struct horizon_server_handle_entry *entry;
+    struct horizon_server_object **ptr = &horizon_server_timers, *object;
     LARGE_INTEGER now;
-    int armed = 0;
 
-    if (!horizon_server_timers_armed) return;
+    if (!*ptr) return;
     NtQuerySystemTime( &now );
-    for (entry = horizon_server_handles; entry; entry = entry->next)
+    while ((object = *ptr))
     {
-        struct horizon_server_object *object = entry->object;
-
-        if (object->type != HORIZON_SERVER_OBJECT_TIMER || !object->timer_when) continue;
         if (object->timer_when > now.QuadPart)
         {
-            armed = 1;
+            ptr = &object->timer_next;
             continue;
         }
         object->signaled = 1;
         if (!object->timer_period)
         {
+            *ptr = object->timer_next;
+            object->timer_next = NULL;
             object->timer_when = 0;
-            continue;
         }
-        /* A period is in milliseconds, and one that was missed does not repeat. */
-        do object->timer_when += (long long)object->timer_period * 10000;
-        while (object->timer_when <= now.QuadPart);
-        armed = 1;
+        else
+        {
+            long long period = (long long)object->timer_period * 10000;
+
+            object->timer_when += ((now.QuadPart - object->timer_when) / period + 1) * period;
+            ptr = &object->timer_next;
+        }
+        horizon_sync_notify_object_locked( object, 1 );
     }
-    horizon_server_timers_armed = armed;
 }
 
 static int horizon_server_object_is_signaled( const struct horizon_server_object *object )
@@ -6163,8 +6277,10 @@ static void horizon_server_end_thread_locked( struct horizon_server_connection *
     if (horizon_clip_thread_ended( &horizon_clipboard, thread->thread.tid )) horizon_server_clipboard_notify_locked();
     horizon_server_destroy_queue_locked( thread->thread.tid );
     for (entry = horizon_server_handles; entry; entry = entry->next)
-        if (entry->object->type == HORIZON_SERVER_OBJECT_MUTEX)
-            horizon_mutex_abandon( &entry->object->mutex, thread->thread.tid );
+        if (entry->object->type == HORIZON_SERVER_OBJECT_MUTEX &&
+            horizon_mutex_abandon( &entry->object->mutex, thread->thread.tid ))
+            horizon_sync_notify_object_locked( entry->object, 1 );
+    horizon_sync_notify_object_locked( thread, 1 );
     horizon_server_signal_changed_locked();
     if (!--thread->refs) horizon_server_free_object( thread );
 }
@@ -6184,20 +6300,20 @@ static unsigned int horizon_server_signal_object_locked( unsigned int handle )
         if (!object->signaled)
         {
             object->signaled = 1;
-            horizon_server_signal_changed_locked();
+            horizon_sync_notify_object_locked( object, 1 );
         }
         return HORIZON_STATUS_SUCCESS;
     case HORIZON_SERVER_OBJECT_MUTEX:
     {
         unsigned int previous, status = horizon_mutex_release( &object->mutex, horizon_server_current_tid(), &previous );
 
-        if (!status && !object->mutex.count) horizon_server_signal_changed_locked();
+        if (!status && !object->mutex.count) horizon_sync_notify_object_locked( object, 1 );
         return status;
     }
     case HORIZON_SERVER_OBJECT_SEMAPHORE:
         if (object->count == object->max) return HORIZON_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
         object->count++;
-        horizon_server_signal_changed_locked();
+        horizon_sync_notify_object_locked( object, 1 );
         return HORIZON_STATUS_SUCCESS;
     default:
         return HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
@@ -6220,7 +6336,12 @@ static unsigned int horizon_server_wait_object_locked( unsigned int handle, int 
     }
     if (!(entry = horizon_server_find_handle_locked( handle ))) return HORIZON_STATUS_INVALID_HANDLE;
     object = entry->object;
-    if (object->type == HORIZON_SERVER_OBJECT_MSG_QUEUE) horizon_server_refresh_queues_locked();
+    if (object->type == HORIZON_SERVER_OBJECT_MSG_QUEUE)
+    {
+        struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, object->queue_tid );
+
+        if (queue) horizon_server_refresh_wait_queue_locked( queue );
+    }
     if (!horizon_server_object_is_signaled( object )) return HORIZON_STATUS_TIMEOUT;
     if (consume && horizon_server_consume_signal( object )) return HORIZON_STATUS_ABANDONED_WAIT_0;
     return HORIZON_STATUS_SUCCESS;
@@ -9992,7 +10113,7 @@ static int horizon_server_handle_set_queue_mask( struct horizon_server_connectio
     {
         queue->wake_mask = request->wake_mask;
         queue->changed_mask = request->changed_mask;
-        horizon_server_refresh_queues_locked();
+        horizon_server_refresh_wait_queue_locked( queue );
         reply.wake_bits = queue->wake_bits;
         reply.changed_bits = queue->changed_bits;
     }
@@ -10011,7 +10132,7 @@ static int horizon_server_handle_get_queue_status( struct horizon_server_connect
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((queue = horizon_server_queue_locked( connection->tid )))
     {
-        horizon_server_refresh_queues_locked();
+        horizon_server_refresh_wait_queue_locked( queue );
         reply.wake_bits = queue->wake_bits;
         reply.changed_bits = queue->changed_bits;
         queue->changed_bits &= ~request->clear_bits;
@@ -10097,6 +10218,10 @@ static int horizon_server_handle_set_win_timer( struct horizon_server_connection
         case 0: break;
         case HORIZON_WIN_TIMERS_NO_IDS: reply.header.error = 0xc0010486u; break; /* ERROR_NO_MORE_USER_HANDLES */
         default: reply.header.error = HORIZON_STATUS_NO_MEMORY; break;
+        }
+        {
+            struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
+            if (queue && queue->sync) horizon_sync_notify_object_locked( queue->sync, 0 );
         }
         horizon_server_refresh_queues_locked();
     }
@@ -12034,6 +12159,17 @@ static int horizon_sock_poll_all_asyncs_locked(void)
 static pthread_t horizon_sock_poller_thread_id;
 static int horizon_sock_poller_running;
 
+static void horizon_sync_notify_async_locked(void)
+{
+    struct horizon_sync_waiter *waiter;
+    unsigned long long now = horizon_async_now();
+
+    horizon_sync_notify_legacy_locked();
+    for (waiter = horizon_sync_waiters; waiter; waiter = waiter->next)
+        if (!waiter->completed && horizon_async_ready_for( &horizon_asyncs, waiter->connection->tid, now, HORIZON_ASYNC_STALE ))
+            horizon_sync_notify_locked( waiter );
+}
+
 static void *horizon_sock_poller_thread( void *param )
 {
     int busy = 1, since_scan = 0;
@@ -12156,7 +12292,7 @@ static void *horizon_sock_poller_thread( void *param )
         /* Waiting threads look for what is ready for them, or has waited too
          * long for its own thread. */
         if (changed || horizon_async_any_stale( &horizon_asyncs, horizon_async_now(), HORIZON_ASYNC_STALE ))
-            horizon_server_signal_changed_locked();
+            horizon_sync_notify_async_locked();
         pthread_mutex_unlock( &horizon_server_objects_mutex );
     }
     return NULL;
@@ -13319,7 +13455,7 @@ static int horizon_server_handle_cancel_async( struct horizon_server_connection 
                               request->only_thread ? connection->tid : 0, horizon_async_now(), 0 ))
     {
         status = HORIZON_STATUS_SUCCESS;
-        horizon_server_signal_changed_locked();
+        horizon_sync_notify_async_locked();
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_status( connection->reply_fd, status );
@@ -14095,7 +14231,7 @@ static int horizon_server_handle_event_op( struct horizon_server_connection *con
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_EVENT, &object );
     if (status == HORIZON_STATUS_SUCCESS)
     {
@@ -14103,6 +14239,8 @@ static int horizon_server_handle_event_op( struct horizon_server_connection *con
         switch (request->op)
         {
         case HORIZON_PULSE_EVENT:
+            object->signaled = 1;
+            horizon_sync_notify_object_locked( object, 1 );
             object->signaled = 0;
             break;
         case HORIZON_SET_EVENT:
@@ -14110,7 +14248,7 @@ static int horizon_server_handle_event_op( struct horizon_server_connection *con
             if (!object->signaled)
             {
                 object->signaled = 1;
-                horizon_server_signal_changed_locked();
+                horizon_sync_notify_object_locked( object, 1 );
             }
             break;
         case HORIZON_RESET_EVENT:
@@ -14136,7 +14274,7 @@ static int horizon_server_handle_query_event( struct horizon_server_connection *
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_EVENT, &object );
     if (status == HORIZON_STATUS_SUCCESS)
     {
@@ -14159,7 +14297,7 @@ static void horizon_server_post_completion_locked( struct horizon_server_object 
                                                    unsigned long long information )
 {
     if (horizon_completion_add( &port->completion, ckey, cvalue, status, information ))
-        horizon_server_signal_changed_locked();
+        horizon_sync_notify_object_locked( port, 1 );
 }
 
 /* The client's completion wait object, created with a handle at its first wait. */
@@ -14425,12 +14563,12 @@ static int horizon_server_handle_release_mutex( struct horizon_server_connection
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_MUTEX, &object );
     if (status == HORIZON_STATUS_SUCCESS)
         status = horizon_mutex_release( &object->mutex, connection->tid, &reply.prev_count );
     /* Only a release that frees the mutex lets a waiter take it. */
-    if (status == HORIZON_STATUS_SUCCESS && !object->mutex.count) horizon_server_signal_changed_locked();
+    if (status == HORIZON_STATUS_SUCCESS && !object->mutex.count) horizon_sync_notify_object_locked( object, 1 );
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     reply.header.error = status;
@@ -14446,7 +14584,7 @@ static int horizon_server_handle_query_mutex( struct horizon_server_connection *
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_MUTEX, &object );
     if (status == HORIZON_STATUS_SUCCESS)
     {
@@ -14503,7 +14641,7 @@ static int horizon_server_handle_release_semaphore( struct horizon_server_connec
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_SEMAPHORE, &object );
     if (status == HORIZON_STATUS_SUCCESS)
     {
@@ -14514,7 +14652,7 @@ static int horizon_server_handle_release_semaphore( struct horizon_server_connec
         {
             reply.prev_count = object->count;
             object->count += request->count;
-            horizon_server_signal_changed_locked();
+            horizon_sync_notify_object_locked( object, 1 );
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -14532,7 +14670,7 @@ static int horizon_server_handle_query_semaphore( struct horizon_server_connecti
     unsigned int status;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     status = horizon_server_find_typed_object_locked( request->handle, HORIZON_SERVER_OBJECT_SEMAPHORE, &object );
     if (status == HORIZON_STATUS_SUCCESS)
     {
@@ -14612,12 +14750,16 @@ static int horizon_server_handle_set_timer( struct horizon_server_connection *co
          * the wineserver's set_timer takes it. */
         NtQuerySystemTime( &now );
         reply.signaled = object->signaled;
+        if (!object->timer_when)
+        {
+            object->timer_next = horizon_server_timers;
+            horizon_server_timers = object;
+        }
         object->timer_when = request->expire <= 0 ? now.QuadPart - request->expire
                                                   : max( request->expire, now.QuadPart );
         object->timer_period = request->period > 0 ? request->period : 0;
         object->signaled = 0;
-        horizon_server_timers_armed = 1;
-        horizon_server_signal_changed_locked();
+        horizon_sync_notify_object_locked( object, 0 );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
@@ -14639,9 +14781,11 @@ static int horizon_server_handle_cancel_timer( struct horizon_server_connection 
     if (status == HORIZON_STATUS_SUCCESS)
     {
         reply.signaled = object->signaled;
+        horizon_server_unlink_timer_locked( object );
         object->signaled = 0;
         object->timer_when = 0;
         object->timer_period = 0;
+        horizon_sync_notify_object_locked( object, 0 );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
@@ -14714,21 +14858,8 @@ static unsigned int horizon_server_select_wait( const struct horizon_select_wait
     return status;
 }
 
-static unsigned int horizon_server_select_signal_and_wait( const struct horizon_select_signal_and_wait_op *op,
-                                                           unsigned int size, int initial )
-{
-    unsigned int status;
-
-    if (size < offsetof( struct horizon_select_signal_and_wait_op, signal )) return HORIZON_STATUS_INVALID_PARAMETER;
-
-    status = initial && size >= sizeof(*op) ? horizon_server_signal_object_locked( op->signal ) : HORIZON_STATUS_SUCCESS;
-    if (status == HORIZON_STATUS_SUCCESS)
-        status = horizon_server_wait_object_locked( op->wait, TRUE );
-    return status;
-}
-
 static unsigned int horizon_server_select_status( const struct horizon_select_request *request,
-                                                  const unsigned char *data, unsigned int data_size, int initial )
+                                                  const unsigned char *data, unsigned int data_size )
 {
     const unsigned char *select_data = NULL;
     int op;
@@ -14752,8 +14883,9 @@ static unsigned int horizon_server_select_status( const struct horizon_select_re
         return horizon_server_select_wait( (const struct horizon_select_wait_op *)select_data,
                                            request->size, TRUE );
     case HORIZON_SELECT_SIGNAL_AND_WAIT:
-        return horizon_server_select_signal_and_wait(
-            (const struct horizon_select_signal_and_wait_op *)select_data, request->size, initial );
+        if (request->size < offsetof( struct horizon_select_signal_and_wait_op, signal ))
+            return HORIZON_STATUS_INVALID_PARAMETER;
+        return horizon_server_wait_object_locked( ((const struct horizon_select_signal_and_wait_op *)select_data)->wait, TRUE );
     case HORIZON_SELECT_KEYED_EVENT_WAIT:
     case HORIZON_SELECT_KEYED_EVENT_RELEASE:
         return HORIZON_STATUS_SUCCESS;
@@ -14762,20 +14894,194 @@ static unsigned int horizon_server_select_status( const struct horizon_select_re
     }
 }
 
+static void horizon_sync_unqueue_locked( struct horizon_sync_waiter *waiter )
+{
+    if (waiter->queued)
+    {
+        *waiter->prev = waiter->next;
+        if (waiter->next) waiter->next->prev = waiter->prev;
+        waiter->queued = 0;
+    }
+    while (waiter->count)
+    {
+        struct horizon_sync_link *link = &waiter->links[--waiter->count];
+        struct horizon_server_object *object = link->object;
+        struct horizon_server_object *source = link->source;
+
+        if (link->next == link) source->waiters = NULL;
+        else
+        {
+            link->prev->next = link->next;
+            link->next->prev = link->prev;
+            if (source->waiters == link) source->waiters = link->next;
+        }
+        if (source != object && !--source->refs) horizon_server_free_object( source );
+        if (!--object->refs) horizon_server_free_object( object );
+    }
+}
+
+static int horizon_sync_queue_locked( struct horizon_sync_waiter *waiter )
+{
+    const unsigned char *data = waiter->data;
+    const unsigned int *handles;
+    unsigned int count, size = waiter->request->size;
+    int op;
+
+    if (size < sizeof(op)) return 0;
+    if (waiter->data_size >= HORIZON_APC_RESULT_SIZE + size) data += HORIZON_APC_RESULT_SIZE;
+    else if (waiter->data_size < size) return 0;
+    memcpy( &op, data, sizeof(op) );
+    if (op == HORIZON_SELECT_WAIT || op == HORIZON_SELECT_WAIT_ALL)
+    {
+        const struct horizon_select_wait_op *wait = (const void *)data;
+
+        if (size < offsetof( struct horizon_select_wait_op, handles[1] )) return 0;
+        count = (size - offsetof( struct horizon_select_wait_op, handles )) / sizeof(*handles);
+        handles = wait->handles;
+    }
+    else if (op == HORIZON_SELECT_SIGNAL_AND_WAIT)
+    {
+        if (size < offsetof( struct horizon_select_signal_and_wait_op, signal )) return 0;
+        handles = &((const struct horizon_select_signal_and_wait_op *)data)->wait;
+        count = 1;
+    }
+    else return 0;
+    if (count > 64) return 0;
+
+    for (unsigned int i = 0; i < count; i++)
+    {
+        struct horizon_server_object *object = horizon_server_find_handle_object_locked( handles[i], 0 );
+        struct horizon_server_object *source = object;
+        struct horizon_sync_link *link = &waiter->links[waiter->count];
+
+        if (!object) goto unsupported;
+        switch (object->type)
+        {
+        case HORIZON_SERVER_OBJECT_EVENT:
+        case HORIZON_SERVER_OBJECT_MUTEX:
+        case HORIZON_SERVER_OBJECT_SEMAPHORE:
+        case HORIZON_SERVER_OBJECT_TIMER:
+        case HORIZON_SERVER_OBJECT_THREAD:
+        case HORIZON_SERVER_OBJECT_MSG_QUEUE:
+        case HORIZON_SERVER_OBJECT_COMPLETION:
+            break;
+        case HORIZON_SERVER_OBJECT_COMPLETION_WAIT:
+            if (!(source = object->wait_port)) goto unsupported;
+            break;
+        default:
+            goto unsupported;
+        }
+        link->object = object;
+        link->source = source;
+        link->waiter = waiter;
+        if (source->waiters)
+        {
+            link->next = source->waiters;
+            link->prev = source->waiters->prev;
+            link->prev->next = link;
+            link->next->prev = link;
+        }
+        else source->waiters = link->next = link->prev = link;
+        if (source != object) source->refs++;
+        object->refs++;
+        waiter->count++;
+    }
+    waiter->next = horizon_sync_waiters;
+    waiter->prev = &horizon_sync_waiters;
+    if (waiter->next) waiter->next->prev = &waiter->next;
+    horizon_sync_waiters = waiter;
+    waiter->queued = 1;
+    return 1;
+
+unsupported:
+    horizon_sync_unqueue_locked( waiter );
+    return 0;
+}
+
+static void horizon_sync_notify_object_locked( struct horizon_server_object *object, int satisfy )
+{
+    if (object->type == HORIZON_SERVER_OBJECT_COMPLETION_WAIT && object->wait_port) object = object->wait_port;
+    struct horizon_sync_link *link = object->waiters;
+
+    horizon_sync_notify_legacy_locked();
+    if (!link) return;
+    do
+    {
+        struct horizon_sync_waiter *waiter = link->waiter;
+        struct horizon_server_connection *previous = horizon_server_current;
+        struct horizon_server_object *thread = waiter->connection->thread;
+
+        if (waiter->completed) continue;
+        if (!satisfy || thread->thread.suspend ||
+            ((waiter->request->flags & HORIZON_SELECT_ALERTABLE) && thread->apc_first) ||
+            (horizon_asyncs.head && horizon_async_ready_for( &horizon_asyncs, waiter->connection->tid,
+                                                            horizon_async_now(), HORIZON_ASYNC_STALE )))
+        {
+            horizon_sync_notify_locked( waiter );
+            continue;
+        }
+        horizon_server_current = waiter->connection;
+        waiter->status = horizon_server_select_status( waiter->request, waiter->data, waiter->data_size );
+        horizon_server_current = previous;
+        if (waiter->status == HORIZON_STATUS_TIMEOUT) continue;
+        waiter->completed = 1;
+        horizon_sync_notify_locked( waiter );
+    } while ((link = link->next) != object->waiters);
+}
+
+static long long horizon_sync_queue_timeout_locked( unsigned int tid, long long timeout )
+{
+    struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
+    struct horizon_msgq_result *result;
+    struct horizon_win_timer *timer;
+    unsigned long long now = horizon_server_timer_clock(), deadline = ~0ULL;
+
+    if (!queue) return timeout;
+    if ((queue->wake_mask | queue->changed_mask) & HORIZON_MSGQ_QS_TIMER)
+        for (timer = horizon_timers.head; timer; timer = timer->next)
+            if (timer->tid == tid && timer->when > now && timer->when < deadline) deadline = timer->when;
+    for (int list = 0; list < 2; list++)
+        for (result = list ? queue->callback_results : queue->send_results; result; result = result->sender_next)
+            if (!result->replied && result->has_deadline && result->deadline < deadline) deadline = result->deadline;
+    if (deadline <= now) return 0;
+    if (deadline - now < (unsigned long long)((timeout + 9999) / 10000)) timeout = (deadline - now) * 10000;
+    return timeout;
+}
+
+static void horizon_sync_sleep_locked( struct horizon_sync_waiter *waiter, long long timeout )
+{
+    LARGE_INTEGER now;
+    int have_time = 0;
+
+    /* Keep quit responsive without rechecking ordinary waits every 20 ms. */
+    if (timeout > 2500000) timeout = 2500000;
+    for (unsigned int i = 0; i < waiter->count; i++)
+    {
+        struct horizon_server_object *object = waiter->links[i].object;
+
+        if (object->type == HORIZON_SERVER_OBJECT_MSG_QUEUE)
+            timeout = horizon_sync_queue_timeout_locked( object->queue_tid, timeout );
+        if (object->type != HORIZON_SERVER_OBJECT_TIMER || !object->timer_when) continue;
+        if (!have_time) { NtQuerySystemTime( &now ); have_time = 1; }
+        if (object->timer_when <= now.QuadPart) return;
+        if (timeout > object->timer_when - now.QuadPart) timeout = object->timer_when - now.QuadPart;
+    }
+    if (!timeout) return;
+    waiter->notified = 0;
+    condvarWaitTimeout( &waiter->cond.cond, &horizon_server_objects_mutex.normal, (u64)timeout * 100 );
+}
+
 static int horizon_server_handle_polls_locked( unsigned int handle )
 {
     struct horizon_server_handle_entry *entry;
 
     if (!handle || handle == HORIZON_CURRENT_THREAD_HANDLE) return 0;
     if (!(entry = horizon_server_find_handle_locked( handle ))) return 0;
-    /* Neither a message queue nor a timer that is running signals the waiter
-     * when it becomes ready: both are noticed by looking again. */
+    /* Legacy waits poll message queues and active timers. */
     return entry->object->type == HORIZON_SERVER_OBJECT_MSG_QUEUE ||
            (entry->object->type == HORIZON_SERVER_OBJECT_TIMER && entry->object->timer_when);
 }
 
-/* Whether a select waits on a message queue, which can become signaled without
- * a wakeup. Called with horizon_server_objects_mutex held. */
 static int horizon_server_select_polls_locked( const struct horizon_select_request *request,
                                                const unsigned char *data, unsigned int data_size )
 {
@@ -14833,6 +15139,7 @@ static unsigned int horizon_server_queue_user_apc_locked( struct horizon_server_
                                                           const unsigned char *call, unsigned int size )
 {
     struct horizon_user_apc *apc;
+    struct horizon_sync_waiter *waiter;
 
     if (!size || size > HORIZON_USER_APC_MAX) return HORIZON_STATUS_INVALID_PARAMETER;
     if (!(apc = calloc( 1, offsetof( struct horizon_user_apc, call[size] ) ))) return HORIZON_STATUS_NO_MEMORY;
@@ -14841,8 +15148,10 @@ static unsigned int horizon_server_queue_user_apc_locked( struct horizon_server_
     if (thread->apc_last) thread->apc_last->next = apc;
     else thread->apc_first = apc;
     thread->apc_last = apc;
-    /* The thread may already be asleep in a wait of its own. */
-    horizon_server_signal_changed_locked();
+    horizon_sync_notify_legacy_locked();
+    for (waiter = horizon_sync_waiters; waiter; waiter = waiter->next)
+        if (waiter->connection->thread == thread && (waiter->request->flags & HORIZON_SELECT_ALERTABLE))
+            horizon_sync_notify_locked( waiter );
     return HORIZON_STATUS_SUCCESS;
 }
 
@@ -14926,7 +15235,7 @@ static void horizon_async_finish_locked( struct horizon_async *async, unsigned i
         event->object->type == HORIZON_SERVER_OBJECT_EVENT && !event->object->signaled)
     {
         event->object->signaled = 1;
-        horizon_server_signal_changed_locked();
+        horizon_sync_notify_object_locked( event->object, 1 );
     }
     if (async->pending) horizon_report_async( "done", async, status );
 }
@@ -14993,7 +15302,10 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
     unsigned char system_call[HORIZON_APC_CALL_SIZE];
     struct horizon_user_apc *apc = NULL;
     struct horizon_select_reply reply;
-    int polls, signals, ret;
+    struct horizon_sync_link links[64];
+    struct horizon_sync_waiter waiter = { .connection = connection, .request = request,
+        .data = data, .data_size = data_size, .cond = PTHREAD_COND_INITIALIZER, .links = links };
+    int polls, signals, ret, queued = -1;
 #ifndef HORIZON_STANDALONE_SYNTAX
     struct
     {
@@ -15005,15 +15317,8 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
 #endif
 
     memset( &reply, 0, sizeof(reply) );
-    /* Each client has its own server connection/thread. A pending wait sleeps on
-     * horizon_server_objects_cond, which releases the object lock so other
-     * clients can signal objects meanwhile and wake it
-     * (horizon_server_signal_changed_locked). Message queues also change without
-     * that wakeup (window timers), so waits on them recheck every millisecond.
-     * Negative server deadlines are absolute performance-counter ticks (100ns),
-     * positive deadlines use NT wall-clock time; INT64_MAX means infinite.
-     * Signal-and-wait must perform its signal only on the first attempt. */
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    /* Deadlines use 100ns units: negative performance time, positive wall time. */
+    horizon_server_sync_lock( connection );
     horizon_server_async_result_locked( request, data, data_size );
     polls = horizon_server_select_polls_locked( request, data, data_size );
     signals = horizon_server_select_signals( request, data, data_size );
@@ -15033,13 +15338,19 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
     for (int initial = 1;; initial = 0)
     {
         LARGE_INTEGER now;
-        long long timeout = HORIZON_SERVER_WAIT_SLICE;
+        long long timeout = 0x7fffffffffffffffLL;
 
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (connection->thread && connection->thread->thread.started &&
             connection->thread->thread.suspend)
         {
             struct horizon_server_object *thread = connection->thread;
+
+            if (waiter.queued)
+            {
+                horizon_sync_unqueue_locked( &waiter );
+                queued = -1;
+            }
 
             if (!thread->thread_context_valid)
             {
@@ -15075,11 +15386,25 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
         }
 #endif
 
-        /* A system APC comes first, in any wait: the socket operation the
-         * thread started is ready to be done. Not before a signal-and-wait
-         * has signalled, which the client leaves out when it waits again. */
-        if (!(initial && signals) &&
-            (reply.apc_handle = horizon_server_async_apc_locked( connection, system_call )))
+        if (waiter.completed)
+        {
+            reply.header.error = waiter.status;
+            break;
+        }
+
+        if (initial && signals)
+        {
+            const unsigned char *select_data = data;
+            const struct horizon_select_signal_and_wait_op *op;
+
+            if (data_size >= HORIZON_APC_RESULT_SIZE + request->size) select_data += HORIZON_APC_RESULT_SIZE;
+            op = (const void *)select_data;
+            reply.header.error = horizon_server_wait_object_locked( op->wait, FALSE );
+            if (reply.header.error != HORIZON_STATUS_SUCCESS && reply.header.error != HORIZON_STATUS_TIMEOUT) break;
+            reply.header.error = horizon_server_signal_object_locked( op->signal );
+            if (reply.header.error) break;
+        }
+        if ((reply.apc_handle = horizon_server_async_apc_locked( connection, system_call )))
         {
             reply.header.error = HORIZON_STATUS_KERNEL_APC;
             break;
@@ -15095,7 +15420,12 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
             break;
         }
         horizon_server_update_timers_locked();
-        reply.header.error = horizon_server_select_status( request, data, data_size, initial );
+        if (waiter.completed)
+        {
+            reply.header.error = waiter.status;
+            break;
+        }
+        reply.header.error = horizon_server_select_status( request, data, data_size );
         if (reply.header.error != HORIZON_STATUS_TIMEOUT || !request->timeout) break;
         if (request->timeout != 0x7fffffffffffffffLL)
         {
@@ -15112,10 +15442,26 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 timeout = request->timeout - now.QuadPart;
             }
         }
-        if (polls && timeout > HORIZON_SERVER_POLL_INTERVAL) timeout = HORIZON_SERVER_POLL_INTERVAL;
-        horizon_server_sleep_locked( timeout );
+        if (connection->direct_reply && queued < 0)
+            queued = horizon_sync_queue_locked( &waiter );
+        if (queued > 0) horizon_sync_sleep_locked( &waiter, timeout );
+        else
+        {
+            if (polls && timeout > HORIZON_SERVER_POLL_INTERVAL) timeout = HORIZON_SERVER_POLL_INTERVAL;
+            horizon_server_sleep_locked( timeout );
+        }
+        {
+            extern volatile int wine_nx_quit_requested __attribute__((weak));
+
+            if (&wine_nx_quit_requested && wine_nx_quit_requested && waiter.queued)
+            {
+                horizon_sync_unqueue_locked( &waiter );
+                queued = -1;
+            }
+        }
         horizon_server_quit_check_locked();
     }
+    horizon_sync_unqueue_locked( &waiter );
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     reply.signaled = 1;
 
@@ -15171,12 +15517,17 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
     case HORIZON_REQ_QUERY_SEMAPHORE: handler = horizon_server_handle_query_semaphore; break;
     default: return 0;
     }
+    if (!horizon_sync_thread)
+    {
+        pthread_once( &horizon_sync_thread_once, horizon_sync_init_thread_key );
+        if (!horizon_sync_thread_key_valid) return 0;
+    }
     pthread_mutex_lock( &horizon_server_objects_mutex );
-    for (thread = horizon_server_threads; thread; thread = thread->thread_next)
-        if (thread->thread.tid == tid && !thread->thread.terminated) break;
-    if (thread) thread->refs++;
-    pthread_mutex_unlock( &horizon_server_objects_mutex );
-    if (!thread) return 0;
+    if (!(thread = horizon_sync_get_thread_locked( tid )))
+    {
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+        return 0;
+    }
 
     connection.tid = tid;
     connection.pid = thread->thread.pid;
@@ -15190,9 +15541,6 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
     else status = horizon_server_handle_select( &connection, message, data, data_size );
     horizon_server_current = previous;
 
-    pthread_mutex_lock( &horizon_server_objects_mutex );
-    if (!--thread->refs) horizon_server_free_object( thread );
-    pthread_mutex_unlock( &horizon_server_objects_mutex );
     if (status)
     {
         struct horizon_server_reply_header *header = reply;

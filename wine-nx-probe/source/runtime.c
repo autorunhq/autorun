@@ -90,9 +90,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2634"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2639"
 #elif defined(WINE_NX_FEX)
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2634"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2639"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
@@ -4063,10 +4063,11 @@ int main( int argc, char **argv )
         }
     }
 
+    horizon_server_profile_enabled = runtime_profile;
     open_game_log( target );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
-    log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon direct waits" : "Standard" );
+    log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
                                       : "no sdmc device; reads are not cached" );

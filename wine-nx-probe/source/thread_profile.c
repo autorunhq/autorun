@@ -778,9 +778,9 @@ static void server_report( void )
     for (i = 0; i < shown; i++)
     {
         unsigned long long ns = armTicksToNs( delta_ticks[top[i]] );
-        const char *name = &wine_nx_server_names && wine_nx_server_names[top[i]] ? wine_nx_server_names[top[i]] : "?";
+        const char *name = &wine_nx_server_names ? __atomic_load_n( &wine_nx_server_names[top[i]], __ATOMIC_RELAXED ) : NULL;
 
-        len = appendf( line, len, " %s %u avg %lluus %llums", name, delta_calls[top[i]],
+        len = appendf( line, len, " %s %u avg %lluus %llums", name ? name : "?", delta_calls[top[i]],
                        ns / delta_calls[top[i]] / 1000, ns / 1000000 );
     }
     wine_nx_runtime_trace( line );
@@ -826,7 +826,7 @@ void wine_nx_thread_report( void )
                        rows[i].name[0] ? ":" : "", rows[i].name, (int)rows[i].core,
                        rows[i].permille / 10, rows[i].permille % 10 );
     wine_nx_runtime_trace( line );
-    server_report();
+    if (profiling) server_report();
     if (profiling) profile_report( rows, count );
 }
 

@@ -52,7 +52,10 @@ static struct horizon_server_handle_entry *horizon_server_handles;
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int horizon_registry;
 static void horizon_reg_handle_closed(int *reg, void *key, unsigned handle) { (void)reg; (void)key; (void)handle; }
-static void horizon_server_signal_changed_locked(void) {}
+static void horizon_sync_notify_async_locked(void) {}
+static void horizon_sync_notify_object_locked(struct horizon_server_object *o, int satisfy) {
+    (void)o; assert(!satisfy);
+}
 static unsigned horizon_server_errno_status(int e) { return 0xc0000000u | e; }
 static void horizon_server_free_object(struct horizon_server_object *o) { if (o->file_fd != -1) close(o->file_fd); free(o->file_name); free(o); }
 static int expected_closed_fd = -1;

@@ -358,6 +358,7 @@ static inline unsigned int wait_reply( int reply_fd, struct __server_request_inf
  */
 #ifdef __SWITCH__
 /* Request counts and latency for the runtime's [SERVER] report. */
+int horizon_server_profile_enabled;
 unsigned int wine_nx_server_request_count = REQ_NB_REQUESTS;
 unsigned int wine_nx_server_calls[REQ_NB_REQUESTS];
 unsigned long long wine_nx_server_ticks[REQ_NB_REQUESTS];
@@ -408,7 +409,7 @@ unsigned int server_call_unlocked( void *req_ptr )
     unsigned int ret;
 #ifdef __SWITCH__
     unsigned int code = req->u.req.request_header.req;
-    u64 start = armGetSystemTick();
+    u64 start = horizon_server_profile_enabled ? armGetSystemTick() : 0;
 #endif
 
 #ifdef __SWITCH__
@@ -418,9 +419,9 @@ unsigned int server_call_unlocked( void *req_ptr )
     if (!(ret = send_request( data->request_fd, req )))
         ret = wait_reply( data->reply_fd, req );
 #ifdef __SWITCH__
-    if (code < REQ_NB_REQUESTS)
+    if (horizon_server_profile_enabled && code < REQ_NB_REQUESTS)
     {
-        wine_nx_server_names[code] = req->name;
+        __atomic_store_n( &wine_nx_server_names[code], req->name, __ATOMIC_RELAXED );
         __atomic_add_fetch( &wine_nx_server_calls[code], 1, __ATOMIC_RELAXED );
         __atomic_add_fetch( &wine_nx_server_ticks[code], armGetSystemTick() - start, __ATOMIC_RELAXED );
     }
