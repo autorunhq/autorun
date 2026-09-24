@@ -16,6 +16,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from dxvk_payload import DLLS as DXVK_DLLS, validate_payload
 from vkd3d_payload import DLLS as VKD3D_DLLS, validate_payload as validate_vkd3d_payload
 from fex_payload import DLLS as FEX_DLLS, validate_payload as validate_fex_payload
+from legacy_runtime import LEGACY_RUNTIME_DLLS
 
 probe = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -254,6 +255,7 @@ common += ('user32 win32u gdi32 imm32 ole32 oleaut32 combase coml2 rpcrt4 shell3
            'xinput9_1_0 dbghelp windowscodecs '
            'd3dx9_38 d3dx9_43 winhttp oleacc wsock32 psapi').split()
 common += game_runtime
+common += LEGACY_RUNTIME_DLLS
 native_seeds = common + list(game_runtime64) + [
     'winebox64', 'winebox64ec', 'wow64', 'wow64win', 'apisetschema',
 ]

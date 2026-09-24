@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import sys
 
+from legacy_runtime import LEGACY_RUNTIME_DLLS
+
 probe = Path(__file__).resolve().parents[1]
 build = probe / 'build-switch-wow64-dynarec'
 tools = probe / 'tools'
@@ -85,7 +87,8 @@ SIMS2_DLLS = ['gdiplus']
 # 32-bit loader in syswow64. vulkan-1 loads winevulkan by hand and imports
 # nothing else of it, so no import walk reaches either: name both.
 VULKAN_DLLS = 'vulkan-1 winevulkan'.split()
-GAME_DLLS = NFS_DLLS + FALLOUT_DLLS + SOURCE_DLLS + HALO_DLLS + SIMS2_DLLS + VULKAN_DLLS
+GAME_DLLS = (NFS_DLLS + FALLOUT_DLLS + SOURCE_DLLS + HALO_DLLS + SIMS2_DLLS + VULKAN_DLLS
+             + list(LEGACY_RUNTIME_DLLS))
 pe = probe / 'build-wine-wow64-pe'
 toolchain = probe / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
 env = dict(os.environ, PATH=f'{toolchain}:/opt/homebrew/opt/bison/bin:' + os.environ['PATH'])
