@@ -17,6 +17,7 @@ from dxvk_payload import DLLS as DXVK_DLLS, validate_payload
 from vkd3d_payload import DLLS as VKD3D_DLLS, validate_payload as validate_vkd3d_payload
 from fex_payload import DLLS as FEX_DLLS, validate_payload as validate_fex_payload
 from legacy_runtime import LEGACY_RUNTIME_DLLS
+from mesa_sdk import mesa_revision as configured_mesa_revision
 
 probe = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -71,12 +72,11 @@ mesa_revision = None
 if args.vulkan:
     if b'a Vulkan surface has the screen' not in nro.read_bytes():
         parser.error('The NRO has no mesa-switch Vulkan display driver')
-    mesa_revision_path = probe / 'build-mesa-switch/source-revision.txt'
-    if not mesa_revision_path.is_file():
-        parser.error('Missing mesa-switch source revision; rebuild it with build-mesa-switch.sh')
-    mesa_revision = mesa_revision_path.read_text().strip()
-    if not re.fullmatch(r'[0-9a-f]{40}', mesa_revision):
-        parser.error('Invalid or dirty mesa-switch source revision')
+    try:
+        mesa_revision = configured_mesa_revision(cache['WINE_NX_MESA_SWITCH_DIR'],
+                                                 probe / 'build-mesa-switch/source-revision.txt')
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
 staging = tempfile.TemporaryDirectory(prefix='amd64-package-')
 stage_root = Path(staging.name)
 stage = stage_root / 'switch/wine'
