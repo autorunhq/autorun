@@ -2904,6 +2904,8 @@ struct horizon_server_object
     unsigned long long file_completion_key;
     unsigned int file_completion_flags;  /* FILE_SKIP_* */
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
+    struct horizon_server_object *mapping_shared; /* image mapping: file object backing its writable
+                                                   * shared sections, as wineserver's shared_map */
 };
 
 struct horizon_server_handle_entry
@@ -4127,6 +4129,8 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (object->wait_port && !--object->wait_port->refs) horizon_server_free_object( object->wait_port );
     if (object->file_completion && !--object->file_completion->refs)
         horizon_server_free_object( object->file_completion );
+    if (object->mapping_shared && !--object->mapping_shared->refs)
+        horizon_server_free_object( object->mapping_shared );
     if (object->reg_key) horizon_reg_release( &horizon_registry, object->reg_key );
     if (object->file_fd != -1) close( object->file_fd );
     free( object->file_name );
@@ -12130,6 +12134,123 @@ void horizon_get_address_space_limits( void **start, void **limit )
 }
 #endif
 
+/* As wineserver's build_shared_mapping (server/mapping.c): the writable shared
+ * sections of an image are backed by one file that every view of the image
+ * shares, each section taking the next multiple of its mapped size, filled
+ * from the image file. map_image_into_view maps that file over the sections;
+ * without it an image with such a section - FEAR.exe's .SHARED - fails there
+ * with STATUS_INVALID_IMAGE_FORMAT. The file is a memfile, the only kind
+ * horizon_mmap maps shared.
+ * Returns the memfile descriptor, -2 when the image has no such section, or
+ * -1 with errno set. */
+static int horizon_server_build_shared_mapping( int fd, unsigned int alignment )
+{
+    static const unsigned int sector_align = 0x1ff;
+    const unsigned long long align_mask = alignment - 1 > 0xfff ? alignment - 1 : 0xfff;
+    unsigned char dos[64], nt[24];
+    unsigned char *headers = NULL, *sec, *buffer = NULL;
+    unsigned int pe_offset, opt_size, section_count, headers_size, i;
+    unsigned long long total = 0, max_file = 0, shared_pos = 0;
+    struct horizon_memfile *memfile = NULL;
+    int shared_fd = -1, pass;
+
+    if (horizon_server_read_exact_at( fd, 0, dos, sizeof(dos) )) return -2;
+    pe_offset = horizon_get_le32( dos + 0x3c );
+    if (horizon_server_read_exact_at( fd, pe_offset, nt, sizeof(nt) )) return -2;
+    section_count = horizon_get_le16( nt + 6 );
+    opt_size = horizon_get_le16( nt + 20 );
+    headers_size = opt_size + section_count * 40;
+    /* horizon_server_read_pe_image_info has already vetted these headers */
+    if (!(headers = malloc( headers_size )))
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (horizon_server_read_exact_at( fd, pe_offset + sizeof(nt), headers, headers_size ))
+    {
+        free( headers );
+        return -2;
+    }
+
+    /* The first pass sizes the file, the second fills it. */
+    for (pass = 0; pass < 2; pass++)
+    {
+        for (i = 0, sec = headers + opt_size; i < section_count; i++, sec += 40)
+        {
+            unsigned int virtual_size = horizon_get_le32( sec + 8 );
+            unsigned int raw_size = horizon_get_le32( sec + 16 );
+            unsigned int raw_ptr = horizon_get_le32( sec + 20 );
+            unsigned int charact = horizon_get_le32( sec + 36 );
+            unsigned long long map_size, file_size, write_pos, done;
+            off_t read_pos;
+
+            if (!(charact & 0x10000000 /* IMAGE_SCN_MEM_SHARED */) ||
+                !(charact & 0x80000000 /* IMAGE_SCN_MEM_WRITE */))
+                continue;
+
+            /* get_section_sizes in server/mapping.c */
+            map_size = ((virtual_size ? virtual_size : raw_size) + align_mask) & ~align_mask;
+            read_pos = raw_ptr & ~sector_align;
+            file_size = (raw_size + (raw_ptr & sector_align) + sector_align) & ~sector_align;
+            if (file_size > map_size) file_size = map_size;
+
+            if (!pass)
+            {
+                total += map_size;
+                if (file_size > max_file) max_file = file_size;
+                continue;
+            }
+
+            write_pos = shared_pos;
+            shared_pos += map_size;
+            if (!raw_ptr || !file_size) continue;
+
+            for (done = 0; done < file_size;)
+            {
+                ssize_t ret = pread( fd, buffer + done, file_size - done, read_pos + done );
+
+                /* a partial sector at the end of the file is not an error */
+                if (!ret && file_size - done < 0x200) break;
+                if (ret <= 0) goto failed;
+                done += ret;
+            }
+            if (horizon_memfile_pwrite( memfile, (const char *)buffer, done, write_pos ) != (ssize_t)done)
+                goto failed;
+        }
+
+        if (pass) break;
+        if (!total)
+        {
+            free( headers );
+            return -2;
+        }
+        if ((shared_fd = horizon_memfile_create( total, 0 )) == -1) goto failed;
+        if (!(memfile = horizon_memfile_from_fd( shared_fd )) || !(buffer = malloc( max_file ? max_file : 1 )))
+        {
+            errno = ENOMEM;
+            goto failed;
+        }
+    }
+
+    free( buffer );
+    free( headers );
+#ifdef __SWITCH__
+    horizon_trace( "[HZ] shared sections: %llu bytes in a memfile", total );
+#endif
+    return shared_fd;
+
+failed:
+    {
+        int error = errno ? errno : EIO;
+
+        if (shared_fd != -1) close( shared_fd );
+        free( buffer );
+        free( headers );
+        errno = error;
+        return -1;
+    }
+}
+
 static int horizon_server_handle_create_mapping( struct horizon_server_connection *connection,
                                                  const unsigned char *message,
                                                  const unsigned char *data, unsigned int data_size )
@@ -12144,7 +12265,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
     unsigned int mapping_flags = request->flags;
     unsigned int file_access = request->file_access;
     char *mapping_name = NULL;
-    int fd = -1;
+    int fd = -1, shared_fd = -1;
 #ifdef __SWITCH__
     int dbg_has_image = -1;
 #endif
@@ -12207,6 +12328,10 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
         else mapping_size = st.st_size;
     }
 
+    if (!reply.header.error && (request->flags & HORIZON_SEC_IMAGE) &&
+        (shared_fd = horizon_server_build_shared_mapping( fd, image_info.alignment )) == -1)
+        reply.header.error = horizon_server_errno_status( errno );
+
     if (!reply.header.error)
     {
         unsigned int status = HORIZON_STATUS_SUCCESS;
@@ -12231,6 +12356,23 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
             mapping_entry->object->mapping_has_image = !!(request->flags & HORIZON_SEC_IMAGE);
             mapping_entry->object->mapping_image = image_info;
             mapping_entry->object->mapping_memfile = horizon_memfile_from_fd( fd );
+            if (shared_fd >= 0)
+            {
+                struct horizon_server_handle_entry *shared_entry =
+                    horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_FILE );
+
+                if (shared_entry)
+                {
+                    /* No handle of its own: the mapping holds its one reference,
+                     * and get_mapping_info hands each caller a handle to it. */
+                    horizon_server_unlink_handle_locked( shared_entry );
+                    shared_entry->object->file_fd = shared_fd;
+                    shared_entry->object->file_access = FILE_READ_DATA | FILE_WRITE_DATA;
+                    mapping_entry->object->mapping_shared = shared_entry->object;
+                    free( shared_entry );
+                    shared_fd = -1;
+                }
+            }
             reply.handle = mapping_entry->handle;
 #ifdef __SWITCH__
             dbg_has_image = mapping_entry->object->mapping_has_image;
@@ -12250,6 +12392,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
 #endif
 
     if (fd != -1) close( fd );
+    if (shared_fd >= 0) close( shared_fd );
     free( mapping_name );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -12282,6 +12425,14 @@ static int horizon_server_handle_get_mapping_info( struct horizon_server_connect
         reply.size = entry->object->mapping_size;
         reply.flags = entry->object->mapping_flags;
         reply.shared_file = 0;
+        if (entry->object->mapping_shared)
+        {
+            struct horizon_server_handle_entry *shared =
+                horizon_server_create_handle_for_object_locked( entry->object->mapping_shared );
+
+            /* the client closes it once the view is mapped (virtual.c) */
+            if (shared) reply.shared_file = shared->handle;
+        }
 #ifdef __SWITCH__
         dbg_found = 1;
         dbg_type = entry->object->type;
