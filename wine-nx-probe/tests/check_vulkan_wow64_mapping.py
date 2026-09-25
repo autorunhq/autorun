@@ -36,8 +36,10 @@ static struct { int WowTebOffset; } teb;
 static ULONG_PTR zero_bits;
 static uintptr_t host_limit;
 static unsigned allocations, frees, maps, unmaps;
+static unsigned device_allocations;
 static NTSTATUS allocation_result;
 static VkResult properties_result, map_result;
+static VkResult device_allocation_result;
 static uint32_t host_type_bits = 1;
 static void *allocation_pointer = (void *)0x30000000, *driver_pointer;
 static LONG nx_host_import_logs;
@@ -49,6 +51,7 @@ struct vulkan_device {
     struct vulkan_physical_device *physical_device;
     struct { VkDevice device; } host;
     PFN_vkGetMemoryHostPointerPropertiesEXT p_vkGetMemoryHostPointerPropertiesEXT;
+    PFN_vkAllocateMemory p_vkAllocateMemory;
     PFN_vkMapMemory p_vkMapMemory;
     PFN_vkMapMemory2KHR p_vkMapMemory2KHR;
     PFN_vkUnmapMemory p_vkUnmapMemory;
@@ -114,15 +117,51 @@ static VkResult host_map2(VkDevice d, const VkMemoryMapInfoKHR *info, void **p)
 }
 static void host_unmap(VkDevice d, VkDeviceMemory m)
 { assert(d == (VkDevice)3 && m == (VkDeviceMemory)4); unmaps++; }
+static VkResult host_allocate(VkDevice d, const VkMemoryAllocateInfo *info,
+                              const VkAllocationCallbacks *callbacks, VkDeviceMemory *m)
+{
+    const VkImportMemoryHostPointerInfoEXT *imported = info->pNext;
+    assert(d == (VkDevice)3 && !callbacks);
+    assert(imported && imported->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
+    assert(imported->pHostPointer == allocation_pointer && info->allocationSize == 256 * 1048576);
+    device_allocations++;
+    if (!device_allocation_result) *m = (VkDeviceMemory)4;
+    return device_allocation_result;
+}
 '''
 
 for marker in ('static BOOL nx_uses_32bit_address_space(',
                'static BOOL nx_driver_maps_preferred(',
+               'static BOOL nx_can_import_fragmented_memory(',
                'static VkResult import_external_host_memory(',
                'static VkResult allocate_external_host_memory(',
                'static VkResult win32u_vkMapMemory2KHR(',
                'static VkResult win32u_vkMapMemory('):
     fixture += function(marker)
+
+fixture += r'''
+static VkResult retry_fragmented_allocation(VkResult res, unsigned *attempts, BOOL *reclaim)
+{
+    struct vulkan_device *device = vulkan_device_from_handle((VkDevice)1);
+    VkMemoryAllocateInfo info = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                 .allocationSize = 256 * 1048576};
+    VkMemoryAllocateInfo *alloc_info = &info;
+    VkImportMemoryHostPointerInfoEXT host_pointer_info = {0};
+    VkDeviceMemory host_device_memory = VK_NULL_HANDLE;
+    uint32_t mem_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    BOOL host_import_retry = nx_can_import_fragmented_memory(alloc_info);
+    BOOL reclaim_host_memory = TRUE;
+    unsigned alloc_attempts = 1;
+    void *mapping = NULL;
+'''
+fixture += function('    if (res == VK_ERROR_OUT_OF_HOST_MEMORY && host_import_retry)')
+fixture += r'''
+    memory.vm_map = mapping;
+    *attempts = alloc_attempts;
+    *reclaim = reclaim_host_memory;
+    return res;
+}
+'''
 
 fixture += r'''
 int main(int argc, char **argv)
@@ -135,6 +174,7 @@ int main(int argc, char **argv)
     device.physical_device = &physical;
     device.host.device = (VkDevice)3;
     device.p_vkGetMemoryHostPointerPropertiesEXT = host_properties;
+    device.p_vkAllocateMemory = host_allocate;
     device.p_vkMapMemory = host_map;
     device.p_vkUnmapMemory = host_unmap;
     memory.obj.host.device_memory = (VkDeviceMemory)4;
@@ -145,6 +185,32 @@ int main(int argc, char **argv)
         teb.WowTebOffset = wow64 ? 0x2000 : 0;
         zero_bits = wow64 ? UINT32_MAX : 0;
         assert(nx_driver_maps_preferred() == (!wow64 || host_limit <= 0x100000000ULL));
+        VkMemoryAllocateFlagsInfo flags = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+        VkMemoryOpaqueCaptureAddressAllocateInfo capture = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO};
+        VkMemoryDedicatedAllocateInfo dedicated = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        VkMemoryAllocateInfo info = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &flags};
+        assert(nx_can_import_fragmented_memory(&info) == (!wow64 && host_limit > 0x100000000ULL));
+        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        assert(nx_can_import_fragmented_memory(&info) == (!wow64 && host_limit > 0x100000000ULL));
+        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+        assert(!nx_can_import_fragmented_memory(&info));
+        flags.flags = VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT;
+        assert(!nx_can_import_fragmented_memory(&info));
+        info.pNext = &capture;
+        capture.opaqueCaptureAddress = 65536;
+        assert(!nx_can_import_fragmented_memory(&info));
+        info.pNext = &dedicated;
+        assert(nx_can_import_fragmented_memory(&info) == (!wow64 && host_limit > 0x100000000ULL));
+        dedicated.image = (VkImage)1;
+        assert(!nx_can_import_fragmented_memory(&info));
+        dedicated.image = VK_NULL_HANDLE;
+        dedicated.buffer = (VkBuffer)1;
+        assert(!nx_can_import_fragmented_memory(&info));
+        dedicated.sType = VK_STRUCTURE_TYPE_DEDICATED_ALLOCATION_MEMORY_ALLOCATE_INFO_NV;
+        assert(!nx_can_import_fragmented_memory(&info));
+        dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_TENSOR_ARM;
+        assert(!nx_can_import_fragmented_memory(&info));
         for (unsigned modern = 0; modern < 2; modern++)
         {
             void *p = NULL;
@@ -208,7 +274,37 @@ int main(int argc, char **argv)
     map_result = VK_ERROR_MEMORY_MAP_FAILED;
     assert(win32u_vkMapMemory((VkDevice)1, (VkDeviceMemory)2, 0, VK_WHOLE_SIZE, 0, &p) == map_result);
     assert(frees == 3 && !memory.vm_map);
-    puts("Vulkan: guest-width policy, low imports, mapping APIs, range boundaries and failure cleanup passed");
+
+    if (host_limit > 0x100000000ULL)
+    {
+        unsigned attempts;
+        BOOL reclaim;
+        zero_bits = 0;
+        teb.WowTebOffset = 0;
+        allocation_pointer = (void *)0x1a2210000ULL;
+        host_type_bits = 1;
+        assert(retry_fragmented_allocation(VK_SUCCESS, &attempts, &reclaim) == VK_SUCCESS);
+        assert(!device_allocations && !memory.vm_map && attempts == 1 && reclaim);
+        assert(retry_fragmented_allocation(VK_ERROR_DEVICE_LOST, &attempts, &reclaim) == VK_ERROR_DEVICE_LOST);
+        assert(!device_allocations && !memory.vm_map);
+        assert(retry_fragmented_allocation(VK_ERROR_OUT_OF_HOST_MEMORY, &attempts, &reclaim) == VK_SUCCESS);
+        assert(device_allocations == 1 && memory.vm_map == allocation_pointer && attempts == 2 && !reclaim);
+        SIZE_T size = 0;
+        NtFreeVirtualMemory(GetCurrentProcess(), &memory.vm_map, &size, MEM_RELEASE);
+        assert(frees == 4);
+        device_allocation_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        assert(retry_fragmented_allocation(VK_ERROR_OUT_OF_HOST_MEMORY, &attempts, &reclaim) == device_allocation_result);
+        assert(device_allocations == 2 && memory.vm_map == allocation_pointer && attempts == 2 && !reclaim);
+        NtFreeVirtualMemory(GetCurrentProcess(), &memory.vm_map, &size, MEM_RELEASE);
+        assert(frees == 5);
+        host_type_bits = 0;
+        assert(retry_fragmented_allocation(VK_ERROR_OUT_OF_HOST_MEMORY, &attempts, &reclaim) == VK_ERROR_OUT_OF_HOST_MEMORY);
+        assert(device_allocations == 2 && !memory.vm_map && attempts == 1 && reclaim && frees == 6);
+        allocation_result = 1;
+        assert(retry_fragmented_allocation(VK_ERROR_OUT_OF_HOST_MEMORY, &attempts, &reclaim) == VK_ERROR_OUT_OF_HOST_MEMORY);
+        assert(device_allocations == 2 && !memory.vm_map && attempts == 1 && reclaim && frees == 6);
+    }
+    puts("Vulkan: guest-width policy, imports, fragmented allocation recovery, mapping APIs and failure cleanup passed");
 }
 '''
 
@@ -219,7 +315,7 @@ with tempfile.TemporaryDirectory(prefix='vulkan-wow64-mapping-') as directory:
     directory = Path(directory)
     (directory / 'test.c').write_text(fixture)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-D__SWITCH__', '-D_WIN64', '-DWINE_UNIX_LIB',
+                    '-fsanitize=address,undefined', '-D__SWITCH__', '-DWINE_NX_SWAP_POC', '-D_WIN64', '-DWINE_UNIX_LIB',
                     '-D__WINESRC__', '-I', str(root / 'include'), str(directory / 'test.c'),
                     '-o', str(directory / 'test')], check=True)
     for limit in ('0x100000000', '0x1000000000', '0x8000000000'):

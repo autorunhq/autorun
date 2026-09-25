@@ -6361,6 +6361,17 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         set_arm64ec_range( base, size );
     }
 
+#if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
+    if (!status && (protect & PAGE_GUARD)) horizon_swap_exclude( view->base, view->size );
+    if (!status && (type & (MEM_RESERVE | MEM_COMMIT)) && !(type & MEM_WRITE_WATCH) &&
+        is_view_valloc( view ) &&
+        !(view->protect & (VPROT_SYSTEM | VPROT_WRITEWATCH | VPROT_GUARD |
+                           VPROT_PLACEHOLDER | VPROT_FREE_PLACEHOLDER | SEC_NOCACHE)) &&
+        !(protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) &&
+        !(attributes & MEM_EXTENDED_PARAMETER_EC_CODE))
+        horizon_swap_track( base, size );
+#endif
+
     if (!status) VIRTUAL_DEBUG_DUMP_VIEW( view );
 
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );

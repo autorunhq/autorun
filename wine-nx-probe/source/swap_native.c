@@ -3,6 +3,7 @@
 #include "swap_ipc.h"
 #include <sys/reent.h>
 #include <malloc.h>
+#include <stdio.h>
 #include "native_heap.h"
 
 __thread unsigned int wine_nx_swap_native_io;
@@ -245,40 +246,125 @@ void __wrap_svcSignalProcessWideKey( u32 *key, s32 count )
 
 extern void *__real__malloc_r( struct _reent *, size_t );
 extern void *__real__calloc_r( struct _reent *, size_t, size_t );
+extern size_t wine_nx_sd_cache_reclaim( size_t );
 static __thread unsigned int allocator_depth;
 static __thread unsigned int allocator_deferred;
+static unsigned long long native_deferred, native_budget_zero, native_no_progress, native_freed_bytes;
+static unsigned long long native_cache_dropped_bytes;
+static unsigned long long native_fragmented, native_reclaim_ticks, native_max_reclaim_ticks;
 void horizon_swap_native_begin(void) { allocator_deferred++; }
 void horizon_swap_native_end(void) { allocator_deferred--; }
 
-int horizon_swap_native_reclaim( size_t size, size_t *budget )
+int horizon_swap_native_reclaim( size_t size, struct horizon_swap_reclaim_budget *budget )
 {
     size_t freed;
-    if (!size || allocator_deferred || !horizon_swap_enabled()) return 0;
-    if (*budget == SIZE_MAX)
+    unsigned long long tick, elapsed, previous;
+    if (!size || !horizon_swap_enabled()) return 0;
+    if (allocator_deferred)
+    {
+        __atomic_add_fetch( &native_deferred, 1, __ATOMIC_RELAXED );
+        return 0;
+    }
+    if (budget->remaining == SIZE_MAX || budget->fragmented)
     {
         extern char *fake_heap_start, *fake_heap_end;
-        struct mallinfo heap = mallinfo();
+        struct mallinfo heap;
+        struct wine_nx_native_heap_stats backing;
         size_t heap_size = fake_heap_end - fake_heap_start;
-        size_t available = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
-        /* A fragmented heap needs a contiguous block, not unlimited page-outs. */
-        *budget = size > heap_size ? 0 : size > available ? size - available :
-                  size < 16 * 1048576u ? size : 16 * 1048576u;
+        size_t available, largest;
+        __malloc_lock( _REENT );
+        heap = _mallinfo_r( _REENT );
+        wine_nx_native_heap_stats( &backing );
+        __malloc_unlock( _REENT );
+        available = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
+        largest = backing.small_largest > backing.largest ? backing.small_largest : backing.largest;
+        if (budget->remaining != SIZE_MAX && backing.complete && largest <= budget->largest)
+        {
+            __atomic_add_fetch( &native_fragmented, 1, __ATOMIC_RELAXED );
+            budget->remaining = 0;
+            return 0;
+        }
+        if (budget->remaining == SIZE_MAX)
+        {
+            budget->remaining = size > heap_size ? 0 : size > available ? size - available :
+                                size < 16 * 1048576u ? size : 16 * 1048576u;
+            budget->fragmented = backing.complete && size <= available && size > largest;
+        }
+        budget->largest = largest;
     }
-    if (!*budget) return 0;
-    freed = horizon_swap_reclaim( *budget );
-    *budget -= freed < *budget ? freed : *budget;
-    if (!freed) *budget = 0;
+    if (!budget->remaining)
+    {
+        __atomic_add_fetch( &native_budget_zero, 1, __ATOMIC_RELAXED );
+        return 0;
+    }
+    if (!budget->cache_tried)
+    {
+        budget->cache_tried = 1;
+        freed = wine_nx_sd_cache_reclaim( size );
+        if (freed)
+        {
+            __atomic_add_fetch( &native_cache_dropped_bytes, freed, __ATOMIC_RELAXED );
+            return 1;
+        }
+    }
+    tick = armGetSystemTick();
+    freed = horizon_swap_reclaim( budget->remaining );
+    elapsed = armGetSystemTick() - tick;
+    __atomic_add_fetch( &native_reclaim_ticks, elapsed, __ATOMIC_RELAXED );
+    previous = __atomic_load_n( &native_max_reclaim_ticks, __ATOMIC_RELAXED );
+    while (previous < elapsed && !__atomic_compare_exchange_n( &native_max_reclaim_ticks, &previous,
+                elapsed, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) {}
+    if (freed) __atomic_add_fetch( &native_freed_bytes, freed, __ATOMIC_RELAXED );
+    else __atomic_add_fetch( &native_no_progress, 1, __ATOMIC_RELAXED );
+    budget->remaining -= freed < budget->remaining ? freed : budget->remaining;
+    if (!freed) budget->remaining = 0;
     return freed != 0;
+}
+
+void horizon_swap_native_profile(void)
+{
+    extern void wine_nx_runtime_trace( const char * );
+    extern char *fake_heap_start, *fake_heap_end;
+    struct wine_nx_native_heap_stats backing;
+    struct mallinfo heap;
+    size_t heap_size = fake_heap_end - fake_heap_start, available;
+    char line[256];
+    __malloc_lock( _REENT );
+    heap = _mallinfo_r( _REENT );
+    wine_nx_native_heap_stats( &backing );
+    __malloc_unlock( _REENT );
+    available = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
+    snprintf( line, sizeof(line), "[HEAP] free_mb=%llu aligned_free_mb=%llu aligned_largest_mb=%llu "
+              "small_free_mb=%llu small_largest_mb=%llu gap_mb=%llu holes=%llu/%llu scan=%s",
+              (unsigned long long)available >> 20, (unsigned long long)backing.free >> 20,
+              (unsigned long long)backing.largest >> 20, (unsigned long long)backing.small_free >> 20,
+              (unsigned long long)backing.small_largest >> 20, (unsigned long long)backing.gap >> 20,
+              (unsigned long long)backing.holes, (unsigned long long)backing.small_holes,
+              backing.complete ? "ok" : "incomplete" );
+    wine_nx_runtime_trace( line );
+    if (!horizon_swap_enabled()) return;
+    snprintf( line, sizeof(line), "[SWAP-NATIVE] deferred=%llu budget_zero=%llu fragmented=%llu no_progress=%llu "
+              "cache_drop_mb=%llu reclaimed_mb=%llu reclaim_ms=%llu max_reclaim_ms=%llu",
+              __atomic_load_n( &native_deferred, __ATOMIC_RELAXED ),
+              __atomic_load_n( &native_budget_zero, __ATOMIC_RELAXED ),
+              __atomic_load_n( &native_fragmented, __ATOMIC_RELAXED ),
+              __atomic_load_n( &native_no_progress, __ATOMIC_RELAXED ),
+              __atomic_load_n( &native_cache_dropped_bytes, __ATOMIC_RELAXED ) >> 20,
+              __atomic_load_n( &native_freed_bytes, __ATOMIC_RELAXED ) >> 20,
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &native_reclaim_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &native_max_reclaim_ticks, __ATOMIC_RELAXED ) ) / 1000000) );
+    wine_nx_runtime_trace( line );
 }
 
 void *__wrap__malloc_r( struct _reent *reent, size_t size )
 {
     void *ptr;
-    size_t budget = SIZE_MAX;
+    struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
     ptr = __real__malloc_r( reent, size );
     while (!ptr && allocator_depth == 1 && horizon_swap_native_reclaim( size, &budget ))
         ptr = __real__malloc_r( reent, size );
+    if (ptr && horizon_swap_enabled()) wine_nx_native_heap_note_small_allocation( size );
     allocator_depth--;
     return ptr;
 }
@@ -286,12 +372,14 @@ void *__wrap__malloc_r( struct _reent *reent, size_t size )
 void *__wrap__calloc_r( struct _reent *reent, size_t count, size_t size )
 {
     void *ptr;
-    size_t budget = SIZE_MAX;
+    struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
     ptr = __real__calloc_r( reent, count, size );
     while (!ptr && size && allocator_depth == 1 && count <= SIZE_MAX / size &&
            horizon_swap_native_reclaim( count * size, &budget ))
         ptr = __real__calloc_r( reent, count, size );
+    if (ptr && size && count <= SIZE_MAX / size && horizon_swap_enabled())
+        wine_nx_native_heap_note_small_allocation( count * size );
     allocator_depth--;
     return ptr;
 }
@@ -299,11 +387,12 @@ void *__wrap__calloc_r( struct _reent *reent, size_t count, size_t size )
 void *__wrap__realloc_r( struct _reent *reent, void *old, size_t size )
 {
     void *ptr;
-    size_t budget = SIZE_MAX;
+    struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
     ptr = wine_nx_native_realloc( reent, old, size );
     while (!ptr && allocator_depth == 1 && horizon_swap_native_reclaim( size, &budget ))
         ptr = wine_nx_native_realloc( reent, old, size );
+    if (ptr && horizon_swap_enabled()) wine_nx_native_heap_note_small_allocation( size );
     allocator_depth--;
     return ptr;
 }
@@ -311,12 +400,14 @@ void *__wrap__realloc_r( struct _reent *reent, void *old, size_t size )
 void *__wrap__memalign_r( struct _reent *reent, size_t align, size_t size )
 {
     void *ptr;
-    size_t budget = SIZE_MAX;
+    struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
     ptr = wine_nx_native_memalign( reent, align, size );
     while (!ptr && allocator_depth == 1 && align && !(align & (align - 1)) &&
            horizon_swap_native_reclaim( size, &budget ))
         ptr = wine_nx_native_memalign( reent, align, size );
+    if (ptr && (align < 4096 || size < 65536) && horizon_swap_enabled())
+        wine_nx_native_heap_note_small_allocation( size <= SIZE_MAX - align ? size + align : SIZE_MAX );
     allocator_depth--;
     return ptr;
 }

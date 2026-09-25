@@ -331,8 +331,9 @@ static void test_pool_resized(void)
     assert( cached_read( &files[1], &pool, &f, SD_CACHE_CHUNK + 12, buf, 10 ) == 10 );
     assert( f.requests == before + 1 && !memcmp( buf, f.data + SD_CACHE_CHUNK + 12, 10 ) );
 
-    pool.max = 0;  /* nothing at all: every chunk goes back */
-    sd_cache_trim( &pool );
+    assert( sd_cache_reclaim( &pool, SD_CACHE_CHUNK / 2 ) == SD_CACHE_CHUNK );
+    assert( pool.used == 1 );
+    assert( sd_cache_reclaim( &pool, 2 * SD_CACHE_CHUNK ) == SD_CACHE_CHUNK );
     assert( !pool.used && !pool.held );
     for (i = 0; i < 6; i++) sd_cache_drop( &files[i], &pool );
     free( f.data );

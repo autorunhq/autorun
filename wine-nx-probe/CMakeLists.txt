@@ -831,7 +831,7 @@ if(WINE_NX_SWAP_POC)
         message(FATAL_ERROR "WINE_NX_SWAP_POC requires the per-thread FEX exception entry")
     endif()
     target_sources(wine-nx-runtime PRIVATE source/swap_store.c source/swap_file.c source/swap_native.c
-        source/swap_pager.c source/swap_poc.c source/launcher_swap.c)
+        source/swap_pager.c source/launcher_swap.c)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_SWAP_POC)
     foreach(target wine-horizon-real wine-virtual-real wine-system-real wine-win32u-real)
         target_compile_definitions(${target} PRIVATE WINE_NX_SWAP_POC)

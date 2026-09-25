@@ -33,6 +33,7 @@ static const devoptab_t *sd_cache_base;
 static devoptab_t sd_cache_device;
 static pthread_mutex_t sd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct sd_cache_file *sd_cache_files;
+static u64 sd_cache_settled_at;
 /* Whole chunks on every miss (fill_min 0). Readahead from 16 KB halved the
  * bytes The Sims 2 took from the card but nearly tripled the requests, and on
  * the hardware a request costs 0.83 ms before its transfer at 42 MB/s: card
@@ -75,8 +76,14 @@ static unsigned int sd_cache_room(void)
     /* What malloc holds unused plus what it has not taken from the heap yet,
      * and the chunks the cache is already holding, which it can keep. */
     unsigned long long free_mb = (heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0)) >> 20;
-    unsigned long long room = free_mb + (((unsigned long long)sd_cache_pool.used * SD_CACHE_CHUNK) >> 20);
+    unsigned long long room;
     unsigned long long chunks;
+    unsigned int used;
+
+    pthread_mutex_lock( &sd_cache_mutex );
+    used = sd_cache_pool.used;
+    pthread_mutex_unlock( &sd_cache_mutex );
+    room = free_mb + (((unsigned long long)used * SD_CACHE_CHUNK) >> 20);
 
     if (room <= SD_CACHE_FREE_FLOOR_MB) return SD_CACHE_POOL_MIN;
     chunks = (room - SD_CACHE_FREE_FLOOR_MB) / SD_CACHE_FREE_SHARE * (1024 * 1024 / SD_CACHE_CHUNK);
@@ -88,20 +95,36 @@ static unsigned int sd_cache_room(void)
 /* Called before the lock is taken, from the read path. */
 static void sd_cache_resize(void)
 {
-    static u64 settled_at;
     u64 now = armGetSystemTick();
+    u64 settled_at = __atomic_load_n( &sd_cache_settled_at, __ATOMIC_RELAXED );
     unsigned int target;
 
     if (settled_at && armTicksToNs( now - settled_at ) < 5000000000ull) return;
-    settled_at = now;
     target = sd_cache_room();
     pthread_mutex_lock( &sd_cache_mutex );
+    if (__atomic_load_n( &sd_cache_settled_at, __ATOMIC_RELAXED ) != settled_at)
+    {
+        pthread_mutex_unlock( &sd_cache_mutex );
+        return;
+    }
+    __atomic_store_n( &sd_cache_settled_at, now, __ATOMIC_RELAXED );
     if ((target > sd_cache_pool.max ? target - sd_cache_pool.max : sd_cache_pool.max - target) >= SD_CACHE_STEP)
     {
         sd_cache_pool.max = target;
         sd_cache_trim( &sd_cache_pool );
     }
     pthread_mutex_unlock( &sd_cache_mutex );
+}
+
+size_t wine_nx_sd_cache_reclaim( size_t bytes )
+{
+    size_t released = 0;
+
+    if (!bytes || pthread_mutex_trylock( &sd_cache_mutex )) return 0;
+    released = sd_cache_reclaim( &sd_cache_pool, bytes );
+    if (released) __atomic_store_n( &sd_cache_settled_at, armGetSystemTick(), __ATOMIC_RELAXED );
+    pthread_mutex_unlock( &sd_cache_mutex );
+    return released;
 }
 
 /* Megabytes the cache is holding, for the runtime's [PROGRESS] line. */

@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <malloc.h>
 #include <string.h>
 #include <sys/reent.h>
@@ -18,6 +19,24 @@ extern size_t __real__malloc_usable_size_r( struct _reent *, void * );
 static struct backing_block blocks[131072];
 static struct backing_heap heap;
 static uintptr_t backing_start = UINTPTR_MAX, backing_end;
+enum { SMALL_FREE_CACHE_LIMIT = 16 * 1048576 };
+static size_t cached_small_free;
+static unsigned long long small_allocated, cached_allocated;
+
+static size_t free_lower_bound_locked(void)
+{
+    uintptr_t floor = (uintptr_t)__real__sbrk_r( _REENT, 0 );
+    uintptr_t limit = heap.blocks ? heap.base + (size_t)heap.bottom * BACKING_UNIT : (uintptr_t)fake_heap_end;
+    size_t available = (size_t)(heap.count - heap.bottom) * BACKING_UNIT - heap.used;
+    if (limit > floor) available += limit - floor;
+    return available;
+}
+
+static void cache_small_free_locked( size_t available )
+{
+    cached_small_free = available < SMALL_FREE_CACHE_LIMIT ? available : SMALL_FREE_CACHE_LIMIT;
+    cached_allocated = __atomic_load_n( &small_allocated, __ATOMIC_RELAXED );
+}
 
 static void init_heap(void)
 {
@@ -114,6 +133,7 @@ struct mallinfo __wrap__mallinfo_r( struct _reent *reent )
     size_t reserved;
     __malloc_lock( reent );
     info = __real__mallinfo_r( reent );
+    cache_small_free_locked( info.fordblks > 0 ? info.fordblks : 0 );
     reserved = (size_t)(heap.count - heap.bottom) * BACKING_UNIT;
     info.arena += reserved;
     info.uordblks += heap.used;
@@ -121,6 +141,48 @@ struct mallinfo __wrap__mallinfo_r( struct _reent *reent )
     info.ordblks += heap.holes;
     __malloc_unlock( reent );
     return info;
+}
+
+size_t wine_nx_native_heap_free_lower_bound(void)
+{
+    size_t available;
+    __malloc_lock( _REENT );
+    available = free_lower_bound_locked();
+    __malloc_unlock( _REENT );
+    return available;
+}
+
+size_t wine_nx_native_heap_free_estimate( size_t *lower_bound )
+{
+    unsigned long long allocated, spent;
+    size_t available;
+    __malloc_lock( _REENT );
+    available = free_lower_bound_locked();
+    if (lower_bound) *lower_bound = available;
+    allocated = __atomic_load_n( &small_allocated, __ATOMIC_RELAXED );
+    spent = allocated >= cached_allocated ? allocated - cached_allocated : ULLONG_MAX;
+    if (spent < cached_small_free) available += cached_small_free - spent;
+    __malloc_unlock( _REENT );
+    return available;
+}
+
+size_t wine_nx_native_heap_free_exact(void)
+{
+    struct mallinfo info;
+    size_t available, small_free;
+    __malloc_lock( _REENT );
+    info = __real__mallinfo_r( _REENT );
+    small_free = info.fordblks > 0 ? info.fordblks : 0;
+    available = free_lower_bound_locked() + small_free;
+    cache_small_free_locked( small_free );
+    __malloc_unlock( _REENT );
+    return available;
+}
+
+void wine_nx_native_heap_note_small_allocation( size_t size )
+{
+    size_t charge = size < SMALL_FREE_CACHE_LIMIT - 64 ? size + 64 : SMALL_FREE_CACHE_LIMIT;
+    __atomic_add_fetch( &small_allocated, charge, __ATOMIC_RELAXED );
 }
 
 void wine_nx_native_heap_stats( struct wine_nx_native_heap_stats *stats )

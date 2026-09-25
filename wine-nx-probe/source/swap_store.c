@@ -38,10 +38,11 @@ static void header( unsigned char *data, unsigned int index, uint64_t size )
 
 static void save_error( struct swap_store *store )
 {
-    store->fs_error = 0;
+    uint32_t fs_error = 0;
 #ifdef __SWITCH__
-    if (errno == EIO) store->fs_error = fsdevGetLastResult();
+    if (errno == EIO) fs_error = fsdevGetLastResult();
 #endif
+    __atomic_store_n( &store->fs_error, fs_error, __ATOMIC_RELAXED );
 }
 
 static int open_segment( struct swap_store *store, const char *directory, unsigned int index, uint64_t size,
@@ -51,8 +52,12 @@ static int open_segment( struct swap_store *store, const char *directory, unsign
     unsigned char expected[HEADER_SIZE], found[HEADER_SIZE];
     struct stat st;
     struct statvfs space;
+#ifndef __SWITCH__
     void *zeros = NULL;
+#endif
+#ifndef __SWITCH__
     uint64_t done;
+#endif
     int fd = -1, error, created = 0;
 
     store->operation = "open segment";
@@ -76,14 +81,46 @@ static int open_segment( struct swap_store *store, const char *directory, unsign
     if ((uint64_t)space.f_bavail * space.f_frsize < size + HEADER_SIZE + 64 * UINT64_C(1048576))
     { errno = ENOSPC; goto failed; }
     snprintf( temp, sizeof(temp), "%s.creating", path );
+#ifdef __SWITCH__
+    store->operation = "create segment";
+    if (!stat( temp, &st )) { errno = EEXIST; goto failed; }
+    if (errno != ENOENT) goto failed;
+    if (progress && !progress( context, "Allocating SD swap", before, total ))
+    { errno = ECANCELED; goto failed; }
+    created = 1;
+    {
+        Result rc = fsdevCreateFile( temp, size + HEADER_SIZE, 0 );
+        if (R_FAILED(rc))
+        {
+            __atomic_store_n( &store->fs_error, rc, __ATOMIC_RELAXED );
+            errno = EIO;
+            goto failed;
+        }
+    }
+    fd = open( temp, O_RDWR );
+    if (fd < 0) goto failed;
+    if (fstat( fd, &st )) goto failed;
+    if ((uint64_t)st.st_size != size + HEADER_SIZE) { errno = EIO; goto failed; }
+#else
     store->operation = "allocate write buffer";
     if (!(zeros = calloc( 1, PREALLOC_CHUNK ))) { errno = ENOMEM; goto failed; }
     store->operation = "create segment";
     fd = open( temp, O_RDWR | O_CREAT | O_EXCL, 0600 );
     if (fd < 0) goto failed;
     created = 1;
+#endif
     store->operation = "write header";
     if (transfer( fd, expected, sizeof(expected), 0, 1 )) goto failed;
+#ifdef __SWITCH__
+    {
+        unsigned char zero = 0;
+        store->operation = "verify segment end";
+        if (transfer( fd, &zero, 1, size + HEADER_SIZE - 1, 1 )) goto failed;
+        store->offset = before + size;
+        if (progress && !progress( context, "Allocating SD swap", before + size, total ))
+        { errno = ECANCELED; goto failed; }
+    }
+#else
     store->operation = "allocate segment";
     for (done = 0; done < size; )
     {
@@ -95,6 +132,7 @@ static int open_segment( struct swap_store *store, const char *directory, unsign
         done += chunk;
     }
     store->offset = before + size;
+#endif
     store->operation = "flush segment";
     if (fsync( fd )) goto failed;
     store->operation = "close segment";
@@ -107,14 +145,18 @@ static int open_segment( struct swap_store *store, const char *directory, unsign
     store->operation = "reopen segment";
     fd = open( path, O_RDWR );
     if (fd < 0) goto failed;
+#ifndef __SWITCH__
     free( zeros );
+#endif
     return fd;
 failed:
     error = errno;
-    save_error( store );
+    if (!__atomic_load_n( &store->fs_error, __ATOMIC_RELAXED )) save_error( store );
     if (fd >= 0) close( fd );
     if (created) unlink( temp );
+#ifndef __SWITCH__
     free( zeros );
+#endif
     errno = error;
     return -1;
 }
@@ -222,7 +264,7 @@ int swap_store_open_existing( struct swap_store *store, const char *directory, u
     store->operation = NULL;
     return 0;
 failed:
-    store->fs_error = rc;
+    __atomic_store_n( &store->fs_error, rc, __ATOMIC_RELAXED );
     errno = EIO;
 close_store:
     {
@@ -261,7 +303,7 @@ static int native_transfer( struct swap_store *store, unsigned int index, uint64
     wine_nx_swap_native_io--;
     memcpy( armGetTls(), ipc, sizeof(ipc) );
     if (!size) return 0;
-    store->fs_error = rc;
+    __atomic_store_n( &store->fs_error, rc, __ATOMIC_RELAXED );
     errno = EIO;
     return -1;
 }

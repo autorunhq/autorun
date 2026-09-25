@@ -52,6 +52,27 @@ static void validate(void)
     assert(!holes);
 }
 
+static void preserve_large_holes(void)
+{
+    void *small, *large, *guard1, *guard2;
+    uintptr_t floor;
+    backing_init(&heap, blocks, UINT64_C(0x200000000), 32);
+    small = backing_alloc(&heap, heap.base, BACKING_UNIT, 8 * BACKING_UNIT);
+    guard1 = backing_alloc(&heap, heap.base, BACKING_UNIT, BACKING_UNIT);
+    large = backing_alloc(&heap, heap.base, BACKING_UNIT, 12 * BACKING_UNIT);
+    guard2 = backing_alloc(&heap, heap.base, BACKING_UNIT, BACKING_UNIT);
+    floor = heap.base + heap.bottom * BACKING_UNIT;
+    backing_free(&heap, small);
+    backing_free(&heap, large);
+    assert(backing_alloc(&heap, floor, BACKING_UNIT, 8 * BACKING_UNIT) == small);
+    assert(backing_alloc(&heap, floor, BACKING_UNIT, 12 * BACKING_UNIT) == large);
+    backing_free(&heap, small);
+    backing_free(&heap, large);
+    backing_free(&heap, guard1);
+    backing_free(&heap, guard2);
+    assert(heap.bottom == heap.count && !heap.used && !heap.holes);
+}
+
 int main(void)
 {
     const uintptr_t base = UINT64_C(0x1800040000);
@@ -59,6 +80,7 @@ int main(void)
     size_t sizes[256] = {0};
     uintptr_t floor = base;
     assert(!backing_largest(&heap));
+    preserve_large_holes();
     backing_init(&heap, blocks, UINT64_C(0x200000000), 32);
     first = backing_alloc(&heap, heap.base, 2 * 1048576, 2 * 1048576);
     assert(first == (void *)heap.base && !heap.bottom && heap.used == 2 * 1048576);

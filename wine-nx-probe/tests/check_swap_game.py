@@ -6,6 +6,10 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
+virtual = (root / 'dlls/ntdll/unix/virtual.c').read_text()
+allocation = virtual[virtual.index('static NTSTATUS allocate_virtual_memory('):]
+allocation = allocation[:allocation.index('NTSTATUS WINAPI NtAllocateVirtualMemory(')]
+assert 'horizon_swap_track( base, size )' in allocation
 
 
 def function(name):
@@ -30,7 +34,7 @@ parts = [
     function('compare_mapping'),
     'static struct rb_tree mappings = { compare_mapping, NULL };',
     function('find_overlap_mapping'),
-    block('static void swap_free_memory(', '\n#endif'),
+    block('static void swap_profile_max(', '\n#endif'),
     function('swap_resident_locked'),
     function('horizon_swap_fault'),
 ]

@@ -72,9 +72,15 @@ failed:
 void horizon_swap_configure( const struct horizon_swap_storage *storage );
 int horizon_swap_enabled(void);
 size_t horizon_swap_reclaim( size_t size );
-int horizon_swap_native_reclaim( size_t size, size_t *budget );
+struct horizon_swap_reclaim_budget
+{
+    size_t remaining, largest;
+    int fragmented, cache_tried;
+};
+int horizon_swap_native_reclaim( size_t size, struct horizon_swap_reclaim_budget *budget );
 void horizon_swap_native_begin(void);
 void horizon_swap_native_end(void);
+void horizon_swap_native_profile(void);
 struct horizon_swap_pin
 {
     const void *addr;

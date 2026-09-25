@@ -385,7 +385,7 @@ static void nx_memory_note_alloc( VkDeviceSize size, BOOL imported )
     if (allocs % 256) return;
     freed = __atomic_load_n( &nx_memory_free_bytes, __ATOMIC_RELAXED );
     nx_vk_trace( "[NXVK] memory: %d allocations of %lld MB, %d frees of %lld MB, %lld MB live, "
-                 "%d with imported 32-bit mappings", (int)allocs, bytes >> 20,
+                 "%d with imported host mappings", (int)allocs, bytes >> 20,
                  (int)__atomic_load_n( &nx_memory_frees, __ATOMIC_RELAXED ), freed >> 20,
                  (bytes - freed) >> 20, (int)__atomic_load_n( &nx_memory_imports, __ATOMIC_RELAXED ) );
 }
@@ -404,6 +404,30 @@ static BOOL nx_driver_maps_preferred(void)
         nx_vk_trace( "[NXVK] Vulkan memory uses %s",
                      native ? "native driver mappings" : "low host imports for the Win32 guest" );
     return native;
+}
+
+static BOOL nx_can_import_fragmented_memory( const VkMemoryAllocateInfo *info )
+{
+    const VkBaseInStructure *next;
+
+    if (zero_bits || nx_uses_32bit_address_space()) return FALSE;
+    for (next = info->pNext; next; next = next->pNext)
+    {
+        if (next->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO &&
+            (((const VkMemoryAllocateFlagsInfo *)next)->flags &
+             (VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT | VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT)))
+            return FALSE;
+        if (next->sType == VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO &&
+            ((const VkMemoryOpaqueCaptureAddressAllocateInfo *)next)->opaqueCaptureAddress)
+            return FALSE;
+        if (next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO &&
+            (((const VkMemoryDedicatedAllocateInfo *)next)->image || ((const VkMemoryDedicatedAllocateInfo *)next)->buffer))
+            return FALSE;
+        if (next->sType == VK_STRUCTURE_TYPE_DEDICATED_ALLOCATION_MEMORY_ALLOCATE_INFO_NV ||
+            next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_TENSOR_ARM)
+            return FALSE;
+    }
+    return TRUE;
 }
 #endif
 
@@ -474,7 +498,7 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
     {
 #ifdef __SWITCH__
         if (nx_memory_log_failure())
-            nx_vk_trace( "[NXVK] no 32-bit mapping for %llu bytes of memory type %u: status %#x",
+            nx_vk_trace( "[NXVK] no host mapping for %llu bytes of memory type %u: status %#x",
                          (unsigned long long)alloc_info->allocationSize, alloc_info->memoryTypeIndex, (unsigned int)status );
 #endif
         return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1235,6 +1259,17 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
     uint32_t mem_flags;
     void *mapping = NULL;
     VkResult res;
+#ifdef __SWITCH__
+    BOOL host_import_retry;
+#endif
+#ifdef WINE_NX_SWAP_POC
+    struct horizon_swap_reclaim_budget reclaim_budget = { .remaining = SIZE_MAX };
+    struct timespec alloc_start, alloc_end;
+    unsigned int alloc_attempts = 0;
+    BOOL reclaim_host_memory;
+
+    clock_gettime( CLOCK_MONOTONIC, &alloc_start );
+#endif
 
     for (next = &prev->pNext; *next; prev = *next, next = &(*next)->pNext)
     {
@@ -1282,6 +1317,10 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
                             (export_info || import_win32);
     /* For host visible memory, we try to use VK_EXT_external_memory_host on wow64 to ensure that mapped pointer is 32-bit. */
     mem_flags = physical_device->memory_properties.memoryTypes[alloc_info->memoryTypeIndex].propertyFlags;
+#ifdef __SWITCH__
+    host_import_retry = !export_info && !import_win32 && !pointer_info && physical_device->external_memory_align &&
+                        (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && nx_can_import_fragmented_memory( alloc_info );
+#endif
     if (!native_shared_request && physical_device->external_memory_align &&
         (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info &&
 #ifdef __SWITCH__
@@ -1289,8 +1328,6 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
 #endif
         (res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info )))
         return res;
-    /* The 32-bit mapping the host imports, if any: vkMapMemory hands it out, and
-     * it is released once the host memory is freed. */
     mapping = host_pointer_info.pHostPointer;
 
     if (!(memory = calloc( 1, sizeof(*memory) )))
@@ -1377,10 +1414,10 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
     }
 
 #ifdef WINE_NX_SWAP_POC
-    size_t reclaim_budget = SIZE_MAX;
-    BOOL reclaim_host_memory = !import_win32 && !pointer_info && !mapping && !native_shared_request;
+    reclaim_host_memory = !import_win32 && !pointer_info && !mapping && !native_shared_request;
     do
     {
+        alloc_attempts++;
         /* Let the driver trim its BO cache before reclaiming guest pages. */
         if (reclaim_host_memory) horizon_swap_native_begin();
 #endif
@@ -1393,8 +1430,36 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
         res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory );
 #ifdef WINE_NX_SWAP_POC
         if (reclaim_host_memory) horizon_swap_native_end();
+#endif
+#ifdef __SWITCH__
+    if (res == VK_ERROR_OUT_OF_HOST_MEMORY && host_import_retry)
+    {
+        VkResult import_res;
+
+        /* Chunked Wine backing can use holes too small for one native allocation. */
+        host_import_retry = FALSE;
+        import_res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info );
+        if (!import_res && (mapping = host_pointer_info.pHostPointer))
+        {
+#ifdef WINE_NX_SWAP_POC
+            alloc_attempts++;
+            reclaim_host_memory = FALSE;
+#endif
+            res = device->p_vkAllocateMemory( device->host.device, alloc_info, NULL, &host_device_memory );
+        }
+        else if (import_res) res = import_res;
+    }
+#endif
+#ifdef WINE_NX_SWAP_POC
     } while (res == VK_ERROR_OUT_OF_HOST_MEMORY && reclaim_host_memory &&
              horizon_swap_native_reclaim( alloc_info->allocationSize, &reclaim_budget ));
+    clock_gettime( CLOCK_MONOTONIC, &alloc_end );
+    unsigned long long alloc_ms = (alloc_end.tv_sec - alloc_start.tv_sec) * 1000LL +
+                                 (alloc_end.tv_nsec - alloc_start.tv_nsec) / 1000000LL;
+    if (alloc_attempts > 1 || alloc_ms >= 50 || alloc_info->allocationSize >= 64 * UINT64_C(1048576))
+        nx_vk_trace( "[NXVK-ALLOC] size_kb=%llu backing=%s attempts=%u elapsed_ms=%llu result=%d",
+                     (unsigned long long)alloc_info->allocationSize >> 10, mapping ? "host" : "native",
+                     alloc_attempts, alloc_ms, res );
 #endif
     if (res) goto failed;
 

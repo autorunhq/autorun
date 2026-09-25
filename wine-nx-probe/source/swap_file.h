@@ -11,6 +11,9 @@ struct swap_file
     struct swap_store store;
     unsigned char *used;
     unsigned int units, hint;
+    uint64_t used_units, scan_units, scan_ticks, no_run;
+    uint64_t writes, write_bytes, write_ticks, max_write_ticks, write_errors;
+    uint64_t reads, read_bytes, read_ticks, max_read_ticks, read_errors;
 };
 
 int swap_file_open( struct swap_file *file, const char *directory, unsigned int megabytes );

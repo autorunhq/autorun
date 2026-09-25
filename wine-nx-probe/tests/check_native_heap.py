@@ -23,6 +23,8 @@ struct mallinfo { size_t arena, fordblks, keepcost, ordblks, uordblks; };
 static unsigned char area[128 * 1048576] __attribute__((aligned(2097152)));
 char *fake_heap_start = (char *)area, *fake_heap_end = (char *)area + sizeof(area);
 static uintptr_t heap_break = (uintptr_t)area;
+static size_t small_free;
+static unsigned long mallinfo_calls;
 static mtx_t mutex;
 static _Thread_local unsigned int locks;
 struct horizon_heap_chunk *__malloc_av_[258];
@@ -48,8 +50,66 @@ void __real__free_r(struct _reent *r, void *pointer) { (void)r; free(pointer); }
 size_t __real__malloc_usable_size_r(struct _reent *r, void *pointer)
 { (void)r; (void)pointer; assert(0); return 0; }
 struct mallinfo __real__mallinfo_r(struct _reent *r)
-{ (void)r; assert(locks); return (struct mallinfo){.arena = heap_break - (uintptr_t)fake_heap_start}; }
+{
+    (void)r;
+    assert(locks);
+    mallinfo_calls++;
+    return (struct mallinfo){.arena = heap_break - (uintptr_t)fake_heap_start, .fordblks = small_free};
+}
 /* IMPLEMENTATION */
+static void check_available(void)
+{
+    struct wine_nx_native_heap_stats stats;
+    __malloc_lock(_REENT);
+    unsigned long calls = mallinfo_calls;
+    size_t available = wine_nx_native_heap_free_lower_bound();
+    assert(calls == mallinfo_calls);
+    wine_nx_native_heap_stats(&stats);
+    assert(stats.complete && stats.used <= stats.reserved && locks == 1);
+    assert(available == stats.free + stats.gap);
+    __malloc_unlock(_REENT);
+}
+
+static void available_bounds(void)
+{
+    void *p[3];
+    size_t initial = sizeof(area);
+    assert(wine_nx_native_heap_free_lower_bound() == initial);
+    fake_heap_end = (char *)((uintptr_t)fake_heap_start + (UINT64_C(8) << 30));
+    assert(wine_nx_native_heap_free_lower_bound() == (UINT64_C(8) << 30));
+    fake_heap_end = (char *)area + sizeof(area);
+    for (unsigned int i = 0; i < 3; i++)
+    {
+        p[i] = __wrap__memalign_r(_REENT, 65536, 1048576);
+        assert(p[i]);
+    }
+    assert(wine_nx_native_heap_free_lower_bound() == initial - 3 * 1048576);
+    __wrap__free_r(_REENT, p[1]);
+    assert(wine_nx_native_heap_free_lower_bound() == initial - 2 * 1048576);
+    assert(__wrap__sbrk_r(_REENT, 65536) == fake_heap_start);
+    small_free = 32768;
+    unsigned long calls = mallinfo_calls;
+    size_t available = wine_nx_native_heap_free_lower_bound();
+    assert(calls == mallinfo_calls && available == initial - 2 * 1048576 - 65536);
+    size_t lower;
+    assert(wine_nx_native_heap_free_estimate(&lower) == available && lower == available);
+    assert(wine_nx_native_heap_free_exact() == available + small_free);
+    calls = mallinfo_calls;
+    assert(wine_nx_native_heap_free_estimate(&lower) == available + small_free);
+    wine_nx_native_heap_note_small_allocation(8192);
+    assert(wine_nx_native_heap_free_estimate(&lower) == available + small_free - 8192 - 64);
+    wine_nx_native_heap_note_small_allocation(small_free);
+    assert(wine_nx_native_heap_free_estimate(&lower) == available && calls == mallinfo_calls);
+    struct mallinfo info = __wrap__mallinfo_r(_REENT);
+    assert(available + small_free == initial - info.arena + info.fordblks);
+    check_available();
+    small_free = 0;
+    assert(__wrap__sbrk_r(_REENT, -65536) == fake_heap_start + 65536);
+    __wrap__free_r(_REENT, p[0]);
+    __wrap__free_r(_REENT, p[2]);
+    assert(wine_nx_native_heap_free_lower_bound() == initial);
+}
+
 static int worker(void *argument)
 {
     unsigned int seed = (uintptr_t)argument + 1;
@@ -90,12 +150,7 @@ static int worker(void *argument)
                 live[slot][0] = live[slot][size - 1] = slot;
             }
         }
-        if (!(iteration % 100))
-        {
-            struct wine_nx_native_heap_stats stats;
-            wine_nx_native_heap_stats(&stats);
-            assert(stats.complete && stats.used <= stats.reserved && !locks);
-        }
+        if (!(iteration % 100)) check_available();
     }
     for (unsigned int i = 0; i < 32; i++) __wrap__free_r(_REENT, live[i]);
     return 0;
@@ -123,6 +178,7 @@ int main(void)
     for (unsigned int i = 0; i < 128; i++)
         __malloc_av_[2 * i + 2] = __malloc_av_[2 * i + 3] =
             (struct horizon_heap_chunk *)((char *)&__malloc_av_[2 * i + 2] - 2 * sizeof(size_t));
+    available_bounds();
     for (uintptr_t i = 0; i < 4; i++) assert(thrd_create(&workers[i], worker, (void *)i) == thrd_success);
     assert(thrd_create(&workers[4], small_heap_worker, NULL) == thrd_success);
     for (unsigned int i = 0; i < 5; i++) assert(thrd_join(workers[i], NULL) == thrd_success);

@@ -230,6 +230,32 @@ static void runtime_alternate_clean(void)
  * hang looked like until now. */
 static void log_line( const char *fmt, ... ) __attribute__((format(printf,1,2)));
 
+#ifdef WINE_NX_SWAP_POC
+static void runtime_report_swap_io(void)
+{
+    const struct swap_file *file = &game_swap;
+    if (!__atomic_load_n( &game_swap_open, __ATOMIC_ACQUIRE )) return;
+    log_line( "[SWAP-IO] used_mb=%llu scan_k=%llu scan_ms=%llu no_run=%llu "
+              "writes=%llu write_mb=%llu write_ms=%llu max_write_ms=%llu "
+              "reads=%llu read_mb=%llu read_ms=%llu max_read_ms=%llu errors=%llu/%llu fs=0x%x",
+              (unsigned long long)(__atomic_load_n( &file->used_units, __ATOMIC_RELAXED ) * SWAP_FILE_UNIT) >> 20,
+              (unsigned long long)__atomic_load_n( &file->scan_units, __ATOMIC_RELAXED ) >> 10,
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &file->scan_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)__atomic_load_n( &file->no_run, __ATOMIC_RELAXED ),
+              (unsigned long long)__atomic_load_n( &file->writes, __ATOMIC_RELAXED ),
+              (unsigned long long)__atomic_load_n( &file->write_bytes, __ATOMIC_RELAXED ) >> 20,
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &file->write_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &file->max_write_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)__atomic_load_n( &file->reads, __ATOMIC_RELAXED ),
+              (unsigned long long)__atomic_load_n( &file->read_bytes, __ATOMIC_RELAXED ) >> 20,
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &file->read_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &file->max_read_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)__atomic_load_n( &file->write_errors, __ATOMIC_RELAXED ),
+              (unsigned long long)__atomic_load_n( &file->read_errors, __ATOMIC_RELAXED ),
+              (unsigned int)__atomic_load_n( &file->store.fs_error, __ATOMIC_RELAXED ) );
+}
+#endif
+
 static volatile int stall_watch_quit;
 static int stall_watch_running;
 static Thread stall_watch_thread;
@@ -239,6 +265,7 @@ static Thread stall_watch_thread;
  * The same thread emits idle partial output lines and reports interpreter speed. */
 static int log_flusher_quit;
 static pthread_t log_flusher_thread;
+static int runtime_profile;
 
 static void *log_flusher( void *arg )
 {
@@ -249,7 +276,18 @@ static void *log_flusher( void *arg )
     {
         svcSleepThread( 200000000LL );
         runtime_tick_std_streams();
-        if (++ticks % 25 == 0) runtime_report_interpreter();
+        if (++ticks % 25 == 0)
+        {
+#ifdef WINE_NX_SWAP_POC
+            if (__atomic_load_n( &game_swap_open, __ATOMIC_ACQUIRE ))
+            {
+                horizon_swap_report();
+                runtime_report_swap_io();
+            }
+            if (runtime_profile) horizon_swap_native_profile();
+#endif
+            runtime_report_interpreter();
+        }
         if (ticks % 5 == 0)
         {
             extern int horizon_registry_flush(void);
@@ -354,7 +392,6 @@ static void log_line( const char *fmt, ... )
  * next run opens autorun_runtime.log afresh, and without this the run that
  * mattered is gone before it can be read off the card. */
 extern int wine_nx_runtime_verbose;
-static int runtime_profile;
 
 static void open_game_log( const char *target )
 {
@@ -446,9 +483,6 @@ void wine_nx_runtime_trace( const char *msg )
  * whole program down. Their call sites check this first; it is set from
  * sdmc:/switch/wine/verbose.txt containing 1. */
 int wine_nx_runtime_verbose;
-/* The sampling profiler's [PROF] lines (thread_profile.c): sdmc:/switch/wine/profile.txt
- * containing 1, which the launcher's X toggles like Y does verbose.txt. */
-static int runtime_profile;
 static int runtime_dxvk;
 static int runtime_fex;
 static int runtime_four_cores;
@@ -1489,9 +1523,6 @@ static void runtime_report_interpreter(void)
             horizon_memory_pool_stats( pool_stats, sizeof(pool_stats) );
             log_line( "%s", pool_stats );
             wine_nx_thread_report();
-#ifdef WINE_NX_SWAP_POC
-            horizon_swap_report();
-#endif
         }
         return;
     }
@@ -3494,6 +3525,8 @@ static int return_to_launcher( void )
     if (game_swap_open)
     {
         horizon_swap_report();
+        runtime_report_swap_io();
+        if (runtime_profile) horizon_swap_native_profile();
         horizon_swap_configure( NULL );
     }
 #endif
@@ -3517,7 +3550,7 @@ static int return_to_launcher( void )
     if (game_swap_open)
     {
         swap_file_close( &game_swap );
-        game_swap_open = 0;
+        __atomic_store_n( &game_swap_open, 0, __ATOMIC_RELEASE );
     }
 #endif
     {
@@ -4132,22 +4165,22 @@ int main( int argc, char **argv )
     {
         struct launcher_kv kv;
         if (launcher_kv_load( &kv, RUNTIME_DIR "/launcher.txt" ) &&
-            launcher_kv_get_int( &kv, "swap-in-game", 0 ))
+            launcher_kv_get_int( &kv, "swap-mb", 0 ))
         {
-            unsigned int size = launcher_kv_get_int( &kv, "swap-poc-mb", 0 );
+            unsigned int size = launcher_kv_get_int( &kv, "swap-mb", 0 );
             u64 bits = 0;
             svcGetInfo( &bits, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0 );
             if (bits < (UINT64_C(1) << 36) || swap_file_open( &game_swap, RUNTIME_DIR "/swap-poc", size ))
             {
-                log_line( "[SWAP-GAME] startup failed: validate the SD files using the 39-bit forwarder (errno=%d fs=0x%x)",
+                log_line( "[SWAP-GAME] startup failed: check SD swap files and the 39-bit forwarder (errno=%d fs=0x%x)",
                           errno, game_swap.store.fs_error );
                 return return_to_launcher();
             }
             struct horizon_swap_storage storage = { &game_swap, swap_file_save, swap_file_load,
                                                     swap_file_discard, game_swap.store.size };
             horizon_swap_configure( &storage );
-            game_swap_open = 1;
-            log_line( "[SWAP-GAME] enabled capacity=%uMiB reserve=128MiB", size );
+            __atomic_store_n( &game_swap_open, 1, __ATOMIC_RELEASE );
+            log_line( "[SWAP-GAME] enabled capacity=%uMiB reserve=128MiB path=" RUNTIME_DIR "/swap-poc", size );
         }
     }
 #endif

@@ -3519,6 +3519,7 @@ struct horizon_backing
 #ifdef WINE_NX_SWAP_POC
     struct horizon_swap_entry swap;
     unsigned char swap_private, swap_managed, swap_excluded;
+    unsigned long long swap_report_epoch, swap_out_tick;
 #endif
 };
 
@@ -3595,9 +3596,22 @@ static int swap_active;
 static uintptr_t swap_cursor;
 static struct horizon_swap_pin *swap_pins, *swap_locks;
 static struct horizon_swap_index swap_index;
+static struct horizon_swap_index swap_fault_index;
 static unsigned long long swap_stored_bytes, swap_out_bytes, swap_in_bytes, swap_errors;
 static unsigned long long swap_out_ticks, swap_in_ticks, swap_max_restore_ticks;
 static int swap_last_error;
+static struct
+{
+    unsigned long long tracked_mappings, tracked_bytes;
+    unsigned long long reclaim_calls, reclaim_ticks, scanned, candidates, pinned, full, empty;
+    unsigned long long pressure, native_calls, native_busy, native_trim_bytes;
+    unsigned long long pressure_fast, pressure_cached, pressure_scans, pressure_scan_ticks, pressure_scan_max_ticks;
+    unsigned long long backing_retries, backing_failures;
+    unsigned long long out_count, restore_count, restore_failures;
+    unsigned long long heap_release_bytes;
+    unsigned long long faults, refaults, fault_unhandled, fault_wait_ticks, fault_max_wait_ticks;
+    unsigned long long quick_refaults, quick_refault_bytes;
+} swap_profile;
 static size_t swap_reclaim_locked( size_t size );
 static int swap_restore_locked( struct horizon_backing *backing );
 static int swap_resident_locked( const void *addr, size_t size );
@@ -17111,21 +17125,58 @@ static int unmap_code_memory_range( void *addr, void *source, size_t size )
 }
 
 #ifdef WINE_NX_SWAP_POC
+static void swap_profile_max( unsigned long long *target, unsigned long long value )
+{
+    unsigned long long previous = __atomic_load_n( target, __ATOMIC_RELAXED );
+    while (previous < value && !__atomic_compare_exchange_n( target, &previous, value, 0,
+                                                               __ATOMIC_RELAXED, __ATOMIC_RELAXED )) {}
+}
+
 static void swap_free_memory( void *context, void *memory )
 {
     struct horizon_backing *backing = context;
-    if (!horizon_pages_free( &backing_pages, memory, backing->size )) free( memory );
+    unsigned int arenas = backing_pages.active_arenas;
+    size_t released;
+    if (horizon_pages_free( &backing_pages, memory, backing->size ))
+        released = (arenas - backing_pages.active_arenas) * HORIZON_POOL_ARENA;
+    else
+    {
+        released = malloc_usable_size( memory );
+        free( memory );
+    }
+    __atomic_add_fetch( &swap_profile.heap_release_bytes, released, __ATOMIC_RELAXED );
 }
 
 static void *swap_alloc_memory( void *context, size_t size )
 {
     void *memory = horizon_pages_alloc_dedicated( &backing_pages, size );
     (void)context;
-    while (!memory && swap_reclaim_locked( size )) memory = horizon_pages_alloc_dedicated( &backing_pages, size );
+    if (!memory)
+    {
+        __atomic_add_fetch( &swap_profile.backing_retries, 1, __ATOMIC_RELAXED );
+        while (swap_reclaim_locked( size ))
+            if ((memory = horizon_pages_alloc_dedicated( &backing_pages, size ))) break;
+        if (!memory) __atomic_add_fetch( &swap_profile.backing_failures, 1, __ATOMIC_RELAXED );
+    }
     return memory;
 }
 
 static int swap_map_memory( void *context, void *memory );
+
+static int swap_mark_faults_locked( struct horizon_backing *backing, int set )
+{
+    struct horizon_mapping *first = find_overlap_mapping( backing->code_addr, backing->size );
+    struct rb_entry *entry;
+    for (entry = first ? &first->entry : NULL; entry; entry = rb_next( entry ))
+    {
+        struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
+        if ((char *)mapping->addr >= (char *)backing->code_addr + backing->size) break;
+        if (mapping->backing != backing) continue;
+        if (swap_index_update( &swap_fault_index, (uintptr_t)mapping->addr, mapping->size, set ))
+        { errno = ENOMEM; return -1; }
+    }
+    return 0;
+}
 
 static int swap_unmap_memory( void *context, void *memory )
 {
@@ -17133,6 +17184,11 @@ static int swap_unmap_memory( void *context, void *memory )
     struct horizon_mapping *first = find_overlap_mapping( backing->code_addr, backing->size );
     struct rb_entry *entry;
     int changed = 0;
+    if (swap_mark_faults_locked( backing, 1 ))
+    {
+        swap_mark_faults_locked( backing, 0 );
+        return -1;
+    }
     for (entry = first ? &first->entry : NULL; entry; entry = rb_next( entry ))
     {
         struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
@@ -17149,6 +17205,7 @@ static int swap_unmap_memory( void *context, void *memory )
                 backing->swap.detached = 1;
                 return -1;
             }
+            swap_mark_faults_locked( backing, 0 );
             errno = EBUSY;
             return -1;
         }
@@ -17184,6 +17241,7 @@ static int swap_map_memory( void *context, void *memory )
         if (R_FAILED(rc)) { errno = EIO; return -1; }
         mapping->swap_unmapped = 0;
     }
+    swap_mark_faults_locked( backing, 0 );
     return 0;
 }
 
@@ -17234,8 +17292,10 @@ static size_t swap_reclaim_locked( size_t size )
     struct rb_entry *entry;
     size_t freed = 0;
     unsigned int pass;
+    unsigned long long scanned = 0, candidates = 0, pinned = 0, full = 0, start;
     uintptr_t begin = swap_cursor;
     if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return 0;
+    start = armGetSystemTick();
     for (pass = 0; pass < 2 && freed < size; pass++)
     {
         first = pass || !begin ? NULL : find_overlap_mapping( (void *)begin, (UINT64_C(1) << 39) - begin );
@@ -17247,12 +17307,14 @@ static size_t swap_reclaim_locked( size_t size )
             unsigned long long tick;
             if (pass && (uintptr_t)mapping->addr >= begin) break;
             swap_cursor = (uintptr_t)mapping->addr + mapping->size;
+            scanned++;
             if (!mapping->swap_managed || !backing || mapping->swap_excluded ||
                 (mapping->prot & PROT_EXEC) || backing->swap_excluded || !backing->heap_addr ||
-                !backing->swap_private || backing->swap.detached || backing->swap.token ||
-                swap_pinned_locked( backing->code_addr, backing->size )) continue;
+                !backing->swap_private || backing->swap.detached || backing->swap.token) continue;
+            candidates++;
+            if (swap_pinned_locked( backing->code_addr, backing->size )) { pinned++; continue; }
             if (backing->size > swap_storage.capacity - __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED ))
-                continue;
+            { full++; continue; }
             tick = armGetSystemTick();
             if (horizon_swap_out( &backing->swap, &backing->heap_addr, backing->size,
                                   &swap_ops, backing, &swap_storage ))
@@ -17264,29 +17326,70 @@ static size_t swap_reclaim_locked( size_t size )
             }
             __atomic_add_fetch( &swap_out_ticks, armGetSystemTick() - tick, __ATOMIC_RELAXED );
             freed += backing->size;
+            __atomic_add_fetch( &swap_profile.out_count, 1, __ATOMIC_RELAXED );
             __atomic_add_fetch( &swap_stored_bytes, backing->size, __ATOMIC_RELAXED );
             __atomic_add_fetch( &swap_out_bytes, backing->size, __ATOMIC_RELAXED );
+            backing->swap_out_tick = armGetSystemTick();
+            if (armTicksToNs( backing->swap_out_tick - start ) >= 8000000) goto done;
         }
     }
 done:
-    if (freed) horizon_pages_trim( &backing_pages );
+    __atomic_add_fetch( &swap_profile.reclaim_calls, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.reclaim_ticks, armGetSystemTick() - start, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.scanned, scanned, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.candidates, candidates, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.pinned, pinned, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.full, full, __ATOMIC_RELAXED );
+    if (!freed) __atomic_add_fetch( &swap_profile.empty, 1, __ATOMIC_RELAXED );
+    if (freed)
+        __atomic_add_fetch( &swap_profile.heap_release_bytes, horizon_pages_trim( &backing_pages ), __ATOMIC_RELAXED );
     return freed;
 }
 
 static void swap_pressure_locked( size_t size )
 {
-    unsigned long long total, used, target = size + 128 * UINT64_C(1048576);
+    extern size_t wine_nx_native_heap_free_estimate( size_t * );
+    extern size_t wine_nx_native_heap_free_exact(void);
+    unsigned long long target = size + 128 * UINT64_C(1048576);
+    size_t lower_bound, available, trimmed;
+    u64 tick;
     if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return;
-    horizon_get_memory_info( &total, &used );
-    if (total - used < target) swap_reclaim_locked( min( target - (total - used), 16 * UINT64_C(1048576) ) );
+    available = wine_nx_native_heap_free_estimate( &lower_bound );
+    if (available >= target)
+    {
+        __atomic_add_fetch( lower_bound >= target ? &swap_profile.pressure_fast :
+                            &swap_profile.pressure_cached, 1, __ATOMIC_RELAXED );
+        return;
+    }
+    tick = armGetSystemTick();
+    available = wine_nx_native_heap_free_exact();
+    tick = armGetSystemTick() - tick;
+    __atomic_add_fetch( &swap_profile.pressure_scans, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.pressure_scan_ticks, tick, __ATOMIC_RELAXED );
+    swap_profile_max( &swap_profile.pressure_scan_max_ticks, tick );
+    if (available < target)
+    {
+        __atomic_add_fetch( &swap_profile.pressure, 1, __ATOMIC_RELAXED );
+        trimmed = horizon_pages_trim( &backing_pages );
+        __atomic_add_fetch( &swap_profile.native_trim_bytes, trimmed, __ATOMIC_RELAXED );
+        if (trimmed < target - available)
+            swap_reclaim_locked( min( target - available - trimmed, 16 * UINT64_C(1048576) ) );
+    }
 }
 
 size_t horizon_swap_reclaim( size_t size )
 {
     size_t freed;
-    if (!horizon_swap_enabled() || pthread_mutex_trylock( &mapping_mutex )) return 0;
+    if (!horizon_swap_enabled()) return 0;
+    __atomic_add_fetch( &swap_profile.native_calls, 1, __ATOMIC_RELAXED );
+    if (pthread_mutex_trylock( &mapping_mutex ))
+    {
+        __atomic_add_fetch( &swap_profile.native_busy, 1, __ATOMIC_RELAXED );
+        return 0;
+    }
     size = min( size, 2 * UINT64_C(1048576) );
     freed = horizon_pages_trim( &backing_pages );
+    __atomic_add_fetch( &swap_profile.native_trim_bytes, freed, __ATOMIC_RELAXED );
     if (freed < size) freed += swap_reclaim_locked( size - freed );
     pthread_mutex_unlock( &mapping_mutex );
     return freed;
@@ -17301,11 +17404,19 @@ static int swap_restore_locked( struct horizon_backing *backing )
     if (horizon_swap_in( &backing->swap, &backing->heap_addr, backing->size,
                          &swap_ops, backing, &swap_storage ))
     {
+        __atomic_add_fetch( &swap_profile.restore_failures, 1, __ATOMIC_RELAXED );
         __atomic_add_fetch( &swap_errors, 1, __ATOMIC_RELAXED );
         __atomic_store_n( &swap_last_error, errno, __ATOMIC_RELAXED );
         return -1;
     }
     elapsed = armGetSystemTick() - tick;
+    if (token && backing->swap_out_tick && armTicksToNs( tick - backing->swap_out_tick ) < 1000000000)
+    {
+        __atomic_add_fetch( &swap_profile.quick_refaults, 1, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &swap_profile.quick_refault_bytes, backing->size, __ATOMIC_RELAXED );
+    }
+    backing->swap_out_tick = 0;
+    __atomic_add_fetch( &swap_profile.restore_count, 1, __ATOMIC_RELAXED );
     __atomic_add_fetch( &swap_in_ticks, elapsed, __ATOMIC_RELAXED );
     longest = __atomic_load_n( &swap_max_restore_ticks, __ATOMIC_RELAXED );
     if (elapsed > longest) __atomic_store_n( &swap_max_restore_ticks, elapsed, __ATOMIC_RELAXED );
@@ -17331,6 +17442,11 @@ void horizon_swap_track( void *addr, size_t size )
                                      !mapping->backing->swap_excluded)))
         {
             if (swap_index_update( &swap_index, (uintptr_t)mapping->addr, mapping->size, 1 )) break;
+            if (!mapping->swap_managed)
+            {
+                __atomic_add_fetch( &swap_profile.tracked_mappings, 1, __ATOMIC_RELAXED );
+                __atomic_add_fetch( &swap_profile.tracked_bytes, mapping->size, __ATOMIC_RELAXED );
+            }
             mapping->swap_managed = 1;
             if (mapping->backing) mapping->backing->swap_managed = 1;
         }
@@ -17469,11 +17585,51 @@ int horizon_swap_unlock( const void *addr, size_t size )
     return ret;
 }
 
+static void swap_report_resident(void)
+{
+    static unsigned long long epoch;
+    unsigned long long resident = 0, eligible = 0, pinned = 0, excluded = 0, untracked = 0, lazy = 0;
+    unsigned long long pool_free = 0, start;
+    struct rb_entry *entry;
+    unsigned int i;
+    char line[320];
+    if (pthread_mutex_trylock( &mapping_mutex )) return;
+    start = armGetSystemTick();
+    epoch++;
+    for (entry = rb_head( mappings.root ); entry; entry = rb_next( entry ))
+    {
+        struct horizon_mapping *mapping = RB_ENTRY_VALUE( entry, struct horizon_mapping, entry );
+        struct horizon_backing *backing = mapping->backing;
+        if (mapping->reservation && mapping->swap_managed && mapping->prot != PROT_NONE)
+            lazy += mapping->size;
+        if (!backing || backing->swap_report_epoch == epoch) continue;
+        backing->swap_report_epoch = epoch;
+        if (!backing->heap_addr || backing->swap.detached) continue;
+        resident += backing->size;
+        if (!backing->swap_managed) untracked += backing->size;
+        else if (!backing->swap_private || backing->swap_excluded) excluded += backing->size;
+        else if (swap_pinned_locked( backing->code_addr, backing->size )) pinned += backing->size;
+        else eligible += backing->size;
+    }
+    for (i = 0; i < HORIZON_POOL_ARENAS; i++)
+        if (backing_pages.arenas[i].memory)
+            pool_free += backing_pages.arenas[i].free_pages * HORIZON_POOL_PAGE;
+    pthread_mutex_unlock( &mapping_mutex );
+    snprintf( line, sizeof(line), "[SWAP-RESIDENT] mapped_mb=%llu eligible_mb=%llu pinned_mb=%llu "
+              "excluded_mb=%llu untracked_mb=%llu lazy_va_mb=%llu arena_free_mb=%llu scan_us=%llu",
+              resident >> 20, eligible >> 20, pinned >> 20, excluded >> 20, untracked >> 20,
+              lazy >> 20, pool_free >> 20, (unsigned long long)(armTicksToNs( armGetSystemTick() - start ) / 1000) );
+    wine_nx_runtime_trace( line );
+}
+
 void horizon_swap_report(void)
 {
-    char line[256];
+    char line[512];
+    unsigned long long total, used;
     if (!__atomic_load_n( &swap_active, __ATOMIC_ACQUIRE )) return;
-    snprintf( line, sizeof(line), "[SWAP-GAME] stored_kb=%llu out_kb=%llu in_kb=%llu out_ms=%llu restore_ms=%llu max_restore_ms=%llu failures=%llu errno=%d",
+    horizon_get_memory_info( &total, &used );
+    snprintf( line, sizeof(line), "[SWAP-GAME] free_mb=%llu stored_kb=%llu out_kb=%llu in_kb=%llu out_ms=%llu restore_ms=%llu max_restore_ms=%llu failures=%llu errno=%d",
+              (total - used) >> 20,
               __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED ) >> 10,
               __atomic_load_n( &swap_out_bytes, __ATOMIC_RELAXED ) >> 10,
               __atomic_load_n( &swap_in_bytes, __ATOMIC_RELAXED ) >> 10,
@@ -17483,13 +17639,50 @@ void horizon_swap_report(void)
               __atomic_load_n( &swap_errors, __ATOMIC_RELAXED ),
               __atomic_load_n( &swap_last_error, __ATOMIC_RELAXED ) );
     wine_nx_runtime_trace( line );
+    snprintf( line, sizeof(line), "[SWAP-RECLAIM] enrolled=%llu enrolled_va_mb=%llu calls=%llu scanned=%llu candidates=%llu pinned=%llu full=%llu empty=%llu ms=%llu pressure=%llu native=%llu busy=%llu trim_mb=%llu heap_release_mb=%llu out=%llu alloc_retry=%llu alloc_fail=%llu",
+              __atomic_load_n( &swap_profile.tracked_mappings, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.tracked_bytes, __ATOMIC_RELAXED ) >> 20,
+              __atomic_load_n( &swap_profile.reclaim_calls, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.scanned, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.candidates, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.pinned, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.full, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.empty, __ATOMIC_RELAXED ),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_profile.reclaim_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              __atomic_load_n( &swap_profile.pressure, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.native_calls, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.native_busy, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.native_trim_bytes, __ATOMIC_RELAXED ) >> 20,
+              __atomic_load_n( &swap_profile.heap_release_bytes, __ATOMIC_RELAXED ) >> 20,
+              __atomic_load_n( &swap_profile.out_count, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.backing_retries, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.backing_failures, __ATOMIC_RELAXED ) );
+    wine_nx_runtime_trace( line );
+    snprintf( line, sizeof(line), "[SWAP-PRESSURE] fast=%llu cached=%llu scans=%llu scan_ms=%llu max_scan_us=%llu",
+              __atomic_load_n( &swap_profile.pressure_fast, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.pressure_cached, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.pressure_scans, __ATOMIC_RELAXED ),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_profile.pressure_scan_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_profile.pressure_scan_max_ticks, __ATOMIC_RELAXED ) ) / 1000) );
+    wine_nx_runtime_trace( line );
+    snprintf( line, sizeof(line), "[SWAP-FAULT] faults=%llu refaults=%llu unhandled=%llu wait_ms=%llu max_wait_ms=%llu restored=%llu restore_failures=%llu quick_refaults=%llu quick_refault_mb=%llu",
+              __atomic_load_n( &swap_profile.faults, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.refaults, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.fault_unhandled, __ATOMIC_RELAXED ),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_profile.fault_wait_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              (unsigned long long)(armTicksToNs( __atomic_load_n( &swap_profile.fault_max_wait_ticks, __ATOMIC_RELAXED ) ) / 1000000),
+              __atomic_load_n( &swap_profile.restore_count, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.restore_failures, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.quick_refaults, __ATOMIC_RELAXED ),
+              __atomic_load_n( &swap_profile.quick_refault_bytes, __ATOMIC_RELAXED ) >> 20 );
+    wine_nx_runtime_trace( line );
+    swap_report_resident();
 }
 
 void horizon_swap_get_memory_info( unsigned long long *total, unsigned long long *available )
 {
-    unsigned long long used = __atomic_load_n( &swap_stored_bytes, __ATOMIC_RELAXED );
-    *total = horizon_swap_enabled() ? swap_storage.capacity : 0;
-    *available = *total > used ? *total - used : 0;
+    *total = 0;
+    *available = 0;
 }
 #endif
 
@@ -18655,6 +18848,10 @@ static int unmap_range_locked( void *addr, size_t size )
             if (split_reservation_mapping( mapping, unmap_start, unmap_size )) return -1;
         }
         else if (split_backing_mapping( mapping, unmap_start, unmap_size )) return -1;
+#ifdef WINE_NX_SWAP_POC
+        swap_index_update( &swap_index, (uintptr_t)unmap_start, unmap_size, 0 );
+        swap_index_update( &swap_fault_index, (uintptr_t)unmap_start, unmap_size, 0 );
+#endif
     }
 
     return 0;
@@ -18912,20 +19109,28 @@ static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr )
 {
     unsigned int ec = esr >> 26;
     struct horizon_mapping *mapping;
+    unsigned long long tick, waited;
     int saved_errno = errno, needed;
     BOOL handled = FALSE;
     if ((ec != 0x24 && ec != 0x25) || (esr & (1u << 10)) ||
         (((esr & 0x3f) & ~3u) != 0x04 && ((esr & 0x3f) & ~3u) != 0x0c) ||
-        !horizon_swap_may_contain( (void *)(uintptr_t)address, 1 )) return FALSE;
+        !horizon_swap_enabled() ||
+        !swap_index_contains( &swap_fault_index, address, 1 )) return FALSE;
     needed = (esr & 0x40) ? PROT_WRITE : PROT_READ;
+    tick = armGetSystemTick();
     pthread_mutex_lock( &mapping_mutex );
+    waited = armGetSystemTick() - tick;
     mapping = find_overlap_mapping( (void *)(uintptr_t)address, 1 );
     if (mapping && mapping->swap_managed && (mapping->prot & needed) && mapping->backing)
     {
-        /* Another faulting thread may already have restored this backing. */
         handled = !swap_restore_locked( mapping->backing );
+        if (handled) __atomic_add_fetch( &swap_profile.refaults, 1, __ATOMIC_RELAXED );
     }
     pthread_mutex_unlock( &mapping_mutex );
+    __atomic_add_fetch( &swap_profile.faults, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &swap_profile.fault_wait_ticks, waited, __ATOMIC_RELAXED );
+    swap_profile_max( &swap_profile.fault_max_wait_ticks, waited );
+    if (!handled) __atomic_add_fetch( &swap_profile.fault_unhandled, 1, __ATOMIC_RELAXED );
     errno = saved_errno;
     return handled;
 }

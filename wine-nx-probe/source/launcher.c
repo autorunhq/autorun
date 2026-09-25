@@ -2798,7 +2798,7 @@ enum settings_row
     SET_CONTROLS, SET_STEAMGRIDDB,
     SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
-    SET_SWAP_SIZE, SET_SWAP_GAME, SET_SWAP_TEST, SET_SWAP_REMOVE,
+    SET_SWAP_SIZE,
 #endif
     SET_CREDITS, SETTINGS_ROWS
 };
@@ -2815,6 +2815,10 @@ static void save_look( struct launcher *l )
     launcher_kv_set( &l->look, "rows", NULL );
     launcher_kv_set( &l->look, "show-hidden", l->show_hidden ? "1" : "0" );
     launcher_kv_set( &l->look, "hide-missing", l->hide_missing ? "1" : NULL );
+#ifdef WINE_NX_SWAP_POC
+    launcher_kv_set( &l->look, "swap-poc-mb", NULL );
+    launcher_kv_set( &l->look, "swap-in-game", NULL );
+#endif
     launcher_kv_set( &l->look, "browse", l->browse_dir );
     runtime_file( l, "launcher.txt", path, sizeof(path) );
     launcher_kv_save( &l->look, path );
@@ -3252,9 +3256,7 @@ static void settings_menu( struct launcher *l )
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
-            [SET_SWAP_SIZE] = SET_SECTION_SYSTEM, [SET_SWAP_TEST] = SET_SECTION_SYSTEM,
-            [SET_SWAP_GAME] = SET_SECTION_SYSTEM,
-            [SET_SWAP_REMOVE] = SET_SECTION_SYSTEM,
+            [SET_SWAP_SIZE] = SET_SECTION_SYSTEM,
 #endif
             [SET_CREDITS] = SET_SECTION_SYSTEM,
         };
@@ -3333,28 +3335,15 @@ static void settings_menu( struct launcher *l )
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
 #ifdef WINE_NX_SWAP_POC
         {
-            int size = launcher_kv_get_int( &l->look, "swap-poc-mb", 0 );
-            snprintf( rows[SET_SWAP_SIZE].label, sizeof(rows[0].label), "Swap file" );
+            int size = launcher_kv_get_int( &l->look, "swap-mb", 0 );
+            snprintf( rows[SET_SWAP_SIZE].label, sizeof(rows[0].label), "SD swap" );
             if (size) snprintf( rows[SET_SWAP_SIZE].value, sizeof(rows[0].value), "%d MiB", size );
             else snprintf( rows[SET_SWAP_SIZE].value, sizeof(rows[0].value), "Off" );
             rows[SET_SWAP_SIZE].kind = UI_ROW_DROPDOWN;
             rows[SET_SWAP_SIZE].adjustable = 0;
-            rows[SET_SWAP_SIZE].help = "SD space reserved for experimental memory paging. Validate after changing the size.";
-            snprintf( rows[SET_SWAP_GAME].label, sizeof(rows[0].label), "In-game swap (experimental)" );
-            rows[SET_SWAP_GAME].kind = UI_ROW_SWITCH;
-            rows[SET_SWAP_GAME].on = !!launcher_kv_get_int( &l->look, "swap-in-game", 0 );
-            snprintf( rows[SET_SWAP_GAME].value, sizeof(rows[0].value), "%s", on_off[rows[SET_SWAP_GAME].on] );
-            rows[SET_SWAP_GAME].disabled = (!size || l->options->address_space_bits != 39) && !rows[SET_SWAP_GAME].on;
-            rows[SET_SWAP_GAME].help = "Page private game memory to SD under pressure. GPU/shared memory stays resident. May cause long stalls; requires validated files and the 39-bit forwarder.";
-            snprintf( rows[SET_SWAP_TEST].label, sizeof(rows[0].label), "Validate SD paging" );
-            rows[SET_SWAP_TEST].kind = UI_ROW_ACTION;
-            rows[SET_SWAP_TEST].adjustable = 0;
-            rows[SET_SWAP_TEST].disabled = !size || l->options->address_space_bits != 39;
-            rows[SET_SWAP_TEST].help = "Preallocate the swap file, then verify 128 MiB with 32 MiB resident. Requires the main 39-bit forwarder.";
-            snprintf( rows[SET_SWAP_REMOVE].label, sizeof(rows[0].label), "Remove swap files" );
-            rows[SET_SWAP_REMOVE].kind = UI_ROW_ACTION;
-            rows[SET_SWAP_REMOVE].adjustable = 0;
-            rows[SET_SWAP_REMOVE].help = "Delete only Autorun's prototype swap files. Games and settings are untouched.";
+            rows[SET_SWAP_SIZE].disabled = l->options->address_space_bits != 39 && !size;
+            rows[SET_SWAP_SIZE].help = "Offload private game memory when RAM is low. May cause pauses; "
+                                       "GPU and shared memory stay in RAM. Off removes the swap files.";
         }
 #endif
         snprintf( rows[SET_SWKBD].label, sizeof(rows[0].label), "On-screen keyboard" );
@@ -3421,58 +3410,43 @@ static void settings_menu( struct launcher *l )
 #ifdef WINE_NX_SWAP_POC
         case SET_SWAP_SIZE:
         {
-            static const int sizes[] = { 0, 1024, 2048, 4096, 8092 };
-            struct ui_row items[5] = {0};
-            int j, selected = 0, size = launcher_kv_get_int( &l->look, "swap-poc-mb", 0 );
+            static const int sizes[] = { 0, 1024, 2048 };
+            struct ui_row items[3] = {0};
+            int j, selected = 0, size = launcher_kv_get_int( &l->look, "swap-mb", 0 );
             if (action != UI_ACTION_CHOOSE && action != UI_ACTION_RESET) break;
             snprintf( items[0].label, sizeof(items[0].label), "Off" );
-            for (j = 1; j < 5; j++)
+            for (j = 1; j < 3; j++)
             {
                 snprintf( items[j].label, sizeof(items[j].label), "%d MiB", sizes[j] );
                 if (sizes[j] == size) selected = j;
             }
-            selected = action == UI_ACTION_RESET ? 0 : ui_settings_dropdown( ui, &list, items, 5, selected );
+            selected = action == UI_ACTION_RESET ? 0 : ui_settings_dropdown( ui, &list, items, 3, selected );
             if (selected >= 0)
             {
                 char value[16];
-                snprintf( value, sizeof(value), "%d", sizes[selected] );
-                launcher_kv_set( &l->look, "swap-poc-mb", selected ? value : NULL );
-                if (sizes[selected] != size) launcher_kv_set( &l->look, "swap-in-game", NULL );
-            }
-            break;
-        }
-        case SET_SWAP_TEST:
-            if (action != UI_ACTION_CHOOSE) break;
-            runtime_file( l, "swap-poc", path, sizeof(path) );
-            launcher_swap_test( ui, path, launcher_kv_get_int( &l->look, "swap-poc-mb", 0 ) );
-            break;
-        case SET_SWAP_GAME:
-            if (launcher_kv_get_int( &l->look, "swap-in-game", 0 ) || action == UI_ACTION_RESET)
-                launcher_kv_set( &l->look, "swap-in-game", NULL );
-            else
-            {
-                struct swap_store store;
-                runtime_file( l, "swap-poc", path, sizeof(path) );
-                if (swap_store_open_existing( &store, path, launcher_kv_get_int( &l->look, "swap-poc-mb", 0 ) ))
-                    ui_message( ui, "SD swap", "Validate SD paging before enabling in-game swap." );
-                else
+                if (!selected)
                 {
-                    swap_store_close( &store );
-                    launcher_kv_set( &l->look, "swap-in-game", "1" );
+                    runtime_file( l, "swap-poc", path, sizeof(path) );
+                    if (swap_store_remove( path )) ui_message( ui, "SD swap", strerror(errno) );
+                    else
+                    {
+                        launcher_kv_set( &l->look, "swap-mb", NULL );
+                        ui_toast( ui, "SD swap disabled", 1800 );
+                    }
+                }
+                else if (l->options->address_space_bits == 39)
+                {
+                    runtime_file( l, "swap-poc", path, sizeof(path) );
+                    if (launcher_swap_prepare( ui, path, sizes[selected] ))
+                    {
+                        snprintf( value, sizeof(value), "%d", sizes[selected] );
+                        launcher_kv_set( &l->look, "swap-mb", value );
+                        ui_toast( ui, "SD swap enabled", 1800 );
+                    }
                 }
             }
             break;
-        case SET_SWAP_REMOVE:
-            if (action != UI_ACTION_CHOOSE ||
-                !ui_confirm( ui, "Remove swap files", "Delete the prototype's preallocated files from SD?", "Remove" )) break;
-            runtime_file( l, "swap-poc", path, sizeof(path) );
-            if (swap_store_remove( path )) ui_message( ui, "SD swap", strerror(errno) );
-            else
-            {
-                launcher_kv_set( &l->look, "swap-in-game", NULL );
-                ui_toast( ui, "Swap files removed", 1800 );
-            }
-            break;
+        }
 #endif
 
         case SET_SWKBD: l->options->swkbd_auto = !l->options->swkbd_auto; break;

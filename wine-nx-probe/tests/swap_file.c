@@ -64,7 +64,7 @@ static void release( void *context, void *memory )
 
 int main(void)
 {
-    char directory[] = "/tmp/autorun-extents.XXXXXX";
+    char directory[512];
     struct swap_store prepared;
     struct fixture f = {0};
     struct horizon_swap_entry entry = {0};
@@ -73,6 +73,8 @@ int main(void)
     unsigned int tokens[1024] = {0}, i, token;
     unsigned char input[4096], output[4096];
     void *memory;
+    snprintf( directory, sizeof(directory), "%s/autorun-extents.XXXXXX",
+              getenv( "TMPDIR" ) ? getenv( "TMPDIR" ) : "/tmp" );
     assert( mkdtemp( directory ) );
     assert( swap_file_open( &f.file, directory, 4 ) == -1 && errno == ENOENT );
     assert( !swap_store_open( &prepared, directory, 4, NULL, NULL ) );
@@ -84,20 +86,27 @@ int main(void)
         assert( !swap_file_save( &f.file, input, sizeof(input), &tokens[i] ) );
         assert( tokens[i] == i + 1 );
     }
+    assert( f.file.used_units == 1024 && f.file.writes == 1024 &&
+            f.file.write_bytes == 4 * 1048576 && f.file.scan_units >= 1024 );
     assert( swap_file_save( &f.file, input, sizeof(input), &token ) == -1 && errno == ENOSPC );
+    assert( f.file.no_run == 1 );
     for (i = 0; i < 1024; i++)
     {
         memset( input, i, sizeof(input) );
         assert( !swap_file_load( &f.file, tokens[i], output, sizeof(output) ) );
         assert( !memcmp( input, output, sizeof(input) ) );
     }
+    assert( f.file.reads == 1024 && f.file.read_bytes == 4 * 1048576 );
     for (i = 0; i < 1024; i += 2) swap_file_discard( &f.file, tokens[i], 4096 );
+    assert( f.file.used_units == 512 );
     assert( swap_file_save( &f.file, input, 8192, &token ) == -1 && errno == ENOSPC );
+    assert( f.file.no_run == 2 );
     for (i = 0; i < 1024; i += 2)
     {
         assert( !swap_file_save( &f.file, input, 4096, &token ) && token == tokens[i] );
     }
     for (i = 0; i < 1024; i++) swap_file_discard( &f.file, tokens[i], 4096 );
+    assert( !f.file.used_units );
     assert( swap_file_load( &f.file, tokens[0], output, 4096 ) == -1 && errno == EINVAL );
 
     memory = allocate( &f, 4096 );

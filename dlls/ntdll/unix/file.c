@@ -2245,6 +2245,32 @@ static unsigned int server_get_unix_name( HANDLE handle, char **unix_name )
 
 static NTSTATUS server_get_name_info( HANDLE handle, FILE_NAME_INFORMATION *info, LONG *name_len )
 {
+#ifdef __SWITCH__
+    char *unix_name, *path;
+    WCHAR *name;
+    unsigned int i, chars, bytes, capacity;
+    NTSTATUS status;
+
+    if ((status = server_get_unix_name( handle, &unix_name ))) return status;
+    path = strchr( unix_name, ':' );
+    path = path && path[1] == '/' ? path + 2 : unix_name;
+    capacity = strlen( path );
+    if (!(name = malloc( (capacity + 1) * sizeof(*name) )))
+    {
+        free( unix_name );
+        return STATUS_NO_MEMORY;
+    }
+    chars = ntdll_umbstowcs( path, capacity, name, capacity );
+    for (i = 0; i < chars; i++) if (name[i] == '/') name[i] = '\\';
+    bytes = chars * sizeof(*name);
+    info->FileNameLength = bytes;
+    status = *name_len < bytes ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    if (*name_len > bytes) *name_len = bytes;
+    memcpy( info->FileName, name, *name_len & ~1 );
+    free( name );
+    free( unix_name );
+    return status;
+#else
     data_size_t size = 1024;
     NTSTATUS status;
     OBJECT_NAME_INFORMATION *name;
@@ -2276,6 +2302,7 @@ static NTSTATUS server_get_name_info( HANDLE handle, FILE_NAME_INFORMATION *info
         }
         return status;
     }
+#endif
 }
 
 

@@ -45,19 +45,23 @@ static int cancel( void *context, const char *phase, uint64_t done, uint64_t tot
 
 int main(void)
 {
-    char directory[] = "/tmp/autorun-swap-test.XXXXXX", path[512];
+    char directory[512], path[768];
     unsigned char out[8192], in[8192];
     struct swap_store store;
     struct stat st;
     unsigned int i;
     int fd;
 
+    snprintf( directory, sizeof(directory), "%s/autorun-swap-test.XXXXXX",
+              getenv( "TMPDIR" ) ? getenv( "TMPDIR" ) : "/tmp" );
     assert( mkdtemp( directory ) );
     assert( !swap_store_open( &store, directory, 4, NULL, NULL ) );
     assert( renames == 1 && !store.operation );
     assert( !fstat( store.fd[0], &st ) );
     assert( st.st_size == 4 * 1048576 + 4096 );
+#ifndef __CYGWIN__
     assert( (uint64_t)st.st_blocks * 512 >= (uint64_t)st.st_size );
+#endif
     for (i = 0; i < sizeof(out); i++) out[i] = (i * 19) ^ (i >> 3);
     assert( !swap_store_write( &store, store.size - sizeof(out), out, sizeof(out) ) );
     assert( !swap_store_read( &store, store.size - sizeof(in), in, sizeof(in) ) );

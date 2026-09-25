@@ -142,6 +142,17 @@ static inline void sd_cache_trim( struct sd_cache_pool *pool )
     }
 }
 
+static inline size_t sd_cache_reclaim( struct sd_cache_pool *pool, size_t bytes )
+{
+    size_t count = bytes / SD_CACHE_CHUNK + !!(bytes % SD_CACHE_CHUNK);
+    unsigned int before = pool->used;
+
+    if (count > before) count = before;
+    pool->max = before - (unsigned int)count;
+    sd_cache_trim( pool );
+    return (size_t)(before - pool->used) * SD_CACHE_CHUNK;
+}
+
 struct sd_cache_file
 {
     void *key;         /* libnx's per-open file data */

@@ -60,7 +60,7 @@ static inline void backing_remove( struct backing_heap *heap, uint32_t first )
 
 static inline void *backing_alloc( struct backing_heap *heap, uintptr_t floor, size_t alignment, size_t size )
 {
-    uint32_t length, first, end, at;
+    uint32_t length, first, end, at, best;
     unsigned int bin;
     uintptr_t address;
 
@@ -71,18 +71,26 @@ static inline void *backing_alloc( struct backing_heap *heap, uintptr_t floor, s
     length = size / BACKING_UNIT;
     for (bin = backing_bin( length ); bin < BACKING_BINS; bin++)
     {
+        best = BACKING_NONE;
         for (first = heap->bins[bin]; first != BACKING_NONE; first = heap->blocks[first].next)
         {
             if (heap->blocks[first].length < length) continue;
             end = first + heap->blocks[first].length;
             address = (heap->base + (size_t)end * BACKING_UNIT - size) & ~(uintptr_t)(alignment - 1);
             if (address < heap->base + (size_t)first * BACKING_UNIT) continue;
-            at = (address - heap->base) / BACKING_UNIT;
-            backing_remove( heap, first );
-            if (at > first) backing_insert( heap, first, at - first );
-            if (at + length < end) backing_insert( heap, at + length, end - at - length );
-            goto allocated;
+            if (best == BACKING_NONE || heap->blocks[first].length < heap->blocks[best].length)
+                best = first;
+            if (heap->blocks[first].length == length) break;
         }
+        if (best == BACKING_NONE) continue;
+        first = best;
+        end = first + heap->blocks[first].length;
+        address = (heap->base + (size_t)end * BACKING_UNIT - size) & ~(uintptr_t)(alignment - 1);
+        at = (address - heap->base) / BACKING_UNIT;
+        backing_remove( heap, first );
+        if (at > first) backing_insert( heap, first, at - first );
+        if (at + length < end) backing_insert( heap, at + length, end - at - length );
+        goto allocated;
     }
     end = heap->bottom;
     if (length > end) goto failed;
