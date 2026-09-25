@@ -10,6 +10,7 @@ wine-nx-probe/build-switch-wow64/
 .DS_Store
 
 /wine-nx-probe/build-switch-wow64-dynarec/
+/wine-nx-probe/build-horizon-dlls/
 /wine-nx-probe/build-switch-mesa/
 /wine-nx-probe/build-mesa-switch/
 /wine-nx-probe/build-switch-wow64-mesa-switch/
