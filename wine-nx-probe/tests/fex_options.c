@@ -28,8 +28,11 @@ int main(void)
     assert( nx_fex_option_choice( option, "1" ) == 1 );
     assert( nx_fex_option_choice( option, "enabled" ) < 0 );
     option = nx_fex_options + NX_FEX_SMC;
+    assert( !strcmp( nx_fex_option_default( option ), "none" ) );
     assert( nx_fex_option_choice( option, "MTRACK" ) == 1 );
     assert( nx_fex_option_choice( option, "invalid" ) < 0 );
+    option = nx_fex_options + NX_FEX_X87_REDUCED;
+    assert( !strcmp( nx_fex_option_default( option ), "1" ) );
     option = nx_fex_options + NX_FEX_MAXINST;
     assert( !strcmp( nx_fex_option_default( option ), "1000" ) );
 
