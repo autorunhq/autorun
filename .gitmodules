@@ -1,0 +1,3 @@
+[submodule "horizon-dlls"]
+	path = horizon-dlls
+	url = https://github.com/autorunhq/autorun-horizon-dlls.git
