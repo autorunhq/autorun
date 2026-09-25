@@ -488,6 +488,7 @@ void wine_nx_runtime_trace( const char *msg )
  * sdmc:/switch/wine/verbose.txt containing 1. */
 int wine_nx_runtime_verbose;
 static int runtime_dxvk;
+static enum dxvk_source runtime_dxvk_source;
 static int runtime_fex;
 static int runtime_four_cores;
 static int runtime_dxvk_hud;
@@ -1848,6 +1849,7 @@ static void put_process_string( WCHAR **cursor, UNICODE_STRING *string, const ch
 static const char runtime_environment[] =
     "ALLUSERSPROFILE=C:\\ProgramData\0"
     "APPDATA=C:\\users\\steamuser\\AppData\\Roaming\0"
+    "DXVK_ASYNC=1\0"
     "DXVK_CONFIG_FILE=C:\\users\\steamuser\\AppData\\Local\\Autorun\\dxvk.conf\0"
     "DXVK_HUD=0\0"
     "HOMEDRIVE=C:\0"
@@ -1948,7 +1950,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
 
     if (runtime_dxvk)
     {
-        dxvk_resolve_version( RUNTIME_DIR, main_image_info.Machine, runtime_dxvk_version, &dxvk );
+        dxvk_resolve_version( runtime_dxvk_source, RUNTIME_DIR, main_image_info.Machine, runtime_dxvk_version, &dxvk );
         vkd3d_resolve_version( RUNTIME_DIR, main_image_info.Machine, runtime_vkd3d_version, &vkd3d );
     }
 
@@ -1965,14 +1967,14 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     }
     /* Keep native DXVK DLLs separate for each guest architecture. */
     if (dxvk.installed &&
-        launcher_dxvk_version_directory( main_image_info.Machine, dxvk.bundled ? "" : dxvk.version,
+        launcher_dxvk_version_directory( main_image_info.Machine, runtime_dxvk_source,
+                                         dxvk.bundled ? "" : dxvk.version,
                                          dxvk_dir, sizeof(dxvk_dir) ))
     {
         snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
         if (dxvk.version[0])
             log_line( "[DXVK] %s payload C:\\%s (version %s); application-local DLLs take priority",
-                      main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir,
-                      dxvk.version );
+                      main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir, dxvk.version );
         else
             log_line( "[DXVK] %s bundled payload C:\\%s; application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir );
@@ -2071,6 +2073,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         const char *value = entry;
 
         if (!runtime_dxvk && !strncmp( entry, "DXVK_", 5 )) continue;
+        if (!strncmp( entry, "DXVK_ASYNC=", 11 ) &&
+            (runtime_dxvk_source != DXVK_SOURCE_GPLASYNC || !dxvk.installed)) continue;
         if (!strncmp( entry, "DXVK_HUD=", 9 ))
         {
             for (i = 0; i < 9; i++) *cursor++ = (unsigned char)*value++;
@@ -4034,6 +4038,7 @@ int main( int argc, char **argv )
         char settings_path[520];
 
         runtime_dxvk = 0;
+        runtime_dxvk_source = DXVK_SOURCE_OFFICIAL;
         runtime_dxvk_hud = 0;
         runtime_fex = 0;
         runtime_four_cores = 0;
@@ -4060,6 +4065,7 @@ int main( int argc, char **argv )
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
 #ifdef WINE_NX_MESA_SWITCH
             runtime_dxvk = settings.dxvk;
+            runtime_dxvk_source = settings.dxvk_source;
             runtime_dxvk_hud = settings.dxvk_hud;
             wine_nx_graphics_configure( launcher_frame_limits[settings.frame_limit], settings.vsync );
             wine_nx_upscaling_configure( settings.upscaling, launcher_sharpness_values[settings.upscaling_sharpness] );

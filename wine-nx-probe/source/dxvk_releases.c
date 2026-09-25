@@ -26,6 +26,7 @@ struct release_backend
     const char *x32, *x64;
     const char *const *dlls;
     size_t dll_count;
+    int gitlab;
 };
 static const char *const vkd3d_dlls[] = { "d3d12.dll", "d3d12core.dll" };
 
@@ -45,14 +46,29 @@ static const char *const dxvk_dlls[] =
 {
     "d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"
 };
+static const char *const sarek_dlls[] =
+{
+    "ddraw.dll", "d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"
+};
 
 static const struct release_backend dxvk_backend = {
     "dxvk", "doitsujin/dxvk", "https://github.com/doitsujin/dxvk/", "dxvk", "gz",
-    "dxvk", "dxvk64", dxvk_dlls, sizeof(dxvk_dlls) / sizeof(dxvk_dlls[0])
+    "dxvk", "dxvk64", dxvk_dlls, sizeof(dxvk_dlls) / sizeof(dxvk_dlls[0]), 0
+};
+static const struct release_backend sarek_backend = {
+    "dxvk-sarek", "pythonlover02/dxvk-sarek", "https://github.com/pythonlover02/dxvk-sarek/", "dxvk-sarek", "gz",
+    "dxvk-sarek", "dxvk-sarek64", sarek_dlls, sizeof(sarek_dlls) / sizeof(sarek_dlls[0]), 0
+};
+static const struct release_backend gplasync_backend = {
+    "dxvk-gplasync", "43488626", "https://gitlab.com/Ph42oN/dxvk-gplasync/", "dxvk-gplasync", "gz",
+    "dxvk-gplasync", "dxvk-gplasync64", dxvk_dlls, sizeof(dxvk_dlls) / sizeof(dxvk_dlls[0]), 1
+};
+static const struct release_backend *const dxvk_backends[DXVK_SOURCE_COUNT] = {
+    &dxvk_backend, &sarek_backend, &gplasync_backend
 };
 static const struct release_backend vkd3d_backend = {
     "vkd3d", "HansKristian-Work/vkd3d-proton", "https://github.com/HansKristian-Work/vkd3d-proton/",
-    "vkd3d-proton", "zst", "vkd3d", "vkd3d64", vkd3d_dlls, 2
+    "vkd3d-proton", "zst", "vkd3d", "vkd3d64", vkd3d_dlls, 2, 0
 };
 
 static size_t receive_data( void *data, size_t size, size_t count, void *opaque )
@@ -108,8 +124,11 @@ static enum dxvk_result http_get( const char *url, size_t limit, struct buffer *
     body->limit = limit;
     if (curl_global_init( CURL_GLOBAL_DEFAULT ) != CURLE_OK || !(curl = curl_easy_init()))
         return DXVK_NETWORK_ERROR;
-    headers = curl_slist_append( headers, "Accept: application/vnd.github+json" );
-    headers = curl_slist_append( headers, "X-GitHub-Api-Version: 2022-11-28" );
+    if (!strncmp( url, "https://api.github.com/", 23 ))
+    {
+        headers = curl_slist_append( headers, "Accept: application/vnd.github+json" );
+        headers = curl_slist_append( headers, "X-GitHub-Api-Version: 2022-11-28" );
+    }
     curl_easy_setopt( curl, CURLOPT_URL, url );
     curl_easy_setopt( curl, CURLOPT_HTTPHEADER, headers );
     curl_easy_setopt( curl, CURLOPT_WRITEFUNCTION, receive_data );
@@ -269,6 +288,24 @@ static int json_array( const char *object, const char *end, const char *name,
     return 0;
 }
 
+static int asset_rank( const struct release_backend *backend, const char *name, const char *version )
+{
+    char expected[80];
+
+    if (backend == &sarek_backend)
+    {
+        snprintf( expected, sizeof(expected), "dxvk-sarek-%s.tar.gz", version );
+        if (!strcmp( name, expected )) return 3;
+        snprintf( expected, sizeof(expected), "dxvk-sarek-v%s.tar.gz", version );
+        if (!strcmp( name, expected )) return 2;
+        snprintf( expected, sizeof(expected), "dxvk-sarek-dyasync-v%s.tar.gz", version );
+        return !strcmp( name, expected );
+    }
+    snprintf( expected, sizeof(expected), "%s-%s%s.tar.%s", backend->asset,
+              backend->gitlab ? "v" : "", version, backend->extension );
+    return !strcmp( name, expected );
+}
+
 static int parse_release_page( const struct release_backend *backend, const unsigned char *json, size_t size, struct dxvk_release *releases,
                                int max_releases, int *seen )
 {
@@ -282,32 +319,47 @@ static int parse_release_page( const struct release_backend *backend, const unsi
     {
         const char *assets, *assets_end, *asset_cursor, *asset, *asset_end;
         struct dxvk_release release;
-        char tag[40], asset_name[80], expected[80], digest[80];
-        int draft = 0;
+        char tag[40], asset_name[80], digest[80];
+        int draft = 0, best = 0;
 
         (*seen)++;
         memset( &release, 0, sizeof(release) );
         if (!json_string( json_field( object, object_end, "tag_name" ), object_end, tag, sizeof(tag) ) ||
-            !json_boolean( json_field( object, object_end, "draft" ), object_end, &draft ) || draft)
+            (!backend->gitlab && (!json_boolean( json_field( object, object_end, "draft" ), object_end, &draft ) || draft)))
             continue;
         json_boolean( json_field( object, object_end, "prerelease" ), object_end, &release.prerelease );
         if (tag[0] == 'v' || tag[0] == 'V') memmove( tag, tag + 1, strlen( tag ) );
         if (!launcher_dxvk_version_valid( tag )) continue;
         memcpy( release.version, tag, strlen( tag ) + 1 );
-        snprintf( expected, sizeof(expected), "%s-%s.tar.%s", backend->asset, tag, backend->extension );
-        if (!json_array( object, object_end, "assets", &assets, &assets_end )) continue;
+        if (backend->gitlab)
+        {
+            const char *value = json_field( object, object_end, "assets" );
+            if (!value || *value != '{' || !next_object( &value, object_end, &asset, &asset_end ) ||
+                !json_array( asset, asset_end, "links", &assets, &assets_end )) continue;
+        }
+        else if (!json_array( object, object_end, "assets", &assets, &assets_end )) continue;
         asset_cursor = assets;
         while (next_object( &asset_cursor, assets_end, &asset, &asset_end ))
         {
+            struct dxvk_release candidate = release;
+            int rank;
+
+            candidate.url[0] = candidate.digest[0] = 0;
+            candidate.size = 0;
             if (!json_string( json_field( asset, asset_end, "name" ), asset_end,
-                              asset_name, sizeof(asset_name) ) || strcmp( asset_name, expected )) continue;
+                              asset_name, sizeof(asset_name) ) || !(rank = asset_rank( backend, asset_name, tag )) ||
+                rank <= best) continue;
             if (!json_string( json_field( asset, asset_end, "browser_download_url" ), asset_end,
-                              release.url, sizeof(release.url) )) break;
-            json_integer( json_field( asset, asset_end, "size" ), asset_end, &release.size );
+                              candidate.url, sizeof(candidate.url) ) &&
+                !json_string( json_field( asset, asset_end, "direct_asset_url" ), asset_end,
+                              candidate.url, sizeof(candidate.url) )) continue;
+            if (strncmp( candidate.url, backend->prefix, strlen(backend->prefix) )) continue;
+            json_integer( json_field( asset, asset_end, "size" ), asset_end, &candidate.size );
             if (json_string( json_field( asset, asset_end, "digest" ), asset_end, digest, sizeof(digest) ) &&
                 !strncmp( digest, "sha256:", 7 ) && strlen( digest + 7 ) == 64)
-                snprintf( release.digest, sizeof(release.digest), "%s", digest + 7 );
-            break;
+                snprintf( candidate.digest, sizeof(candidate.digest), "%s", digest + 7 );
+            release = candidate;
+            best = rank;
         }
         if (!release.url[0]) continue;
         if (added < max_releases) releases[added++] = release;
@@ -466,8 +518,12 @@ static enum dxvk_result backend_release_catalog( const struct release_backend *b
         enum dxvk_result result;
         int seen = 0, added;
 
-        snprintf( url, sizeof(url),
-                  "https://api.github.com/repos/%s/releases?per_page=100&page=%d", backend->repo, page );
+        if (backend->gitlab)
+            snprintf( url, sizeof(url),
+                      "https://gitlab.com/api/v4/projects/%s/releases?per_page=100&page=%d", backend->repo, page );
+        else
+            snprintf( url, sizeof(url),
+                      "https://api.github.com/repos/%s/releases?per_page=100&page=%d", backend->repo, page );
         if ((result = http_get( url, DXVK_API_BODY_MAX, &body, progress, opaque )) != DXVK_OK) return result;
         added = parse_release_page( backend, body.data, body.size, releases + total, max_releases - total, &seen );
         free( body.data );
@@ -875,6 +931,19 @@ static int stable_version( const char *version )
     return !*p || (isalpha( *p ) && !p[1]);
 }
 
+static int backend_stable_version( const struct release_backend *backend, const char *version )
+{
+    const char *suffix;
+
+    if (backend != &gplasync_backend) return stable_version( version );
+    if (!launcher_dxvk_version_selectable( version ) || !(suffix = strrchr( version, '-' )) || !suffix[1])
+        return 0;
+    for (const char *p = suffix + 1; *p; p++) if (!isdigit( (unsigned char)*p )) return 0;
+    for (const char *p = version; p < suffix; p++)
+        if (!isdigit( (unsigned char)*p ) && *p != '.') return 0;
+    return 1;
+}
+
 static int compare_versions( const char *a, const char *b )
 {
     while (*a || *b)
@@ -929,8 +998,8 @@ static void backend_resolve_version( const struct release_backend *backend, cons
         !(directory = opendir( path ))) return;
     while ((entry = readdir( directory )))
     {
-        if (!stable_version( entry->d_name ) ||
-            (backend == &dxvk_backend && !launcher_dxvk_version_selectable( entry->d_name )) ||
+        if (!backend_stable_version( backend, entry->d_name ) ||
+            (backend != &vkd3d_backend && !launcher_dxvk_version_selectable( entry->d_name )) ||
             (selected->version[0] && compare_versions( entry->d_name, selected->version ) <= 0) ||
             !backend_release_installed( backend, runtime_dir, machine, entry->d_name )) continue;
         strcpy( selected->version, entry->d_name );
@@ -945,9 +1014,9 @@ const char *dxvk_result_message( enum dxvk_result result )
     switch (result)
     {
     case DXVK_OK: return "The selected release is ready.";
-    case DXVK_NETWORK_ERROR: return "Could not connect to GitHub.";
-    case DXVK_NOT_FOUND: return "No official release asset was found.";
-    case DXVK_INVALID_RESPONSE: return "GitHub returned an invalid release catalog.";
+    case DXVK_NETWORK_ERROR: return "Could not connect to the release server.";
+    case DXVK_NOT_FOUND: return "No compatible release asset was found.";
+    case DXVK_INVALID_RESPONSE: return "The release catalog is invalid.";
     case DXVK_INVALID_ARCHIVE: return "The downloaded archive is invalid.";
     case DXVK_HASH_MISMATCH: return "The downloaded archive failed SHA-256 verification.";
     case DXVK_IO_ERROR: return "The release could not be written to the SD card.";
@@ -956,33 +1025,38 @@ const char *dxvk_result_message( enum dxvk_result result )
     return "Installation failed.";
 }
 
-enum dxvk_result dxvk_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
+enum dxvk_result dxvk_release_catalog( enum dxvk_source source, const char *runtime_dir, struct dxvk_release *releases,
                                         int max_releases, int *count, int cache_only,
                                         dxvk_progress_callback progress, void *opaque )
 {
-    return backend_release_catalog( &dxvk_backend, runtime_dir, releases, max_releases, count, cache_only, progress, opaque );
+    if (source < 0 || source >= DXVK_SOURCE_COUNT) return DXVK_INVALID_RESPONSE;
+    return backend_release_catalog( dxvk_backends[source], runtime_dir, releases, max_releases, count, cache_only, progress, opaque );
 }
 
-enum dxvk_result dxvk_install_release( const char *runtime_dir, const struct dxvk_release *release,
+enum dxvk_result dxvk_install_release( enum dxvk_source source, const char *runtime_dir, const struct dxvk_release *release,
                                         dxvk_progress_callback progress, void *opaque )
 {
-    return backend_install_release( &dxvk_backend, runtime_dir, release, progress, opaque );
+    if (source < 0 || source >= DXVK_SOURCE_COUNT) return DXVK_INVALID_RESPONSE;
+    return backend_install_release( dxvk_backends[source], runtime_dir, release, progress, opaque );
 }
 
-int dxvk_release_installed( const char *runtime_dir, unsigned short machine, const char *version )
+int dxvk_release_installed( enum dxvk_source source, const char *runtime_dir, unsigned short machine, const char *version )
 {
-    return backend_release_installed( &dxvk_backend, runtime_dir, machine, version );
+    return source >= 0 && source < DXVK_SOURCE_COUNT &&
+           backend_release_installed( dxvk_backends[source], runtime_dir, machine, version );
 }
 
-int dxvk_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
+int dxvk_root_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
-    return backend_root_version( &dxvk_backend, runtime_dir, machine, version, size );
+    if (source < 0 || source >= DXVK_SOURCE_COUNT) return 0;
+    return backend_root_version( dxvk_backends[source], runtime_dir, machine, version, size );
 }
 
-void dxvk_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+void dxvk_resolve_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, const char *requested,
                            struct dxvk_version *selected )
 {
-    backend_resolve_version( &dxvk_backend, runtime_dir, machine, requested, selected );
+    if (source < 0 || source >= DXVK_SOURCE_COUNT) { memset( selected, 0, sizeof(*selected) ); return; }
+    backend_resolve_version( dxvk_backends[source], runtime_dir, machine, requested, selected );
 }
 
 enum dxvk_result vkd3d_release_catalog( const char *runtime_dir, struct dxvk_release *releases,

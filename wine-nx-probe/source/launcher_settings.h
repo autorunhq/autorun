@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "dxvk_releases.h"
 
 #define LAUNCHER_KV_MAX 8192
 
@@ -181,6 +182,7 @@ struct launcher_settings
     int four_cores;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     int dxvk;         /* architecture-specific DXVK payload */
+    enum dxvk_source dxvk_source;
     char vkd3d_version[32];
     char dxvk_version[32]; /* empty: newest installed release */
     int dxvk_hud;
@@ -263,10 +265,18 @@ static inline int launcher_dxvk_config_add( char *out, size_t size, const char *
     return 1;
 }
 
-static inline const char *launcher_dxvk_directory( unsigned short machine )
+static inline const char *launcher_dxvk_directory( unsigned short machine, enum dxvk_source source )
 {
-    if (machine == 0x014c) return "dxvk";
-    if (machine == 0x8664) return "dxvk64";
+    static const char *const directories[DXVK_SOURCE_COUNT][2] =
+    {
+        { "dxvk", "dxvk64" },
+        { "dxvk-sarek", "dxvk-sarek64" },
+        { "dxvk-gplasync", "dxvk-gplasync64" }
+    };
+
+    if (source < 0 || source >= DXVK_SOURCE_COUNT) return NULL;
+    if (machine == 0x014c) return directories[source][0];
+    if (machine == 0x8664) return directories[source][1];
     return NULL;
 }
 
@@ -290,10 +300,10 @@ static inline int launcher_dxvk_version_selectable( const char *version )
     return end != version && major >= 1;
 }
 
-static inline int launcher_dxvk_version_directory( unsigned short machine, const char *version,
+static inline int launcher_dxvk_version_directory( unsigned short machine, enum dxvk_source source, const char *version,
                                                    char *out, size_t size )
 {
-    const char *base = launcher_dxvk_directory( machine );
+    const char *base = launcher_dxvk_directory( machine, source );
     int length;
 
     if (!base || !out || !size || (version && version[0] && !launcher_dxvk_version_valid( version ))) return 0;
@@ -381,6 +391,12 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     if (!launcher_kv_get( kv, "d3d", value, sizeof(value) ) &&
         !launcher_kv_get( kv, "d3d9", value, sizeof(value) )) value[0] = 0;
     settings->dxvk = !strcasecmp( value, "dxvk" );
+    settings->dxvk_source = DXVK_SOURCE_OFFICIAL;
+    if (launcher_kv_get( kv, "dxvk-source", value, sizeof(value) ))
+    {
+        if (!strcasecmp( value, "sarek" )) settings->dxvk_source = DXVK_SOURCE_SAREK;
+        else if (!strcasecmp( value, "gplasync" )) settings->dxvk_source = DXVK_SOURCE_GPLASYNC;
+    }
     settings->vkd3d_version[0] = 0;
     if (launcher_kv_get( kv, "vkd3d-version", value, sizeof(value) ) && launcher_dxvk_version_valid( value ))
         memcpy( settings->vkd3d_version, value, strlen( value ) + 1 );
@@ -427,6 +443,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
     static const char *states[] = { NULL, "0", "1" };
 
     if (settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
+        settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
         settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
         settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
@@ -442,6 +459,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&
            launcher_kv_set( kv, "d3d", settings->dxvk ? "dxvk" : NULL ) &&
+           launcher_kv_set( kv, "dxvk-source", settings->dxvk_source == DXVK_SOURCE_SAREK ? "sarek" :
+                            settings->dxvk_source == DXVK_SOURCE_GPLASYNC ? "gplasync" : NULL ) &&
            launcher_kv_set( kv, "vkd3d-version", settings->vkd3d_version[0] ? settings->vkd3d_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-version", settings->dxvk_version[0] ? settings->dxvk_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-hud", settings->dxvk_hud ? launcher_hud_values[settings->dxvk_hud] : NULL ) &&

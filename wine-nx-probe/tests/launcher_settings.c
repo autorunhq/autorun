@@ -119,7 +119,15 @@ static void test_settings( const char *dir )
     assert( settings.dxvk == 0 );
     load_text( &kv, "d3d=DXVK\ndxvk-version=2.7.1\n" );
     launcher_settings_read( &kv, &settings );
-    assert( settings.dxvk == 1 && !strcmp( settings.dxvk_version, "2.7.1" ) );
+    assert( settings.dxvk == 1 && settings.dxvk_source == DXVK_SOURCE_OFFICIAL &&
+            !strcmp( settings.dxvk_version, "2.7.1" ) );
+    load_text( &kv, "d3d=dxvk\ndxvk-source=gplasync\ndxvk-version=3.1.1-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.dxvk_source == DXVK_SOURCE_GPLASYNC && !strcmp( settings.dxvk_version, "3.1.1-1" ) );
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "dxvk-source=gplasync\n" ) );
+    load_text( &kv, "d3d=dxvk\ndxvk-source=sarek\ndxvk-version=1.13.0\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.dxvk_source == DXVK_SOURCE_SAREK && !strcmp( settings.dxvk_version, "1.13.0" ) );
     load_text( &kv, "d3d=DXVK\ndxvk-version=../../bad\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.dxvk == 1 && !settings.dxvk_version[0] );
@@ -128,9 +136,12 @@ static void test_settings( const char *dir )
             !launcher_dxvk_version_valid( "3.1/other" ) );
     assert( launcher_dxvk_version_selectable( "1.0" ) && launcher_dxvk_version_selectable( "3.1.1" ) );
     assert( !launcher_dxvk_version_selectable( "0.96" ) && !launcher_dxvk_version_selectable( "bad" ) );
-    assert( !strcmp( launcher_dxvk_directory( 0x014c ), "dxvk" ) );
-    assert( !strcmp( launcher_dxvk_directory( 0x8664 ), "dxvk64" ) );
-    assert( !launcher_dxvk_directory( 0xaa64 ) && !launcher_dxvk_directory( 0 ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_OFFICIAL ), "dxvk" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_OFFICIAL ), "dxvk64" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_SAREK ), "dxvk-sarek" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_GPLASYNC ), "dxvk-gplasync64" ) );
+    assert( !launcher_dxvk_directory( 0xaa64, DXVK_SOURCE_OFFICIAL ) &&
+            !launcher_dxvk_directory( 0, DXVK_SOURCE_OFFICIAL ) );
     assert( LAUNCHER_HUD_COUNT == 4 );
     assert( !strcmp( launcher_hud_values[2], "api,fps,frametimes" ) );
     assert( !strcmp( launcher_hud_values[3],
@@ -166,10 +177,13 @@ static void test_settings( const char *dir )
     assert( strstr( config, "dxvk.enableDescriptorBuffer = False" ) );
     settings.dxvk_hud = 0;
     assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "frame-limit=" ) );
-    assert( launcher_dxvk_version_directory( 0x8664, "2.7.1", path, sizeof(path) ) &&
+    assert( launcher_dxvk_version_directory( 0x8664, DXVK_SOURCE_OFFICIAL, "2.7.1", path, sizeof(path) ) &&
             !strcmp( path, "dxvk64\\versions\\2.7.1" ) );
-    assert( launcher_dxvk_version_directory( 0x014c, "", path, sizeof(path) ) && !strcmp( path, "dxvk" ) );
-    assert( !launcher_dxvk_version_directory( 0x8664, "../bad", path, sizeof(path) ) );
+    assert( launcher_dxvk_version_directory( 0x014c, DXVK_SOURCE_OFFICIAL, "", path, sizeof(path) ) &&
+            !strcmp( path, "dxvk" ) );
+    assert( launcher_dxvk_version_directory( 0x8664, DXVK_SOURCE_GPLASYNC, "3.1.1-1", path, sizeof(path) ) &&
+            !strcmp( path, "dxvk-gplasync64\\versions\\3.1.1-1" ) );
+    assert( !launcher_dxvk_version_directory( 0x8664, DXVK_SOURCE_OFFICIAL, "../bad", path, sizeof(path) ) );
 
     load_text( &kv, "upscaling=fsr\nupscaling-sharpness=80%\n" );
     launcher_settings_read( &kv, &settings );

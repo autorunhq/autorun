@@ -128,11 +128,11 @@ static enum dxvk_result graphics_catalog( int vkd3d, struct dxvk_release *releas
     return DXVK_OK;
 }
 
-enum dxvk_result dxvk_release_catalog( const char *runtime_dir, struct dxvk_release *releases,
+enum dxvk_result dxvk_release_catalog( enum dxvk_source source, const char *runtime_dir, struct dxvk_release *releases,
                                        int max_releases, int *count, int cache_only,
                                        dxvk_progress_callback progress, void *opaque )
 {
-    (void)runtime_dir;
+    (void)source; (void)runtime_dir;
     return graphics_catalog( 0, releases, max_releases, count, cache_only, progress, opaque );
 }
 
@@ -153,24 +153,24 @@ static enum dxvk_result graphics_install( int vkd3d, const struct dxvk_release *
     return DXVK_OK;
 }
 
-enum dxvk_result dxvk_install_release( const char *runtime_dir, const struct dxvk_release *release,
+enum dxvk_result dxvk_install_release( enum dxvk_source source, const char *runtime_dir, const struct dxvk_release *release,
                                        dxvk_progress_callback progress, void *opaque )
 {
-    (void)runtime_dir;
+    (void)source; (void)runtime_dir;
     return graphics_install( 0, release, progress, opaque );
 }
 
-int dxvk_release_installed( const char *runtime_dir, unsigned short machine, const char *version )
+int dxvk_release_installed( enum dxvk_source source, const char *runtime_dir, unsigned short machine, const char *version )
 {
     struct dxvk_version selected;
-    (void)runtime_dir; (void)machine;
+    (void)source; (void)runtime_dir; (void)machine;
     graphics_resolve( 0, version, &selected );
     return version[0] && selected.installed;
 }
 
-int dxvk_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
+int dxvk_root_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
-    (void)runtime_dir; (void)machine;
+    (void)source; (void)runtime_dir; (void)machine;
     if (size) version[0] = 0;
     return 0;
 }
@@ -206,7 +206,7 @@ int vkd3d_release_installed( const char *runtime_dir, unsigned short machine, co
 
 int vkd3d_root_version( const char *runtime_dir, unsigned short machine, char *version, size_t size )
 {
-    return dxvk_root_version( runtime_dir, machine, version, size );
+    return dxvk_root_version( DXVK_SOURCE_OFFICIAL, runtime_dir, machine, version, size );
 }
 
 static void graphics_resolve( int vkd3d, const char *requested, struct dxvk_version *selected )
@@ -221,10 +221,10 @@ static void graphics_resolve( int vkd3d, const char *requested, struct dxvk_vers
     selected->installed = version[0] && !strcmp( version, selected->version );
 }
 
-void dxvk_resolve_version( const char *runtime_dir, unsigned short machine, const char *requested,
+void dxvk_resolve_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, const char *requested,
                            struct dxvk_version *selected )
 {
-    (void)runtime_dir; (void)machine;
+    (void)source; (void)runtime_dir; (void)machine;
     graphics_resolve( 0, requested, selected );
 }
 

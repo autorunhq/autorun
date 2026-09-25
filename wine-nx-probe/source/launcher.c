@@ -699,8 +699,9 @@ static void enable_program_dxvk( struct launcher *l, struct program *p )
 {
     struct dxvk_version dxvk, vkd3d;
 
-    if (!l->options->dxvk_on_add || !launcher_dxvk_directory( p->machine )) return;
-    dxvk_resolve_version( l->options->runtime_dir, p->machine, p->settings.dxvk_version, &dxvk );
+    if (!l->options->dxvk_on_add || !launcher_dxvk_directory( p->machine, p->settings.dxvk_source )) return;
+    dxvk_resolve_version( p->settings.dxvk_source, l->options->runtime_dir, p->machine,
+                          p->settings.dxvk_version, &dxvk );
     vkd3d_resolve_version( l->options->runtime_dir, p->machine, p->settings.vkd3d_version, &vkd3d );
     if (dxvk.installed) strcpy( p->settings.dxvk_version, dxvk.version );
     if (vkd3d.installed) strcpy( p->settings.vkd3d_version, vkd3d.version );
@@ -1841,7 +1842,7 @@ static int prepare_program_graphics( struct launcher *l, struct program *p )
 
     strcpy( dxvk, p->settings.dxvk_version );
     strcpy( vkd3d, p->settings.vkd3d_version );
-    if (!launcher_graphics_ensure( l->graphics, p->machine, dxvk, vkd3d )) return 0;
+    if (!launcher_graphics_ensure( l->graphics, p->machine, p->settings.dxvk_source, dxvk, vkd3d )) return 0;
     if (strcmp( dxvk, p->settings.dxvk_version ) || strcmp( vkd3d, p->settings.vkd3d_version ))
     {
         strcpy( p->settings.dxvk_version, dxvk );
@@ -2219,7 +2220,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 dxvk_beside |= file_exists( path );
             }
         }
-        dxvk_resolve_version( l->options->runtime_dir, p->machine, p->settings.dxvk_version, &dxvk );
+        dxvk_resolve_version( p->settings.dxvk_source, l->options->runtime_dir, p->machine,
+                              p->settings.dxvk_version, &dxvk );
         vkd3d_resolve_version( l->options->runtime_dir, p->machine, p->settings.vkd3d_version, &vkd3d );
 
         count = 0;
@@ -2317,11 +2319,13 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                       vkd3d.installed ? "Bundled" : "Not installed" );
 
             ADD_ROW( ROW_DXVK_VERSION, SECTION_GRAPHICS, "DXVK version",
-                     "Choose an official DXVK GitHub release." );
+                     "Choose an Official, Sarek or GPLAsync release." );
             row->kind = UI_ROW_DROPDOWN;
             row->download = !dxvk.installed;
-            snprintf( row->value, sizeof(row->value), "%s", dxvk.version[0] ? dxvk.version :
-                      dxvk.installed ? "Bundled" : "Not installed" );
+            snprintf( row->value, sizeof(row->value), "%s %s",
+                      p->settings.dxvk_source == DXVK_SOURCE_SAREK ? "Sarek" :
+                      p->settings.dxvk_source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" : "Official",
+                      dxvk.version[0] ? dxvk.version : dxvk.installed ? "Bundled" : "Not installed" );
             ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "DXVK HUD",
                      "FPS shows only the frame rate. Compact shows the DirectX version, FPS and frame times. "
                      "Full also shows the DXVK version, GPU, video memory and shader compiler activity. "
@@ -2628,12 +2632,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             {
                 char *version = id == ROW_VKD3D_VERSION ? p->settings.vkd3d_version : p->settings.dxvk_version;
                 version[0] = 0;
+                if (id == ROW_DXVK_VERSION) p->settings.dxvk_source = DXVK_SOURCE_OFFICIAL;
                 save_program_settings( l, p );
             }
             else if (action == UI_ACTION_CHOOSE)
             {
                 char *version = id == ROW_VKD3D_VERSION ? p->settings.vkd3d_version : p->settings.dxvk_version;
-                if (launcher_graphics_select( l->graphics, &list, p->machine, id == ROW_VKD3D_VERSION, version ))
+                if (launcher_graphics_select( l->graphics, &list, p->machine, id == ROW_VKD3D_VERSION,
+                                              &p->settings.dxvk_source, version ))
                 {
                     p->settings.dxvk = 1;
                     save_program_settings( l, p );

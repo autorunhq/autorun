@@ -27,19 +27,28 @@ static void dll( const char *root, const char *directory, const char *name, unsi
     assert( !fclose( file ) );
 }
 
+static void check_source( const char *root, int vkd3d, enum dxvk_source source,
+                          unsigned short machine, const char *requested,
+                          const char *expected, int installed, int bundled )
+{
+    struct dxvk_version selected;
+    if (vkd3d) vkd3d_resolve_version( root, machine, requested, &selected );
+    else dxvk_resolve_version( source, root, machine, requested, &selected );
+    assert( !strcmp( selected.version, expected ) );
+    assert( selected.installed == installed && selected.bundled == bundled );
+}
+
 static void check( const char *root, int vkd3d, unsigned short machine, const char *requested,
                     const char *expected, int installed, int bundled )
 {
-    struct dxvk_version selected;
-    (vkd3d ? vkd3d_resolve_version : dxvk_resolve_version)( root, machine, requested, &selected );
-    assert( !strcmp( selected.version, expected ) );
-    assert( selected.installed == installed && selected.bundled == bundled );
+    check_source( root, vkd3d, DXVK_SOURCE_OFFICIAL, machine, requested, expected, installed, bundled );
 }
 
 int main(void)
 {
     char root[] = "graphics-releases-XXXXXX", path[1024];
     struct dxvk_release releases[4] = {0}, readback[4];
+    const char *archives[2] = { getenv( "DXVK_TEST_SAREK_ARCHIVE" ), getenv( "DXVK_TEST_GPLASYNC_ARCHIVE" ) };
     int count;
 
     assert( mkdtemp( root ) );
@@ -49,6 +58,8 @@ int main(void)
     assert( compare_versions( "3.0.1", "3.0b" ) > 0 );
     assert( compare_versions( "3.0", "3.0.0" ) == 0 );
     assert( !stable_version( "3.0-rc1" ) && !stable_version( "3.0.new" ) );
+    assert( backend_stable_version( &gplasync_backend, "3.1.1-1" ) );
+    assert( !backend_stable_version( &gplasync_backend, "3.1.1-rc1" ) );
     dll( root, "dxvk64", "d3d9.dll", 0x8664 );
     snprintf( path, sizeof(path), "%s/drive_c/dxvk64/dxvk-manifest.json", root );
     assert( write_atomic( path, "{\"version\":\"3.0b\"}", 18 ) );
@@ -74,19 +85,64 @@ int main(void)
     dll( root, "vkd3d64/versions/3.0b", "d3d12core.dll", 0x8664 );
     check( root, 1, 0x8664, "", "3.0b", 1, 0 );
     check( root, 1, 0x014c, "", "", 0, 0 );
+    dll( root, "dxvk-sarek64/versions/1.13.0", "d3d9.dll", 0x8664 );
+    dll( root, "dxvk-gplasync64/versions/3.1.1-1", "d3d9.dll", 0x8664 );
+    check_source( root, 0, DXVK_SOURCE_SAREK, 0x8664, "", "1.13.0", 1, 0 );
+    check_source( root, 0, DXVK_SOURCE_GPLASYNC, 0x8664, "", "3.1.1-1", 1, 0 );
+    check_source( root, 0, DXVK_SOURCE_GPLASYNC, 0x014c, "", "", 0, 0 );
 
-    assert( dxvk_release_catalog( root, readback, 4, &count, 1, NULL, NULL ) == DXVK_NOT_FOUND );
+    {
+        static const char official[] = "[{\"tag_name\":\"v3.1.1\",\"draft\":false,\"prerelease\":false,"
+            "\"assets\":[{\"name\":\"dxvk-3.1.1.tar.gz\","
+            "\"browser_download_url\":\"https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz\"}]}]";
+        static const char github[] = "[{\"tag_name\":\"v1.13.0\",\"draft\":false,\"prerelease\":false,"
+            "\"assets\":[{\"name\":\"dxvk-sarek-1.13.0.tar.gz\","
+            "\"browser_download_url\":\"https://github.com/pythonlover02/dxvk-sarek/releases/download/v1.13.0/dxvk-sarek-1.13.0.tar.gz\"}]}]";
+        static const char gitlab[] = "[{\"tag_name\":\"v3.1.1-1\",\"assets\":{\"links\":["
+            "{\"name\":\"dxvk-gplasync-v3.1.1-1.zip\",\"direct_asset_url\":\"https://gitlab.com/Ph42oN/dxvk-gplasync/zip\"},"
+            "{\"name\":\"dxvk-gplasync-v3.1.1-1.tar.gz\","
+            "\"direct_asset_url\":\"https://gitlab.com/Ph42oN/dxvk-gplasync/-/raw/main/releases/dxvk-gplasync-v3.1.1-1.tar.gz\"}]}}]";
+        int seen = 0;
+
+        assert( parse_release_page( &dxvk_backend, (const unsigned char *)official, strlen(official), readback, 4, &seen ) == 1 );
+        assert( seen == 1 && !strcmp( readback[0].version, "3.1.1" ) );
+        seen = 0;
+        assert( parse_release_page( &sarek_backend, (const unsigned char *)github, strlen(github), readback, 4, &seen ) == 1 );
+        assert( seen == 1 && !strcmp( readback[0].version, "1.13.0" ) );
+        seen = 0;
+        assert( parse_release_page( &gplasync_backend, (const unsigned char *)gitlab, strlen(gitlab), readback, 4, &seen ) == 1 );
+        assert( seen == 1 && !strcmp( readback[0].version, "3.1.1-1" ) );
+    }
+
+    assert( dxvk_release_catalog( DXVK_SOURCE_OFFICIAL, root, readback, 4, &count, 1, NULL, NULL ) == DXVK_NOT_FOUND );
     assert( !count );
     strcpy( releases[0].version, "3.1.1" );
     strcpy( releases[0].url, "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz" );
     strcpy( releases[1].version, "2.7.1" );
     strcpy( releases[1].url, "https://github.com/doitsujin/dxvk/releases/download/v2.7.1/dxvk-2.7.1.tar.gz" );
     assert( save_catalog( &dxvk_backend, root, releases, 2 ) );
-    assert( dxvk_release_catalog( root, readback, 1, &count, 1, NULL, NULL ) == DXVK_OK );
+    assert( dxvk_release_catalog( DXVK_SOURCE_OFFICIAL, root, readback, 1, &count, 1, NULL, NULL ) == DXVK_OK );
     assert( count == 1 && !strcmp( readback[0].version, "3.1.1" ) );
-    assert( dxvk_release_catalog( root, readback, 4, &count, 1, NULL, NULL ) == DXVK_OK );
+    assert( dxvk_release_catalog( DXVK_SOURCE_OFFICIAL, root, readback, 4, &count, 1, NULL, NULL ) == DXVK_OK );
     assert( count == 2 && !strcmp( readback[1].version, "2.7.1" ) );
+    assert( dxvk_release_catalog( DXVK_SOURCE_SAREK, root, readback, 4, &count, 1, NULL, NULL ) == DXVK_NOT_FOUND );
+    assert( dxvk_release_catalog( DXVK_SOURCE_GPLASYNC, root, readback, 4, &count, 1, NULL, NULL ) == DXVK_NOT_FOUND );
     assert( vkd3d_release_catalog( root, readback, 4, &count, 1, NULL, NULL ) == DXVK_NOT_FOUND );
+    for (int i = 0; i < 2; i++)
+        if (archives[i])
+        {
+            const struct release_backend *backend = i ? &gplasync_backend : &sarek_backend;
+            char x32[1024], x64[1024];
+            int x32_files = 0, x64_files = 0;
+
+            snprintf( x32, sizeof(x32), "%s/%s-archive-x32", root, backend->id );
+            snprintf( x64, sizeof(x64), "%s/%s-archive-x64", root, backend->id );
+            assert( make_directory( x32 ) && make_directory( x64 ) );
+            assert( extract_archive( backend, archives[i], x32, x64, &x32_files, &x64_files ) );
+            assert( x32_files >= 4 && x64_files >= 4 );
+            assert( validate_payload( backend, x32, 0x014c, NULL ) );
+            assert( validate_payload( backend, x64, 0x8664, NULL ) );
+        }
     assert( remove_tree( root ) );
     puts( "graphics version resolution and cached catalogs: OK" );
     return 0;
