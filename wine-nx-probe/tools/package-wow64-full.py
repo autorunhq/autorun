@@ -63,9 +63,10 @@ shutil.copy2(mesa_nro, stage / 'wine-nx-runtime.nro')
 # SPEED2.EXE, and the XtendedInput dinput8.dll in its folder (which loads the
 # real dinput8.dll from syswow64), and Most Wanted's speed.exe, which adds
 # d3dx9_26, with the scripts\NFS_XtendedInput.asi its ASI loader loads, which
-# adds msvcp140, which loads concrt140 when it starts. quartz delay-loads ddraw
-# too. Their imports, and the DLLs that exports they use forward to, come along.
-NFS_DLLS = 'ddraw dinput dinput8 netapi32 shfolder tapi32 dbghelp vcruntime140 msvcp140 concrt140 xinput1_4 d3dx9_26'.split()
+# adds msvcp140, which loads concrt140 when it starts, and Carbon's NFSC.exe,
+# which adds d3dx9_30. quartz delay-loads ddraw too. Their imports, and the DLLs
+# that exports they use forward to, come along.
+NFS_DLLS = 'ddraw dinput dinput8 netapi32 shfolder tapi32 dbghelp vcruntime140 msvcp140 concrt140 xinput1_4 d3dx9_26 d3dx9_30'.split()
 # Fallout New Vegas (GOG) imports xinput1_3 and d3dx9_38, and its Galaxy.dll and
 # GalaxyWrp.dll import the 2012 runtimes. d3dx9 loads images through
 # windowscodecs, which it delay-imports, so no import walk reaches it.
@@ -87,8 +88,12 @@ SIMS2_DLLS = ['gdiplus']
 # 32-bit loader in syswow64. vulkan-1 loads winevulkan by hand and imports
 # nothing else of it, so no import walk reaches either: name both.
 VULKAN_DLLS = 'vulkan-1 winevulkan'.split()
+# F.E.A.R. (Platinum Collection) imports d3dx9_27, from the April 2005 DirectX
+# redistributable its installer would have run. Without it FEAR.exe stops in
+# the loader with STATUS_DLL_NOT_FOUND. What d3dx9_27 imports is staged already.
+FEAR_DLLS = ['d3dx9_27']
 GAME_DLLS = (NFS_DLLS + FALLOUT_DLLS + SOURCE_DLLS + HALO_DLLS + SIMS2_DLLS + VULKAN_DLLS
-             + list(LEGACY_RUNTIME_DLLS))
+             + FEAR_DLLS + list(LEGACY_RUNTIME_DLLS))
 pe = probe / 'build-wine-wow64-pe'
 toolchain = probe / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
 env = dict(os.environ, PATH=f'{toolchain}:/opt/homebrew/opt/bison/bin:' + os.environ['PATH'])
@@ -343,6 +348,9 @@ they import), with dbghelp, msvcp140, vcruntime140 and xinput1_4 for XtendedInpu
 NFSU2's dinput8.dll and Most Wanted's NFS_XtendedInput.asi. Neither executable
 can be moved in memory, so start them through a forwarder set to a 32-bit
 address space.
+
+F.E.A.R. (Platinum Collection): d3dx9_27, which FEAR.exe imports and the game's
+DirectX installer would otherwise supply.
 
 Fallout New Vegas (GOG): xinput1_3, d3dx9_38 and the windowscodecs that loads its
 textures are staged, with msvcp110 and msvcr110 for Galaxy.dll and GalaxyWrp.dll.

@@ -87,6 +87,28 @@ aligned blocks the same way.
 - `tests/sd_read_cache.c` covers OpenTTD's read pattern, the end of a file,
   least recently used replacement against 20,000 random reads, failed
   requests, the memory limit and open-file rules.
+- `source/sd_write_buffer.h` keeps a window of each file being written, up
+  to 1 MB, with the bytes written into it and the file position the program
+  sees; writes of 64 KB or more go straight out. Writes and seeks inside the
+  window stay there, and sending it out writes only what changed since the
+  last time and keeps it. Dolphin's Switch port puts a 16 KB stdio buffer on
+  its NAND files for the same reason, but stdio sends it out on every seek.
+  `sd_cache.c` holds writes only for a file open once and not for appending,
+  drops the window before a read, open, rename, delete, seek from the end or
+  close of that file, adds it to the size stat and fstat report, and sends
+  what changed every 200 ms from the log flusher. F.E.A.R. writes its 262 KB
+  checkpoint a value at a time, going back to fill in each length, which
+  stalled the start of every level for a minute; `tests/sd_write_buffer.c`
+  turns that pattern's 52,500 requests into one per 200 ms send.
+- `source/sd_stat_cache.h` keeps what stat said about 512 paths, and that a
+  path is not there. libnx answers a stat with up to five requests, and
+  F.E.A.R. asks for PunkBuster's missing `pb/pbcl.dll` 340 times a second,
+  each one a lookup of every directory on the way. `sd_cache.c` forgets a path
+  created, written, truncated or deleted, and everything on a rename or a
+  directory removed. `[PROGRESS]` shows `sd_writes`, `sd_write_ms`,
+  `writes_held`, `sd_stats` (asked of the card), `stat_hits` and why held
+  writes went out (`flushes=` a write elsewhere / the file read or opened /
+  a seek from its end / closed / the 200 ms send).
 Hardware results are pending.
 
 `nx-wow64-dynarec-30` fixes OpenTTD's white screen and idle hang.
