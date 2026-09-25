@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Build a pack of autorun-horizon-dlls: every Windows module Autorun runs,
-built from this tree's Wine, written into a checkout of the pack repo.
+"""Build autorun-horizon-dlls, the DLL repository: every Windows module Autorun
+runs, built from this tree's Wine, written into a checkout of the repository.
 
     package-horizon-dlls.py [--repo ~/autorun-horizon-dlls] [--allow-dirty] [--no-build]
 
@@ -14,12 +14,10 @@ and the manifest at switch/wine/horizon-dlls/manifest.json, which is also what a
 card keeps to know what it has. A download of the repo is what a player without
 a network copies to the card.
 
-Each pack is a tag, pack-N, and a file's URL is its raw path at the tag of the
-pack its version first came in; that stays as it is while main moves on. A file
-whose bytes did not change keeps its version and URL, so a card downloads only
-what changed, and git keeps one copy of it however many packs carry it. The
-packager writes the new tree over the old one and says how to commit, tag and
-push it; main and the tag go up together.
+A file's URL is its raw path on main, and its version changes only when its
+bytes do, so a card downloads only what changed, and git keeps one copy of a
+file however many commits carry it. The packager writes the new tree over the
+old one; committing and pushing it is what publishes it.
 
 A module that calls straight into the runtime needs a runtime built against
 the same interface. Its entry requires the features the runtime reports for
@@ -63,7 +61,7 @@ WINE_IMPORT = 'eaa5b16e'
 SCHEMA = 1
 # The runtime these files are for. The AMD64 runtime has its own system32
 # (ARM64X, from build-wine-amd64-pe) at the same paths, and gets entries of its
-# own when it has a pack.
+# own when it is built.
 FLAVOR = 'x86'
 # Where each architecture's modules go, as on Windows on ARM.
 ARCHES = {'i386': 'drive_c/windows/syswow64', 'aarch64': 'drive_c/windows/system32'}
@@ -198,7 +196,7 @@ def build(modules):
                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def stripped(path, into):
-    """The file without its debug information, as the pack carries it."""
+    """The file without its debug information, as the repository carries it."""
     out = into / path.name
     subprocess.run([str(toolchain / 'llvm-strip'), '--strip-debug', '-o', str(out), str(path)], check=True)
     return out
@@ -206,7 +204,7 @@ def stripped(path, into):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--repo', type=Path, default=root.parent / 'autorun-horizon-dlls',
-                        help='a checkout of the pack repo')
+                        help='a checkout of the DLL repository')
     parser.add_argument('--allow-dirty', action='store_true', help='build from uncommitted sources, for trying it')
     parser.add_argument('--no-build', action='store_true', help='package what is built already')
     args = parser.parse_args()
@@ -218,9 +216,6 @@ def main():
     previous = json.loads((card / MANIFEST).read_text()) if (card / MANIFEST).exists() else None
     if previous:
         assert previous['schema'] == SCHEMA, f"previous manifest is schema {previous['schema']}"
-    pack = previous['pack'] + 1 if previous else 1
-    tag = f'pack-{pack}'
-    assert not pack_git(repo, 'tag', '--list', tag), f'{tag} is already a tag in {repo}'
     earlier = {f"{f['path']}/{f['name']}": f for f in previous['files']} if previous else {}
 
     modules = targets()
@@ -240,7 +235,7 @@ def main():
     dirty = git('status', '--porcelain', '--', 'include', 'libs', 'dlls', 'programs',
                 'wine-nx-probe/source/audio_driver.c', 'wine-nx-probe/runtime-interfaces.json')
     if dirty:
-        assert args.allow_dirty, f'uncommitted changes in what the pack is built from:\n{dirty}'
+        assert args.allow_dirty, f'uncommitted changes in what the DLLs are built from:\n{dirty}'
         commit += '-dirty'
     elif not git('branch', '-r', '--contains', commit):
         print(f'warning: {commit[:8]} is not pushed; push it before publishing, the manifest points there')
@@ -264,7 +259,7 @@ def main():
         machine = readobj('--file-headers', shipped)
         assert f'Arch: {arch}\n' in machine, f'{name} is not {arch}'
 
-        # What it imports at load time is in the pack, for its architecture.
+        # What it imports at load time is in the repository, for its architecture.
         for module in re.findall(r'^Import \{\n  Name: (.+)$', readobj('--coff-imports', shipped), re.M):
             module = module.lower()
             if not module.startswith(('api-ms-', 'ext-ms-')) and module not in loaded[arch]:
@@ -272,11 +267,8 @@ def main():
 
         digest = hashlib.sha256(shipped.read_bytes()).hexdigest()
         before = earlier.get(f'{path}/{name}')
-        if before and before['sha256'] == digest and before['url'].startswith(RAW):
-            version, url = before['version'], before['url']
-        else:
-            version = before['version'] + (before['sha256'] != digest) if before else 1
-            url = f'{RAW}/{tag}/switch/wine/{path}/{name}'
+        version = before['version'] + (before['sha256'] != digest) if before else 1
+        url = f'{RAW}/main/switch/wine/{path}/{name}'
 
         served = []
         found = classes.registered_classes_of(shipped)
@@ -314,7 +306,7 @@ def main():
         shutil.copy2(shipped, card / path / name)
     shutil.rmtree(scratch)
 
-    manifest = dict(schema=SCHEMA, pack=pack, tag=tag, flavor=FLAVOR,
+    manifest = dict(schema=SCHEMA, flavor=FLAVOR,
                     source=dict(repo=SOURCE_REPO, commit=commit, wine='11.0', wine_import=WINE_IMPORT),
                     files=files)
     (card / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
@@ -326,25 +318,24 @@ def main():
     (repo / 'NOTICE.md').write_text(write_notice(manifest, licenses))
     (repo / 'README.md').write_text(README)
 
-    new = [f for f in files if f['url'].startswith(f'{RAW}/{tag}/')]
+    new = [f for f in files if f['version'] == 1 or f['sha256'] != earlier.get(f"{f['path']}/{f['name']}", {}).get('sha256')]
     for arch, path in ARCHES.items():
         mine = [f for f in files if f['arch'] == arch]
         print(f'{path}: {len(mine)} files, {sum(f["size"] for f in mine) >> 20} MB')
-    print(f'{tag}: {len(files)} files ({sum(f["size"] for f in files) >> 20} MB), {len(new)} new or changed '
+    print(f'{len(files)} files ({sum(f["size"] for f in files) >> 20} MB), {len(new)} new or changed '
           f'({sum(f["size"] for f in new) >> 20} MB); source {commit[:12]}')
     print(f'  modified from Wine 11.0 or Autorun\'s own: {sum(f["source"]["modified"] for f in files)}')
     print(f'  tied to the runtime: {", ".join(f["arch"] + " " + f["name"] for f in files if f["requires"]["features"])}')
     print(f'  classes: {sum(len(f["classes"]) for f in files)}')
     if unresolved:
-        print(f'  imports nothing in the pack provides ({len(unresolved)}): {", ".join(unresolved[:12])}')
+        print(f'  imports nothing in the repository provides ({len(unresolved)}): {", ".join(unresolved[:12])}')
     print(f'  publish from {repo}:')
-    print(f'    git add -A && git commit -m "{tag}: ..." && git tag {tag}')
-    print(f'    git push --atomic origin main {tag}')
+    print(f'    git add -A && git commit -m "..." && git push origin main')
 
 def write_notice(manifest, licenses):
     source = manifest['source']
     modified = [f for f in manifest['files'] if f['source']['modified']]
-    lines = [f"# autorun-horizon-dlls {manifest['tag']}", '',
+    lines = ['# autorun-horizon-dlls', '',
              f"Built from Wine {source['wine']} as carried by "
              f"https://github.com/{source['repo']} at commit `{source['commit']}`. "
              f"The source of every file is there, under the paths its manifest entry lists.", '',
@@ -358,7 +349,7 @@ def write_notice(manifest, licenses):
         lines += ["Changed from Wine 11.0, or Autorun's own (see the commit history of the paths listed):", '']
         lines += [f"- `{f['path']}/{f['name']}`: {', '.join(f['source']['paths'])}" for f in modified]
     else:
-        lines.append('No file in this pack is changed from Wine 11.0.')
+        lines.append('No file here is changed from Wine 11.0.')
     return '\n'.join(lines) + '\n'
 
 README = '''# autorun-horizon-dlls
@@ -378,7 +369,6 @@ which, and where their source is. None of it is Microsoft's.
 
 The repository is laid out as the SD card is: `switch/wine/drive_c/windows/`
 holds the files, and `switch/wine/horizon-dlls/manifest.json` describes them.
-Each pack is a tag, `pack-N`; `main` is the latest.
 
 ## manifest.json
 
@@ -387,7 +377,6 @@ from in the same place.
 
 ```
 schema        format version; Autorun ignores a manifest it does not know
-pack, tag     the pack number, and its tag (pack-N)
 flavor        the runtime the files are for (x86: the WoW64 runtime)
 source        repo, commit and Wine version everything was built from
 files[]       one per file:
@@ -397,7 +386,7 @@ files[]       one per file:
   version     this file's own version; it changes only when its bytes do
   size, sha256, url
               what to download and how to check it; url is the file's raw
-              path at the tag its version first came in, which does not move
+              path on main
   source      repo, commit, origin (wine or autorun), the source paths, and
               whether they changed since Wine was imported
   license     SPDX expression
@@ -410,7 +399,7 @@ files[]       one per file:
               Autorun registers, as DllRegisterServer would on a PC
 ```
 
-Packs are made with `wine-nx-probe/tools/package-horizon-dlls.py` in the
+The files are built with `wine-nx-probe/tools/package-horizon-dlls.py` in the
 Autorun repository.
 '''
 
