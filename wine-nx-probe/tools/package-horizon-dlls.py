@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Build a release of autorun-horizon-dlls: the Windows components Autorun
-downloads instead of shipping, each built from this tree's Wine.
+"""Build a pack of autorun-horizon-dlls: the Windows components Autorun
+downloads instead of shipping, each built from this tree's Wine, written into a
+checkout of the pack repo.
 
-    package-horizon-dlls.py [--previous manifest.json] [--allow-dirty]
+    package-horizon-dlls.py [--repo ~/autorun-horizon-dlls] [--allow-dirty]
 
---previous is the manifest of the release before this one (manifest.json in a
-checkout of the pack repo). A file whose bytes did not change keeps its version
-and the URL it was released under, so a release uploads only what changed and a
-card downloads only that; a changed file gets the next version. Without it this
-is the first release.
+The repo is laid out as the SD card is: each file at switch/wine/<path>/<name>
+and the manifest at switch/wine/horizon-dlls/manifest.json, which is also what a
+card keeps to know what it has. A download of the repo is what a player without
+a network copies to the card.
 
-What it writes, in build-horizon-dlls/:
-  repo/     manifest.json, README.md, NOTICE.md and LICENSES/, for the repo
-  assets/   the files new in this release, to attach to its GitHub release
-  autorun-horizon-dlls-pack-N.zip
-            the whole pack laid out as on a card, for players without a
-            network: extracted to the SD card root it is what a download leaves
+Each pack is a tag, pack-N, and a file's URL is its raw path at the tag of the
+pack its version first came in; that stays as it is while main moves on. A file
+whose bytes did not change keeps its version and URL, so a card downloads only
+what changed, and git keeps one copy of it however many packs carry it. The
+packager writes the new tree over the old one and says how to commit, tag and
+push it; main and the tag go up together.
 
 Every file names the commit it was built from, and whether its sources changed
 since Wine 11.0 was imported, which is what the LGPL asks of a changed library.
@@ -24,7 +24,6 @@ the manifest points to would not be what the file was built from; --allow-dirty
 is for trying the packager, and marks the commit so.
 """
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
 import argparse
 import functools
 import hashlib
@@ -41,14 +40,15 @@ root = probe.parent
 tools = probe / 'tools'
 pe = probe / 'build-wine-wow64-pe'
 toolchain = probe / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
-out = probe / 'build-horizon-dlls'
 # The card a release of Autorun leaves; what the pack's DLLs import has to be on
 # it or in the pack.
 release_stage = probe / 'build-switch-wow64-dynarec/full-sd-card/switch/wine'
 
 PACK_REPO = 'autorunhq/autorun-horizon-dlls'
 SOURCE_REPO = 'autorunhq/autorun'
-DOWNLOAD = f'https://github.com/{PACK_REPO}/releases/download'
+RAW = f'https://raw.githubusercontent.com/{PACK_REPO}'
+# Where a card, and the repo, keep the manifest; relative to switch/wine.
+MANIFEST = 'horizon-dlls/manifest.json'
 # The commit that imported Wine 11.0; a file whose sources a later commit
 # touched is a changed copy of Wine's.
 WINE_IMPORT = 'eaa5b16e'
@@ -177,17 +177,30 @@ def with_dependencies(components, on_card):
 def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def pack_git(repo, *args):
+    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--previous', type=Path, help="the last release's manifest.json")
+    parser.add_argument('--repo', type=Path, default=root.parent / 'autorun-horizon-dlls',
+                        help='a checkout of the pack repo')
     parser.add_argument('--allow-dirty', action='store_true', help='build from uncommitted sources, for trying it')
     args = parser.parse_args()
 
-    previous = json.loads(args.previous.read_text()) if args.previous else None
+    repo = args.repo.resolve()
+    assert (repo / '.git').exists(), f'{repo} is not a checkout of {PACK_REPO}'
+    assert not pack_git(repo, 'status', '--porcelain'), f'{repo} has uncommitted changes'
+    card = repo / 'switch/wine'
+    previous = None
+    for place in (card / MANIFEST, repo / 'manifest.json'):
+        if place.exists():
+            previous = json.loads(place.read_text())
+            break
     if previous:
         assert previous['schema'] == SCHEMA, f"previous manifest is schema {previous['schema']}"
     pack = previous['pack'] + 1 if previous else 1
     tag = f'pack-{pack}'
+    assert not pack_git(repo, 'tag', '--list', tag), f'{tag} is already a tag in {repo}'
     earlier = {f"{f['path']}/{f['name']}": f for f in previous['files']} if previous else {}
 
     commit = git('rev-parse', 'HEAD')
@@ -202,10 +215,10 @@ def main():
     elif not git('branch', '-r', '--contains', commit):
         print(f'warning: {commit[:8]} is not pushed; push it before publishing, the manifest points there')
 
-    shutil.rmtree(out, ignore_errors=True)
-    (out / 'repo/LICENSES').mkdir(parents=True)
-    (out / 'assets').mkdir()
-    card = out / 'card/switch/wine'
+    # The tree is written anew; git sees what did not change as unchanged.
+    shutil.rmtree(repo / 'switch', ignore_errors=True)
+    shutil.rmtree(repo / 'LICENSES', ignore_errors=True)
+    (repo / 'manifest.json').unlink(missing_ok=True)
 
     files, licenses, claimed = [], {'wine'}, {}
     for component in components:
@@ -215,11 +228,12 @@ def main():
 
         digest = sha256(dll)
         before = earlier.get(f'{path}/{name}')
-        if before and before['sha256'] == digest:
+        # A URL from the time packs were GitHub releases is not kept.
+        if before and before['sha256'] == digest and before['url'].startswith(RAW):
             version, url = before['version'], before['url']
         else:
-            version, url = (before['version'] + 1 if before else 1), f'{DOWNLOAD}/{tag}/{name}'
-            shutil.copy2(dll, out / 'assets' / name)
+            version = before['version'] + (before['sha256'] != digest) if before else 1
+            url = f'{RAW}/{tag}/switch/wine/{path}/{name}'
 
         served = []
         for uuid, threading, coclass in classes.classes_of(module_dir(name)) + classes.registered_classes_of(dll):
@@ -246,37 +260,26 @@ def main():
     manifest = dict(schema=SCHEMA, pack=pack, tag=tag,
                     source=dict(repo=SOURCE_REPO, commit=commit, wine='11.0', wine_import=WINE_IMPORT),
                     files=files)
-    text = json.dumps(manifest, indent=2) + '\n'
-    (out / 'repo/manifest.json').write_text(text)
-    (out / 'assets/manifest.json').write_text(text)
-    # A card keeps the manifest of what it has, so the next check knows.
-    (card / 'horizon-dlls').mkdir(parents=True)
-    (card / 'horizon-dlls/manifest.json').write_text(text)
+    (card / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+    (card / MANIFEST).write_text(json.dumps(manifest, indent=2) + '\n')
 
     for key in sorted(licenses):
         _, source, target = LICENSES[key]
-        shutil.copy2(source, out / 'repo' / target)
-        (card / 'horizon-dlls' / target).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, card / 'horizon-dlls' / target)
-    notice = write_notice(manifest, licenses)
-    (out / 'repo/NOTICE.md').write_text(notice)
-    (card / 'horizon-dlls/NOTICE.md').write_text(notice)
-    (out / 'repo/README.md').write_text(README)
-
-    archive = out / f'autorun-horizon-dlls-{tag}.zip'
-    with ZipFile(archive, 'w', ZIP_DEFLATED) as zipf:
-        for item in sorted((out / 'card').rglob('*')):
-            if item.is_file():
-                zipf.write(item, item.relative_to(out / 'card'))
-    shutil.copy2(archive, out / 'assets' / archive.name)
+        (repo / target).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, repo / target)
+    (repo / 'NOTICE.md').write_text(write_notice(manifest, licenses))
+    (repo / 'README.md').write_text(README)
 
     depends = [f['name'] for f in files if f['group'] == 'depends']
+    new = [f['name'] for f in files if f['url'].startswith(f'{RAW}/{tag}/')]
+    size = sum(f['size'] for f in files)
+    print(f'{tag}: {len(files)} files ({size >> 20} MB), {len(new)} new or changed; source {commit[:12]}')
     print(f'  brought along, since the release card lacks them: {", ".join(depends) or "nothing"}')
-    new = [f['name'] for f in files if f['url'].startswith(f'{DOWNLOAD}/{tag}/')]
-    print(f'{tag}: {len(files)} files, {len(new)} new in this release; source {commit[:12]}')
     print(f'  modified since Wine 11.0: {", ".join(f["name"] for f in files if f["source"]["modified"]) or "none"}')
-    print(f'  classes: {sum(len(f["classes"]) for f in files)}; offline zip {archive.stat().st_size >> 20} MB')
-    print(f'  publish: commit {out}/repo to {PACK_REPO}, then attach {out}/assets to release {tag}')
+    print(f'  classes: {sum(len(f["classes"]) for f in files)}')
+    print(f'  publish from {repo}:')
+    print(f'    git add -A && git commit -m "{tag}: ..." && git tag {tag}')
+    print(f'    git push --atomic origin main {tag}')
 
 def write_notice(manifest, licenses):
     source = manifest['source']
@@ -301,32 +304,38 @@ README = '''# autorun-horizon-dlls
 
 Windows components for [Autorun](https://github.com/autorunhq/autorun), the
 Windows compatibility layer for the Nintendo Switch: the DirectX a game's
-installer would have run on a PC (D3DX9, D3DCompiler, XInput, XAudio2, X3DAudio, XAPOFX,
-XACT, DirectMusic, DirectPlay), built from Autorun's Wine. Autorun downloads
-them itself; nothing here needs to be copied by hand.
+installer would have run on a PC (D3DX9, D3DCompiler, XInput, XAudio2,
+X3DAudio, XAPOFX, XACT, DirectMusic, DirectPlay), built from Autorun's Wine.
+Autorun downloads them itself; nothing here needs to be copied by hand.
 
-**Without a network:** download `autorun-horizon-dlls-pack-N.zip` from the
-latest release and extract it to the root of the SD card, merging folders.
+**Without a network:** download this repository (Code, Download ZIP) and copy
+its `switch` folder to the root of the SD card, merging folders.
 
 Every file is built from Wine, some with changes for Horizon; `NOTICE.md` says
 which, and where their source is. None of it is Microsoft's.
 
+## Layout
+
+The repository is laid out as the SD card is: `switch/wine/drive_c/...` holds
+the files, and `switch/wine/horizon-dlls/manifest.json` describes them. Each
+pack is a tag, `pack-N`; `main` is the latest.
+
 ## manifest.json
 
-`manifest.json` on `main` describes the latest release. Autorun reads it, and a
-card keeps the one it installed from in `switch/wine/horizon-dlls/`.
+Autorun reads the manifest on `main`, and a card keeps the one it installed
+from in the same place.
 
 ```
 schema        format version; Autorun ignores a manifest it does not know
-pack, tag     the release number, and its GitHub release (pack-N)
+pack, tag     the pack number, and its tag (pack-N)
 source        repo, commit and Wine version everything was built from
 files[]       one per file:
   name, path  where it goes, relative to switch/wine
   group       what it belongs to (d3dx9, xaudio2, directmusic, ...)
   version     this file's own version; it changes only when its bytes do
   size, sha256, url
-              what to download and how to check it; an unchanged file keeps
-              the URL of the release it came in
+              what to download and how to check it; url is the file's raw
+              path at the tag its version first came in, which does not move
   source      repo, commit, the source paths, and whether they changed since
               Wine was imported
   license     SPDX expression
@@ -336,7 +345,7 @@ files[]       one per file:
               Autorun registers, as DllRegisterServer would on a PC
 ```
 
-Releases are made with `wine-nx-probe/tools/package-horizon-dlls.py` in the
+Packs are made with `wine-nx-probe/tools/package-horizon-dlls.py` in the
 Autorun repository.
 '''
 
