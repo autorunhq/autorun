@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Build a pack of autorun-horizon-dlls: the Windows components Autorun
-downloads instead of shipping, each built from this tree's Wine, written into a
-checkout of the pack repo.
+"""Build a pack of autorun-horizon-dlls: every Windows module Autorun runs,
+built from this tree's Wine, written into a checkout of the pack repo.
 
-    package-horizon-dlls.py [--repo ~/autorun-horizon-dlls] [--allow-dirty]
+    package-horizon-dlls.py [--repo ~/autorun-horizon-dlls] [--allow-dirty] [--no-build]
+
+That is all of system32 (the aarch64 modules) and syswow64 (the i386 ones):
+every DLL, driver and program Wine's PE build makes, with Autorun's own
+winenxaudio.drv. The files are stripped of their debug information, which the
+build tree keeps for reading logs.
 
 The repo is laid out as the SD card is: each file at switch/wine/<path>/<name>
 and the manifest at switch/wine/horizon-dlls/manifest.json, which is also what a
@@ -16,6 +20,13 @@ whose bytes did not change keeps its version and URL, so a card downloads only
 what changed, and git keeps one copy of it however many packs carry it. The
 packager writes the new tree over the old one and says how to commit, tag and
 push it; main and the tag go up together.
+
+A module that calls straight into the runtime needs a runtime built against
+the same interface. Its entry requires the features the runtime reports for
+that: unixlib:<name> or unixlib32:<name> for being in the runtime's static
+unix-call tables (read from dlls/ntdll/unix/virtual.c), and iface:<name>:<hash>
+for the headers runtime-interfaces.json lists for it. Autorun leaves a file its
+runtime does not satisfy as it is.
 
 Every file names the commit it was built from, and whether its sources changed
 since Wine 11.0 was imported, which is what the LGPL asks of a changed library.
@@ -33,16 +44,13 @@ import os
 import re
 import shutil
 import subprocess
-import sys
+import tempfile
 
 probe = Path(__file__).resolve().parents[1]
 root = probe.parent
 tools = probe / 'tools'
 pe = probe / 'build-wine-wow64-pe'
 toolchain = probe / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
-# The card a release of Autorun leaves; what the pack's DLLs import has to be on
-# it or in the pack.
-release_stage = probe / 'build-switch-wow64-dynarec/full-sd-card/switch/wine'
 
 PACK_REPO = 'autorunhq/autorun-horizon-dlls'
 SOURCE_REPO = 'autorunhq/autorun'
@@ -53,52 +61,74 @@ MANIFEST = 'horizon-dlls/manifest.json'
 # touched is a changed copy of Wine's.
 WINE_IMPORT = 'eaa5b16e'
 SCHEMA = 1
-# What the runtime says it is; a file lists the range it works with. Raise it
-# when a runtime change breaks what files already released expect, and give a
-# file that needs something new from the runtime a feature name, which the
-# runtime lists once it has it.
-RUNTIME_ABI = 1
-SYSWOW64 = 'drive_c/windows/syswow64'
+# The runtime these files are for. The AMD64 runtime has its own system32
+# (ARM64X, from build-wine-amd64-pe) at the same paths, and gets entries of its
+# own when it has a pack.
+FLAVOR = 'x86'
+# Where each architecture's modules go, as on Windows on ARM.
+ARCHES = {'i386': 'drive_c/windows/syswow64', 'aarch64': 'drive_c/windows/system32'}
+MODULE = r'(?:dll|drv|exe|sys|ocx|cpl|acm|ax|tlb|ds|msstyles|dll16|drv16|exe16|mod16|vxd)'
+# Wine's test runner carries every test program inside it, hundreds of MB per
+# architecture, over what GitHub keeps in one file; it is no part of Windows.
+EXCLUDE = {'winetest.exe'}
 
-def group(name, dlls, **requires):
-    return [dict(group=name, name=dll if dll.endswith(('.dll', '.drv', '.acm')) else dll + '.dll',
-                 path=SYSWOW64, **requires) for dll in dlls]
+# What a file belongs to, for showing a player what is there; the rest is Wine.
+GROUPS = [
+    ('core', r'(ntdll|wow64|wow64win|wow64cpu|win32u|winebox64|apisetschema|kernel32|kernelbase)\.dll'),
+    ('d3dx9', r'd3dx9_\d+\.dll'), ('d3dcompiler', r'd3dcompiler_\d+\.dll'),
+    ('xinput', r'xinput.*\.dll'), ('xaudio2', r'xaudio2_\d\.dll'), ('x3daudio', r'x3daudio1_\d\.dll'),
+    ('xapofx', r'xapofx1_\d\.dll'), ('xact', r'xactengine\d_\d\.dll'),
+    ('directmusic', r'(dmusic|dmusic32|dmime|dmloader|dmstyle|dmsynth|dmband|dmcompos|dmscript|dswave|dsdmo)\.dll'),
+    ('directplay', r'(dplay|dplayx|dpnet|dpwsockx|dpnhpast|dpvoice)\.dll'),
+    ('direct3d', r'(d3d\w*|ddraw\w*|dxgi|wined3d|d3dim\w*|d3drm|d3dxof)\.dll'),
+    ('audio', r'(dsound|winmm|mmdevapi|winenxaudio)\.(dll|drv)'),
+    ('programs', r'.*\.exe'),
+]
 
-# The DirectX redistributable a game's installer would have run on a PC: every
-# version Wine builds. Those created by class rather than imported (XAudio2
-# before 2.8, XACT, DirectMusic, DirectPlay) carry their classes. A file that
-# will not work without something new in the runtime says so here, with
-# runtime_abi=(min, max) or features=[...]. What they load that a release's
-# card lacks comes along as the group 'depends'.
-COMPONENTS = (
-    group('d3dx9', [f'd3dx9_{n}' for n in range(24, 44)])
-    # d3dx9_42 and _43 import their own compiler; 47 comes with the runtime.
-    + group('d3dcompiler', [f'd3dcompiler_{n}' for n in (*range(33, 44), 46)])
-    # xinput1_1 and 1_2 build xinput1_3's Switch pad code, whose call table the
-    # runtime finds by module name (dlls/ntdll/unix/virtual.c); one without
-    # their names would give them no pad.
-    + group('xinput', ['xinput1_1', 'xinput1_2'], features=['xinput1_1-switch-pad'])
-    + group('xinput', ['xinput9_1_0'])
-    + group('xaudio2', [f'xaudio2_{n}' for n in range(10)])
-    + group('x3daudio', [f'x3daudio1_{n}' for n in range(8)])
-    + group('xapofx', [f'xapofx1_{n}' for n in range(1, 6)])
-    + group('xact', [f'xactengine2_{n}' for n in (0, 4, 7, 9)] + [f'xactengine3_{n}' for n in range(8)])
-    + group('directmusic', 'dmusic dmime dmloader dmstyle dmsynth dmband dmcompos dmscript dswave dsdmo dmusic32'.split())
-    + group('directplay', 'dplay dplayx dpnet dpwsockx dpnhpast dpvoice'.split())
-)
+# Modules built outside Wine's make: Autorun's own, as its packagers build them.
+def build_audio_driver():
+    driver = pe / 'winenxaudio.drv'
+    subprocess.run([str(toolchain / 'i686-w64-mingw32-clang'), '-Os', '-Wall', '-Wextra', '-Werror',
+                    '-fno-builtin', '-nostdlib', '-shared', '-Wl,--entry,_DllMain@12', '-Wl,--dynamicbase',
+                    '-o', str(driver), str(probe / 'source/audio_driver.c')], check=True, env=env)
+    return driver
 
-# The licenses of what the files are built from: Wine, and the libraries some
-# of them link in (by the $(NAME_PE_LIBS) their Makefile.in imports).
+EXTRA = [dict(arch='i386', name='winenxaudio.drv', build=build_audio_driver,
+              sources=['wine-nx-probe/source/audio_driver.c'], origin='autorun')]
+
+# The licenses of what the files are built from: Wine, compiler-rt, which the
+# build links into every module, and the libraries some of them link in (by the
+# $(NAME_PE_LIBS) their Makefile.in imports).
+ALWAYS = ['wine', 'compiler-rt']
 LICENSES = {
-    'wine': ('LGPL-2.1-or-later', root / 'COPYING.LIB', 'LICENSES/Wine-LGPL-2.1.txt'),
-    'faudio': ('Zlib', root / 'libs/faudio/LICENSE', 'LICENSES/FAudio-Zlib.txt'),
-    'fluidsynth': ('LGPL-2.1-or-later', root / 'COPYING.LIB', 'LICENSES/FluidSynth-LGPL-2.1.txt'),
+    'wine': ('LGPL-2.1-or-later', 'COPYING.LIB', 'Wine'),
+    'compiler-rt': ('NCSA OR MIT', 'libs/compiler-rt/LICENSE.TXT', 'compiler-rt'),
+    'capstone': ('BSD-3-Clause', 'libs/capstone/LICENSE.TXT', 'Capstone'),
+    'musl': ('MIT', 'libs/musl/COPYRIGHT', 'musl'),
+    'faudio': ('Zlib', 'libs/faudio/LICENSE', 'FAudio'),
+    'fluidsynth': ('LGPL-2.1-or-later', 'COPYING.LIB', 'FluidSynth'),
+    'gsm': ('TU-Berlin-2.0', 'libs/gsm/COPYRIGHT', 'libgsm'),
+    'jpeg': ('IJG', 'libs/jpeg/LICENSE', 'libjpeg'),
+    'jxr': ('BSD-2-Clause', 'libs/jxr/LICENSE', 'jxrlib'),
+    'lcms2': ('MIT', 'libs/lcms2/COPYING', 'Little CMS'),
+    'ldap': ('OLDAP-2.8', 'libs/ldap/LICENSE', 'OpenLDAP'),
+    'mpg123': ('LGPL-2.1-only', 'libs/mpg123/LICENSE', 'mpg123'),
+    'png': ('Libpng', 'libs/png/LICENSE', 'libpng'),
+    'tiff': ('libtiff', 'libs/tiff/COPYRIGHT', 'libtiff'),
+    'tomcrypt': ('Unlicense', 'libs/tomcrypt/LICENSE', 'LibTomCrypt'),
+    'vkd3d': ('LGPL-2.1-or-later', 'libs/vkd3d/COPYING', 'vkd3d'),
+    'xml2': ('MIT', 'libs/xml2/COPYING', 'libxml2'),
+    'xslt': ('MIT', 'libs/xslt/COPYING', 'libxslt'),
+    'zlib': ('Zlib', 'libs/zlib/LICENSE', 'zlib'),
 }
 
 env = dict(os.environ, PATH=f'{toolchain}:/opt/homebrew/opt/bison/bin:' + os.environ['PATH'])
 
 def git(*args):
     return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+
+def pack_git(repo, *args):
+    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
 
 def readobj(option, path):
     return subprocess.check_output([str(toolchain / 'llvm-readobj'), option, str(path)], text=True)
@@ -107,95 +137,85 @@ spec = importlib.util.spec_from_file_location('classes', tools / 'make-classes-r
 classes = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(classes)
 
-def module_dir(name):
-    return name.rsplit('.', 1)[0]
+def targets():
+    """Every PE module Wine's make builds, as (arch, source dir, file name)."""
+    database = subprocess.run(['make', '-C', str(pe), '-pnq', 'all'], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    found = set(re.findall(rf'\b((?:dlls|programs)/[^ :/]+)/(i386|aarch64)-windows/([^ :/]+\.{MODULE})\b', database))
+    return sorted((arch, directory, name) for directory, arch, name in found if name.lower() not in EXCLUDE)
 
-def makefile(name):
-    text = (root / 'dlls' / module_dir(name) / 'Makefile.in').read_text()
+def makefile(directory):
+    text = (root / directory / 'Makefile.in').read_text()
     return dict(re.findall(r'^(\w+)\s*=\s*(.*(?:\\\n.*)*)', text, re.M))
 
-def libraries(name):
+def libraries(directory):
     """The bundled libraries a module links in, by name under libs/."""
-    imports = makefile(name).get('IMPORTS', '')
+    imports = makefile(directory).get('IMPORTS', '')
     return sorted(lib.lower() for lib in re.findall(r'\$\((\w+)_PE_LIBS\)', imports)
                   if (root / 'libs' / lib.lower()).is_dir())
 
-def sources(name):
+def sources(directory):
     """The directories a module is built from: its own, the one it shares
     sources with, and the bundled libraries it links in."""
-    paths = [f'dlls/{module_dir(name)}']
-    parent = makefile(name).get('PARENTSRC')
+    paths = [directory]
+    parent = makefile(directory).get('PARENTSRC')
     if parent:
-        paths.append(os.path.normpath(f'dlls/{module_dir(name)}/{parent.strip()}'))
-    return paths + [f'libs/{lib}' for lib in libraries(name)]
+        paths.append(os.path.normpath(f'{directory}/{parent.strip()}'))
+    return paths + [f'libs/{lib}' for lib in libraries(directory)]
 
-@functools.lru_cache(maxsize=None)
-def built(name):
-    target = f'dlls/{module_dir(name)}/i386-windows/{name}'
-    subprocess.run(['make', '-C', str(pe), '-j8', target], env=env, check=True,
-                   stdout=subprocess.DEVNULL)
-    return pe / target
+def static_unix_libs():
+    """The modules the runtime's static unix-call tables name: native ones by a
+    wide string, WoW64 ones by a narrow one."""
+    text = (root / 'dlls/ntdll/unix/virtual.c').read_text()
+    native = text[text.index('wine_nx_static_unix_libs[] ='):]
+    native = native[:native.index('};')]
+    wow64 = text[text.index('wine_nx_static_wow64_unix_libs[] ='):]
+    wow64 = wow64[:wow64.index('};')]
+    return ({''.join(re.findall(r"'(.)'", entry)) for entry in re.findall(r'\{\s*\{([^}]*)\}', native)},
+            set(re.findall(r'\{\s*"([^"]+)"', wow64)))
 
-@functools.lru_cache(maxsize=None)
-def forwards_of(path):
-    return dict(re.findall(r'^  Name: (\S+)\n  ForwardedTo: ([^.\s]+)\.', readobj('--coff-exports', path), re.M))
-
-def needed(dll):
-    """The modules a DLL loads at start: its imports, and the modules the
-    exports it uses from them forward to."""
-    found = set()
-    for block in re.findall(r'^Import \{\n(.*?)^\}', readobj('--coff-imports', dll), re.M | re.S):
-        module = re.search(r'Name: (.+)', block).group(1).lower()
-        if module.startswith(('api-ms-', 'ext-ms-')):
+def interfaces():
+    table = json.loads((probe / 'runtime-interfaces.json').read_text())
+    result = {}
+    for name, files in table.items():
+        if name.startswith('_'):
             continue
-        found.add(module)
-        source = release_stage / SYSWOW64 / module
-        if not source.exists():
-            source = built(module)
-        forwards = forwards_of(source)
-        for symbol in set(re.findall(r'Symbol: (\S+) \(', block)) & forwards.keys():
-            if not forwards[symbol].lower().startswith(('api-ms-', 'ext-ms-')):
-                found.add(forwards[symbol].lower() + '.dll')
-    return found
+        digest = hashlib.sha256()
+        for path in files:
+            digest.update((root / path).read_bytes())
+        result[name] = f'iface:{name}:{digest.hexdigest()[:12]}'
+    return result
 
-def with_dependencies(components, on_card):
-    """The components, and what they load that a release's card does not
-    have, which comes with them as the group 'depends'."""
-    components = list(components)
-    queue = [c['name'] for c in components]
-    in_pack = {name.lower() for name in queue}
-    while queue:
-        for module in sorted(needed(built(queue.pop()))):
-            if module in on_card or module in in_pack:
-                continue
-            assert (root / 'dlls' / module_dir(module)).is_dir(), f'nothing builds {module}'
-            components += group('depends', [module])
-            in_pack.add(module)
-            queue.append(module)
-    return components
+def group_of(name):
+    for group, pattern in GROUPS:
+        if re.fullmatch(pattern, name.lower()):
+            return group
+    return 'wine'
 
-def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def build(modules):
+    subprocess.run(['make', '-C', str(pe), '-k', f'-j{os.cpu_count()}',
+                    *[f'{directory}/{arch}-windows/{name}' for arch, directory, name in modules]],
+                   env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def pack_git(repo, *args):
-    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+def stripped(path, into):
+    """The file without its debug information, as the pack carries it."""
+    out = into / path.name
+    subprocess.run([str(toolchain / 'llvm-strip'), '--strip-debug', '-o', str(out), str(path)], check=True)
+    return out
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--repo', type=Path, default=root.parent / 'autorun-horizon-dlls',
                         help='a checkout of the pack repo')
     parser.add_argument('--allow-dirty', action='store_true', help='build from uncommitted sources, for trying it')
+    parser.add_argument('--no-build', action='store_true', help='package what is built already')
     args = parser.parse_args()
 
     repo = args.repo.resolve()
     assert (repo / '.git').exists(), f'{repo} is not a checkout of {PACK_REPO}'
     assert not pack_git(repo, 'status', '--porcelain'), f'{repo} has uncommitted changes'
     card = repo / 'switch/wine'
-    previous = None
-    for place in (card / MANIFEST, repo / 'manifest.json'):
-        if place.exists():
-            previous = json.loads(place.read_text())
-            break
+    previous = json.loads((card / MANIFEST).read_text()) if (card / MANIFEST).exists() else None
     if previous:
         assert previous['schema'] == SCHEMA, f"previous manifest is schema {previous['schema']}"
     pack = previous['pack'] + 1 if previous else 1
@@ -203,32 +223,55 @@ def main():
     assert not pack_git(repo, 'tag', '--list', tag), f'{tag} is already a tag in {repo}'
     earlier = {f"{f['path']}/{f['name']}": f for f in previous['files']} if previous else {}
 
+    modules = targets()
+    if not args.no_build:
+        build(modules)
+    missing = [f'{d}/{a}-windows/{n}' for a, d, n in modules if not (pe / d / f'{a}-windows' / n).exists()]
+    assert not missing, f'{len(missing)} modules did not build, e.g. {missing[:5]}'
+    entries = [dict(arch=a, name=n, file=pe / d / f'{a}-windows' / n, sources=sources(d),
+                    libs=libraries(d), module_dir=d, origin='wine') for a, d, n in modules]
+    for extra in EXTRA:
+        entries.append(dict(arch=extra['arch'], name=extra['name'], file=extra['build'](),
+                            sources=extra['sources'], libs=[], module_dir=None, origin=extra['origin']))
+    names = [(e['arch'], e['name'].lower()) for e in entries]
+    assert len(set(names)) == len(names), 'a file is built twice'
+
     commit = git('rev-parse', 'HEAD')
-    on_card = {p.name.lower() for p in (release_stage / SYSWOW64).iterdir()}
-    components = with_dependencies(COMPONENTS, on_card)
-    names = [c['name'] for c in components]
-    assert len(set(names)) == len(names), 'a file is listed twice'
-    dirty = git('status', '--porcelain', '--', *sorted({p for n in names for p in sources(n)}))
+    dirty = git('status', '--porcelain', '--', 'include', 'libs', 'dlls', 'programs',
+                'wine-nx-probe/source/audio_driver.c', 'wine-nx-probe/runtime-interfaces.json')
     if dirty:
         assert args.allow_dirty, f'uncommitted changes in what the pack is built from:\n{dirty}'
         commit += '-dirty'
     elif not git('branch', '-r', '--contains', commit):
         print(f'warning: {commit[:8]} is not pushed; push it before publishing, the manifest points there')
 
+    native_table, wow64_table = static_unix_libs()
+    iface = interfaces()
+    loaded = {arch: {name for a, name in names if a == arch} for arch in ARCHES}
+
     # The tree is written anew; git sees what did not change as unchanged.
     shutil.rmtree(repo / 'switch', ignore_errors=True)
     shutil.rmtree(repo / 'LICENSES', ignore_errors=True)
     (repo / 'manifest.json').unlink(missing_ok=True)
 
-    files, licenses, claimed = [], {'wine'}, {}
-    for component in components:
-        name, path = component['name'], component['path']
-        dll = built(name)
-        assert 'Arch: i386\n' in readobj('--file-headers', dll), f'{name} is not i386'
+    files, licenses, unresolved = [], set(ALWAYS), []
+    claimed = {arch: {} for arch in ARCHES}
+    scratch = Path(tempfile.mkdtemp())
+    for entry in sorted(entries, key=lambda e: (ARCHES[e['arch']], e['name'].lower())):
+        name, arch, path = entry['name'], entry['arch'], ARCHES[entry['arch']]
+        lower = name.lower()
+        shipped = stripped(entry['file'], scratch)
+        machine = readobj('--file-headers', shipped)
+        assert f'Arch: {arch}\n' in machine, f'{name} is not {arch}'
 
-        digest = sha256(dll)
+        # What it imports at load time is in the pack, for its architecture.
+        for module in re.findall(r'^Import \{\n  Name: (.+)$', readobj('--coff-imports', shipped), re.M):
+            module = module.lower()
+            if not module.startswith(('api-ms-', 'ext-ms-')) and module not in loaded[arch]:
+                unresolved.append(f'{arch} {name} -> {module}')
+
+        digest = hashlib.sha256(shipped.read_bytes()).hexdigest()
         before = earlier.get(f'{path}/{name}')
-        # A URL from the time packs were GitHub releases is not kept.
         if before and before['sha256'] == digest and before['url'].startswith(RAW):
             version, url = before['version'], before['url']
         else:
@@ -236,47 +279,64 @@ def main():
             url = f'{RAW}/{tag}/switch/wine/{path}/{name}'
 
         served = []
-        for uuid, threading, coclass in classes.classes_of(module_dir(name)) + classes.registered_classes_of(dll):
-            if uuid in claimed:
+        found = classes.registered_classes_of(shipped)
+        if entry['module_dir'] and entry['module_dir'].startswith('dlls/'):
+            found = classes.classes_of(entry['module_dir'][5:]) + found
+        for uuid, threading, coclass in found:
+            if uuid in claimed[arch]:
                 continue
-            claimed[uuid] = name
+            claimed[arch][uuid] = name
             served.append(dict(clsid=uuid, name=coclass, threading=threading))
 
-        changes = git('log', '--format=%h', f'{WINE_IMPORT}..HEAD', '--', *sources(name)).split()
-        libs = libraries(name)
-        licenses.update(libs)
+        features = []
+        if arch == 'aarch64' and lower in native_table:
+            features.append(f'unixlib:{lower}')
+        if arch == 'i386' and lower in wow64_table:
+            features.append(f'unixlib32:{lower}')
+        # The interface a module shares with the runtime matters where it calls
+        # in: what a table names, and the native ntdll and win32u's syscalls.
+        if lower in iface and (features or (arch == 'aarch64' and lower in ('ntdll.dll', 'win32u.dll'))):
+            features.append(iface[lower])
+
+        changes = git('log', '--format=%h', f'{WINE_IMPORT}..HEAD', '--', *entry['sources']).split()
+        licenses.update(entry['libs'])
         files.append(dict(
-            name=name, path=path, group=component['group'], version=version,
-            size=dll.stat().st_size, sha256=digest, url=url,
-            source=dict(repo=SOURCE_REPO, commit=commit, modified=bool(changes or commit.endswith('-dirty')),
-                        paths=sources(name)),
-            license=' AND '.join(dict.fromkeys(LICENSES[l][0] for l in ['wine'] + libs)),
-            requires=dict(runtime_abi=list(component.get('runtime_abi', (RUNTIME_ABI, None))),
-                          features=component.get('features', [])),
+            name=name, path=path, arch=arch, group=group_of(name), version=version,
+            size=shipped.stat().st_size, sha256=digest, url=url,
+            source=dict(repo=SOURCE_REPO, commit=commit, origin=entry['origin'],
+                        modified=entry['origin'] != 'wine' or bool(changes) or commit.endswith('-dirty'),
+                        paths=entry['sources']),
+            license=' AND '.join(f'({LICENSES[l][0]})' if ' OR ' in LICENSES[l][0] else LICENSES[l][0]
+                              for l in dict.fromkeys(ALWAYS + entry['libs'])),
+            requires=dict(flavor=FLAVOR, features=features),
             classes=served))
         (card / path).mkdir(parents=True, exist_ok=True)
-        shutil.copy2(dll, card / path / name)
+        shutil.copy2(shipped, card / path / name)
+    shutil.rmtree(scratch)
 
-    manifest = dict(schema=SCHEMA, pack=pack, tag=tag,
+    manifest = dict(schema=SCHEMA, pack=pack, tag=tag, flavor=FLAVOR,
                     source=dict(repo=SOURCE_REPO, commit=commit, wine='11.0', wine_import=WINE_IMPORT),
                     files=files)
     (card / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
-    (card / MANIFEST).write_text(json.dumps(manifest, indent=2) + '\n')
+    (card / MANIFEST).write_text(json.dumps(manifest, indent=1) + '\n')
 
+    (repo / 'LICENSES').mkdir()
     for key in sorted(licenses):
-        _, source, target = LICENSES[key]
-        (repo / target).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, repo / target)
+        shutil.copy2(root / LICENSES[key][1], repo / 'LICENSES' / f'{LICENSES[key][2]}.txt')
     (repo / 'NOTICE.md').write_text(write_notice(manifest, licenses))
     (repo / 'README.md').write_text(README)
 
-    depends = [f['name'] for f in files if f['group'] == 'depends']
-    new = [f['name'] for f in files if f['url'].startswith(f'{RAW}/{tag}/')]
-    size = sum(f['size'] for f in files)
-    print(f'{tag}: {len(files)} files ({size >> 20} MB), {len(new)} new or changed; source {commit[:12]}')
-    print(f'  brought along, since the release card lacks them: {", ".join(depends) or "nothing"}')
-    print(f'  modified since Wine 11.0: {", ".join(f["name"] for f in files if f["source"]["modified"]) or "none"}')
+    new = [f for f in files if f['url'].startswith(f'{RAW}/{tag}/')]
+    for arch, path in ARCHES.items():
+        mine = [f for f in files if f['arch'] == arch]
+        print(f'{path}: {len(mine)} files, {sum(f["size"] for f in mine) >> 20} MB')
+    print(f'{tag}: {len(files)} files ({sum(f["size"] for f in files) >> 20} MB), {len(new)} new or changed '
+          f'({sum(f["size"] for f in new) >> 20} MB); source {commit[:12]}')
+    print(f'  modified from Wine 11.0 or Autorun\'s own: {sum(f["source"]["modified"] for f in files)}')
+    print(f'  tied to the runtime: {", ".join(f["arch"] + " " + f["name"] for f in files if f["requires"]["features"])}')
     print(f'  classes: {sum(len(f["classes"]) for f in files)}')
+    if unresolved:
+        print(f'  imports nothing in the pack provides ({len(unresolved)}): {", ".join(unresolved[:12])}')
     print(f'  publish from {repo}:')
     print(f'    git add -A && git commit -m "{tag}: ..." && git tag {tag}')
     print(f'    git push --atomic origin main {tag}')
@@ -289,24 +349,24 @@ def write_notice(manifest, licenses):
              f"https://github.com/{source['repo']} at commit `{source['commit']}`. "
              f"The source of every file is there, under the paths its manifest entry lists.", '',
              '| Component | License | Text |', '|---|---|---|']
-    names = {'wine': 'Wine', 'faudio': 'FAudio', 'fluidsynth': 'FluidSynth'}
     for key in sorted(licenses):
-        lines.append(f'| {names[key]} | {LICENSES[key][0]} | `{LICENSES[key][2]}` |')
-    lines += ['', 'FAudio is in the XAudio2, X3DAudio, XAPOFX and XACT files; FluidSynth is in dmsynth.dll.', '']
+        spdx, _, title = LICENSES[key]
+        lines.append(f'| {title} | {spdx} | `LICENSES/{title}.txt` |')
+    lines += ['', 'compiler-rt is built into every file; the other libraries besides Wine into the',
+              'files whose manifest entry names their license.', '']
     if modified:
-        lines += ['Changed from Wine 11.0 (see the commit history of the paths listed):', '']
-        lines += [f"- `{f['name']}`: {', '.join(f['source']['paths'])}" for f in modified]
+        lines += ["Changed from Wine 11.0, or Autorun's own (see the commit history of the paths listed):", '']
+        lines += [f"- `{f['path']}/{f['name']}`: {', '.join(f['source']['paths'])}" for f in modified]
     else:
-        lines.append('No file in this release is changed from Wine 11.0.')
+        lines.append('No file in this pack is changed from Wine 11.0.')
     return '\n'.join(lines) + '\n'
 
 README = '''# autorun-horizon-dlls
 
-Windows components for [Autorun](https://github.com/autorunhq/autorun), the
-Windows compatibility layer for the Nintendo Switch: the DirectX a game's
-installer would have run on a PC (D3DX9, D3DCompiler, XInput, XAudio2,
-X3DAudio, XAPOFX, XACT, DirectMusic, DirectPlay), built from Autorun's Wine.
-Autorun downloads them itself; nothing here needs to be copied by hand.
+The Windows side of [Autorun](https://github.com/autorunhq/autorun), the
+Windows compatibility layer for the Nintendo Switch: every module in
+`system32` (aarch64) and `syswow64` (i386), built from Autorun's Wine. Autorun
+downloads them itself; nothing here needs to be copied by hand.
 
 **Without a network:** download this repository (Code, Download ZIP) and copy
 its `switch` folder to the root of the SD card, merging folders.
@@ -316,9 +376,9 @@ which, and where their source is. None of it is Microsoft's.
 
 ## Layout
 
-The repository is laid out as the SD card is: `switch/wine/drive_c/...` holds
-the files, and `switch/wine/horizon-dlls/manifest.json` describes them. Each
-pack is a tag, `pack-N`; `main` is the latest.
+The repository is laid out as the SD card is: `switch/wine/drive_c/windows/`
+holds the files, and `switch/wine/horizon-dlls/manifest.json` describes them.
+Each pack is a tag, `pack-N`; `main` is the latest.
 
 ## manifest.json
 
@@ -328,19 +388,24 @@ from in the same place.
 ```
 schema        format version; Autorun ignores a manifest it does not know
 pack, tag     the pack number, and its tag (pack-N)
+flavor        the runtime the files are for (x86: the WoW64 runtime)
 source        repo, commit and Wine version everything was built from
 files[]       one per file:
   name, path  where it goes, relative to switch/wine
-  group       what it belongs to (d3dx9, xaudio2, directmusic, ...)
+  arch        i386 (syswow64) or aarch64 (system32)
+  group       what it belongs to (core, d3dx9, xaudio2, programs, wine, ...)
   version     this file's own version; it changes only when its bytes do
   size, sha256, url
               what to download and how to check it; url is the file's raw
               path at the tag its version first came in, which does not move
-  source      repo, commit, the source paths, and whether they changed since
-              Wine was imported
+  source      repo, commit, origin (wine or autorun), the source paths, and
+              whether they changed since Wine was imported
   license     SPDX expression
-  requires    runtime_abi [min, max or null] and the runtime features the file
-              needs; Autorun skips a file its runtime does not satisfy
+  requires    flavor, and the features the runtime has to report for the
+              file: unixlib:<name> / unixlib32:<name> for a module the
+              runtime's unix-call tables name, iface:<name>:<hash> for the
+              headers it shares with the runtime. Autorun leaves a file its
+              runtime does not satisfy as it is.
   classes[]   COM classes the file serves (clsid, name, threading), which
               Autorun registers, as DllRegisterServer would on a PC
 ```
