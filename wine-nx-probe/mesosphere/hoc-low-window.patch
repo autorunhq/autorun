@@ -1,0 +1,14 @@
+diff --git a/stratosphere/loader/source/ldr_process_creation.cpp b/stratosphere/loader/source/ldr_process_creation.cpp
+--- a/stratosphere/loader/source/ldr_process_creation.cpp
++++ b/stratosphere/loader/source/ldr_process_creation.cpp
+@@ -607,6 +607,10 @@ namespace ams::ldr {
+                     case svc::CreateProcessFlag_AddressSpace64Bit:
+                         aslr_start = svc::AddressMap39Start;
+                         aslr_size  = svc::AddressMap39Size;
++                        if (svc::HasAutorunLowWindow(out_param->program_id)) {
++                            aslr_start = svc::AutorunNativeAddressStart;
++                            aslr_size  = svc::AddressMap39End - aslr_start;
++                        }
+                         break;
+                     AMS_UNREACHABLE_DEFAULT_CASE();
+                 }

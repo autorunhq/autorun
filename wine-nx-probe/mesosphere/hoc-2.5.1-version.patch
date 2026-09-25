@@ -1,0 +1,12 @@
+diff --git a/Source/Atmosphere/stratosphere/loader/source/oc/customize.hpp b/Source/Atmosphere/stratosphere/loader/source/oc/customize.hpp
+--- a/Source/Atmosphere/stratosphere/loader/source/oc/customize.hpp
++++ b/Source/Atmosphere/stratosphere/loader/source/oc/customize.hpp
+@@ -21,7 +21,7 @@
+ #pragma once
+ 
+ #define CUST_REV 6
+-#define KIP_VERSION 250
++#define KIP_VERSION 251
+ 
+ #include "oc_common.hpp"
+ #include "pcv/pcv_common.hpp"

@@ -44,6 +44,7 @@
 #include "launcher_image.h"
 #include "launcher_update.h"
 #include "launcher_setup.h"
+#include "setup_boot.h"
 #include "launcher_graphics.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
@@ -1667,6 +1668,26 @@ static void quick_setup( struct launcher *l )
         l->options->reboot_requested = 1;
         l->ui.running = 0;
     }
+}
+
+static void offer_quick_setup( struct launcher *l )
+{
+    const struct setup_boot_manifest *manifest;
+    char bundle_id[33], prompted[33] = "";
+    if (!l->options->install_forwarder) return;
+    if (!launcher_kv_get_int( &l->look, "setup-offered", 0 ))
+    {
+        quick_setup( l );
+        return;
+    }
+    manifest = setup_boot_bundled_manifest();
+    if (!setup_boot_needs_update( "sdmc:", manifest, NULL )) return;
+    setup_boot_bundle_id( manifest, bundle_id );
+    launcher_kv_get( &l->look, "setup-boot-prompted", prompted, sizeof(prompted) );
+    if (!strcmp( prompted, bundle_id )) return;
+    launcher_kv_set( &l->look, "setup-boot-prompted", bundle_id );
+    save_look( l );
+    quick_setup( l );
 }
 
 static int confirm_forwarder( struct launcher *l )
@@ -3319,7 +3340,7 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_SETUP].label, sizeof(rows[0].label), "Quick setup" );
         rows[SET_SETUP].kind = UI_ROW_ACTION;
         rows[SET_SETUP].adjustable = 0;
-        rows[SET_SETUP].help = "Install the Autorun forwarder and set up a separate patched Hekate boot entry.";
+        rows[SET_SETUP].help = "Install the Autorun forwarder or update its patched Hekate boot entry.";
         snprintf( rows[SET_REOPEN].label, sizeof(rows[0].label), "Return here when a program ends" );
         snprintf( rows[SET_REOPEN].value, sizeof(rows[0].value), "%s", on_off[!!l->options->reopen_launcher] );
         rows[SET_REOPEN].kind = UI_ROW_SWITCH;
@@ -4323,7 +4344,7 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     l->graphics = launcher_graphics_create( &l->ui, options->runtime_dir );
     l->ui.background_tick = launcher_update_tick;
     l->ui.background_data = l->update;
-    if (options->install_forwarder && !launcher_kv_get_int( &l->look, "setup-offered", 0 )) quick_setup( l );
+    offer_quick_setup( l );
     if (options->launch_error) ui_message( &l->ui, "Game unavailable", options->launch_error );
     ret = l->ui.running ? run_library( l, target, target_size ) : 0;
     l->ui.background_tick = NULL;

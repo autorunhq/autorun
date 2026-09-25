@@ -37,10 +37,17 @@ struct setup_boot_manifest
 {
     unsigned int version;
     char release[33];
-    struct setup_boot_payload stock, hoc, mesosphere, package3;
-    uint32_t hoc_config_offset, hoc_config_size, hoc_config_revision;
-    struct setup_boot_payload hoc_original;
-    unsigned char hoc_original_normalized_sha256[32];
+    uint32_t atmosphere_version;
+    struct setup_boot_payload stock, hoc, mesosphere;
+    unsigned char hoc_code_sha256[32];
+    uint32_t hoc_config_offset, hoc_config_size, hoc_config_revision, hoc_kip_version;
+};
+
+struct setup_boot_hoc_info
+{
+    char path[512];
+    uint32_t revision, kip_version;
+    int compatible;
 };
 
 struct setup_boot_options
@@ -48,9 +55,15 @@ struct setup_boot_options
     struct setup_boot_entry entry;
     enum setup_boot_loader loader;
     int preserve_hoc;
+    char hoc_source[512];
 };
 
 const struct setup_boot_manifest *setup_boot_bundled_manifest(void);
+void setup_boot_bundle_id(const struct setup_boot_manifest *manifest, char out[33]);
+int setup_boot_needs_update(const char *sd_root, const struct setup_boot_manifest *manifest,
+    enum setup_boot_loader *installed_loader);
+int setup_boot_hoc_probe(const char *sd_root, const struct setup_boot_manifest *manifest,
+    struct setup_boot_hoc_info *info);
 enum setup_boot_result setup_boot_list(const char *sd_root, struct setup_boot_entry *entries,
     size_t capacity, size_t *count, char *detail, size_t detail_size);
 enum setup_boot_result setup_boot_install(const char *sd_root, const char *payload_root,
