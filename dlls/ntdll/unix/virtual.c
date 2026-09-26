@@ -6516,7 +6516,11 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     }
 
     if (!*ret)
+    {
         limit = get_zero_bits_limit( zero_bits );
+        if (user_space_wow_limit && limit && limit <= limit_4g)
+            limit = min( limit, get_wow_user_space_limit() - 1 );
+    }
     else
         limit = 0;
 
