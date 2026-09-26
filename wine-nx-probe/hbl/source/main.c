@@ -281,6 +281,39 @@ static Result restoreProgramPath(NcmStorageId storage_id, u64 program_id, const 
     return rc;
 }
 
+struct nro_file {
+    FsFile file;
+    Result error;
+};
+
+static int readNroFile(void *context, uint64_t offset, void *data, size_t size) {
+    struct nro_file *file = context;
+    u64 read = 0;
+    file->error = fsFileRead(&file->file, offset, data, size, FsReadOption_None, &read);
+    return R_SUCCEEDED(file->error) && read == size;
+}
+
+static uint32_t nroU32(const unsigned char *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static bool nroImageSize(const unsigned char header[0x80], uint64_t file_size,
+                         uint64_t heap_size, uint32_t *image_size) {
+    uint64_t end = 0, size = nroU32(header + 0x18);
+    uint64_t bss = nroU32(header + 0x38);
+    if (memcmp(header + 0x10, "NRO0", 4) || size < 0x1000 || (size & 0xfff) ||
+        size > file_size || size + ((bss + 0xfff) & ~UINT64_C(0xfff)) > heap_size) return false;
+    for (unsigned int i = 0; i < 3; i++) {
+        uint64_t offset = nroU32(header + 0x20 + i * 8);
+        uint64_t bytes = nroU32(header + 0x24 + i * 8);
+        if (offset != end || (bytes & 0xfff) || offset > size || bytes > size - offset) return false;
+        end = offset + bytes;
+    }
+    if (end != size) return false;
+    *image_size = size;
+    return true;
+}
+
 void NX_NORETURN loadNro(void) {
     NroHeader* header = NULL;
     size_t rw_size = 0;
@@ -303,12 +336,10 @@ void NX_NORETURN loadNro(void) {
     if (g_nroSize) {
         // checks if nro was previously mapped, if so, unmap
         header = &g_nroHeader;
-        rw_size = header->segments[2].size + header->bss_size;
+        rw_size = (size_t)header->segments[2].size + header->bss_size;
         rw_size = (rw_size+0xFFF) & ~0xFFF;
 
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreUnloadDll, g_nroAddr, g_nroSize))) {
-            diagAbortWithResult(rc);
-        }
+        svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreUnloadDll, g_nroAddr, g_nroSize);
 
         // .text
         rc = svcUnmapProcessCodeMemory(
@@ -331,9 +362,7 @@ void NX_NORETURN loadNro(void) {
         if (R_FAILED(rc))
             diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 26));
 
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostUnloadDll, g_nroAddr, g_nroSize))) {
-            diagAbortWithResult(rc);
-        }
+        svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PostUnloadDll, g_nroAddr, g_nroSize);
 
         g_nroAddr = g_nroSize = 0;
     } else {
@@ -405,9 +434,7 @@ void NX_NORETURN loadNro(void) {
         fix_nro_path(fixedNextNroPath);
 
         memcpy(g_argv, g_nextArgv, sizeof(g_argv));
-        if (R_FAILED(rc = svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreLoadDll, (uintptr_t)g_argv, sizeof(g_argv)))) {
-            diagAbortWithResult(rc);
-        }
+        svcBreak(BreakReason_NotificationOnlyFlag | BreakReason_PreLoadDll, (uintptr_t)g_argv, sizeof(g_argv));
 
         uint8_t *nrobuf = (uint8_t*) g_heapAddr;
         NroStart*  start  = (NroStart*)  (nrobuf + 0);
@@ -418,35 +445,31 @@ void NX_NORETURN loadNro(void) {
             diagAbortWithResult(rc);
         }
 
-        // don't fatal if we don't find the nro, exit to menu
-        FsFile f;
-        if (R_FAILED(rc = fsFsOpenFile(&fs, fixedNextNroPath, FsOpenMode_Read, &f))) {
+        struct nro_file file = {0};
+        if (R_FAILED(rc = fsFsOpenFile(&fs, fixedNextNroPath, FsOpenMode_Read, &file.file))) {
             diagAbortWithResult(rc);
         }
 
-        u64 bytes_read;
-        if (R_FAILED(rc = fsFileRead(&f, 0, start, g_heapSize, FsReadOption_None, &bytes_read)) ||
-            header->magic != NROHEADER_MAGIC ||
-            bytes_read < sizeof(*start) + sizeof(*header) + header->size) {
+        s64 file_size = 0;
+        unsigned char checked_header[0x80];
+        uint32_t image_size;
+        if (R_FAILED(rc = fsFileGetSize(&file.file, &file_size)))
             diagAbortWithResult(rc);
-        }
-
-        fsFileClose(&f);
+        if (file_size < sizeof(checked_header))
+            diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 6));
+        if (!readNroFile(&file, 0, checked_header, sizeof(checked_header)) ||
+            !nroImageSize(checked_header, file_size, g_heapSize, &image_size))
+            diagAbortWithResult(R_FAILED(file.error) ? file.error : MAKERESULT(Module_HomebrewLoader, 6));
+        if (!readNroFile(&file, 0, start, image_size))
+            diagAbortWithResult(R_FAILED(file.error) ? file.error : MAKERESULT(Module_HomebrewLoader, 6));
+        if (memcmp(start, checked_header, sizeof(checked_header)))
+            diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 6));
+        fsFileClose(&file.file);
         fsFsClose(&fs);
     }
 
-    rw_size = header->segments[2].size + header->bss_size;
+    rw_size = (size_t)header->segments[2].size + header->bss_size;
     rw_size = (rw_size+0xFFF) & ~0xFFF;
-
-    for (int i = 0; i < 3; i++) {
-        if (header->segments[i].file_off >= header->size || header->segments[i].size > header->size ||
-            (header->segments[i].file_off + header->segments[i].size) > header->size)
-        {
-            diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 6));
-        }
-    }
-
-    // todo: Detect whether NRO fits into heap or not.
 
     // Copy header to elsewhere because we're going to unmap it next.
     memcpy(&g_nroHeader, header, sizeof(g_nroHeader));
@@ -454,7 +477,7 @@ void NX_NORETURN loadNro(void) {
 
     // Map code memory to a new randomized address
     virtmemLock();
-    const size_t total_size = (header->size + header->bss_size + 0xFFF) & ~0xFFF;
+    const size_t total_size = ((size_t)header->size + header->bss_size + 0xFFF) & ~(size_t)0xFFF;
     void* map_addr = virtmemFindCodeMemory(total_size, 0);
     u64 aslr_base = 0, aslr_size = 0;
     svcGetInfo(&aslr_base, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0);

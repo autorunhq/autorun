@@ -144,6 +144,8 @@ class Fixture:
         namespace['built'] = self.built
         namespace['inspect'] = self.inspect
         namespace['shutil'] = SimpleNamespace(copy2=self.copy2)
+        namespace['strip'] = 'fixture-strip'
+        namespace['stage_release'] = lambda source, destination, _: self.copy2(source, destination)
         namespace['forwarders'].cache_clear()
 
 

@@ -52,6 +52,15 @@ void wine_nx_usb_start(void)
     wine_nx_runtime_trace( buf );
 }
 
+void wine_nx_usb_stop(void)
+{
+    if (!usb_started) return;
+    usbHsFsSetPopulateCallback( NULL, NULL );
+    usbHsFsExit();
+    usb_started = 0;
+    usb_device_count = 0;
+}
+
 /* Drives mount on libusbhsfs' own thread. Wait for the attached ones, up to
  * five seconds, so a program on a drive plugged in before starting is found. */
 void wine_nx_usb_wait(void)

@@ -18,12 +18,15 @@ from vkd3d_payload import DLLS as VKD3D_DLLS, validate_payload as validate_vkd3d
 from fex_payload import DLLS as FEX_DLLS, validate_payload as validate_fex_payload
 from legacy_runtime import LEGACY_RUNTIME_DLLS
 from mesa_sdk import mesa_revision as configured_mesa_revision
+from pe_release import stage_release
 
 probe = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--pe', type=Path, default=probe / 'build-wine-amd64-pe')
 parser.add_argument('--build', type=Path, default=probe / 'build-switch-amd64')
 parser.add_argument('--output', type=Path, help='Archive output path (defaults to the build directory)')
+parser.add_argument('--stage-output', type=Path, help='Stage directly into a new directory without creating an archive')
+parser.add_argument('--wine-source', type=Path, default=probe.parent, help='Matching Wine source tree')
 parser.add_argument('--jobs', type=int, default=8)
 parser.add_argument('--no-build', action='store_true', help='Package existing DLLs without invoking make')
 parser.add_argument('--vulkan', action='store_true', help='Include Vulkan DLLs for a mesa-switch runtime')
@@ -31,6 +34,9 @@ parser.add_argument('--dxvk', type=Path, help='AMD64 payload produced by tools/b
 parser.add_argument('--vkd3d', type=Path, help='AMD64 payload produced by tools/build-vkd3d.py (requires --dxvk)')
 parser.add_argument('--fex', type=Path, help='ARM64EC and WoW64 payload produced by build-fex.sh')
 args = parser.parse_args()
+wine_source = args.wine_source.resolve()
+if args.output and args.stage_output:
+    parser.error('--output and --stage-output are mutually exclusive')
 if args.dxvk and not args.vulkan:
     parser.error('--dxvk requires --vulkan')
 if args.vkd3d and not args.dxvk:
@@ -43,7 +49,8 @@ env = os.environ.copy()
 if env.get('WINE_NX_LLVM_MINGW'):
     env['PATH'] = str(Path(env['WINE_NX_LLVM_MINGW']) / 'bin') + os.pathsep + env['PATH']
 readobj = shutil.which('llvm-readobj', path=env['PATH'])
-if not readobj or not (pe / 'Makefile').is_file():
+strip = shutil.which('llvm-strip', path=env['PATH'])
+if not readobj or not strip or not (pe / 'Makefile').is_file():
     parser.error('Configure the multi-architecture PE build and put LLVM-MinGW on PATH first.')
 cache_path = build / 'CMakeCache.txt'
 if not cache_path.is_file():
@@ -77,16 +84,26 @@ if args.vulkan:
                                                  probe / 'build-mesa-switch/source-revision.txt')
     except (OSError, ValueError) as error:
         parser.error(str(error))
-staging = tempfile.TemporaryDirectory(prefix='amd64-package-')
-stage_root = Path(staging.name)
+if args.stage_output:
+    stage_root = args.stage_output.resolve()
+    stage_root.mkdir(parents=True, exist_ok=False)
+    staging = None
+else:
+    staging = tempfile.TemporaryDirectory(prefix='amd64-package-')
+    stage_root = Path(staging.name)
 stage = stage_root / 'switch/wine'
 prebuilt = set()
 source_hashes = {}
 
 
-def stage_file(source, destination):
-    source_hashes[destination.relative_to(stage).as_posix()] = hashlib.sha256(source.read_bytes()).hexdigest()
-    shutil.copy2(source, destination)
+def stage_file(source, destination, release=False):
+    if release:
+        stage_release(source, destination, strip)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    else:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        shutil.copy2(source, destination)
+    source_hashes[destination.relative_to(stage).as_posix()] = digest
 
 
 def run(command):
@@ -108,7 +125,7 @@ def apiset(name):
 
 
 api_sets = dict(re.findall(r'^apiset (\S+) = (\S+)$',
-                          (probe.parent / 'dlls/apisetschema/apisetschema.spec').read_text(), re.M))
+                          (wine_source / 'dlls/apisetschema/apisetschema.spec').read_text(), re.M))
 
 
 def import_host(name):
@@ -194,7 +211,7 @@ def stage_closure(seeds, arch, directory):
                 raise ValueError(f'Not i386: {path}')
             if arch == 'aarch64' and 'IMAGE_FILE_MACHINE_ARM64' not in info and 'IMAGE_FILE_MACHINE_AMD64' not in info:
                 raise ValueError(f'Not ARM64/ARM64EC: {path}')
-            stage_file(path, destination / name)
+            stage_file(path, destination / name, release=True)
             copied.add(name)
             pending.extend(imports(path))
         unseen = symbols - required.setdefault(name, set())
@@ -312,7 +329,7 @@ for name in ('fonts', 'nls'):
     destination = stage / 'share/wine' / name
     destination.mkdir(parents=True, exist_ok=True)
     extension = '*.ttf' if name == 'fonts' else '*.nls'
-    resources = list((probe.parent / name).glob(extension))
+    resources = list((wine_source / name).glob(extension))
     if not resources:
         raise ValueError(f'Missing Wine {name} resources')
     for path in resources:
@@ -320,7 +337,7 @@ for name in ('fonts', 'nls'):
         if name == 'fonts':
             (drive / 'windows/fonts').mkdir(parents=True, exist_ok=True)
             stage_file(path, drive / 'windows/fonts' / path.name)
-stage_file(nro, stage / 'wine-nx-runtime.nro')
+stage_file(nro, stage / nro.name)
 licenses = stage / 'licenses'
 licenses.mkdir()
 if args.fex:
@@ -329,10 +346,10 @@ if args.fex:
 if lsfg_revision:
     stage_file(probe / 'vendor/lsfg-vk/LICENSE.md', licenses / 'LSFG-VK-GPL-3.0.txt')
     (stage / 'lsfg').mkdir()
-for source, name in ((probe.parent / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
+for source, name in ((wine_source / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (probe / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
                      (probe / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
-                     (probe.parent / 'dlls/winebox64ec/LICENSE.FEX', 'FEX-MIT.txt')):
+                     (wine_source / 'dlls/winebox64ec/LICENSE.FEX', 'FEX-MIT.txt')):
     stage_file(source, licenses / name)
 if args.dxvk:
     for name in dxvk_manifest['licenses']:
@@ -362,15 +379,17 @@ for name in ('ntdll', 'kernel32', 'kernelbase'):
 cpu = stage / 'drive_c/windows/system32/winebox64ec.dll'
 exports = set(re.findall(r'^  Name: (.+)$', inspect(cpu, '--coff-exports'), re.M))
 required = set(re.findall(r'^@ (?:stdcall|extern) (\w+)',
-                          (probe.parent / 'dlls/winebox64ec/winebox64ec.spec').read_text(), re.M))
+                          (wine_source / 'dlls/winebox64ec/winebox64ec.spec').read_text(), re.M))
 if not required <= exports:
     raise ValueError(f'CPU64 exports missing: {required - exports}')
 run([sys.executable, str(probe / 'tools/make-classes-reg.py'), str(stage)])
+if hashlib.sha256((stage / nro.name).read_bytes()).hexdigest() != source_hashes[nro.name]:
+    raise ValueError('Staged native image differs from the build output')
 files = sorted(path for path in stage.rglob('*') if path.is_file() and
                path.suffix != '.log' and path.name != 'build-manifest.json')
 manifest = {
     'box64': '2f130fab1d6e1a4ee8a71dc60cfdfcc839ad192a',
-    'wine': subprocess.check_output(['git', '-C', str(probe.parent), 'rev-parse', 'HEAD'], text=True).strip(),
+    'wine': subprocess.check_output(['git', '-C', str(wine_source), 'rev-parse', 'HEAD'], text=True).strip(),
     'features': {'amd64': True, 'dynarec': enabled('WINE_NX_BOX64_DYNAREC'),
                  'vulkan': args.vulkan, 'dxvk': bool(args.dxvk), 'vkd3d': bool(args.vkd3d),
                   'lsfg': bool(lsfg_revision), 'fex': bool(args.fex)},
@@ -388,6 +407,9 @@ for name, digest in source_hashes.items():
     if manifest['files'][name] != digest:
         raise ValueError(f'Staged file differs from its build output: {name}')
 (stage / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+if args.stage_output:
+    print(stage)
+    sys.exit(0)
 archive = build / ('wine-nx-amd64-box64-mesa-dxvk-vkd3d.zip' if args.vkd3d else
                    'wine-nx-amd64-box64-mesa-dxvk.zip' if args.dxvk else
                    'wine-nx-amd64-box64-mesa-vulkan.zip' if args.vulkan else 'wine-nx-amd64-box64.zip')

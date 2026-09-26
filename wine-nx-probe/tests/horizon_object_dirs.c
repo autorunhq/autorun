@@ -72,29 +72,53 @@ int main(void)
     assert( horizon_object_dir_from_path( name, len ) == HORIZON_OBJECT_DIR_NONE );
 
     /* the whole listing in one reply */
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 0, ~0u, sizeof(data),
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1u << 2, 0, ~0u, sizeof(data),
                                         data, &size, &count, &total ) == SUCCESS );
     assert( count == 1 && size == 36 && total == 4 + 24 );
     assert( logical_drives( data, count ) == 1u << 2 );
     assert( !memcmp( data + 8, "C\0:\0", 4 ) && !memcmp( data + 12, "S\0y\0m\0b\0o\0l\0i\0c\0L\0i\0n\0k\0", 24 ) );
 
     /* single-entry reads: the next index has nothing */
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 0, 1, sizeof(data),
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1u << 2, 0, 1, sizeof(data),
                                         data, &size, &count, &total ) == SUCCESS && count == 1 );
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1, 1, sizeof(data),
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1u << 2, 1, 1, sizeof(data),
                                         data, &size, &count, &total ) == NO_MORE_ENTRIES );
     assert( !count && !size && !total );
 
     /* a reply buffer too small for the entry still reports its length */
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 0, 1, 35,
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1u << 2, 0, 1, 35,
                                         data, &size, &count, &total ) == MORE_ENTRIES );
     assert( !count && !size && total == 28 );
 
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 0, 0, sizeof(data),
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, 1u << 2, 0, 0, sizeof(data),
                                         data, &size, &count, &total ) == NO_MORE_ENTRIES );
-    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_NAMED_OBJECTS, 0, ~0u, sizeof(data),
+    assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_NAMED_OBJECTS, ~0u, 0, ~0u, sizeof(data),
                                         data, &size, &count, &total ) == NO_MORE_ENTRIES );
     assert( !count && !size );
+
+    for (unsigned int usb = 0; usb < 32; usb++)
+    {
+        unsigned int drives = (1u << 2) | (1u << 25) | (usb << 3), found = 0, index = 0;
+        unsigned int status;
+        assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, drives, 0, ~0u, sizeof(data),
+                                            data, &size, &count, &total ) == SUCCESS );
+        assert( logical_drives( data, count ) == drives );
+        assert( size == count * 36 && total == count * 28 );
+        while (!(status = horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, drives, index, 1,
+                                                       sizeof(data), data, &size, &count, &total )))
+        {
+            unsigned int drive = logical_drives( data, count );
+            assert( count == 1 && size == 36 && total == 28 && !(found & drive) );
+            found |= drive;
+            index++;
+        }
+        assert( status == NO_MORE_ENTRIES && !count && !size && !total && found == drives );
+        assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, drives, ~0u, 1, sizeof(data),
+                                            data, &size, &count, &total ) == NO_MORE_ENTRIES );
+        assert( horizon_object_dir_entries( HORIZON_OBJECT_DIR_DOS_DEVICES, drives, 0, ~0u, 36,
+                                            data, &size, &count, &total ) == MORE_ENTRIES );
+        assert( count == 1 && size == 36 && total == 56 );
+    }
 
     puts( "Horizon object directories: names, sessions, case, DOS device listing, reply limits and empty directories passed" );
     return 0;

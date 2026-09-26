@@ -90,9 +90,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define CONFIG_FILE CONFIG_DIR "/settings.json"
 #define DEFAULT_TARGET WINE_DRIVE_C "/curl/curl.exe"
 #ifdef WINE_NX_SWAP_POC
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2631"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2633"
 #elif defined(WINE_NX_FEX)
-#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2631"
+#define WINE_NX_RUNTIME_BUILD "nx-amd64-fex-2633"
 #elif defined(WINE_NX_AMD64)
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
@@ -3407,6 +3407,12 @@ static int return_to_launcher( void )
     }
     wine_nx_compositor_stop();
     wine_nx_profile_stop();
+#ifdef WINE_NX_USB_STORAGE
+    {
+        extern void wine_nx_usb_stop(void);
+        wine_nx_usb_stop();
+    }
+#endif
     release_thread_local_pages();
     /* Mesa's worker threads outlive the program that made work for them. */
     run_closing_step( stop_mesa_workers, 5, "ending the graphics library's worker threads" );
@@ -3533,21 +3539,6 @@ static int return_to_launcher( void )
             still_lent = 1;
         }
     }
-    /* Two ways out, and which one works is the loader's business, not ours.
-     *
-     * Through the loader: it unloads this program and starts it again, which
-     * opens the launcher without leaving the console. It is what
-     * switch/wine/reload-launcher.txt asks for. sphaira's forwarder cannot do
-     * it: its loader checks the result of svcBreak, a system call that returns
-     * nothing at all (svc 0x26 is declared void in the kernel's own table), so
-     * it reads whatever the register happens to hold and stops the console with
-     * it -- the crash report says 2001-0106 whatever this program leaves behind,
-     * with a clean heap as readily as with a dirty one. Upstream nx-hbloader
-     * makes the same four svcBreak calls without looking at any of them.
-     *
-     * Otherwise: close the application the way the HOME menu does, through
-     * libnx's applet exit. The console goes back to the menu with no error, and
-     * the launcher is one press away. */
     if (runtime_components_run)
     {
         char done[64];
@@ -3876,7 +3867,6 @@ int main( int argc, char **argv )
         launch_error = "The shortcut's game is unavailable. Connect its USB drive or use Locate executable in the game's Library settings.";
         forwarded_game = -1;
     }
-    if (forwarded_game > 0) autorun = 1;
     if (!forwarded_game && read_first_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target, sizeof(target) ) && target[0])
     {
         remove( WINE_NX_RUNTIME_ROOT "/run-next.txt" );
@@ -3887,6 +3877,7 @@ int main( int argc, char **argv )
     {
         const char *name;
 
+        autorun = 1;
         if (!resumed_program && !forwarded_game) snprintf( target, sizeof(target), "%s", argv[1] );
         name = strrchr( target, '/' );
         log_line( "[TARGET] starting %s", name ? name + 1 : target );

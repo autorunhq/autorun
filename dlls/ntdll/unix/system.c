@@ -1767,6 +1767,7 @@ void init_cpu_info(void)
 
 #ifdef __SWITCH__
     num = horizon_get_processor_count();
+    cpu_count = num;
 #elif defined(_SC_NPROCESSORS_ONLN)
     num = sysconf(_SC_NPROCESSORS_ONLN);
     if (num >= 1) cpu_count = num;

@@ -87,6 +87,9 @@ target_include_directories(wine-server-real PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES
 add_library(wine-sync-real OBJECT
     ../dlls/ntdll/unix/sync.c
 )
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/ntdll/unix/fsync.c")
+    target_sources(wine-sync-real PRIVATE ../dlls/ntdll/unix/fsync.c)
+endif()
 
 target_compile_definitions(wine-sync-real PRIVATE ${WINE_SWITCH_NTDLL_DEFS})
 
@@ -153,10 +156,11 @@ target_compile_options(wine-virtual-real PRIVATE
 target_include_directories(wine-virtual-real PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES})
 
 add_library(wine-signal-arm64-real OBJECT
-    ../dlls/ntdll/unix/alpc.c
     ../dlls/ntdll/unix/signal_arm64.c
-    ../dlls/ntdll/unix/syscall.c
 )
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/ntdll/unix/syscall.c")
+    target_sources(wine-signal-arm64-real PRIVATE ../dlls/ntdll/unix/alpc.c ../dlls/ntdll/unix/syscall.c)
+endif()
 
 target_compile_definitions(wine-signal-arm64-real PRIVATE ${WINE_SWITCH_NTDLL_DEFS})
 
@@ -608,23 +612,7 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
-    "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
-    source/launcher.c
-    source/launcher_graphics.c
-    source/launcher_catalog.c
-    source/launcher_console.c
-    source/launcher_svg.c
-    source/launcher_ui.c
-    source/launcher_audio.c
-    source/launcher_forwarder.c
-    source/launcher_image.c
-    source/steamgriddb.c
     source/dxvk_releases.c
-    source/autorun_update.c
-    source/autorun_install.c
-    source/launcher_update.c
-    source/launcher_setup.c
-    source/setup_boot.c
     source/runtime_platform.c
     source/sd_cache.c
     source/wow64_box64_bridge.c
@@ -637,7 +625,6 @@ add_executable(wine-nx-runtime
     source/osk.c
     source/compositor_gl.c
     source/compositor_egl.c
-    source/forwarder.c
     $<TARGET_OBJECTS:wine-horizon-real>
     $<TARGET_OBJECTS:wine-server-real>
     $<TARGET_OBJECTS:wine-sync-real>
@@ -661,6 +648,13 @@ add_executable(wine-nx-runtime
     $<TARGET_OBJECTS:wine-win32u-real>
     $<TARGET_OBJECTS:wine-opengl32-unix-real>
 )
+
+target_sources(wine-nx-runtime PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
+    source/launcher.c source/launcher_graphics.c source/launcher_catalog.c source/launcher_console.c
+    source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
+    source/launcher_image.c source/steamgriddb.c source/autorun_update.c source/autorun_install.c
+    source/launcher_update.c source/launcher_setup.c source/setup_boot.c source/forwarder.c)
 
 set_target_properties(wine-nx-runtime PROPERTIES SUFFIX ".elf")
 

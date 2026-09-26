@@ -70,10 +70,15 @@ struct horizon_object_dir_entry
     const char *type;
 };
 
-/* The runtime maps drive C: only. */
 static const struct horizon_object_dir_entry horizon_object_dir_dos_devices[] =
 {
     { "C:", "SymbolicLink" },
+    { "D:", "SymbolicLink" },
+    { "E:", "SymbolicLink" },
+    { "F:", "SymbolicLink" },
+    { "G:", "SymbolicLink" },
+    { "H:", "SymbolicLink" },
+    { "Z:", "SymbolicLink" },
 };
 
 /* Writes get_directory_entries records - struct directory_entry (name_len,
@@ -82,13 +87,14 @@ static const struct horizon_object_dir_entry horizon_object_dir_dos_devices[] =
  * wineserver's statuses: SUCCESS when some fit, MORE_ENTRIES when the next one
  * does not, NO_MORE_ENTRIES when there is none to send. total_len counts the
  * name and type bytes of every entry looked at, sent or not. */
-static inline unsigned int horizon_object_dir_entries( int dir, unsigned int index, unsigned int max_count,
+static inline unsigned int horizon_object_dir_entries( int dir, unsigned int drive_mask,
+                                                       unsigned int index, unsigned int max_count,
                                                        unsigned int reply_max, unsigned char *out,
                                                        unsigned int *out_size, unsigned int *count,
                                                        unsigned int *total_len )
 {
     const struct horizon_object_dir_entry *entries = NULL;
-    unsigned int entry_count = 0, status = HORIZON_OBJECT_DIR_STATUS_NO_MORE_ENTRIES, size = 0, i, k;
+    unsigned int entry_count = 0, status = HORIZON_OBJECT_DIR_STATUS_NO_MORE_ENTRIES, size = 0, i, k, ordinal = 0;
 
     if (dir == HORIZON_OBJECT_DIR_DOS_DEVICES)
     {
@@ -96,13 +102,14 @@ static inline unsigned int horizon_object_dir_entries( int dir, unsigned int ind
         entry_count = sizeof(horizon_object_dir_dos_devices) / sizeof(horizon_object_dir_dos_devices[0]);
     }
     *count = *total_len = 0;
-    for (i = 0; i < max_count && index < entry_count && i < entry_count - index; i++)
+    for (i = 0; i < entry_count && *count < max_count; i++)
     {
-        const struct horizon_object_dir_entry *entry = &entries[index + i];
+        const struct horizon_object_dir_entry *entry = &entries[i];
         unsigned int name_len = 2 * (unsigned int)strlen( entry->name );
         unsigned int type_len = 2 * (unsigned int)strlen( entry->type );
         unsigned int entry_size = (8 + name_len + type_len + 3) & ~3u;
 
+        if (!(drive_mask & (1u << (entry->name[0] - 'A'))) || ordinal++ < index) continue;
         *total_len += name_len + type_len;
         if (size + entry_size > reply_max)
         {
@@ -115,7 +122,7 @@ static inline unsigned int horizon_object_dir_entries( int dir, unsigned int ind
         for (k = 0; entry->name[k]; k++) out[size + 8 + 2 * k] = (unsigned char)entry->name[k];
         for (k = 0; entry->type[k]; k++) out[size + 8 + name_len + 2 * k] = (unsigned char)entry->type[k];
         size += entry_size;
-        *count = i + 1;
+        (*count)++;
         status = HORIZON_OBJECT_DIR_STATUS_SUCCESS;
     }
     *out_size = size;

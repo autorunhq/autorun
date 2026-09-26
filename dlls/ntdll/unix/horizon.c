@@ -6484,6 +6484,7 @@ static int horizon_server_handle_get_directory_entries( struct horizon_server_co
     struct horizon_server_handle_entry *entry;
     unsigned char data[512];
     unsigned int size = 0, max = request->header.reply_size;
+    unsigned int drive_mask = (1u << ('C' - 'A')) | (1u << ('Z' - 'A'));
     int dir = HORIZON_OBJECT_DIR_NONE;
 
     memset( &reply, 0, sizeof(reply) );
@@ -6497,9 +6498,20 @@ static int horizon_server_handle_get_directory_entries( struct horizon_server_co
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 
     if (!reply.header.error)
-        reply.header.error = horizon_object_dir_entries( dir, request->index, request->max_count,
+    {
+        if (dir == HORIZON_OBJECT_DIR_DOS_DEVICES)
+        {
+            char root[] = "ums0:";
+            for (unsigned int i = 0; i < 5; i++)
+            {
+                root[3] = '0' + i;
+                if (FindDevice( root ) >= 0) drive_mask |= 1u << ('D' - 'A' + i);
+            }
+        }
+        reply.header.error = horizon_object_dir_entries( dir, drive_mask, request->index, request->max_count,
                                                          max < sizeof(data) ? max : sizeof(data), data,
                                                          &size, &reply.count, &reply.total_len );
+    }
     reply.header.reply_size = size;
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), data, size );
 }
