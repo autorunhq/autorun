@@ -82,6 +82,18 @@ static ssize_t sd_cache_base_read( struct _reent *r, void *fd, char *ptr, size_t
     u64 start = armGetSystemTick();
     ssize_t ret = sd_cache_base->read_r( r, fd, ptr, len );
 
+    if (ret < 0 && r->_errno == EIO && sd_cache_base->seek_r && sd_cache_base->fstat_r)
+    {
+        int error = r->_errno;
+        off_t offset = sd_cache_base->seek_r( r, fd, 0, SEEK_CUR );
+        struct stat st;
+
+        if (offset >= 0 && !sd_cache_base->fstat_r( r, fd, &st ) && offset >= st.st_size)
+            ret = 0;
+        else
+            r->_errno = error;
+    }
+
     __atomic_add_fetch( &wine_nx_sd_reads, 1, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_sd_read_ns, armTicksToNs( armGetSystemTick() - start ), __ATOMIC_RELAXED );
     if (ret > 0) __atomic_add_fetch( &wine_nx_sd_bytes, (unsigned long long)ret, __ATOMIC_RELAXED );
