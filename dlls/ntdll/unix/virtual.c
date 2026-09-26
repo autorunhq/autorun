@@ -189,6 +189,12 @@ struct file_view
 #define VPROT_GUARD      0x10
 #define VPROT_COMMITTED  0x20
 #define VPROT_WRITEWATCH 0x40
+#ifdef __SWITCH__
+#define VPROT_FEX_SMC    0x80
+#define VPROT_INTERNAL   (VPROT_WRITEWATCH | VPROT_FEX_SMC)
+#else
+#define VPROT_INTERNAL   VPROT_WRITEWATCH
+#endif
 /* per-mapping protection flags */
 #define VPROT_ARM64EC          0x0100  /* view may contain ARM64EC code */
 #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
@@ -1775,6 +1781,9 @@ static int get_unix_prot( BYTE vprot )
         if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
+#ifdef __SWITCH__
+        if (vprot & VPROT_FEX_SMC) prot &= ~(PROT_WRITE | PROT_EXEC);
+#endif
     }
     if (!prot) prot = PROT_NONE;
     return prot;
@@ -2515,6 +2524,40 @@ static void commit_arm64ec_map( struct file_view *view )
 }
 
 #if defined(__SWITCH__) && defined(WINE_NX_FEX)
+NTSTATUS wine_nx_fex_protect_code( void *base, BOOL enable )
+{
+    struct file_view *view;
+    sigset_t sigset;
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+    BYTE vprot;
+
+    if (!base || ((ULONG_PTR)base & host_page_mask)) return STATUS_INVALID_PARAMETER;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    view = find_view( base, host_page_size );
+    vprot = get_host_page_vprot( base );
+    if (!view || (view->protect & (VPROT_SYSTEM | VPROT_WRITEWATCH)) ||
+        !(vprot & VPROT_COMMITTED) || (vprot & VPROT_GUARD) ||
+        !(vprot & (VPROT_WRITE | VPROT_WRITECOPY))) goto done;
+    if (is_arm64ec() ? !is_emulated_code( (ULONG_PTR)base ) : (ULONG_PTR)base >= 0x100000000ull)
+        goto done;
+
+    if (enable && (vprot & VPROT_FEX_SMC))
+        status = STATUS_SUCCESS;
+    else if (!enable && !(vprot & VPROT_FEX_SMC))
+        status = (get_unix_prot( vprot ) & PROT_WRITE) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    else if (!horizon_protect_fex_page( base, enable ))
+    {
+        /* Guest permissions remain unchanged; only the host write trap changes. */
+        vprot &= ~(VPROT_FEX_SMC | VPROT_WRITEWATCH);
+        if (enable) vprot |= VPROT_FEX_SMC;
+        set_page_vprot( base, host_page_size, vprot );
+        status = STATUS_SUCCESS;
+    }
+done:
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return status;
+}
+
 NTSTATUS wine_nx_set_fex_code_range( void *base, SIZE_T size, BOOL enable )
 {
     sigset_t sigset;
@@ -5735,6 +5778,14 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
         }
         else ret = grow_thread_stack( data, page, &stack_info );
     }
+#ifdef __SWITCH__
+    else if (err == EXCEPTION_WRITE_FAULT && (vprot & VPROT_FEX_SMC))
+    {
+        /* FEX must invalidate translated code before making this page writable. */
+        rec->NumberParameters = 3;
+        rec->ExceptionInformation[2] = STATUS_EXECUTABLE_MEMORY_WRITE;
+    }
+#endif
     else if (err == EXCEPTION_WRITE_FAULT)
     {
         if (vprot & VPROT_WRITEWATCH)
@@ -6936,7 +6987,7 @@ static unsigned int fill_basic_memory_info( const void *addr, MEMORY_BASIC_INFOR
         BYTE vprot;
 
         info->AllocationBase = alloc_base;
-        info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, ~VPROT_WRITEWATCH );
+        info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, ~VPROT_INTERNAL );
         info->State = (vprot & VPROT_COMMITTED) ? MEM_COMMIT : MEM_RESERVE;
         info->Protect = (vprot & VPROT_COMMITTED) ? get_win32_prot( vprot, view->protect ) : 0;
         info->AllocationProtect = get_win32_prot( view->protect, view->protect );
@@ -7267,7 +7318,7 @@ static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
         while (start != (char *)view->base + view->size && r != ref + count
                && r->addr < (char *)view->base + view->size)
         {
-            start += get_committed_size( view, start, end - start, &vprot, ~VPROT_WRITEWATCH );
+            start += get_committed_size( view, start, end - start, &vprot, ~VPROT_INTERNAL );
             i = 0;
             while (r + i != ref + count && r[i].addr < start) ++i;
             if (vprot & VPROT_COMMITTED) fill_working_set_info( &data, view, vprot, r, i, info );

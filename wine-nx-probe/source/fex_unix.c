@@ -11,6 +11,7 @@
 #include "fex_jit.h"
 
 extern NTSTATUS wine_nx_set_fex_code_range( void *base, SIZE_T size, BOOL enable );
+extern NTSTATUS wine_nx_fex_protect_code( void *base, BOOL enable );
 extern int wine_nx_fex_exception_attach(void);
 static pthread_mutex_t allocation_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -32,6 +33,13 @@ static NTSTATUS attach_thread( void *args )
 {
     (void)args;
     return wine_nx_fex_exception_attach() ? STATUS_NO_MEMORY : STATUS_SUCCESS;
+}
+
+static NTSTATUS protect_code( void *args )
+{
+    struct wine_nx_fex_protection *p = args;
+    if (!p || p->enable > 1) return STATUS_INVALID_PARAMETER;
+    return wine_nx_fex_protect_code( (void *)(uintptr_t)p->address, p->enable );
 }
 
 static NTSTATUS allocate( void *args )
@@ -123,9 +131,10 @@ static NTSTATUS heap_free( void *args )
 const unixlib_entry_t wine_nx_fex_unix_funcs[] =
 {
     unsupported, unsupported, unsupported, unsupported, unsupported, unsupported, unsupported,
-    query, allocate, release, flush, attach_thread, heap_allocate, heap_reallocate, heap_free
+    query, allocate, release, flush, attach_thread, heap_allocate, heap_reallocate, heap_free, protect_code
 };
 
 C_ASSERT( sizeof(struct wine_nx_fex_query) == 8 );
 C_ASSERT( sizeof(struct wine_nx_fex_memory) == 24 );
 C_ASSERT( sizeof(struct wine_nx_fex_heap) == 24 );
+C_ASSERT( sizeof(struct wine_nx_fex_protection) == 16 );

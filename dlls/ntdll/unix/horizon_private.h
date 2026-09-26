@@ -31,6 +31,7 @@ extern void horizon_wait_suspend_arm64ec(void);
 extern void horizon_get_memory_info( unsigned long long *total, unsigned long long *used );
 extern void horizon_get_address_space_limits( void **start, void **limit );
 extern void *virtual_alloc_horizon_native( size_t size, void **token );
+extern int horizon_protect_fex_page( void *base, BOOL enable );
 extern void virtual_free_horizon_native( void *token );
 extern unsigned long long horizon_next_thread_local_page( unsigned long long addr, unsigned long long limit );
 extern unsigned int horizon_drop_thread_local_pages( unsigned int *found );

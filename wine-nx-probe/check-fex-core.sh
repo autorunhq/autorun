@@ -40,6 +40,7 @@ done
 for mode in 32 64; do
     "$build/fex_segmented_cache" "$mode"
     "$build/fex_writable_code" "$mode"
+    "$build/fex_writable_code" "$mode" permission
     "$build/fex_pop_fault" "$mode"
     "$build/fex_lookup_cache" "$mode" fixed stock
     "$build/fex_lookup_cache" "$mode" dynamic stock

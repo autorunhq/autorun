@@ -16476,7 +16476,8 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         status = rec.ExceptionCode == STATUS_ACCESS_VIOLATION ?
                  virtual_handle_fault( get_thread_data(), &rec, (void *)ctx->sp.x ) : rec.ExceptionCode;
         if (!status) horizon_resume_exception( ctx );
-        if (get_thread_data() && get_thread_data()->jmp_buf)
+        if (get_thread_data() && get_thread_data()->jmp_buf &&
+            !(rec.NumberParameters == 3 && rec.ExceptionInformation[2] == STATUS_EXECUTABLE_MEMORY_WRITE))
         {
             ctx->cpu_gprs[0].x = (ULONG_PTR)get_thread_data()->jmp_buf;
             ctx->cpu_gprs[1].x = 1;
@@ -18143,11 +18144,48 @@ void horizon_release_code_mappings( unsigned int *released, unsigned int *failed
     pthread_mutex_unlock( &mapping_mutex );
 }
 
+int horizon_protect_fex_page( void *base, BOOL enable )
+{
+    struct horizon_mapping *mapping;
+    Result rc;
+    int ret = -1;
+    int prot = enable ? PROT_READ : PROT_READ | PROT_WRITE;
+
+    pthread_mutex_lock( &mapping_mutex );
+    mapping = find_overlap_mapping( base, 0x1000 );
+    if (!mapping || mapping->addr > base ||
+        (char *)base + 0x1000 > (char *)mapping->addr + mapping->size ||
+        !mapping->backing || mapping->reservation || mapping->section_state != SECTION_NONE ||
+        mapping->backing->write_back || !(mapping->prot & PROT_READ)) goto done;
+#ifdef WINE_NX_SWAP_POC
+    if (mapping->backing->swap.detached || swap_pinned_locked( base, 0x1000 )) goto done;
+#endif
+    if (enable && !(mapping->prot & PROT_WRITE)) ret = 0;
+    else if ((mapping = split_backing_mapping_metadata( mapping, base, 0x1000 )))
+    {
+        rc = svcSetMemoryPermission( base, 0x1000, get_horizon_perm( prot ) );
+        if (R_FAILED(rc) && !enable && (mapping->prot & PROT_EXEC))
+            rc = svcSetProcessMemoryPermission( envGetOwnProcessHandle(), (u64)base, 0x1000, Perm_Rw );
+        if (R_SUCCEEDED(rc))
+        {
+            mapping->prot = prot;
+            ret = 0;
+        }
+    }
+#ifdef WINE_NX_SWAP_POC
+    if (!ret) mapping->backing->swap_excluded = 1;
+#endif
+done:
+    pthread_mutex_unlock( &mapping_mutex );
+    return ret;
+}
+
 static int protect_code_mapping( struct horizon_mapping *mapping, int prot )
 {
     int old_prot = mapping->prot;
     int new_prot = get_effective_horizon_prot( prot );
     void *source = (char *)mapping->backing->heap_addr + mapping->source_offset;
+    BOOL remap = (old_prot & PROT_WRITE) && !(new_prot & PROT_WRITE);
 
     if ((old_prot & PROT_WRITE) && (new_prot & PROT_WRITE))
     {
@@ -18155,7 +18193,20 @@ static int protect_code_mapping( struct horizon_mapping *mapping, int prot )
         return 0;
     }
 
-    if ((old_prot & PROT_WRITE) && !(new_prot & PROT_WRITE))
+    if (!(old_prot & (PROT_WRITE | PROT_EXEC)) && !(new_prot & PROT_EXEC) &&
+        R_SUCCEEDED( svcSetMemoryPermission( mapping->addr, mapping->size, get_horizon_perm( new_prot ) ) ))
+    {
+        mapping->prot = new_prot;
+        return 0;
+    }
+    if (!(old_prot & (PROT_WRITE | PROT_EXEC)) && (new_prot & PROT_EXEC))
+    {
+        MemoryInfo info;
+        u32 page_info;
+        if (R_SUCCEEDED( svcQueryMemory( &info, &page_info, (u64)mapping->addr ) ) &&
+            info.type == MemType_ModuleCodeMutable) remap = TRUE;
+    }
+    if (remap)
     {
         int saved_errno;
 
