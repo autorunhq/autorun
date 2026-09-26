@@ -37,8 +37,11 @@ def idl_text(path, defines):
     compiler = os.environ.get('WINE_NX_IDL_CPP') or shutil.which('clang') or shutil.which('cpp')
     if not compiler:
         raise RuntimeError('IDL registration requires clang or cpp')
+    includes = ['-I', str(root / 'include')]
+    if pe := os.environ.get('WINE_NX_PE_BUILD_DIR'):
+        includes = ['-I', str(Path(pe) / 'include'), *includes]
     return subprocess.check_output(
-        [compiler, '-E', '-P', '-x', 'c', '-I', str(root / 'include'),
+        [compiler, '-E', '-P', '-x', 'c', *includes,
          *defines, str(path)], text=True)
 
 
