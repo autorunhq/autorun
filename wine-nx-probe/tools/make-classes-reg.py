@@ -12,6 +12,12 @@ A class comes from the IDL of the DLL that serves it -- a coclass with a uuid,
 which is what widl turns into those same registry keys -- and only from a DLL
 whose spec exports DllGetClassObject, since one that does not cannot serve a
 class whatever the registry says.
+
+Some DLLs are one source built many times, XAudio2 2.0 to 2.7 and XACT among
+them, and the IDL picks each version's class with #if, which a scan of the text
+cannot follow. widl has already followed it: the registration script it builds
+into the DLL, which its DllRegisterServer writes from, names the classes of that
+version. Those come second, so a class the IDL gave a DLL stays with it.
 """
 import argparse
 from pathlib import Path
@@ -70,14 +76,27 @@ def classes_of(dll):
             found.append((uuid.group(1).lower(), threading, match.group('name')))
     return found
 
+RGS_CLASS = re.compile(
+    r"'\{(?P<uuid>[0-9a-fA-F-]{36})\}' = s '(?P<name>[^']*)'\s*\{\s*"
+    r"InprocServer32 = s '%MODULE%'(?:\s*\{\s*val ThreadingModel = s '(?P<threading>\w+)')?")
+
+def registered_classes_of(path):
+    """(uuid, threading, name) for each class the DLL's registration script
+    gives an InprocServer32 to; one with no server of its own is left out."""
+    return [(m.group('uuid').lower(), (m.group('threading') or 'both').capitalize(), m.group('name'))
+            for m in RGS_CLASS.finditer(path.read_bytes().decode('latin-1'))]
+
 def write(stage, dlls):
     lines = ['WINE REGISTRY Version 2',
              ';; The classes the staged DLLs serve. Written by make-classes-reg.py from',
              ';; the IDL each DLL is built from, which is where widl reads them too.',
              '']
     seen = {}
-    for dll in sorted(dlls):
-        for uuid, threading, name in classes_of(dll):
+    syswow64 = stage / 'drive_c/windows/syswow64'
+    found = [(dll, classes_of(dll)) for dll in sorted(dlls)]
+    found += [(dll, registered_classes_of(syswow64 / f'{dll}.dll')) for dll in sorted(dlls)]
+    for dll, classes in found:
+        for uuid, threading, name in classes:
             # The first DLL to claim a class keeps it, as the load order would.
             if uuid in seen:
                 continue

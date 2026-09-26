@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "What each module that calls straight into the Horizon runtime shares with it:",
+    "the headers that lay out its syscalls or unix calls. The DLL pack's manifest",
+    "gives such a module the feature iface:<module>:<hash>, the first 12 hex digits of",
+    "the sha256 of these files in order; a runtime built from the same files reports",
+    "the same, so a card never pairs one with a runtime built against other headers.",
+    "Being in a static unix-call table (dlls/ntdll/unix/virtual.c) is a feature of its",
+    "own, unixlib:<name> (native) or unixlib32:<name> (WoW64), read from the table."
+  ],
+  "ntdll.dll": ["include/wine/unixlib.h", "dlls/ntdll/unixlib.h", "dlls/ntdll/ntsyscalls.h"],
+  "win32u.dll": ["include/wine/unixlib.h", "dlls/win32u/win32syscalls.h", "include/ntuser.h", "include/ntgdi.h"],
+  "winebox64.dll": ["include/wine/unixlib.h", "dlls/winebox64/unixlib.h"],
+  "ws2_32.dll": ["include/wine/unixlib.h", "dlls/ws2_32/ws2_32_private.h"],
+  "crypt32.dll": ["include/wine/unixlib.h", "dlls/crypt32/crypt32_private.h"],
+  "opengl32.dll": ["include/wine/unixlib.h", "dlls/opengl32/unixlib.h", "dlls/opengl32/unix_thunks.h"],
+  "winenxaudio.drv": ["include/wine/unixlib.h", "dlls/mmdevapi/unixlib.h"],
+  "xinput1_1.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
+  "xinput1_2.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
+  "xinput1_3.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
+  "xinput1_4.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
+  "winevulkan.dll": ["include/wine/unixlib.h", "dlls/winevulkan/vulkan_thunks.h", "dlls/winevulkan/loader_thunks.h"]
+}
