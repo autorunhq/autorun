@@ -52,6 +52,13 @@ NTSTATUS WINAPI NtDelayExecution(BOOLEAN alert, const LARGE_INTEGER *time)
 { (void)alert; (void)time; return 0; }
 NTSTATUS WINAPI NtQueryPerformanceCounter(LARGE_INTEGER *n, LARGE_INTEGER *f)
 { n->QuadPart = 10000000; if (f) f->QuadPart = 10000000; return 0; }
+NTSTATUS WINAPI PsCreateSystemThread(PHANDLE handle, ULONG access, POBJECT_ATTRIBUTES attrs,
+                                    HANDLE process, PCLIENT_ID client, PRTL_THREAD_START_ROUTINE start, PVOID arg)
+{ (void)access; (void)attrs; (void)process; (void)client; (void)start; (void)arg; *handle = (HANDLE)1; return 0; }
+void WINAPI RtlInitUnicodeString(PUNICODE_STRING string, PCWSTR source)
+{ string->Buffer = (WCHAR *)source; string->Length = string->MaximumLength = 0; }
+NTSTATUS WINAPI NtSetInformationThread(HANDLE thread, THREADINFOCLASS info, LPCVOID data, ULONG size)
+{ (void)thread; (void)info; (void)data; (void)size; return 0; }
 
 int main(void)
 {
@@ -86,11 +93,11 @@ int main(void)
     assert(s->held == total && s->submitted == NX_BUFFERS * NX_CHUNK && !s->played);
     assert(((short *)queued[0]->buffer)[2] == 1);
     assert(((short *)queued[1]->buffer)[0] == NX_CHUNK);
-    nx_pump(s); assert(s->held == total && !s->played);
-    ready = 1; nx_pump(s);
+    nx_pump(); assert(s->held == total && !s->played);
+    ready = 1; nx_pump();
     assert(s->held == total - NX_CHUNK && s->played == NX_CHUNK && queued_count == NX_BUFFERS);
     assert(((short *)queued[NX_BUFFERS - 1]->buffer)[0] == (short)(NX_BUFFERS * NX_CHUNK));
-    ready = NX_BUFFERS; nx_pump(s);
+    ready = NX_BUFFERS; nx_pump();
     assert(!s->held && s->played == total && !queued_count);
     /* Cross the ring boundary, preserving order and silence. */
     put.flags = AUDCLNT_BUFFERFLAGS_SILENT;
@@ -100,9 +107,9 @@ int main(void)
         get.frames = put.written_frames = NX_CHUNK;
         nx_get_render_buffer(&get); assert(get.result == S_OK);
         nx_release_render_buffer(&put); assert(put.result == S_OK);
-        nx_pump(s); assert(queued_count == 1);
+        nx_pump(); assert(queued_count == 1);
         for (i = 0; i < NX_CHUNK; i++) assert(((short *)queued[0]->buffer)[i*2] == 0);
-        ready = 1; nx_pump(s);
+        ready = 1; nx_pump();
         if (s->read < before) wrapped = TRUE;
     }
     assert(wrapped);
@@ -115,7 +122,7 @@ int main(void)
     put.written_frames = 2; nx_release_render_buffer(&put); assert(put.result == AUDCLNT_E_INVALID_SIZE);
     nx_reset(&resetp); assert(resetp.result == AUDCLNT_E_BUFFER_OPERATION_PENDING);
     put.written_frames = 0; nx_release_render_buffer(&put); assert(put.result == S_OK);
-    release.stream = handle; release.timer_thread = NULL; nx_release_stream(&release);
+    release.stream = handle; nx_release_stream(&release);
     assert(release.result == S_OK && !active && !queued_count);
     /* Common application format: mono 44.1 kHz float is converted to the
      * Switch's stereo 48 kHz signed-16 stream. */
@@ -131,7 +138,7 @@ int main(void)
         source = (float *)data;
         for (i = 0; i < 441; i++) source[i] = i == 0 ? 0.5f : 0.0f;
         nx_release_render_buffer(&put); assert(put.result == S_OK && nx_stream(handle)->held == 480);
-        release.stream = handle; release.timer_thread = NULL; nx_release_stream(&release);
+        release.stream = handle; nx_release_stream(&release);
         assert(release.result == S_OK);
     }
     /* DirectSound (DSOUND_WaveFormat, DSOUND_ReopenDevice): the mix format made
@@ -166,7 +173,7 @@ int main(void)
         nx_release_render_buffer(&put); assert(put.result == S_OK && nx_stream(handle)->held == 480);
         /* float, not read as 32-bit PCM */
         assert(((short *)nx_stream(handle)->ring)[0] == 16383 && ((short *)nx_stream(handle)->ring)[1] == 0);
-        release.stream = handle; release.timer_thread = NULL; nx_release_stream(&release);
+        release.stream = handle; nx_release_stream(&release);
         assert(release.result == S_OK);
     }
     {
@@ -206,6 +213,43 @@ int main(void)
         aux.msg = AUXDM_GETDEVCAPS;
         wine_nx_audio_unix_funcs[aux_message](&aux);
         assert(err == MMSYSERR_BADDEVICEID);
+    }
+    {
+        stream_handle a = 0, b = 0;
+        struct create_stream_params first = create, second = create;
+        struct nx_audio_stream *stream_a, *stream_b;
+        first.stream = &a;
+        second.stream = &b;
+        nx_create_stream(&first);
+        nx_create_stream(&second);
+        assert(first.result == S_OK && second.result == S_OK && a && b);
+        stream_a = nx_stream(a);
+        stream_b = nx_stream(b);
+        startp.stream = a; nx_start(&startp); assert(startp.result == S_OK);
+        startp.stream = b; nx_start(&startp); assert(startp.result == S_OK);
+        for (i = 0; i < 2; i++)
+        {
+            get.stream = put.stream = i ? b : a;
+            get.frames = put.written_frames = NX_CHUNK;
+            nx_get_render_buffer(&get); assert(get.result == S_OK);
+            for (unsigned int j = 0; j < NX_CHUNK * 2; j++) ((short *)data)[j] = 20000;
+            nx_release_render_buffer(&put); assert(put.result == S_OK);
+        }
+        nx_pump();
+        assert(queued_count == 1 && ((short *)queued[0]->buffer)[0] == 32767);
+        stopp.stream = a; nx_stop(&stopp); assert(stopp.result == S_OK && host_started);
+        ready = 1; nx_pump();
+        assert(!stream_a->held && !stream_b->held && stream_a->played == NX_CHUNK);
+        release.stream = a; nx_release_stream(&release);
+        assert(release.result == S_OK && active == stream_b && host_started);
+        get.stream = put.stream = b;
+        nx_get_render_buffer(&get); assert(get.result == S_OK);
+        for (i = 0; i < NX_CHUNK * 2; i++) ((short *)data)[i] = -1000;
+        nx_release_render_buffer(&put); assert(put.result == S_OK);
+        nx_pump();
+        assert(queued_count == 1 && ((short *)queued[0]->buffer)[0] == -1000);
+        release.stream = b; nx_release_stream(&release);
+        assert(release.result == S_OK && !active && !host_started && !queued_count);
     }
     puts("Audio backend: native table, 64-bit pointers, zero MIDI/aux devices, playback and formats passed");
     return 0;
