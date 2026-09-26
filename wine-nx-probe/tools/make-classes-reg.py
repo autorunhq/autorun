@@ -97,7 +97,10 @@ def write(stage, dlls):
     seen = {}
     syswow64 = stage / 'drive_c/windows/syswow64'
     found = [(dll, classes_of(dll)) for dll in sorted(dlls)]
-    found += [(dll, registered_classes_of(syswow64 / f'{dll}.dll')) for dll in sorted(dlls)]
+    for dll in sorted(dlls):
+        path = syswow64 / f'{dll}.dll'
+        if path.is_file():
+            found.append((dll, registered_classes_of(path)))
     for dll, classes in found:
         for uuid, threading, name in classes:
             # The first DLL to claim a class keeps it, as the load order would.

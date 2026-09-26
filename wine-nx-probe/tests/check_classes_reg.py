@@ -19,7 +19,7 @@ spec.loader.exec_module(mk)
 # The server reads it before system.reg, so a program's own writes still win.
 server = (root / 'dlls/ntdll/unix/horizon_registry_server.h').read_text()
 assert (server.index('horizon_registry_load_hive( machine, "config/classes.reg" )') <
-        server.index('horizon_registry_load_hive( machine, "system.reg" )'))
+        server.index('horizon_registry_load_hive( machine, HORIZON_REGISTRY_SUBDIR "system.reg" )'))
 
 # quartz serves the filter graph, which is the class Fallout asks for.
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('quartz'))
@@ -34,6 +34,10 @@ classes = dict((uuid, name) for uuid, _, name in mk.classes_of('msctf'))
 assert classes.get('33c53a50-f456-4884-b049-85fd643ecfed') == 'TF_InputProcessorProfiles'
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('explorerframe'))
 assert classes.get('56fdf344-fd6d-11d0-958a-006097c9a090') == 'TaskbarList'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('msxml3'))
+assert classes.get('f5078f32-c551-11d3-89b9-0000f81fe221') == 'DOMDocument30'
+assert classes.get('88d969c0-f192-11d4-a65f-0040963251e5') == 'DOMDocument40'
+assert classes.get('88d96a05-f192-11d4-a65f-0040963251e5') == 'DOMDocument60'
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('xaudio2_5'))
 assert classes == {
     '4c9b6dde-6809-46e6-a278-9b6a97588670': 'XAudio2',
