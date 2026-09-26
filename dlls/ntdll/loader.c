@@ -1180,6 +1180,10 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
     const char *end = strrchr(forward, '.');
     FARPROC proc = NULL;
     BOOL wm_loaded = FALSE;
+    NTSTATUS status;
+#ifdef __WINE_PE_BUILD
+    WCHAR *dynamic_path = NULL, *unknown;
+#endif
 
     if (!end) return NULL;
     if (build_import_name( importer, mod_name, forward, end - forward )) return NULL;
@@ -1187,12 +1191,19 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
     if (!(wm = find_basename_module( mod_name )))
     {
         WINE_MODREF *imp = get_modref( module );
-        TRACE( "delay loading %s for '%s'\n", debugstr_w(mod_name), forward );
-        if (load_dll( load_path, mod_name, 0, &wm, imp->system ) != STATUS_SUCCESS)
+#ifdef __WINE_PE_BUILD
+        if (is_dynamic && !load_path)
         {
-            ERR( "module not found for forward '%s' used by %s\n",
-                 forward, debugstr_w(imp->ldr.FullDllName.Buffer) );
-            return NULL;
+            if ((status = LdrGetDllPath( mod_name, 0, &dynamic_path, &unknown ))) return NULL;
+            load_path = dynamic_path;
+        }
+#endif
+        TRACE( "delay loading %s for '%s'\n", debugstr_w(mod_name), forward );
+        if ((status = load_dll( load_path, mod_name, 0, &wm, imp->system )) != STATUS_SUCCESS)
+        {
+            ERR( "module not found for forward '%s' used by %s, status %#lx\n",
+                 forward, debugstr_w(imp->ldr.FullDllName.Buffer), status );
+            goto done;
         }
         wm_loaded = TRUE;
     }
@@ -1207,7 +1218,7 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
             ERR( "process_attach failed for forward '%s' used by %s\n",
                  forward, debugstr_w(get_modref( module )->ldr.FullDllName.Buffer) );
             LdrUnloadDll( wm->ldr.DllBase );
-            return NULL;
+            goto done;
         }
     }
 
@@ -1232,6 +1243,10 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
             forward, debugstr_w(get_modref(module)->ldr.FullDllName.Buffer),
             debugstr_w(get_modref(module)->ldr.BaseDllName.Buffer) );
     }
+done:
+#ifdef __WINE_PE_BUILD
+    if (dynamic_path) RtlReleasePath( dynamic_path );
+#endif
     return proc;
 }
 
