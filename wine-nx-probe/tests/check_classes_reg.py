@@ -34,9 +34,17 @@ classes = dict((uuid, name) for uuid, _, name in mk.classes_of('msctf'))
 assert classes.get('33c53a50-f456-4884-b049-85fd643ecfed') == 'TF_InputProcessorProfiles'
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('explorerframe'))
 assert classes.get('56fdf344-fd6d-11d0-958a-006097c9a090') == 'TaskbarList'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('xaudio2_5'))
+assert classes == {
+    '4c9b6dde-6809-46e6-a278-9b6a97588670': 'XAudio2',
+    '2139e6da-c341-4774-9ac3-b4e026347f64': 'AudioVolumeMeter',
+    'd06df0d0-8518-441e-822f-5451d5c595b8': 'AudioReverb',
+}
 classes = dict((uuid, name) for uuid, _, name in mk.classes_of('xaudio2_0'))
 assert classes.get('fac23f48-31f5-45a8-b49b-5225d61401aa') == 'XAudio2'
 assert classes.get('6f6ea3a9-2cf5-41cf-91c1-2170b1540063') == 'AudioReverb'
+classes = dict((uuid, name) for uuid, _, name in mk.classes_of('xaudio2_7'))
+assert classes.get('5a508685-a254-4fba-9b82-9a24b00306af') == 'XAudio2'
 # and a DLL that cannot serve a class is not asked to.
 assert mk.classes_of('kernel32') == []
 assert mk.classes_of('not-a-dll') == []

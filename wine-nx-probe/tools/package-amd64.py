@@ -265,7 +265,7 @@ game_runtime = (
     'mscoree', 'msctf', 'msvcp140', 'mswsock', 'netprofm', 'normaliz', 'powrprof',
     'uiautomationcore', 'uxtheme', 'vcruntime140', 'wbemprox', 'wldap32', 'wtsapi32',
     'x3daudio1_7',
-    'xapofx1_5', 'xaudio2_0', 'xaudio2_9',
+    'xapofx1_5', 'xaudio2_0', 'xaudio2_5', 'xaudio2_7', 'xaudio2_9',
 )
 game_runtime64 = ('vcruntime140_1',)
 common = 'ntdll kernel32 kernelbase msvcrt ucrtbase advapi32 sechost'.split()
