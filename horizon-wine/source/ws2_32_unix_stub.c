@@ -12,6 +12,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -90,10 +91,14 @@ static const char local_hostname[] = "wine-nx";
 
 #define WS_AF_INET 2
 #define WS_ERROR_INSUFFICIENT_BUFFER 122
+#define WSAEFAULT           10014
+#define WSAEINVAL           10022
 #define WSAEAFNOSUPPORT     10047
+#define WSAENOBUFS          10055
 #define WSAHOST_NOT_FOUND   11001
 #define WSATRY_AGAIN        11002
 #define WSANO_RECOVERY      11003
+#define WSANO_DATA          11004
 #define WSA_NOT_ENOUGH_MEMORY 8
 
 static NTSTATUS gai_error_from_unix( int err )
@@ -104,6 +109,9 @@ static NTSTATUS gai_error_from_unix( int err )
     case EAI_MEMORY:   return WSA_NOT_ENOUGH_MEMORY;
     case EAI_FAMILY:   return WSAEAFNOSUPPORT;
     case EAI_NONAME:   return WSAHOST_NOT_FOUND;
+#ifdef EAI_NODATA
+    case EAI_NODATA:   return WSANO_DATA;
+#endif
     default:           return WSANO_RECOVERY;
     }
 }
@@ -324,6 +332,119 @@ static NTSTATUS wine_nx_gethostbyname( void *args )
     return get_host_by_name( params->name, params->host, params->size, FALSE );
 }
 
+static NTSTATUS pack_hostent( const struct hostent *src, void *buffer, unsigned int *size, BOOL wow64 )
+{
+    unsigned int aliases_count = 0, address_count = 0, pointer_size = wow64 ? 4 : sizeof(void *);
+    size_t needed = wow64 ? sizeof(struct ws_hostent32) : sizeof(struct ws_hostent);
+    char *aliases, *addresses, *data;
+
+    if (src->h_addrtype != AF_INET || src->h_length != 4) return WSAEAFNOSUPPORT;
+    for (; src->h_aliases[aliases_count]; aliases_count++)
+        needed += strlen( src->h_aliases[aliases_count] ) + 1;
+    while (src->h_addr_list[address_count]) address_count++;
+    needed += (aliases_count + address_count + 2) * pointer_size + address_count * 4 + strlen( src->h_name ) + 1;
+    if (needed > UINT_MAX) return WSAENOBUFS;
+    if (*size < needed)
+    {
+        *size = needed;
+        return WS_ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    memset( buffer, 0, needed );
+    aliases = (char *)buffer + (wow64 ? sizeof(struct ws_hostent32) : sizeof(struct ws_hostent));
+    addresses = aliases + (aliases_count + 1) * pointer_size;
+    data = addresses + (address_count + 1) * pointer_size;
+    for (unsigned int i = 0; i < address_count; i++)
+    {
+        if (wow64) ((ULONG *)addresses)[i] = PtrToUlong( data );
+        else ((char **)addresses)[i] = data;
+        memcpy( data, src->h_addr_list[i], 4 );
+        data += 4;
+    }
+    for (unsigned int i = 0; i < aliases_count; i++)
+    {
+        size_t length = strlen( src->h_aliases[i] ) + 1;
+        if (wow64) ((ULONG *)aliases)[i] = PtrToUlong( data );
+        else ((char **)aliases)[i] = data;
+        memcpy( data, src->h_aliases[i], length );
+        data += length;
+    }
+    strcpy( data, src->h_name );
+    if (wow64)
+    {
+        struct ws_hostent32 *host = buffer;
+        host->name = PtrToUlong( data );
+        host->aliases = PtrToUlong( aliases );
+        host->addresses = PtrToUlong( addresses );
+        host->family = WS_AF_INET;
+        host->length = 4;
+    }
+    else
+    {
+        struct ws_hostent *host = buffer;
+        host->name = data;
+        host->aliases = (char **)aliases;
+        host->addresses = (char **)addresses;
+        host->family = WS_AF_INET;
+        host->length = 4;
+    }
+    return 0;
+}
+
+static NTSTATUS get_host_by_addr( const void *addr, int length, int family,
+                                 void *buffer, unsigned int *size, BOOL wow64 )
+{
+    struct in_addr ip, local_ip;
+    char *aliases[] = { NULL }, *addresses[] = { (char *)&ip, NULL };
+    struct hostent local = { (char *)local_hostname, aliases, AF_INET, 4, addresses }, *host;
+    NTSTATUS status;
+
+    if (family != WS_AF_INET) return WSAEAFNOSUPPORT;
+    if (!addr || length < (int)sizeof(ip)) return WSAEFAULT;
+    memcpy( &ip, addr, sizeof(ip) );
+    /* Wine uses 127.12.34.56 for the local host when it has no network address. */
+    if (ip.s_addr == htonl( 0x7f0c2238 )) ip.s_addr = htonl( INADDR_LOOPBACK );
+    local_ip.s_addr = gethostid();
+    if (local_ip.s_addr == INADDR_LOOPBACK) local_ip.s_addr = htonl( INADDR_LOOPBACK );
+    if (ip.s_addr == htonl( INADDR_LOOPBACK ) || (local_ip.s_addr && ip.s_addr == local_ip.s_addr))
+        return pack_hostent( &local, buffer, size, wow64 );
+
+    if (!(host = gethostbyaddr( &ip, sizeof(ip), AF_INET )))
+    {
+        switch (h_errno)
+        {
+        case HOST_NOT_FOUND: return WSAHOST_NOT_FOUND;
+        case TRY_AGAIN: return WSATRY_AGAIN;
+        case NO_DATA: return WSANO_DATA;
+        case NETDB_INTERNAL:
+            switch (errno)
+            {
+            case ENOMEM: case ENOBUFS: case ENOSPC: return WSAENOBUFS;
+            case EAGAIN: return WSATRY_AGAIN;
+            case EINVAL: return WSAEINVAL;
+            case EFAULT: return WSAEFAULT;
+            }
+        }
+        return WSANO_RECOVERY;
+    }
+    status = pack_hostent( host, buffer, size, wow64 );
+    freehostent( host );
+    return status;
+}
+
+static NTSTATUS wine_nx_gethostbyaddr( void *args )
+{
+    const struct { const void *addr; int len, family; void *host; unsigned int *size; } *params = args;
+    return get_host_by_addr( params->addr, params->len, params->family, params->host, params->size, FALSE );
+}
+
+static NTSTATUS wine_nx_wow64_gethostbyaddr( void *args )
+{
+    const struct { ULONG addr; int len, family; ULONG host, size; } *params = args;
+    return get_host_by_addr( ULongToPtr(params->addr), params->len, params->family,
+                             ULongToPtr(params->host), ULongToPtr(params->size), TRUE );
+}
+
 static NTSTATUS wine_nx_wow64_gethostbyname( void *args )
 {
     const struct { ULONG name, host, size; } *params = args;
@@ -342,7 +463,7 @@ static NTSTATUS wine_nx_wow64_gethostname( void *args )
 const unixlib_entry_t wine_nx_ws2_32_unix_funcs[] =
 {
     wine_nx_getaddrinfo,   /* unix_getaddrinfo */
-    stub_not_implemented,  /* unix_gethostbyaddr */
+    wine_nx_gethostbyaddr,  /* unix_gethostbyaddr */
     wine_nx_gethostbyname,  /* unix_gethostbyname */
     wine_nx_gethostname,   /* unix_gethostname */
     stub_not_implemented,  /* unix_getnameinfo */
@@ -351,7 +472,7 @@ const unixlib_entry_t wine_nx_ws2_32_unix_funcs[] =
 const unixlib_entry_t wine_nx_ws2_32_wow64_unix_funcs[5] =
 {
     stub_not_implemented,  /* unix_getaddrinfo */
-    stub_not_implemented,  /* unix_gethostbyaddr */
+    wine_nx_wow64_gethostbyaddr, /* unix_gethostbyaddr */
     wine_nx_wow64_gethostbyname, /* unix_gethostbyname */
     wine_nx_wow64_gethostname,  /* unix_gethostname */
     stub_not_implemented,  /* unix_getnameinfo */
