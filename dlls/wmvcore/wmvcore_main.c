@@ -30,18 +30,44 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(wmvcore);
 
+static HRESULT (WINAPI *p_create_wm_sync_reader)(IUnknown *, void **);
+
+static BOOL CALLBACK load_winegstreamer(INIT_ONCE *once, void *param, void **context)
+{
+    HMODULE module;
+
+    if (!(module = LoadLibraryW(L"winegstreamer.dll"))) return FALSE;
+    if (!(p_create_wm_sync_reader = (void *)GetProcAddress(module, "winegstreamer_create_wm_sync_reader")))
+    {
+        FreeLibrary(module);
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HRESULT create_wm_sync_reader(IUnknown *outer, void **out)
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+
+    *out = NULL;
+    if (!InitOnceExecuteOnce(&once, load_winegstreamer, NULL, NULL))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return p_create_wm_sync_reader(outer, out);
+}
+
 HRESULT WINAPI WMCreateSyncReader(IUnknown *reserved, DWORD rights, IWMSyncReader **reader)
 {
     TRACE("reserved %p, rights %#lx, reader %p.\n", reserved, rights, reader);
 
-    return winegstreamer_create_wm_sync_reader(NULL, (void **)reader);
+    return create_wm_sync_reader(NULL, (void **)reader);
 }
 
 HRESULT WINAPI WMCreateSyncReaderPriv(IWMSyncReader **reader)
 {
     TRACE("reader %p.\n", reader);
 
-    return winegstreamer_create_wm_sync_reader(NULL, (void **)reader);
+    return create_wm_sync_reader(NULL, (void **)reader);
 }
 
 HRESULT WINAPI WMCheckURLExtension(const WCHAR *url)
