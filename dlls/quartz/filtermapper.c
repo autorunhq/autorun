@@ -316,12 +316,15 @@ static HRESULT enum_moniker_create(IMoniker **filters, unsigned int count, IEnum
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    if (!(object->filters = malloc(count * sizeof(*object->filters))))
+    if (count)
     {
-        free(object);
-        return E_OUTOFMEMORY;
+        if (!(object->filters = malloc(count * sizeof(*object->filters))))
+        {
+            free(object);
+            return E_OUTOFMEMORY;
+        }
+        memcpy(object->filters, filters, count * sizeof(*filters));
     }
-    memcpy(object->filters, filters, count * sizeof(*filters));
 
     object->IEnumMoniker_iface.lpVtbl = &enum_moniker_vtbl;
     object->refcount = 1;
@@ -1046,9 +1049,10 @@ static HRESULT WINAPI FilterMapper3_EnumMatchingFilters(
         return hr;
 
     hr = ICreateDevEnum_CreateClassEnumerator(pCreateDevEnum, &CLSID_ActiveMovieCategories, &pEnumCat, 0);
-    if (FAILED(hr)) {
+    if (hr != S_OK)
+    {
         ICreateDevEnum_Release(pCreateDevEnum);
-        return hr;
+        return hr == S_FALSE ? enum_moniker_create(NULL, 0, ppEnum) : hr;
     }
 
     while (IEnumMoniker_Next(pEnumCat, 1, &pMonikerCat, NULL) == S_OK)
