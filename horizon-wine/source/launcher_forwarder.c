@@ -2,11 +2,11 @@
 #include "launcher.h"
 #include "launcher_ui.h"
 #include "launcher_image.h"
-#include "steamgriddb.h"
+#include "launcher_artwork.h"
 #include "forwarder.h"
 #include "forwarder_launch.h"
 
-enum job_kind { JOB_INITIAL, JOB_FILE, JOB_SEARCH, JOB_PICTURES, JOB_DOWNLOAD, JOB_INSTALL };
+enum job_kind { JOB_INITIAL, JOB_FILE, JOB_INSTALL };
 
 struct forwarder_job
 {
@@ -16,20 +16,14 @@ struct forwarder_job
     const struct launcher_forwarder_game *game;
     struct wine_nx_forwarder request;
     struct launcher_icon image;
-    struct steamgriddb_game games[6];
-    struct steamgriddb_picture pictures[STEAMGRIDDB_MAX_PICTURES];
-    const char *key, *path;
-    long game_id;
-    int count, ok;
+    const char *path;
+    int ok;
     char error[256];
 };
 
 static int forwarder_worker( void *opaque )
 {
     struct forwarder_job *job = opaque;
-    enum steamgriddb_result result = STEAMGRIDDB_OK;
-    unsigned char *data = NULL;
-    size_t size = 0;
     int image_job = 0;
     job->ok = 1;
     switch (job->kind)
@@ -54,18 +48,6 @@ static int forwarder_worker( void *opaque )
         job->ok = launcher_image_load( job->path, &job->image );
         image_job = 1;
         break;
-    case JOB_SEARCH:
-        result = steamgriddb_search_games( job->key, job->path, job->games, 6, &job->count );
-        break;
-    case JOB_PICTURES:
-        result = steamgriddb_square_pictures( job->key, job->game_id, job->pictures, STEAMGRIDDB_MAX_PICTURES, &job->count );
-        break;
-    case JOB_DOWNLOAD:
-        result = steamgriddb_picture_data( job->path, &data, &size );
-        job->ok = result == STEAMGRIDDB_OK && launcher_image_decode( data, size, &job->image );
-        free( data );
-        image_job = 1;
-        break;
     case JOB_INSTALL:
     {
         const char *step = NULL;
@@ -78,12 +60,6 @@ static int forwarder_worker( void *opaque )
     }
     if (image_job && job->ok) job->ok = launcher_image_square( &job->image );
     if (image_job && !job->ok) snprintf( job->error, sizeof(job->error), "Use a PNG or JPEG up to 2048 x 2048 pixels and 16 MiB." );
-    if (result != STEAMGRIDDB_OK)
-    {
-        job->ok = 0;
-        snprintf( job->error, sizeof(job->error), "%s", result == STEAMGRIDDB_NOT_FOUND ?
-                  "No matching games or square artwork found." : steamgriddb_result_message( result ) );
-    }
     SDL_AtomicSet( &job->done, 1 );
     return 0;
 }
@@ -140,89 +116,19 @@ static void panel( struct ui *ui, SDL_Texture *background, SDL_Rect rect, const 
     ui_text( ui, ui->normal, rect.x + 28, rect.y + 24, title, ui->value );
 }
 
-static int choose_picture( struct ui *ui, struct forwarder_job *job )
-{
-    const struct ui_hint hints[] = { {UI_L, "Previous"}, {UI_R, "Next"}, {UI_A, "Use icon"}, {UI_B, "Back"} };
-    SDL_Texture *background = keep_background( ui ), *preview = NULL;
-    SDL_Rect rect = { (ui->width - 640) / 2, (ui->height - 448) / 2, 640, 448 };
-    struct ui_input input;
-    struct launcher_icon images[STEAMGRIDDB_MAX_PICTURES] = {0};
-    int index = 0, loaded = -1, chosen = 0;
-    char label[128];
-
-    ui_start_screen( ui );
-    while (ui_begin_frame( ui ))
-    {
-        if (loaded != index)
-        {
-            if (!images[index].data)
-            {
-                job->kind = JOB_DOWNLOAD;
-                job->path = job->pictures[index].url;
-                if (!run_job( ui, job, "Downloading icon..." )) break;
-                images[index] = job->image;
-                memset( &job->image, 0, sizeof(job->image) );
-            }
-            SDL_DestroyTexture( preview );
-            preview = image_texture( ui, &images[index] );
-            if (!preview) { ui_message( ui, "Icon", "Could not create the icon preview." ); break; }
-            loaded = index;
-            ui_start_screen( ui );
-        }
-        while (ui_poll( ui, &input ))
-        {
-            int previous = index;
-            if (input.button == UI_B) { ui_sound( ui, LAUNCHER_SOUND_BACK ); goto done; }
-            if (input.button == UI_A && loaded == index) { ui_sound( ui, LAUNCHER_SOUND_ACCEPT ); chosen = 1; goto done; }
-            if (input.button == UI_L || input.button == UI_LEFT) index = (index + job->count - 1) % job->count;
-            if (input.button == UI_R || input.button == UI_RIGHT) index = (index + 1) % job->count;
-            if (index != previous) ui_sound( ui, LAUNCHER_SOUND_MOVE );
-        }
-        panel( ui, background, rect, "SteamGridDB icon" );
-        ui_rounded_texture( ui, preview, NULL, (SDL_Rect){ rect.x + 192, rect.y + 70, 256, 256 },
-                            16, (SDL_Color){ 255, 255, 255, 255 } );
-        snprintf( label, sizeof(label), "%d / %d%s%s", loaded + 1, job->count,
-                  job->pictures[loaded].author[0] ? "  ·  " : "", job->pictures[loaded].author );
-        ui_text_fit( ui, ui->small, rect.x + 28, rect.y + 345, rect.w - 56, label, ui->dim, 1 );
-        ui_hints_right( ui, hints, 4, rect.x + rect.w - 28, rect.y + rect.h - 30 );
-        ui_present( ui );
-        ui_wait( ui );
-    }
-done:
-    if (chosen)
-    {
-        job->image = images[loaded];
-        memset( &images[loaded], 0, sizeof(images[loaded]) );
-    }
-    for (int i = 0; i < STEAMGRIDDB_MAX_PICTURES; i++) launcher_icon_free( &images[i] );
-    SDL_DestroyTexture( preview );
-    SDL_DestroyTexture( background );
-    return chosen;
-}
-
 static int steam_icon( struct ui *ui, struct forwarder_job *job, char *key, size_t key_size, const char *name )
 {
-    const char *names[6];
-    char edited[256], query[128];
-    int i, chosen;
+    char edited[256];
+    long id;
     if (!key[0])
     {
         if (!launcher_platform_prompt( "SteamGridDB API key", "", edited,
                                        key_size < sizeof(edited) ? key_size : sizeof(edited) ) || !edited[0]) return 0;
         snprintf( key, key_size, "%s", edited );
     }
-    if (!launcher_platform_prompt( "Search SteamGridDB", name, query, sizeof(query) ) || !query[0]) return 0;
-    job->kind = JOB_SEARCH;
-    job->key = key;
-    job->path = query;
-    if (!run_job( ui, job, "Searching SteamGridDB..." )) return 0;
-    for (i = 0; i < job->count; i++) names[i] = job->games[i].name;
-    chosen = job->count == 1 ? 0 : ui_menu( ui, "Choose game", names, job->count, 0 );
-    if (chosen < 0) return 0;
-    job->game_id = job->games[chosen].id;
-    job->kind = JOB_PICTURES;
-    if (!run_job( ui, job, "Finding square artwork..." )) return 0;
-    return choose_picture( ui, job );
+    id = launcher_artwork_search( ui, key, name );
+    if (!id || !launcher_artwork_pick( ui, key, id, STEAMGRIDDB_ICON, NULL, &job->image )) return 0;
+    return launcher_image_square( &job->image );
 }
 
 void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_options *options,

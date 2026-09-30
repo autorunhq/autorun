@@ -226,6 +226,8 @@ int  ui_menu( struct ui *ui, const char *title, const char *const *items, int co
 void ui_progress_begin( struct ui *ui );
 void ui_progress_update( struct ui *ui, const char *title, const char *status,
                          unsigned long long current, unsigned long long total );
+int ui_progress_update_cancellable( struct ui *ui, const char *title, const char *status,
+                                    unsigned int current, unsigned int total );
 void ui_progress_end( struct ui *ui );
 
 /* A list of settings rows. ui_list_run draws it and handles input until the

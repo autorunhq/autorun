@@ -42,6 +42,7 @@
 #include "launcher_ui.h"
 #include "launcher_forwarder.h"
 #include "launcher_image.h"
+#include "launcher_artwork.h"
 #include "launcher_update.h"
 #include "launcher_dlls.h"
 #include "launcher_setup.h"
@@ -133,12 +134,14 @@ struct program
     SDL_Texture *square_icon, *hero_icon;
     int square_width, square_height, hero_width, hero_height;
     Uint32 square_time, hero_time;
+    unsigned int art_generation[3];
 };
 
 struct icon_job
 {
     int index;
     int kind;
+    unsigned int generation;
     char path[512];
     char artwork[512];
 };
@@ -147,6 +150,7 @@ struct icon_result
 {
     int index;
     int kind;
+    unsigned int generation;
     int width, height;
     unsigned char *rgba;
     int artwork;
@@ -804,6 +808,7 @@ static int icon_thread( void *arg )
         }
         result.index = job.index;
         result.kind = job.kind;
+        result.generation = job.generation;
         result.width = icon.width;
         result.height = icon.height;
         result.rgba = icon.kind == LAUNCHER_ICON_RGBA ? icon.data : NULL;
@@ -921,6 +926,8 @@ static void pump_icons( struct launcher *l )
         struct program *p = &l->programs[results[i].index];
         SDL_Texture *texture = NULL;
 
+        if (results[i].generation != p->art_generation[results[i].kind])
+        { free( results[i].rgba ); continue; }
         if (results[i].rgba &&
             (texture = SDL_CreateTexture( l->ui.renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC,
                                           results[i].width, results[i].height )))
@@ -997,12 +1004,15 @@ static void request_art( struct launcher *l, int index, enum art_kind kind )
      * asked for by a screen long gone, which is asked for again if it comes back. */
     if (l->job_count == ICON_JOBS)
     {
-        *art_of( &l->programs[l->jobs[0].index], l->jobs[0].kind ).state = ICON_UNKNOWN;
+        struct icon_job *job = &l->jobs[0];
+        if (job->generation == l->programs[job->index].art_generation[job->kind])
+            *art_of( &l->programs[job->index], job->kind ).state = ICON_UNKNOWN;
         memmove( l->jobs, l->jobs + 1, --l->job_count * sizeof(l->jobs[0]) );
     }
     {
         l->jobs[l->job_count].index = index;
         l->jobs[l->job_count].kind = kind;
+        l->jobs[l->job_count].generation = p->art_generation[kind];
         memcpy( l->jobs[l->job_count].path, p->path, sizeof(p->path) );
         if (art[0])
             snprintf( l->jobs[l->job_count].artwork, sizeof(l->jobs[0].artwork), "%s",
@@ -1846,79 +1856,119 @@ static void make_forwarder( struct launcher *l )
 }
 
 
+static char *artwork_path( struct program *p, enum steamgriddb_kind kind )
+{
+    return kind == STEAMGRIDDB_ICON ? p->square_art : kind == STEAMGRIDDB_COVER ? p->portrait_art : p->hero_art;
+}
+
+static int artwork_installed( struct program *p, enum steamgriddb_kind kind )
+{
+    char folder[512], sibling[512];
+    const char *path = artwork_path( p, kind );
+    if (file_exists( path )) return 1;
+    if (kind != STEAMGRIDDB_COVER || path[0]) return 0;
+    snprintf( folder, sizeof(folder), "%s", p->path );
+    parent_dir( folder );
+    if (snprintf( sibling, sizeof(sibling), "%s/cover.png", folder ) >= (int)sizeof(sibling)) return 0;
+    return file_exists( sibling );
+}
+
+static int artwork_key( struct launcher *l, char *key, size_t size )
+{
+    key[0] = 0;
+    launcher_kv_get( &l->look, "steamgriddb-key", key, size );
+    if (key[0]) return 1;
+    if (!launcher_platform_prompt( "SteamGridDB API key", "", key, size ) || !key[0]) return 0;
+    launcher_kv_set( &l->look, "steamgriddb-key", key );
+    save_look( l );
+    return 1;
+}
+
+static int artwork_directory( struct launcher *l, char *folder, size_t size )
+{
+    if (snprintf( folder, size, "%s/artwork", l->options->runtime_dir ) >= (int)size) return 0;
+    if (!mkdir( folder, 0777 ) || errno == EEXIST) return 1;
+    ui_message( &l->ui, "Artwork", "The artwork cache directory could not be created." );
+    return 0;
+}
+
+static int artwork_destinations( struct launcher *l, struct program *p, const char *folder, char paths[3][512] )
+{
+    static const char *const suffixes[] = { "square", "portrait", "hero" };
+    int kind;
+    if (!p->catalog_id) p->catalog_id = l->catalog.next_id++;
+    for (kind = 0; kind < 3; kind++)
+        if (snprintf( paths[kind], sizeof(paths[kind]), "%s/%u-%s.png", folder, p->catalog_id, suffixes[kind] ) >=
+            (int)sizeof(paths[kind])) return 0;
+    return 1;
+}
+
+static void set_artwork( struct program *p, enum steamgriddb_kind kind, const char *path )
+{
+    enum art_kind surface = kind == STEAMGRIDDB_ICON ? ART_SQUARE : kind == STEAMGRIDDB_COVER ? ART_PORTRAIT : ART_HERO;
+    struct art art = art_of( p, surface );
+    snprintf( artwork_path( p, kind ), 512, "%s", path );
+    p->added = 1;
+    p->art_generation[surface]++;
+    SDL_DestroyTexture( *art.texture );
+    *art.texture = NULL;
+    *art.state = ICON_UNKNOWN;
+    if (surface == ART_PORTRAIT) p->icon_is_art = 0;
+}
+
 static void download_artwork( struct launcher *l, struct program *p )
 {
-    char key[512], folder[512], square[512], portrait[512], hero[512], matched[192], message[512];
-    struct steamgriddb_game games[STEAMGRIDDB_MAX_GAMES];
-    struct ui_row rows[STEAMGRIDDB_MAX_GAMES];
-    struct ui_list list = {0};
-    int count = 0, i;
-    enum steamgriddb_result result;
-
-    if (!launcher_kv_get( &l->look, "steamgriddb-key", key, sizeof(key) ) || !key[0])
+    const char *const labels[] = { "Icon", "Cover", "Background" };
+    char key[512], folder[512], paths[3][512];
+    long id;
+    int kind = 0;
+    if (!artwork_key( l, key, sizeof(key) ) || !artwork_directory( l, folder, sizeof(folder) )) return;
+    id = launcher_artwork_search( &l->ui, key, p->title );
+    if (!id || !artwork_destinations( l, p, folder, paths )) return;
+    while (l->ui.running)
     {
-        if (!launcher_platform_prompt( "SteamGridDB API key", "", key, sizeof(key) ) || !key[0]) return;
-        launcher_kv_set( &l->look, "steamgriddb-key", key );
-        save_look( l );
+        kind = ui_menu( &l->ui, "Download artwork", labels, 3, kind );
+        if (kind < 0) break;
+        if (launcher_artwork_pick( &l->ui, key, id, kind, paths[kind], NULL ))
+        {
+            set_artwork( p, kind, paths[kind] );
+            save_library( l );
+            ui_toast( &l->ui, "Artwork saved", 2000 );
+        }
     }
-    snprintf( folder, sizeof(folder), "%s/artwork", l->options->runtime_dir );
-    if (mkdir( folder, 0777 ) && errno != EEXIST)
-    { ui_message( &l->ui, "Artwork download failed", "The artwork cache directory could not be created." ); return; }
-    if (snprintf( square, sizeof(square), "%s/%u-square.png", folder, p->catalog_id ) >= (int)sizeof(square) ||
-        snprintf( portrait, sizeof(portrait), "%s/%u-portrait.png", folder, p->catalog_id ) >= (int)sizeof(portrait) ||
-        snprintf( hero, sizeof(hero), "%s/%u-hero.png", folder, p->catalog_id ) >= (int)sizeof(hero)) return;
+}
 
-    ui_background( &l->ui );
-    ui_header( &l->ui, "Downloading artwork", p->title );
-    ui_text_centered( &l->ui, l->ui.normal, l->ui.width / 2, l->ui.height / 2 - 12,
-                      "Searching SteamGridDB...", l->ui.text );
-    ui_present( &l->ui );
-    result = steamgriddb_search_games( key, p->title, games, STEAMGRIDDB_MAX_GAMES, &count );
-    if (result == STEAMGRIDDB_NO_KEY)
+static void download_all_covers( struct launcher *l )
+{
+    struct launcher_artwork_entry *entries;
+    char key[512], folder[512];
+    int i, kind, pending = 0, changed = 0;
+    if (!l->program_count) { ui_toast( &l->ui, "The library is empty", 2000 ); return; }
+    if (!artwork_key( l, key, sizeof(key) ) || !artwork_directory( l, folder, sizeof(folder) )) return;
+    entries = calloc( l->program_count, sizeof(*entries) );
+    if (!entries) { ui_message( &l->ui, "Artwork", "Not enough memory to start the download." ); return; }
+    for (i = 0; i < l->program_count; i++)
     {
-        launcher_kv_set( &l->look, "steamgriddb-key", NULL );
-        save_look( l );
+        struct program *p = &l->programs[i];
+        if (p->removed) continue;
+        for (kind = 0; kind < 3; kind++)
+            if (!artwork_installed( p, kind )) entries[i].missing |= 1u << kind;
+        if (!entries[i].missing) continue;
+        if (!artwork_destinations( l, p, folder, entries[i].paths )) { free( entries ); return; }
+        snprintf( entries[i].title, sizeof(entries[i].title), "%s", p->title );
+        pending++;
     }
-    if (result != STEAMGRIDDB_OK)
-    { ui_message( &l->ui, "Artwork download failed", steamgriddb_result_message( result ) ); return; }
-
-    memset( rows, 0, sizeof(rows) );
-    for (i = 0; i < count; i++)
+    if (pending)
     {
-        snprintf( rows[i].label, sizeof(rows[i].label), "%s", games[i].name );
-        snprintf( rows[i].value, sizeof(rows[i].value), "SteamGridDB" );
-        rows[i].help = "Download the highest-rated square, portrait and hero artwork for this match.";
+        launcher_artwork_download_all( &l->ui, key, entries, l->program_count );
+        for (i = 0; i < l->program_count; i++)
+            for (kind = 0; kind < 3; kind++)
+                if (entries[i].downloaded & (1u << kind))
+                { set_artwork( &l->programs[i], kind, entries[i].paths[kind] ); changed = 1; }
+        if (changed) save_library( l );
     }
-    if (count > 1 && ui_list_run( &l->ui, &list, "Choose SteamGridDB game", p->title, rows, count, 0 ) != UI_ACTION_CHOOSE)
-        return;
-    snprintf( matched, sizeof(matched), "%s", games[list.selection].name );
-
-    ui_background( &l->ui );
-    ui_header( &l->ui, "Downloading artwork", matched );
-    ui_text_centered( &l->ui, l->ui.normal, l->ui.width / 2, l->ui.height / 2 - 12,
-                      "Square, portrait and hero from SteamGridDB...", l->ui.text );
-    ui_present( &l->ui );
-    result = steamgriddb_download_game_bundle( key, games[list.selection].id, square, portrait, hero );
-    if (result == STEAMGRIDDB_NO_KEY)
-    {
-        launcher_kv_set( &l->look, "steamgriddb-key", NULL );
-        save_look( l );
-    }
-    if (result != STEAMGRIDDB_OK)
-    { ui_message( &l->ui, "Artwork download failed", steamgriddb_result_message( result ) ); return; }
-
-    snprintf( p->square_art, sizeof(p->square_art), "%s", square );
-    snprintf( p->portrait_art, sizeof(p->portrait_art), "%s", portrait );
-    snprintf( p->hero_art, sizeof(p->hero_art), "%s", hero );
-    if (p->icon) SDL_DestroyTexture( p->icon );
-    if (p->square_icon) SDL_DestroyTexture( p->square_icon );
-    if (p->hero_icon) SDL_DestroyTexture( p->hero_icon );
-    p->icon = NULL; p->icon_state = ICON_UNKNOWN; p->icon_is_art = 0;
-    p->square_icon = p->hero_icon = NULL;
-    p->square_state = p->hero_state = ICON_UNKNOWN;
-    save_library( l );
-    snprintf( message, sizeof(message), "Downloaded the highest-rated square, portrait and hero artwork for %s.", matched );
-    ui_message( &l->ui, "Artwork downloaded", message );
+    else ui_toast( &l->ui, "All artwork is already installed", 2400 );
+    free( entries );
 }
 
 /* A setting that follows the global one (-1) or is on (1) or off (0) for this program. */
@@ -2345,7 +2395,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         ADD_ROW( ROW_FAVORITE, SECTION_GENERAL, "Favorite", "Keeps the game in the Favorites filter of the library." );
         row->kind = UI_ROW_SWITCH;
         row->on = p->favorite;
-        ADD_ROW( ROW_ARTWORK, SECTION_LIBRARY, "Download artwork", "Takes the highest-rated square, portrait and hero pictures for this game from SteamGridDB." );
+        ADD_ROW( ROW_ARTWORK, SECTION_LIBRARY, "Download artwork", "Preview and choose this game's icon, cover and background from SteamGridDB." );
         ADD_ROW( ROW_FORWARDER, SECTION_LIBRARY, "Create game forwarder", "A HOME Menu icon that launches this library game directly with its own settings." );
         row->disabled = !p->added || !l->options->install_game_forwarder;
         if (p->missing) ADD_ROW( ROW_LOCATE, SECTION_LIBRARY, "Locate executable", "Choose the game's executable at its new location." );
@@ -2973,7 +3023,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 enum settings_row
 {
     SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
-    SET_CONTROLS, SET_STEAMGRIDDB,
+    SET_CONTROLS, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
     SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE,
@@ -3429,6 +3479,7 @@ static void settings_menu( struct launcher *l )
             [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_CONTROLS] = SET_SECTION_DEFAULTS,
             [SET_SWKBD] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
+            [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
             [SET_DLLS] = SET_SECTION_SYSTEM,
             [SET_UPDATE] = SET_SECTION_SYSTEM,
@@ -3488,8 +3539,12 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_STEAMGRIDDB].label, sizeof(rows[0].label), "SteamGridDB API key" );
         snprintf( rows[SET_STEAMGRIDDB].value, sizeof(rows[0].value), "%s",
                   launcher_kv_get( &l->look, "steamgriddb-key", path, sizeof(path) ) && path[0] ? "Configured" : "Not set" );
-        rows[SET_STEAMGRIDDB].help = "Used to automatically download the community's highest-rated square, portrait and hero artwork.";
+        rows[SET_STEAMGRIDDB].help = "Used to download icons, covers and backgrounds from SteamGridDB.";
         rows[SET_STEAMGRIDDB].adjustable = 0;
+        snprintf( rows[SET_DOWNLOAD_COVERS].label, sizeof(rows[0].label), "Download all covers" );
+        rows[SET_DOWNLOAD_COVERS].help = "Fill missing icons, covers and backgrounds. Existing artwork is kept.";
+        rows[SET_DOWNLOAD_COVERS].kind = UI_ROW_ACTION;
+        rows[SET_DOWNLOAD_COVERS].adjustable = 0;
         {
             int tone;
 
@@ -3599,6 +3654,10 @@ static void settings_menu( struct launcher *l )
                 launcher_kv_set( &l->look, "steamgriddb-key", key[0] ? key : NULL );
             break;
         }
+        case SET_DOWNLOAD_COVERS:
+            if (action == UI_ACTION_CHOOSE) download_all_covers( l );
+            ui_start_screen( ui );
+            break;
         case SET_MAKE_MAIN:
             if (action == UI_ACTION_CHOOSE) make_forwarder( l );
             break;

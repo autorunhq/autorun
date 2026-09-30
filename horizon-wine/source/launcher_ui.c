@@ -1418,6 +1418,15 @@ int ui_menu( struct ui *ui, const char *title, const char *const *items, int cou
 
     if (count <= 0) return -1;
     if (selection < 0 || selection >= count) selection = 0;
+    for (i = 0; i < count; i++)
+    {
+        int width = ui_text_width( ui, ui->normal, items[i] ) + 28 + 2 * ROW_PADDING;
+        if (width > w) w = width;
+    }
+    top = ui_text_width( ui, ui->normal, title ) + 2 * margin;
+    if (top > w) w = top;
+    if (w > 640) w = 640;
+    if (w > ui->width - 128) w = ui->width - 128;
     /* Its own height, so the hints stand under the last item rather than on it. */
     h = margin + TTF_FontHeight( ui->normal ) + 14 + count * item_h + 14 + hints_h + margin / 2;
     x = (ui->width - w) / 2;
@@ -1465,7 +1474,7 @@ int ui_menu( struct ui *ui, const char *title, const char *const *items, int cou
             if (i == selection)
                 ui_animated_border( ui, x + 14, row + 2, w - 28, item_h - 6, 12, 2, UI_FOCUS_DIM, UI_FOCUS_LIT );
             ui_text_fit( ui, ui->normal, x + 14 + ROW_PADDING, row + (item_h - TTF_FontHeight( ui->normal )) / 2,
-                         w - 28 - 2 * ROW_PADDING, items[i], i == selection ? ui->value : ui->text, 0 );
+                         w - 28 - 2 * ROW_PADDING, items[i], i == selection ? ui->value : ui->text, i == selection );
         }
         ui_hints_right( ui, hints, 2, x + w - margin, y + h - margin / 2 - hints_h / 2 );
         ui_fade( ui );
@@ -1499,18 +1508,18 @@ void ui_progress_begin( struct ui *ui )
     ui_start_screen( ui );
 }
 
-void ui_progress_update( struct ui *ui, const char *title, const char *status,
-                         unsigned long long current, unsigned long long total )
+static int progress_update( struct ui *ui, const char *title, const char *status,
+                            unsigned long long current, unsigned long long total, int cancellable )
 {
     struct ui_input input;
     char amount[96];
     const int w = 560, h = 204, margin = 34;
     const int x = (ui->width - w) / 2, y = (ui->height - h) / 2;
     const int track_x = x + margin, track_y = y + 126, track_w = w - 2 * margin, track_h = 12;
-    int fill = 0;
+    int fill = 0, cancelled = 0;
 
-    if (!ui_begin_frame( ui )) return;
-    while (ui_poll( ui, &input ));
+    if (!ui_begin_frame( ui )) return 1;
+    while (ui_poll( ui, &input )) if (cancellable && input.button == UI_B) cancelled = 1;
     if (ui->snapshot)
     {
         SDL_RenderCopy( ui->renderer, ui->snapshot, NULL, NULL );
@@ -1535,8 +1544,9 @@ void ui_progress_update( struct ui *ui, const char *title, const char *status,
         if (fill > 0 && fill < track_h) fill = track_h;
         if (fill > track_w) fill = track_w;
         if (fill) ui_rounded( ui, track_x, track_y, fill, track_h, track_h / 2, ui->selection );
-        snprintf( amount, sizeof(amount), "%llu%%   %.1f / %.1f MiB",
-                  (unsigned long long)(ratio * 100.0), current / 1048576.0, total / 1048576.0 );
+        if (cancellable) snprintf( amount, sizeof(amount), "%llu / %llu", current, total );
+        else snprintf( amount, sizeof(amount), "%llu%%   %.1f / %.1f MiB",
+                       (unsigned long long)(ratio * 100.0), current / 1048576.0, total / 1048576.0 );
     }
     else
     {
@@ -1550,8 +1560,26 @@ void ui_progress_update( struct ui *ui, const char *title, const char *status,
         snprintf( amount, sizeof(amount), "Please wait..." );
     }
     ui_text_right( ui, ui->small, x + w - margin, y + 154, amount, ui->dim );
+    if (cancellable)
+    {
+        const struct ui_hint hint = { UI_B, "Cancel" };
+        ui_hints_right( ui, &hint, 1, x + margin + 108, y + 166 );
+    }
     ui_fade( ui );
     ui_present( ui );
+    return cancelled || !ui->running;
+}
+
+void ui_progress_update( struct ui *ui, const char *title, const char *status,
+                         unsigned long long current, unsigned long long total )
+{
+    progress_update( ui, title, status, current, total, 0 );
+}
+
+int ui_progress_update_cancellable( struct ui *ui, const char *title, const char *status,
+                                    unsigned int current, unsigned int total )
+{
+    return progress_update( ui, title, status, current, total, 1 );
 }
 
 void ui_progress_end( struct ui *ui )

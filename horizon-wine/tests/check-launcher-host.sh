@@ -65,7 +65,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     "$horizon_wine/tests/launcher_host.c" "$horizon_wine/source/launcher.c" "$horizon_wine/source/launcher_catalog.c" "$horizon_wine/source/launcher_ui.c" "$horizon_wine/source/launcher_audio.c" \
     "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
     "$horizon_wine/source/launcher_setup.c" "$horizon_wine/source/setup_boot.c" \
-    "$horizon_wine/source/steamgriddb.c" \
+    "$horizon_wine/source/steamgriddb.c" "$horizon_wine/source/launcher_artwork.c" \
     "$horizon_wine/source/launcher_svg.c" \
     "$build/forwarder-icon.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lturbojpeg -lcurl -L/opt/homebrew/opt/openssl/lib -lcrypto -lm -o "$build/launcher_host"

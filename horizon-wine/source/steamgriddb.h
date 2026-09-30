@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define STEAMGRIDDB_MAX_GAMES 12
+#define STEAMGRIDDB_MAX_GAMES 6
 #define STEAMGRIDDB_MAX_PICTURES 24
 
 struct steamgriddb_picture
@@ -18,6 +18,14 @@ struct steamgriddb_game
     char name[192];
 };
 
+enum steamgriddb_kind { STEAMGRIDDB_ICON, STEAMGRIDDB_COVER, STEAMGRIDDB_BACKGROUND };
+
+struct steamgriddb_request
+{
+    int (*cancelled)( void *data );
+    void *data;
+};
+
 enum steamgriddb_result
 {
     STEAMGRIDDB_OK,
@@ -25,26 +33,17 @@ enum steamgriddb_result
     STEAMGRIDDB_NETWORK_ERROR,
     STEAMGRIDDB_NOT_FOUND,
     STEAMGRIDDB_INVALID_RESPONSE,
-    STEAMGRIDDB_IO_ERROR
+    STEAMGRIDDB_IO_ERROR,
+    STEAMGRIDDB_CANCELLED
 };
 
-/* Finds the closest title and downloads the highest-reputation static artwork
- * for all three launcher surfaces. Each destination is replaced atomically. */
-enum steamgriddb_result steamgriddb_download_bundle( const char *api_key, const char *title,
-                                                     const char *square_path,
-                                                     const char *portrait_path,
-                                                     const char *hero_path,
-                                                     char *matched, size_t matched_size );
-enum steamgriddb_result steamgriddb_search_games( const char *api_key, const char *title,
-                                                  struct steamgriddb_game *games, int max_games,
-                                                  int *count );
-enum steamgriddb_result steamgriddb_download_game_bundle( const char *api_key, long game_id,
-                                                          const char *square_path,
-                                                          const char *portrait_path,
-                                                          const char *hero_path );
+enum steamgriddb_result steamgriddb_search_games( const char *key, const char *title,
+    struct steamgriddb_game *games, int max, int *count, const struct steamgriddb_request *request );
+enum steamgriddb_result steamgriddb_pictures( const char *key, long game_id, enum steamgriddb_kind kind,
+    struct steamgriddb_picture *pictures, int max, int *count, const struct steamgriddb_request *request );
+enum steamgriddb_result steamgriddb_picture_data( const char *url, unsigned char **data, size_t *size,
+    const struct steamgriddb_request *request );
+enum steamgriddb_result steamgriddb_save_picture( const unsigned char *data, size_t size, const char *path );
 const char *steamgriddb_result_message( enum steamgriddb_result result );
-enum steamgriddb_result steamgriddb_square_pictures( const char *key, long game_id,
-    struct steamgriddb_picture *pictures, int max, int *count );
-enum steamgriddb_result steamgriddb_picture_data( const char *url, unsigned char **data, size_t *size );
 
 #endif
