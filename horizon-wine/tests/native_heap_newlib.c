@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdbool.h>
 #include <malloc.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -12,6 +13,9 @@ char *fake_heap_start = (char *)area, *fake_heap_end = (char *)area + sizeof(are
 static char *heap_break = (char *)area;
 static struct _reent reent;
 static unsigned int locks;
+static unsigned char tls_area[4096] __attribute__((aligned(16)));
+void *__aarch64_read_tp(void) { return tls_area; }
+extern bool __wrap_os_get_available_system_memory(uint64_t *);
 
 static long linux_call(long number, long a, long b, long c)
 {
@@ -27,6 +31,14 @@ static long linux_call(long number, long a, long b, long c)
     static const char message[] = "failed: " #condition "\n"; \
     linux_call(64, 2, (long)message, sizeof(message) - 1); \
     linux_call(93, 1, 0, 0); __builtin_unreachable(); } } while (0)
+
+static void check_budget(void)
+{
+    struct mallinfo info = mallinfo();
+    uint64_t available;
+    check(__wrap_os_get_available_system_memory(&available));
+    check(available == sizeof(area) - info.uordblks);
+}
 
 struct _reent *__getreent(void) { return &reent; }
 void __malloc_lock(struct _reent *r) { (void)r; locks++; }
@@ -67,9 +79,11 @@ static void run(void)
     struct mallinfo before, after;
     void *aligned, *grown, *small, *large, *items[512] = {0};
     unsigned int random_state = 834976, iteration;
+    volatile size_t impossible_size = SIZE_MAX;
     wine_nx_native_heap_stats(&stats);
     check(!stats.used && stats.gap == sizeof(area) && stats.complete);
     before = mallinfo();
+    check_budget();
     aligned = memalign(2 * MiB, 2 * MiB);
     check(aligned && !((uintptr_t)aligned % (2 * MiB)));
     check(malloc_usable_size(aligned) == 2 * MiB);
@@ -87,6 +101,7 @@ static void run(void)
     check(realloc(grown, 2 * MiB) == grown && malloc_usable_size(grown) == 2 * MiB);
     free(small);
     free(grown);
+    check_budget();
     wine_nx_native_heap_stats(&stats);
     check(!stats.reserved && !stats.used && !stats.holes && stats.complete);
 
@@ -117,11 +132,17 @@ static void run(void)
         unsigned int slot;
         random_state = random_state * 1664525 + 1013904223;
         slot = (random_state >> 16) % 512;
-        if (items[slot]) { free(items[slot]); items[slot] = NULL; }
+        if (items[slot] && (random_state & 7) == 0)
+        {
+            void *changed = realloc(items[slot], 1 + (random_state >> 10) % (3 * MiB));
+            if (changed) items[slot] = changed;
+        }
+        else if (items[slot]) { free(items[slot]); items[slot] = NULL; }
         else if (random_state & 1)
             items[slot] = memalign((size_t)4096 << ((random_state >> 8) % 10),
                                   65536 + (random_state >> 10) % (2 * MiB));
-        else items[slot] = malloc(1 + (random_state >> 10) % 8192);
+        else items[slot] = calloc(1 + (random_state >> 10) % 8192, 1);
+        check_budget();
         if (!(iteration % 500))
         {
             wine_nx_native_heap_stats(&stats);
@@ -135,7 +156,18 @@ static void run(void)
     check(!stats.reserved && !stats.used && !stats.holes && stats.complete && !locks);
     check(mallinfo().uordblks == before.uordblks);
     mixed_lifetimes(0);
+    check_budget();
     mixed_lifetimes(1);
+    check_budget();
+    small = malloc(1024);
+    check(small);
+    check(!realloc(small, impossible_size));
+    check_budget();
+    small = realloc(small, 0);
+    check_budget();
+    free(small);
+    check(!calloc(impossible_size, 2));
+    check_budget();
     static const char message[] = "newlib heap: mixed allocation, boundary, realloc, accounting and unmapped backing tests passed\n";
     linux_call(64, 1, (long)message, sizeof(message) - 1);
 }

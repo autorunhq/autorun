@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <malloc.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/reent.h>
 #include "backing_heap.h"
@@ -9,6 +10,8 @@
 
 extern char *fake_heap_start, *fake_heap_end;
 extern void *__real__sbrk_r( struct _reent *, ptrdiff_t );
+extern void *__real__malloc_r( struct _reent *, size_t );
+extern void *__real__calloc_r( struct _reent *, size_t, size_t );
 extern void *__real__memalign_r( struct _reent *, size_t, size_t );
 extern void *__real__realloc_r( struct _reent *, void *, size_t );
 extern void __real__free_r( struct _reent *, void * );
@@ -22,6 +25,34 @@ static uintptr_t backing_start = UINTPTR_MAX, backing_end;
 enum { SMALL_FREE_CACHE_LIMIT = 16 * 1048576 };
 static size_t cached_small_free;
 static unsigned long long small_allocated, cached_allocated;
+static size_t small_used;
+static __thread unsigned int allocation_depth;
+
+static size_t small_allocation_size( struct _reent *reent, void *pointer )
+{
+    /* Newlib's usable size excludes one word of the allocated chunk. */
+    return pointer ? __real__malloc_usable_size_r( reent, pointer ) + sizeof(size_t) : 0;
+}
+
+void *wine_nx_native_malloc( struct _reent *reent, size_t size )
+{
+    void *result;
+    allocation_depth++;
+    result = __real__malloc_r( reent, size );
+    if (!--allocation_depth && result)
+        __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
+    return result;
+}
+
+void *wine_nx_native_calloc( struct _reent *reent, size_t count, size_t size )
+{
+    void *result;
+    allocation_depth++;
+    result = __real__calloc_r( reent, count, size );
+    if (!--allocation_depth && result)
+        __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
+    return result;
+}
 
 static size_t free_lower_bound_locked(void)
 {
@@ -79,7 +110,13 @@ void *wine_nx_native_memalign( struct _reent *reent, size_t alignment, size_t si
     void *result;
     uintptr_t floor;
     if (alignment < 4096 || (alignment & (alignment - 1)) || size < BACKING_UNIT)
-        return __real__memalign_r( reent, alignment, size );
+    {
+        allocation_depth++;
+        result = __real__memalign_r( reent, alignment, size );
+        if (!--allocation_depth && result)
+            __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
+        return result;
+    }
     __malloc_lock( reent );
     init_heap();
     floor = (uintptr_t)__real__sbrk_r( reent, 0 );
@@ -93,7 +130,13 @@ void *wine_nx_native_memalign( struct _reent *reent, size_t alignment, size_t si
 
 void __wrap__free_r( struct _reent *reent, void *pointer )
 {
-    if (!owns_pointer( pointer )) { __real__free_r( reent, pointer ); return; }
+    if (!owns_pointer( pointer ))
+    {
+        if (!allocation_depth && pointer)
+            __atomic_fetch_sub( &small_used, small_allocation_size( reent, pointer ), __ATOMIC_RELAXED );
+        __real__free_r( reent, pointer );
+        return;
+    }
     __malloc_lock( reent );
     backing_free( &heap, pointer );
     __atomic_store_n( &backing_start, heap.base + (size_t)heap.bottom * BACKING_UNIT, __ATOMIC_RELEASE );
@@ -114,7 +157,15 @@ void *wine_nx_native_realloc( struct _reent *reent, void *pointer, size_t size )
 {
     void *result;
     size_t previous;
-    if (!owns_pointer( pointer )) return __real__realloc_r( reent, pointer, size );
+    if (!owns_pointer( pointer ))
+    {
+        previous = allocation_depth ? 0 : small_allocation_size( reent, pointer );
+        allocation_depth++;
+        result = __real__realloc_r( reent, pointer, size );
+        if (!--allocation_depth && (result || !size))
+            __atomic_fetch_add( &small_used, small_allocation_size( reent, result ) - previous, __ATOMIC_RELAXED );
+        return result;
+    }
     if (!size) { __wrap__free_r( reent, pointer ); return NULL; }
     __malloc_lock( reent );
     previous = backing_size( &heap, pointer );
@@ -141,6 +192,18 @@ struct mallinfo __wrap__mallinfo_r( struct _reent *reent )
     info.ordblks += heap.holes;
     __malloc_unlock( reent );
     return info;
+}
+
+bool __wrap_os_get_available_system_memory( uint64_t *available )
+{
+    size_t used;
+    uint64_t capacity = (uintptr_t)fake_heap_end > (uintptr_t)fake_heap_start ?
+                        (uintptr_t)fake_heap_end - (uintptr_t)fake_heap_start : 0;
+    __malloc_lock( _REENT );
+    used = heap.used + __atomic_load_n( &small_used, __ATOMIC_RELAXED );
+    __malloc_unlock( _REENT );
+    *available = used < capacity ? capacity - used : 0;
+    return capacity != 0;
 }
 
 size_t wine_nx_native_heap_free_lower_bound(void)
@@ -207,6 +270,16 @@ void wine_nx_native_heap_stats( struct wine_nx_native_heap_stats *stats )
 }
 
 #ifndef WINE_NX_SWAP_POC
+void *__wrap__malloc_r( struct _reent *reent, size_t size )
+{
+    return wine_nx_native_malloc( reent, size );
+}
+
+void *__wrap__calloc_r( struct _reent *reent, size_t count, size_t size )
+{
+    return wine_nx_native_calloc( reent, count, size );
+}
+
 void *__wrap__memalign_r( struct _reent *reent, size_t alignment, size_t size )
 {
     return wine_nx_native_memalign( reent, alignment, size );

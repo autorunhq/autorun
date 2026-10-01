@@ -7,31 +7,33 @@ root = Path(__file__).resolve().parents[1]
 source = (root / 'source/native_heap.c').read_text()
 source = source.replace('#include <malloc.h>', '').replace('#include <sys/reent.h>', '')
 fixture = r'''
-#define _POSIX_C_SOURCE 200112L
+#define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <threads.h>
+#include <pthread.h>
 #include "heap_snapshot.h"
 struct _reent { int _errno; };
 static _Thread_local struct _reent reent;
 #define _REENT (&reent)
+#define mallinfo native_test_mallinfo
 struct mallinfo { size_t arena, fordblks, keepcost, ordblks, uordblks; };
 static unsigned char area[128 * 1048576] __attribute__((aligned(2097152)));
 char *fake_heap_start = (char *)area, *fake_heap_end = (char *)area + sizeof(area);
 static uintptr_t heap_break = (uintptr_t)area;
 static size_t small_free;
 static unsigned long mallinfo_calls;
-static mtx_t mutex;
+static pthread_mutex_t mutex;
 static _Thread_local unsigned int locks;
 struct horizon_heap_chunk *__malloc_av_[258];
 static void __malloc_lock(struct _reent *r)
-{ (void)r; assert(mtx_lock(&mutex) == thrd_success); locks++; }
+{ (void)r; assert(!pthread_mutex_lock(&mutex)); locks++; }
 static void __malloc_unlock(struct _reent *r)
-{ (void)r; assert(locks); locks--; assert(mtx_unlock(&mutex) == thrd_success); }
+{ (void)r; assert(locks); locks--; assert(!pthread_mutex_unlock(&mutex)); }
 void *__real__sbrk_r(struct _reent *r, ptrdiff_t increment)
 {
     uintptr_t previous = heap_break;
@@ -44,11 +46,13 @@ void *__real__sbrk_r(struct _reent *r, ptrdiff_t increment)
 }
 void *__real__memalign_r(struct _reent *r, size_t alignment, size_t size)
 { void *result = NULL; (void)r; if (posix_memalign(&result, alignment, size)) return NULL; return result; }
+void *__real__malloc_r(struct _reent *r, size_t size) { (void)r; return malloc(size); }
+void *__real__calloc_r(struct _reent *r, size_t count, size_t size) { (void)r; return calloc(count, size); }
 void *__real__realloc_r(struct _reent *r, void *pointer, size_t size)
 { (void)r; return realloc(pointer, size); }
 void __real__free_r(struct _reent *r, void *pointer) { (void)r; free(pointer); }
 size_t __real__malloc_usable_size_r(struct _reent *r, void *pointer)
-{ (void)r; (void)pointer; assert(0); return 0; }
+{ (void)r; return malloc_usable_size(pointer); }
 struct mallinfo __real__mallinfo_r(struct _reent *r)
 {
     (void)r;
@@ -77,6 +81,8 @@ static void available_bounds(void)
     assert(wine_nx_native_heap_free_lower_bound() == initial);
     fake_heap_end = (char *)((uintptr_t)fake_heap_start + (UINT64_C(8) << 30));
     assert(wine_nx_native_heap_free_lower_bound() == (UINT64_C(8) << 30));
+    uint64_t budget;
+    assert(__wrap_os_get_available_system_memory(&budget) && budget == (UINT64_C(8) << 30));
     fake_heap_end = (char *)area + sizeof(area);
     for (unsigned int i = 0; i < 3; i++)
     {
@@ -110,7 +116,7 @@ static void available_bounds(void)
     assert(wine_nx_native_heap_free_lower_bound() == initial);
 }
 
-static int worker(void *argument)
+static void *worker(void *argument)
 {
     unsigned int seed = (uintptr_t)argument + 1;
     unsigned char *live[32] = {0};
@@ -155,7 +161,7 @@ static int worker(void *argument)
     for (unsigned int i = 0; i < 32; i++) __wrap__free_r(_REENT, live[i]);
     return 0;
 }
-static int small_heap_worker(void *argument)
+static void *small_heap_worker(void *argument)
 {
     (void)argument;
     for (unsigned int iteration = 0; iteration < 40000; iteration++)
@@ -171,32 +177,57 @@ static int small_heap_worker(void *argument)
     }
     return 0;
 }
+static void *allocation_worker(void *argument)
+{
+    (void)argument;
+    for (unsigned int i = 0; i < 40000; i++)
+    {
+        uint64_t available;
+        void *p = __wrap__calloc_r(_REENT, 2, 1 + i % 1024);
+        assert(p);
+        p = __wrap__realloc_r(_REENT, p, 8192);
+        assert(p);
+        assert(__wrap_os_get_available_system_memory(&available) && available <= sizeof(area));
+        __wrap__free_r(_REENT, p);
+    }
+    return 0;
+}
 int main(void)
 {
-    thrd_t workers[5];
-    assert(mtx_init(&mutex, mtx_recursive) == thrd_success);
+    pthread_t workers[9];
+    pthread_mutexattr_t attributes;
+    assert(!pthread_mutexattr_init(&attributes));
+    assert(!pthread_mutexattr_settype(&attributes, PTHREAD_MUTEX_RECURSIVE));
+    assert(!pthread_mutex_init(&mutex, &attributes));
+    assert(!pthread_mutexattr_destroy(&attributes));
     for (unsigned int i = 0; i < 128; i++)
         __malloc_av_[2 * i + 2] = __malloc_av_[2 * i + 3] =
             (struct horizon_heap_chunk *)((char *)&__malloc_av_[2 * i + 2] - 2 * sizeof(size_t));
     available_bounds();
-    for (uintptr_t i = 0; i < 4; i++) assert(thrd_create(&workers[i], worker, (void *)i) == thrd_success);
-    assert(thrd_create(&workers[4], small_heap_worker, NULL) == thrd_success);
-    for (unsigned int i = 0; i < 5; i++) assert(thrd_join(workers[i], NULL) == thrd_success);
+    for (uintptr_t i = 0; i < 4; i++) assert(!pthread_create(&workers[i], NULL, worker, (void *)i));
+    assert(!pthread_create(&workers[4], NULL, small_heap_worker, NULL));
+    for (unsigned int i = 5; i < 9; i++) assert(!pthread_create(&workers[i], NULL, allocation_worker, NULL));
+    for (unsigned int i = 0; i < 9; i++) assert(!pthread_join(workers[i], NULL));
     assert(!heap.used && !heap.holes && heap.bottom == heap.count);
     assert(heap_break == (uintptr_t)fake_heap_start);
     void *p = __wrap__memalign_r(_REENT, 4096, 4096);
     assert(p && !owns_pointer(p));
     __wrap__free_r(_REENT, p);
+    uint64_t available;
+    unsigned long calls = mallinfo_calls;
+    for (unsigned int i = 0; i < 10000; i++)
+        assert(__wrap_os_get_available_system_memory(&available) && available == sizeof(area));
+    assert(!small_used && calls == mallinfo_calls);
     p = __wrap__realloc_r(_REENT, NULL, 1024);
     assert(p && !owns_pointer(p));
     __wrap__free_r(_REENT, p);
-    mtx_destroy(&mutex);
-    puts("native heap: 200000 concurrent allocation/resize/free/break operations passed");
+    pthread_mutex_destroy(&mutex);
+    puts("native heap: concurrent allocation, resize, free, break and scan-free budget tests passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='autorun-native-heap-') as tmp:
     unit, binary = Path(tmp) / 'heap.c', Path(tmp) / 'heap'
     unit.write_text(fixture.replace('/* IMPLEMENTATION */', source))
-    subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-I', str(root / 'source'), str(unit), '-o', str(binary)], check=True)
+    subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread',
+                    '-fsanitize=' + os.environ.get('SANITIZE', 'address,undefined'), '-I', str(root / 'source'), str(unit), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

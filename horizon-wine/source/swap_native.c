@@ -244,8 +244,6 @@ void __wrap_svcSignalProcessWideKey( u32 *key, s32 count )
     horizon_swap_pin_end( &pin );
 }
 
-extern void *__real__malloc_r( struct _reent *, size_t );
-extern void *__real__calloc_r( struct _reent *, size_t, size_t );
 extern size_t wine_nx_sd_cache_reclaim( size_t );
 static __thread unsigned int allocator_depth;
 static __thread unsigned int allocator_deferred;
@@ -361,9 +359,9 @@ void *__wrap__malloc_r( struct _reent *reent, size_t size )
     void *ptr;
     struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
-    ptr = __real__malloc_r( reent, size );
+    ptr = wine_nx_native_malloc( reent, size );
     while (!ptr && allocator_depth == 1 && horizon_swap_native_reclaim( size, &budget ))
-        ptr = __real__malloc_r( reent, size );
+        ptr = wine_nx_native_malloc( reent, size );
     if (ptr && horizon_swap_enabled()) wine_nx_native_heap_note_small_allocation( size );
     allocator_depth--;
     return ptr;
@@ -374,10 +372,10 @@ void *__wrap__calloc_r( struct _reent *reent, size_t count, size_t size )
     void *ptr;
     struct horizon_swap_reclaim_budget budget = { .remaining = SIZE_MAX };
     allocator_depth++;
-    ptr = __real__calloc_r( reent, count, size );
+    ptr = wine_nx_native_calloc( reent, count, size );
     while (!ptr && size && allocator_depth == 1 && count <= SIZE_MAX / size &&
            horizon_swap_native_reclaim( count * size, &budget ))
-        ptr = __real__calloc_r( reent, count, size );
+        ptr = wine_nx_native_calloc( reent, count, size );
     if (ptr && size && count <= SIZE_MAX / size && horizon_swap_enabled())
         wine_nx_native_heap_note_small_allocation( count * size );
     allocator_depth--;

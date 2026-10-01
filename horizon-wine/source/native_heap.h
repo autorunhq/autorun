@@ -11,6 +11,8 @@ struct wine_nx_native_heap_stats
     int complete;
 };
 
+void *wine_nx_native_malloc( struct _reent *, size_t size );
+void *wine_nx_native_calloc( struct _reent *, size_t count, size_t size );
 void *wine_nx_native_memalign( struct _reent *, size_t alignment, size_t size );
 void *wine_nx_native_realloc( struct _reent *, void *pointer, size_t size );
 size_t wine_nx_native_heap_free_lower_bound(void);

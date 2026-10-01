@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'source/swap_native.c').read_text()
-source = source[source.index('extern void *__real__malloc_r'):]
+source = source[source.index('extern size_t wine_nx_sd_cache_reclaim'):]
 horizon = (root.parent / 'dlls/ntdll/unix/horizon.c').read_text()
 reclaim = horizon[horizon.index('size_t horizon_swap_reclaim('):]
 reclaim = reclaim[:reclaim.index('\n}') + 2]
@@ -84,9 +84,9 @@ static void *allocate(void)
     attempts++;
     return attempts <= fail_attempts ? NULL : &result;
 }
-void *__real__malloc_r(struct _reent *r, size_t size)
+void *wine_nx_native_malloc(struct _reent *r, size_t size)
 { (void)r; (void)size; return allocate(); }
-void *__real__calloc_r(struct _reent *r, size_t count, size_t size)
+void *wine_nx_native_calloc(struct _reent *r, size_t count, size_t size)
 { (void)r; if (size && count > SIZE_MAX / size) return NULL; return allocate(); }
 void *wine_nx_native_realloc(struct _reent *r, void *old, size_t size)
 { (void)r; assert(old == &result); return size ? allocate() : NULL; }

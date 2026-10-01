@@ -848,7 +848,9 @@ target_compile_options(wine-nx-runtime PRIVATE
 target_include_directories(wine-nx-runtime PRIVATE ${WINE_SWITCH_NTDLL_INCLUDES})
 
 target_sources(wine-nx-runtime PRIVATE source/horizon_virtmem.c source/low_window.c source/native_heap.c)
-foreach(symbol _sbrk_r _free_r _malloc_usable_size_r _mallinfo_r _memalign_r _realloc_r)
+set_property(SOURCE source/native_heap.c APPEND PROPERTY COMPILE_OPTIONS -O2)
+foreach(symbol _sbrk_r _free_r _malloc_usable_size_r _mallinfo_r _memalign_r _realloc_r
+        _malloc_r _calloc_r os_get_available_system_memory)
     target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
 
@@ -868,7 +870,7 @@ if(WINE_NX_SWAP_POC)
             svcCreateTransferMemory nvioctlNvmap_Alloc nvMapCreate svcSetMemoryAttribute svcMapMemory
             svcMapDeviceAddressSpace svcMapDeviceAddressSpaceByForce svcMapDeviceAddressSpaceAligned
             svcWaitForAddress svcSignalToAddress svcArbitrateLock svcArbitrateUnlock
-            svcWaitProcessWideKeyAtomic svcSignalProcessWideKey _malloc_r _calloc_r)
+            svcWaitProcessWideKeyAtomic svcSignalProcessWideKey)
         target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=${symbol}")
     endforeach()
 endif()
