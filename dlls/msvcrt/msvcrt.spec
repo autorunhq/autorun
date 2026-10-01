@@ -174,7 +174,9 @@
 @ extern _HUGE MSVCRT__HUGE
 @ cdecl _Strftime(ptr long str ptr ptr)
 @ cdecl _XcptFilter(long ptr)
-@ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr)
+@ stdcall -arch=!i386,!arm64ec __C_specific_handler(ptr long ptr ptr)
+# ARM64EC callers need ntdll's native-frame exception handler.
+@ stdcall -arch=arm64ec -private __C_specific_handler(ptr long ptr ptr)
 @ cdecl __CppXcptFilter(long ptr)
 # stub __CxxCallUnwindDelDtor
 # stub __CxxCallUnwindDtor

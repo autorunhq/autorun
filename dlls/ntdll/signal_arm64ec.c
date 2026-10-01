@@ -58,6 +58,7 @@ static void     (WINAPI *pThreadTerm)(HANDLE,LONG);
 static void     (WINAPI *pUpdateProcessorInformation)(SYSTEM_CPU_INFORMATION*);
 
 static BOOLEAN emulated_processor_features[PROCESSOR_FEATURE_MAX];
+static ULONG_PTR highest_user_address = ~(ULONG_PTR)0;
 static BYTE KiUserExceptionDispatcher_orig[16]; /* to detect patching */
 extern void KiUserExceptionDispatcher_thunk(void) asm("EXP+#KiUserExceptionDispatcher");
 
@@ -188,8 +189,13 @@ static void arm64x_check_call(void);
 NTSTATUS arm64ec_process_init( HMODULE module )
 {
     NTSTATUS status = STATUS_SUCCESS;
+    SYSTEM_BASIC_INFORMATION system_info;
     CHPEV2_PROCESS_INFO *info = (CHPEV2_PROCESS_INFO *)(RtlGetCurrentPeb() + 1);
     const IMAGE_ARM64EC_METADATA *metadata = arm64ec_get_module_metadata( module );
+
+    if ((status = NtQuerySystemInformation( SystemBasicInformation, &system_info, sizeof(system_info), NULL )))
+        return status;
+    highest_user_address = (ULONG_PTR)system_info.HighestUserAddress;
 
     __os_arm64x_dispatch_call_no_redirect = RtlFindExportedRoutineByName( module, "ExitToX64" );
     __os_arm64x_dispatch_fptr = RtlFindExportedRoutineByName( module, "DispatchJump" );
@@ -1393,6 +1399,7 @@ BOOLEAN WINAPI RtlIsEcCode( ULONG_PTR ptr )
 {
     const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
     ULONG_PTR page = ptr / page_size;
+    if (ptr > highest_user_address || !map) return FALSE;
     return (map[page / 64] >> (page & 63)) & 1;
 }
 

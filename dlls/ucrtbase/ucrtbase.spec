@@ -48,7 +48,9 @@
 @ cdecl __AdjustPointer(ptr ptr)
 @ stub __BuildCatchObject
 @ stub __BuildCatchObjectHelper
-@ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr)
+@ stdcall -arch=!i386,!arm64ec __C_specific_handler(ptr long ptr ptr)
+# ARM64EC callers need ntdll's native-frame exception handler.
+@ stdcall -arch=arm64ec -private __C_specific_handler(ptr long ptr ptr)
 @ cdecl __CxxDetectRethrow(ptr)
 @ cdecl __CxxExceptionFilter(ptr ptr long ptr)
 @ cdecl -norelay __CxxFrameHandler(ptr ptr ptr ptr)
