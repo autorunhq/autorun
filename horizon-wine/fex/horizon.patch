@@ -1730,54 +1730,89 @@ index ba521e8..440433e 100644
        return true;
      }
 diff --git a/Source/Windows/Common/WinAPI/Alloc.cpp b/Source/Windows/Common/WinAPI/Alloc.cpp
-index ded646b..a37f3b9 100644
+index ded646b..8d803fd 100644
 --- a/Source/Windows/Common/WinAPI/Alloc.cpp
 +++ b/Source/Windows/Common/WinAPI/Alloc.cpp
-@@ -12,7 +12,7 @@
+@@ -12,7 +12,37 @@
  #include <processenv.h>
  #include "../Priv.h"
  
 -#ifndef _M_ARM64EC
-+#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
++#ifdef FEX_HORIZON
++#include "cache_policy.h"
++
++namespace {
++NTSTATUS AllocateNativeMemory(HANDLE Process, void** Address, SIZE_T* Size, ULONG Type, ULONG Protect,
++                              MEM_EXTENDED_PARAMETER* Parameters, ULONG Count) {
++  if (*Address || Process != NtCurrentProcess() || !WineNX::FEX::WideHost()) {
++    return NtAllocateVirtualMemoryEx(Process, Address, Size, Type, Protect, Parameters, Count);
++  }
++  if (Count >= MemExtendedParameterMax || (Count && !Parameters)) return STATUS_INVALID_PARAMETER;
++
++  MEM_EXTENDED_PARAMETER Params[MemExtendedParameterMax] {};
++  MEM_ADDRESS_REQUIREMENTS Requirements {};
++  ULONG AddressIndex = Count;
++  for (ULONG i = 0; i < Count; ++i) {
++    Params[i] = Parameters[i];
++    if (Params[i].Type == MemExtendedParameterAddressRequirements) {
++      if (AddressIndex != Count || !Params[i].Pointer) return STATUS_INVALID_PARAMETER;
++      AddressIndex = i;
++      Requirements = *static_cast<MEM_ADDRESS_REQUIREMENTS*>(Params[i].Pointer);
++    }
++  }
++  if (reinterpret_cast<uintptr_t>(Requirements.LowestStartingAddress) < UINT64_C(0x100000000)) {
++    Requirements.LowestStartingAddress = reinterpret_cast<void*>(UINT64_C(0x100000000));
++  }
++  Params[AddressIndex].Type = MemExtendedParameterAddressRequirements;
++  Params[AddressIndex].Pointer = &Requirements;
++  return NtAllocateVirtualMemoryEx(Process, Address, Size, Type, Protect, Params, Count + (AddressIndex == Count));
++}
++}
++#elif !defined(_M_ARM64EC)
  namespace {
  SYSTEM_BASIC_INFORMATION BasicInfo;
  
-@@ -32,7 +32,7 @@ MEM_ADDRESS_REQUIREMENTS MakeWOW64AddressReqs() {
+@@ -32,7 +62,11 @@ MEM_ADDRESS_REQUIREMENTS MakeWOW64AddressReqs() {
  
  DLLEXPORT_FUNC(void*, VirtualAlloc, (void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)) {
    NTSTATUS Status;
 -#ifndef _M_ARM64EC
-+#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
++#ifdef FEX_HORIZON
++  if (!lpAddress && WineNX::FEX::WideHost()) {
++    Status = AllocateNativeMemory(NtCurrentProcess(), &lpAddress, &dwSize, flAllocationType, flProtect, nullptr, 0);
++  } else {
++#elif !defined(_M_ARM64EC)
    if (!lpAddress) {
      // Add address requirements for WOW64 to limit allocations to outside the 32-bit user address space
      MEM_EXTENDED_PARAMETER ExtParam {};
-@@ -45,7 +45,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc, (void* lpAddress, SIZE_T dwSize, DWORD flAll
+@@ -45,7 +79,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc, (void* lpAddress, SIZE_T dwSize, DWORD flAll
    } else {
  #endif
      Status = NtAllocateVirtualMemory(NtCurrentProcess(), &lpAddress, 0, &dwSize, flAllocationType, flProtect);
 -#ifndef _M_ARM64EC
-+#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
++#if !defined(_M_ARM64EC) || defined(FEX_HORIZON)
    }
  #endif
    if (Status) {
-@@ -74,7 +74,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
+@@ -74,6 +108,10 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
                 (HANDLE Process, void* BaseAddress, SIZE_T Size, ULONG AllocationType, ULONG PageProtection,
                  MEM_EXTENDED_PARAMETER* ExtendedParameters, ULONG ParameterCount)) {
    NTSTATUS Status;
--#ifndef _M_ARM64EC
-+#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
++#ifdef FEX_HORIZON
++  Status = AllocateNativeMemory(Process ? Process : NtCurrentProcess(), &BaseAddress, &Size, AllocationType, PageProtection,
++                                ExtendedParameters, ParameterCount);
++#else
+ #ifndef _M_ARM64EC
    if (!BaseAddress) {
      // Add address requirements for WOW64 to limit allocations to outside the 32-bit user address space
-     auto* NewExtParams = reinterpret_cast<MEM_EXTENDED_PARAMETER*>(alloca((ParameterCount + 1) * sizeof(MEM_EXTENDED_PARAMETER)));
-@@ -93,7 +93,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
- #endif
-     Status = NtAllocateVirtualMemoryEx(Process ? Process : NtCurrentProcess(), &BaseAddress, &Size, AllocationType, PageProtection,
+@@ -95,6 +133,7 @@ DLLEXPORT_FUNC(void*, VirtualAlloc2,
                                         ExtendedParameters, ParameterCount);
--#ifndef _M_ARM64EC
-+#if !defined(_M_ARM64EC) && !defined(FEX_HORIZON)
+ #ifndef _M_ARM64EC
    }
++#endif
  #endif
    if (Status) {
+     SetLastError(RtlNtStatusToDosError(Status));
 diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
 index 62a8dd2..5847633 100644
 --- a/Source/Windows/WOW64/Module.cpp

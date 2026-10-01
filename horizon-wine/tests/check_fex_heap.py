@@ -165,7 +165,7 @@ int main() {
 '''
 
 winapi = (source / 'Source/Windows/Common/WinAPI/Alloc.cpp').read_text()
-begin = winapi.index('#if !defined(_M_ARM64EC)')
+begin = winapi.index('#ifdef FEX_HORIZON')
 alloc = winapi[begin:winapi.index('DLLEXPORT_FUNC(SIZE_T, VirtualQuery')]
 alloc += winapi[winapi.index('DLLEXPORT_FUNC(void*, VirtualAlloc2,'):winapi.index('DLLEXPORT_FUNC(WINBOOL, VirtualFree')]
 vm_fixture = r'''
@@ -173,12 +173,17 @@ vm_fixture = r'''
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 using SIZE_T = size_t;
 using DWORD = uint32_t;
 using ULONG = uint32_t;
 using NTSTATUS = uint32_t;
 using HANDLE = void*;
 struct MEM_EXTENDED_PARAMETER { uint64_t Type; void* Pointer; };
+struct MEM_ADDRESS_REQUIREMENTS { void* LowestStartingAddress; void* HighestEndingAddress; SIZE_T Alignment; };
+static constexpr ULONG MemExtendedParameterAddressRequirements = 1, MemExtendedParameterAttributeFlags = 5;
+static constexpr ULONG MemExtendedParameterMax = 7;
+static constexpr NTSTATUS STATUS_INVALID_PARAMETER = 0xc000000d;
 #define DLLEXPORT_FUNC(ret, name, args) ret name args
 static constexpr DWORD MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_TOP_DOWN = 0x100000;
 static constexpr DWORD PAGE_READWRITE = 4;
@@ -188,6 +193,8 @@ static unsigned native_calls, extended_calls;
 static HANDLE process;
 static MEM_EXTENDED_PARAMETER* parameters;
 static ULONG count, allocation_type;
+static MEM_ADDRESS_REQUIREMENTS requirements;
+static MEM_EXTENDED_PARAMETER seen[MemExtendedParameterMax];
 static HANDLE NtCurrentProcess() { return reinterpret_cast<void*>(-1); }
 static DWORD RtlNtStatusToDosError(NTSTATUS status) { return status; }
 static void SetLastError(DWORD error) { last_error = error; }
@@ -203,19 +210,33 @@ static NTSTATUS NtAllocateVirtualMemoryEx(HANDLE p, void** base, SIZE_T* size, U
   assert(*size && protect == PAGE_READWRITE);
   extended_calls++;
   process = p; parameters = params; count = n; allocation_type = type;
-  if (!failure && !*base) *base = reinterpret_cast<void*>(0x300000);
+  requirements = {};
+  for (ULONG i = 0; i < n; ++i) {
+    assert(i < MemExtendedParameterMax);
+    seen[i] = params[i];
+    if (params[i].Type == MemExtendedParameterAddressRequirements) {
+      requirements = *static_cast<MEM_ADDRESS_REQUIREMENTS*>(params[i].Pointer);
+    }
+  }
+  if (requirements.HighestEndingAddress &&
+      reinterpret_cast<uintptr_t>(requirements.HighestEndingAddress) < reinterpret_cast<uintptr_t>(requirements.LowestStartingAddress)) {
+    return STATUS_INVALID_PARAMETER;
+  }
+  if (!failure && !*base) *base = requirements.LowestStartingAddress ? requirements.LowestStartingAddress : reinterpret_cast<void*>(0x300000);
   return failure;
 }
 '''
 vm_tests = r'''
 int main() {
+  unsetenv("WINE_NX_FEX_WIDE_HOST");
   auto* low = reinterpret_cast<void*>(0x200000);
   assert(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE) == low);
   assert(native_calls == 1 && extended_calls == 0 && allocation_type == (MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN));
   assert(VirtualAlloc(low, 4096, MEM_COMMIT, PAGE_READWRITE) == low && native_calls == 2);
   assert(VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, nullptr, 0));
   assert(extended_calls == 1 && process == NtCurrentProcess() && !parameters && !count);
-  MEM_EXTENDED_PARAMETER req {1, low};
+  MEM_ADDRESS_REQUIREMENTS requested {low, nullptr, 0};
+  MEM_EXTENDED_PARAMETER req {MemExtendedParameterAddressRequirements, &requested};
   HANDLE remote = reinterpret_cast<void*>(5);
   assert(VirtualAlloc2(remote, low, 4096, MEM_RESERVE, PAGE_READWRITE, &req, 1) == low);
   assert(extended_calls == 2 && process == remote && parameters == &req && count == 1);
@@ -224,7 +245,61 @@ int main() {
   failure = 0xc0000018;
   assert(!VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE) && last_error == failure);
   assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, nullptr, 0) && last_error == failure);
-  puts("FEX virtual allocations: low addresses, fixed commits, explicit requirements and failures passed");
+  failure = 0;
+
+  setenv("WINE_NX_FEX_WIDE_HOST", "1", 1);
+  auto* high = reinterpret_cast<void*>(UINT64_C(0x100000000));
+  unsigned before_native = native_calls, before_extended = extended_calls;
+  assert(VirtualAlloc(nullptr, 44 * 1024 * 1024, MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE) == high);
+  assert(native_calls == before_native && extended_calls == before_extended + 1);
+  assert(count == 1 && allocation_type == (MEM_RESERVE | MEM_TOP_DOWN));
+  assert(requirements.LowestStartingAddress == high && !requirements.HighestEndingAddress && !requirements.Alignment);
+  assert(VirtualAlloc(high, 4096, MEM_COMMIT, PAGE_READWRITE) == high);
+  assert(VirtualAlloc(low, 4096, MEM_COMMIT, PAGE_READWRITE) == low);
+  assert(native_calls == before_native + 2);
+  assert(VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, nullptr, 0) == high && count == 1);
+
+  auto* ceiling = reinterpret_cast<void*>(UINT64_C(0x7fffffffff));
+  requested = {low, ceiling, 2 * 1024 * 1024};
+  MEM_EXTENDED_PARAMETER attrs {MemExtendedParameterAttributeFlags, reinterpret_cast<void*>(1)};
+  MEM_EXTENDED_PARAMETER supplied[] = {attrs, req};
+  assert(VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, supplied, 2) == high);
+  assert(count == 2 && seen[0].Type == attrs.Type && seen[0].Pointer == attrs.Pointer);
+  assert(requirements.LowestStartingAddress == high && requirements.HighestEndingAddress == ceiling);
+  assert(requirements.Alignment == requested.Alignment && requested.LowestStartingAddress == low);
+  assert(supplied[1].Pointer == &requested);
+  requested.LowestStartingAddress = reinterpret_cast<void*>(UINT64_C(0x200000000));
+  assert(VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &req, 1) == requested.LowestStartingAddress);
+  assert(count == 1);
+  assert(VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &attrs, 1) == high && count == 2);
+  assert(seen[0].Type == attrs.Type && seen[0].Pointer == attrs.Pointer);
+
+  requested = {low, nullptr, 0};
+  assert(VirtualAlloc2(remote, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &req, 1) == low);
+  assert(process == remote && parameters == &req && count == 1);
+  assert(VirtualAlloc2(nullptr, low, 4096, MEM_COMMIT, PAGE_READWRITE, nullptr, 0) == low);
+  assert(!parameters && !count);
+  requested.HighestEndingAddress = reinterpret_cast<void*>(UINT64_C(0xffffffff));
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &req, 1));
+  assert(last_error == STATUS_INVALID_PARAMETER);
+  before_extended = extended_calls;
+  MEM_EXTENDED_PARAMETER duplicate[] = {req, req};
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, duplicate, 2));
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, nullptr, 1));
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &req, MemExtendedParameterMax));
+  req.Pointer = nullptr;
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, &req, 1));
+  assert(extended_calls == before_extended);
+
+  failure = 0xc0000017;
+  before_native = native_calls;
+  assert(!VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE) && last_error == failure);
+  assert(!VirtualAlloc2(nullptr, nullptr, 4096, MEM_RESERVE, PAGE_READWRITE, nullptr, 0) && last_error == failure);
+  assert(native_calls == before_native && extended_calls == before_extended + 2);
+  failure = 0;
+  setenv("WINE_NX_FEX_WIDE_HOST", "0", 1);
+  assert(VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE) == low);
+  puts("FEX virtual allocations: wide/compact hosts, fixed commits, merged limits and no low-address retry passed");
 }
 '''
 cc = os.environ.get('WINE_NX_HOST_CXX', '/usr/bin/clang++')
@@ -237,5 +312,6 @@ with tempfile.TemporaryDirectory(prefix='fex-heap-') as directory:
         file = build / (name + '.cpp')
         file.write_text(code)
         subprocess.run([cc, '-std=c++20', '-g', '-Wall', '-Wextra', '-Werror', '-pthread',
-                        '-fsanitize=address,undefined', *defines, str(file), '-o', str(build / name)], check=True)
+                        '-fsanitize=address,undefined', '-I', str(horizon_wine / 'fex'),
+                        *defines, str(file), '-o', str(build / name)], check=True)
         subprocess.run([str(build / name)], check=True)
