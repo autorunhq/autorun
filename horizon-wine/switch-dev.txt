@@ -1,1 +1,1 @@
-ghcr.io/autorunhq/switch-dev:2026.09.28.4
+ghcr.io/autorunhq/switch-dev:2026.10.01
