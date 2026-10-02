@@ -70,6 +70,10 @@ struct buffer
     BOOL explicit_flush;
     size_t map_length;
     GLbitfield map_access;
+    /* A write-only map with explicit flushes through a 32-bit copy: nothing
+     * is read into the copy, and each flushed range goes back as it is
+     * flushed instead of the whole range at the unmap. */
+    BOOL copy_on_flush;
 #endif
 
     /* members of Vulkan-backed buffer storages */
@@ -495,6 +499,11 @@ extern void wine_nx_nouveau_cpu_clean_range( void *ptr, size_t size ) __attribut
 /* Also reported by [PROGRESS]: bytes copied between GL buffer mappings above
  * 4 GB and their 32-bit copies, and persistent mappings refused. */
 unsigned long long wine_nx_gl_copy_bytes;
+/* The same copies by kind: into the 32-bit copy for maps that read, into it
+ * for maps that only write, back at unmaps and flushes, and what write-only
+ * maps with explicit flushes no longer copy in at all. */
+unsigned long long wine_nx_gl_copy_read_bytes, wine_nx_gl_copy_write_bytes, wine_nx_gl_copy_back_bytes;
+unsigned long long wine_nx_gl_copy_saved_bytes;
 unsigned int wine_nx_gl_persistent_failures;
 unsigned int wine_nx_gl_explicit_flushes;
 
@@ -1494,6 +1503,19 @@ static void flush_buffer( TEB *teb, struct buffer *buffer, size_t offset, size_t
         }
         return;
     }
+    if (buffer->copy_on_flush)
+    {
+        if (!buffer->map_ptr || offset > buffer->map_length || length > buffer->map_length - offset)
+        {
+            set_gl_error( teb, GL_INVALID_VALUE );
+            return;
+        }
+        /* Before the driver's own flush of the range, which follows. */
+        memcpy( (char *)buffer->host_ptr + offset, (char *)buffer->map_ptr + offset, length );
+        __atomic_add_fetch( &wine_nx_gl_copy_bytes, length, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &wine_nx_gl_copy_back_bytes, length, __ATOMIC_RELAXED );
+        return;
+    }
 #endif
     if (!buffer->vk_memory) return;
 
@@ -1756,6 +1778,25 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
     if (!buffer_vm_alloc( teb, buffer, length + (offset & 0xf) )) goto unmap;
     buffer->map_ptr = (char *)buffer->vm_ptr + (offset & 0xf);
     buffer->copy_length = (access & GL_MAP_WRITE_BIT) ? length : 0;
+#ifdef __SWITCH__
+    /* Write-only with explicit flushes: what was there before is never read
+     * through the map, and only the flushed ranges are defined after it, so
+     * neither the whole range in nor the whole range back is needed. WineD3D
+     * maps a dynamic buffer whole for every write to a part of it, and the
+     * driver's mapping is GPU memory that is slow to read: Ragnarok Online
+     * spent most of a core copying it in. */
+    buffer->copy_on_flush = (access & (GL_MAP_WRITE_BIT | GL_MAP_READ_BIT | GL_MAP_FLUSH_EXPLICIT_BIT))
+                            == (GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT);
+    buffer->map_length = length;
+    if (buffer->copy_on_flush)
+    {
+        buffer->copy_length = 0;
+        if (!(access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)))
+            __atomic_add_fetch( &wine_nx_gl_copy_saved_bytes, length, __ATOMIC_RELAXED );
+        TRACE( "returning copy buffer %p, flushed ranges copied back\n", buffer->map_ptr );
+        return buffer->map_ptr;
+    }
+#endif
     if (!(access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)))
     {
         static int once;
@@ -1767,6 +1808,8 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
         memcpy( buffer->map_ptr, buffer->host_ptr, length );
 #ifdef __SWITCH__
         __atomic_add_fetch( &wine_nx_gl_copy_bytes, length, __ATOMIC_RELAXED );
+        __atomic_add_fetch( (access & GL_MAP_READ_BIT) ? &wine_nx_gl_copy_read_bytes : &wine_nx_gl_copy_write_bytes,
+                            length, __ATOMIC_RELAXED );
 #endif
     }
     TRACE( "returning copy buffer %p\n", buffer->map_ptr );
@@ -1932,9 +1975,13 @@ static BOOL wow64_unmap_buffer( TEB *teb, struct buffer *buffer )
         memcpy( buffer->host_ptr, buffer->map_ptr, buffer->copy_length );
 #ifdef __SWITCH__
         __atomic_add_fetch( &wine_nx_gl_copy_bytes, buffer->copy_length, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &wine_nx_gl_copy_back_bytes, buffer->copy_length, __ATOMIC_RELAXED );
 #endif
         buffer->copy_length = 0;
     }
+#ifdef __SWITCH__
+    buffer->copy_on_flush = FALSE;
+#endif
 
     buffer->host_ptr = buffer->map_ptr = NULL;
     return TRUE;
