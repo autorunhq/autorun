@@ -46,6 +46,13 @@ extern unsigned int wine_nx_server_calls[] __attribute__((weak));
 extern unsigned long long wine_nx_server_ticks[] __attribute__((weak));
 extern const char *wine_nx_server_names[] __attribute__((weak));
 
+enum nx_shader_affinity
+{
+    NX_SHADER_AFFINITY_NONE,
+    NX_SHADER_AFFINITY_WORKER,
+    NX_SHADER_AFFINITY_PIPELINE,
+};
+
 struct nx_prof_thread
 {
     Handle handle;  /* 0: free */
@@ -151,7 +158,7 @@ static int restore_thread_locked( struct nx_prof_thread *thread, s32 core, u32 m
         return 0;
     }
     thread->helper = 0;
-    thread->migratable = 0;
+    thread->migratable = NX_SHADER_AFFINITY_NONE;
     if (thread->teb && &horizon_follow_thread_cores)
         horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );
     return 1;
@@ -168,10 +175,48 @@ static int migrate_shader_locked( struct nx_prof_thread *thread )
         R_FAILED( svcSetThreadCoreMask( thread->handle, -1, mask ) )) return -1;
     thread->app_core = previous_core;
     thread->app_mask = previous_mask;
-    thread->migratable = 1;
+    thread->migratable = NX_SHADER_AFFINITY_WORKER;
     if (thread->teb && &horizon_follow_thread_cores)
         horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );
     return (int)mask;
+}
+
+unsigned int wine_nx_thread_pipeline_begin( void )
+{
+    Handle handle = threadGetCurHandle();
+    unsigned int i, token = 0;
+
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+        int moved;
+
+        if (thread->handle != handle || thread->kind != 'w') continue;
+        if (thread->helper) break;
+        if ((moved = migrate_shader_locked( thread )) > 0)
+        {
+            thread->migratable = NX_SHADER_AFFINITY_PIPELINE;
+            token = i + 1;
+        }
+        break;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return token;
+}
+
+void wine_nx_thread_pipeline_end( unsigned int token )
+{
+    struct nx_prof_thread *thread;
+    int restored = 1;
+
+    if (!token || token > NX_PROF_MAX_THREADS) return;
+    pthread_mutex_lock( &registry_mutex );
+    thread = &registry[token - 1];
+    if (thread->handle == threadGetCurHandle() && thread->migratable == NX_SHADER_AFFINITY_PIPELINE)
+        restored = restore_thread_locked( thread, thread->app_core, thread->app_mask );
+    pthread_mutex_unlock( &registry_mutex );
+    if (!restored) wine_nx_runtime_trace( "[CORES] Vulkan compilation: could not restore affinity" );
 }
 
 void wine_nx_thread_set_name( unsigned int tid, const char *name )
@@ -192,6 +237,8 @@ void wine_nx_thread_set_name( unsigned int tid, const char *name )
         snprintf( thread->name, sizeof(thread->name), "%s", name );
         if (nx_thread_shader_worker( name ))
         {
+            if (thread->migratable == NX_SHADER_AFFINITY_PIPELINE)
+                thread->migratable = NX_SHADER_AFFINITY_WORKER;
             if ((moved = migrate_shader_locked( thread )) > 0)
                 snprintf( line, sizeof(line), "[CORES] %u %s: affinity %#x, priority unchanged", tid, name, moved );
             else if (moved < 0)

@@ -753,6 +753,9 @@ class Function(Type):
         body = ""
         needs_alloc = False
         deferred_op = None
+        pipeline_affinity = self.name in ("vkCreateGraphicsPipelines", "vkCreateComputePipelines")
+        if pipeline_affinity:
+            body += "#ifdef __SWITCH__\n    unsigned int nx_pipeline_affinity;\n#endif\n"
 
         # Declare any tmp parameters for conversion.
         for p in self.params:
@@ -818,10 +821,15 @@ class Function(Type):
             func_prefix = "{0}->p_".format(self.params[0].dispatch_table(params_prefix, conv))
 
         # Call the host Vulkan function.
+        if pipeline_affinity:
+            body += "#ifdef __SWITCH__\n    nx_pipeline_affinity = wine_nx_thread_pipeline_begin();\n#endif\n"
         if self.type == "void":
             body += "    {0}{1}({2});\n".format(func_prefix, self.name, params)
         else:
             body += "    {0}result = {1}{2}({3});\n".format(params_prefix, func_prefix, self.name, params)
+
+        if pipeline_affinity:
+            body += "#ifdef __SWITCH__\n    wine_nx_thread_pipeline_end(nx_pipeline_affinity);\n#endif\n"
 
         # Call any host_to_win conversion calls.
         for p in self.params:

@@ -13,6 +13,8 @@ int wine_nx_four_cores_available( void );
 void wine_nx_thread_configure_cores( int enabled );
 void wine_nx_thread_set_name( unsigned int tid, const char *name );
 void wine_nx_thread_set_affinity( unsigned int tid, unsigned int mask );
+unsigned int wine_nx_thread_pipeline_begin( void );
+void wine_nx_thread_pipeline_end( unsigned int token );
 
 static inline int nx_thread_graphics_worker( const char *name )
 {

@@ -27,6 +27,11 @@
 
 #include "wine/rbtree.h"
 
+#ifdef __SWITCH__
+extern unsigned int wine_nx_thread_pipeline_begin(void);
+extern void wine_nx_thread_pipeline_end(unsigned int token);
+#endif
+
 extern const struct vulkan_funcs *vk_funcs;
 
 struct wine_instance

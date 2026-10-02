@@ -59555,10 +59555,19 @@ static NTSTATUS thunk32_vkCreateCommandPool(void *args)
 static NTSTATUS thunk64_vkCreateComputePipelines(void *args)
 {
     struct vkCreateComputePipelines_params *params = args;
+#ifdef __SWITCH__
+    unsigned int nx_pipeline_affinity;
+#endif
 
     TRACE("%p, 0x%s, %u, %p, %p, %p\n", params->device, wine_dbgstr_longlong(params->pipelineCache), params->createInfoCount, params->pCreateInfos, params->pAllocator, params->pPipelines);
 
+#ifdef __SWITCH__
+    nx_pipeline_affinity = wine_nx_thread_pipeline_begin();
+#endif
     params->result = vulkan_device_from_handle(params->device)->p_vkCreateComputePipelines(vulkan_device_from_handle(params->device)->host.device, params->pipelineCache, params->createInfoCount, params->pCreateInfos, NULL, params->pPipelines);
+#ifdef __SWITCH__
+    wine_nx_thread_pipeline_end(nx_pipeline_affinity);
+#endif
     return STATUS_SUCCESS;
 }
 #endif /* _WIN64 */
@@ -59575,6 +59584,9 @@ static NTSTATUS thunk32_vkCreateComputePipelines(void *args)
         PTR32 pPipelines;
         VkResult result;
     } *params = args;
+#ifdef __SWITCH__
+    unsigned int nx_pipeline_affinity;
+#endif
     const VkComputePipelineCreateInfo *pCreateInfos_host;
     struct conversion_context local_ctx;
     struct conversion_context *ctx = &local_ctx;
@@ -59583,7 +59595,13 @@ static NTSTATUS thunk32_vkCreateComputePipelines(void *args)
 
     init_conversion_context(ctx);
     pCreateInfos_host = convert_VkComputePipelineCreateInfo_array_win32_to_host(ctx, (const VkComputePipelineCreateInfo32 *)UlongToPtr(params->pCreateInfos), params->createInfoCount);
+#ifdef __SWITCH__
+    nx_pipeline_affinity = wine_nx_thread_pipeline_begin();
+#endif
     params->result = vulkan_device_from_handle((VkDevice)UlongToPtr(params->device))->p_vkCreateComputePipelines(vulkan_device_from_handle((VkDevice)UlongToPtr(params->device))->host.device, params->pipelineCache, params->createInfoCount, pCreateInfos_host, NULL, (VkPipeline *)UlongToPtr(params->pPipelines));
+#ifdef __SWITCH__
+    wine_nx_thread_pipeline_end(nx_pipeline_affinity);
+#endif
     convert_VkComputePipelineCreateInfo_array_host_to_win32(pCreateInfos_host, (VkComputePipelineCreateInfo32 *)UlongToPtr(params->pCreateInfos), params->createInfoCount);
     free_conversion_context(ctx);
     return STATUS_SUCCESS;
@@ -60149,10 +60167,19 @@ static NTSTATUS thunk32_vkCreateGpaSessionAMD(void *args)
 static NTSTATUS thunk64_vkCreateGraphicsPipelines(void *args)
 {
     struct vkCreateGraphicsPipelines_params *params = args;
+#ifdef __SWITCH__
+    unsigned int nx_pipeline_affinity;
+#endif
 
     TRACE("%p, 0x%s, %u, %p, %p, %p\n", params->device, wine_dbgstr_longlong(params->pipelineCache), params->createInfoCount, params->pCreateInfos, params->pAllocator, params->pPipelines);
 
+#ifdef __SWITCH__
+    nx_pipeline_affinity = wine_nx_thread_pipeline_begin();
+#endif
     params->result = vulkan_device_from_handle(params->device)->p_vkCreateGraphicsPipelines(vulkan_device_from_handle(params->device)->host.device, params->pipelineCache, params->createInfoCount, params->pCreateInfos, NULL, params->pPipelines);
+#ifdef __SWITCH__
+    wine_nx_thread_pipeline_end(nx_pipeline_affinity);
+#endif
     return STATUS_SUCCESS;
 }
 #endif /* _WIN64 */
@@ -60169,6 +60196,9 @@ static NTSTATUS thunk32_vkCreateGraphicsPipelines(void *args)
         PTR32 pPipelines;
         VkResult result;
     } *params = args;
+#ifdef __SWITCH__
+    unsigned int nx_pipeline_affinity;
+#endif
     const VkGraphicsPipelineCreateInfo *pCreateInfos_host;
     struct conversion_context local_ctx;
     struct conversion_context *ctx = &local_ctx;
@@ -60177,7 +60207,13 @@ static NTSTATUS thunk32_vkCreateGraphicsPipelines(void *args)
 
     init_conversion_context(ctx);
     pCreateInfos_host = convert_VkGraphicsPipelineCreateInfo_array_win32_to_host(ctx, (const VkGraphicsPipelineCreateInfo32 *)UlongToPtr(params->pCreateInfos), params->createInfoCount);
+#ifdef __SWITCH__
+    nx_pipeline_affinity = wine_nx_thread_pipeline_begin();
+#endif
     params->result = vulkan_device_from_handle((VkDevice)UlongToPtr(params->device))->p_vkCreateGraphicsPipelines(vulkan_device_from_handle((VkDevice)UlongToPtr(params->device))->host.device, params->pipelineCache, params->createInfoCount, pCreateInfos_host, NULL, (VkPipeline *)UlongToPtr(params->pPipelines));
+#ifdef __SWITCH__
+    wine_nx_thread_pipeline_end(nx_pipeline_affinity);
+#endif
     convert_VkGraphicsPipelineCreateInfo_array_host_to_win32(pCreateInfos_host, (VkGraphicsPipelineCreateInfo32 *)UlongToPtr(params->pCreateInfos), params->createInfoCount);
     free_conversion_context(ctx);
     return STATUS_SUCCESS;
