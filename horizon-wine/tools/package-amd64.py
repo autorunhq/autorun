@@ -19,6 +19,7 @@ import sys
 import tempfile
 from zipfile import ZipFile, ZIP_DEFLATED
 
+from wine_mono_payload import stage_wine_mono
 horizon_wine = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('--build', type=Path, default=horizon_wine / 'build-switch-amd64')
@@ -29,6 +30,7 @@ parser.add_argument('--vulkan', action='store_true', help='The NRO is linked wit
 parser.add_argument('--dxvk', action='store_true', help='The NRO runs the bundled DXVK (requires --vulkan)')
 parser.add_argument('--vkd3d', action='store_true', help='The NRO runs the bundled VKD3D-Proton (requires --dxvk)')
 parser.add_argument('--fex', action='store_true', help='The NRO runs the FEX CPU modules')
+parser.add_argument('--wine-mono', type=Path, help='Stage Win32 and Win64 Mono from wine-mono-11.3.0-arm64.tar.xz')
 args = parser.parse_args()
 wine_source = args.wine_source.resolve()
 if args.output and args.stage_output:
@@ -89,6 +91,9 @@ def stage_file(source, destination):
 
 
 drive = stage / 'drive_c'
+mono_manifest = None
+if args.wine_mono:
+    mono_manifest = stage_wine_mono(args.wine_mono, drive / 'windows/mono/mono-2.0')
 for name in ('fonts', 'nls'):
     extension = '*.ttf' if name == 'fonts' else '*.nls'
     resources = list((wine_source / name).glob(extension))
@@ -101,6 +106,8 @@ for name in ('fonts', 'nls'):
 stage_file(nro, stage / nro.name)
 licenses = stage / 'licenses'
 stage_file(build / 'licenses/FFmpeg-LGPL-2.1.txt', licenses / 'FFmpeg-LGPL-2.1.txt')
+if mono_manifest:
+    stage_file(horizon_wine / 'licenses/WineMono.txt', licenses / 'WineMono.txt')
 if lsfg_revision:
     stage_file(build / 'licenses/LSFG-VK-GPL-3.0.txt', licenses / 'LSFG-VK-GPL-3.0.txt')
     (stage / 'lsfg').mkdir()
@@ -118,6 +125,7 @@ manifest = {
                  'vulkan': args.vulkan, 'dxvk': args.dxvk, 'vkd3d': args.vkd3d,
                  'lsfg': bool(lsfg_revision), 'fex': args.fex},
     'mesa_switch': mesa_revision,
+    'wine_mono': mono_manifest,
     'lsfg': {'repository': 'https://git.lsfg-vk.dev/lsfg-vk-archive.git',
              'revision': lsfg_revision,
              'port': 'https://github.com/autorunhq/switch-dev'}

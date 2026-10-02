@@ -638,6 +638,7 @@ struct horizon_fd_queue
 #define HORIZON_REQ_GET_NEXT_THREAD 295
 #define HORIZON_STATUS_SUCCESS 0
 #define HORIZON_STATUS_OBJECT_NAME_EXISTS 0x40000000u
+#define HORIZON_STATUS_IMAGE_MACHINE_TYPE_MISMATCH 0x4000000eu
 #define HORIZON_STATUS_KERNEL_APC 0x00000100u
 #define HORIZON_STATUS_ALERTED 0x00000101u
 #define HORIZON_STATUS_USER_APC 0x000000c0u
@@ -726,8 +727,14 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_BASERELOC 5
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14
+#define HORIZON_IMAGE_FLAGS_COMPLUS_NATIVE_READY 0x01
+#define HORIZON_IMAGE_FLAGS_COMPLUS_ILONLY 0x02
 #define HORIZON_IMAGE_FLAGS_IMAGE_DYNAMICALLY_RELOCATED 0x04
 #define HORIZON_IMAGE_FLAGS_IMAGE_MAPPED_FLAT 0x08
+#define HORIZON_IMAGE_FLAGS_COMPLUS_PREFER32BIT 0x20
+#define HORIZON_COMIMAGE_FLAGS_ILONLY 0x00000001
+#define HORIZON_COMIMAGE_FLAGS_32BITREQUIRED 0x00000002
+#define HORIZON_COMIMAGE_FLAGS_32BITPREFERRED 0x00020000
 #define HORIZON_SEC_IMAGE 0x01000000u
 #define HORIZON_SECTION_MAP_WRITE 0x0002u
 #define HORIZON_SECTION_MAP_READ 0x0004u
@@ -5269,7 +5276,7 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
 {
     static const char builtin_signature[] = "Wine builtin DLL";
     static const char fakedll_signature[] = "Wine placeholder DLL";
-    unsigned char dos[64], mz_signature[32], nt[24], cfg[0xd0];
+    unsigned char dos[64], mz_signature[32], nt[24], cfg[0xd0], clr[72] = {0};
     unsigned char *headers = NULL;
     unsigned int status = HORIZON_STATUS_SUCCESS;
     unsigned int pe_offset, opt_size, section_count, headers_size;
@@ -5312,7 +5319,8 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
     opt_size = horizon_get_le16( nt + 20 );
     characteristics = horizon_get_le16( nt + 22 );
 
-    if (machine != HORIZON_IMAGE_FILE_MACHINE_ARM64 && machine != horizon_process_machine)
+    if (machine != HORIZON_IMAGE_FILE_MACHINE_ARM64 && machine != horizon_process_machine &&
+        !(machine == HORIZON_IMAGE_FILE_MACHINE_I386 && horizon_process_machine == HORIZON_IMAGE_FILE_MACHINE_AMD64))
         return HORIZON_STATUS_INVALID_IMAGE_FORMAT;
     if (!section_count || section_count > 128 || opt_size < (machine == HORIZON_IMAGE_FILE_MACHINE_I386 ? 96 : 112))
         return HORIZON_STATUS_INVALID_IMAGE_FORMAT;
@@ -5412,6 +5420,25 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
         if (horizon_get_le32( section + 36 ) & HORIZON_IMAGE_SCN_MEM_EXECUTE) info->contains_code = 1;
     }
 
+    if (horizon_server_read_pe_dir( fd, clr, sizeof(clr), clr_va, clr_size, align_mask,
+                                    headers + opt_size, section_count, st.st_size ) &&
+        (horizon_get_le16( clr + 4 ) > 2 ||
+         (horizon_get_le16( clr + 4 ) == 2 && horizon_get_le16( clr + 6 ) >= 5)))
+    {
+        unsigned int flags = horizon_get_le32( clr + 16 );
+
+        if (flags & HORIZON_COMIMAGE_FLAGS_ILONLY)
+        {
+            info->image_flags |= HORIZON_IMAGE_FLAGS_COMPLUS_ILONLY;
+            if (pe32)
+            {
+                if (!(flags & HORIZON_COMIMAGE_FLAGS_32BITREQUIRED))
+                    info->image_flags |= HORIZON_IMAGE_FLAGS_COMPLUS_NATIVE_READY;
+                if (flags & HORIZON_COMIMAGE_FLAGS_32BITPREFERRED)
+                    info->image_flags |= HORIZON_IMAGE_FLAGS_COMPLUS_PREFER32BIT;
+            }
+        }
+    }
     memset( cfg, 0, sizeof(cfg) );
     i = horizon_server_read_pe_dir( fd, cfg, sizeof(cfg), cfg_va, cfg_size, align_mask,
                                     headers + opt_size, section_count, st.st_size );
@@ -14404,6 +14431,8 @@ static int horizon_server_handle_map_image_view( struct horizon_server_connectio
         entry->object->mapping_image.map_size = request->size;
         entry->object->mapping_image.entry_point = request->entry;
         entry->object->mapping_image.machine = request->machine;
+        if (request->machine != horizon_process_machine && request->machine != HORIZON_IMAGE_FILE_MACHINE_ARM64)
+            status = HORIZON_STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 

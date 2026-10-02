@@ -17,6 +17,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
 loadorder = (root / 'dlls/ntdll/unix/loadorder.c').read_text()
+pe_loader = (root / 'dlls/ntdll/loader.c').read_text()
 
 
 def block(marker, text=source):
@@ -32,9 +33,10 @@ def block(marker, text=source):
 struct_start = source.index('struct horizon_pe_image_info\n{')
 struct_text = source[struct_start:source.index('};', struct_start) + 2]
 defines = '\n'.join(line for line in source.splitlines()
-                    if re.match(r'#define HORIZON_(IMAGE_|STATUS_(SUCCESS|NO_MEMORY|INVALID_IMAGE_FORMAT))', line))
+                    if re.match(r'#define HORIZON_(IMAGE_|COMIMAGE_|STATUS_)', line))
 
 fixture = f'''
+#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>
@@ -51,7 +53,11 @@ typedef int BOOL;
 {defines}
 {struct_text}
 {block('struct horizon_pe_version')} ;
-struct horizon_server_object {{ int unused; }};
+struct horizon_server_object
+{{
+    struct horizon_pe_image_info mapping_image;
+    unsigned int type, mapping_has_image, refs;
+}};
 static unsigned short horizon_process_machine = HORIZON_IMAGE_FILE_MACHINE_I386;
 static unsigned int horizon_server_errno_status( int error ) {{ return 0xc0000000u | (unsigned int)error; }}
 {block('static unsigned int horizon_server_read_exact_at(')}
@@ -71,6 +77,59 @@ static unsigned int horizon_server_build_shared_image( int fd, const unsigned ch
     return HORIZON_STATUS_SUCCESS;
 }}
 {block('static unsigned int horizon_server_read_pe_image_info(')}
+struct horizon_server_connection {{ unsigned int pid; int reply_fd; }};
+struct horizon_map_image_view_request
+{{
+    unsigned int mapping, size, entry, machine;
+    unsigned long long base;
+}};
+struct horizon_server_handle_entry {{ struct horizon_server_object *object; }};
+struct horizon_image_view
+{{
+    struct horizon_image_view *next;
+    struct horizon_server_object *mapping;
+    unsigned int pid;
+    unsigned long long base;
+}};
+static struct horizon_image_view *horizon_image_views;
+static struct horizon_server_handle_entry mapped_entry;
+static int horizon_server_objects_mutex;
+#define HORIZON_SERVER_OBJECT_MAPPING 1
+static void test_lock( int *lock ) {{ assert(!*lock); *lock = 1; }}
+static void test_unlock( int *lock ) {{ assert(*lock); *lock = 0; }}
+#define pthread_mutex_lock test_lock
+#define pthread_mutex_unlock test_unlock
+static struct horizon_server_handle_entry *horizon_server_find_handle_locked( unsigned int handle )
+{{ return handle == 1 ? &mapped_entry : NULL; }}
+static void horizon_server_remove_image_view_locked( unsigned int pid, unsigned long long base )
+{{ assert(!horizon_image_views); }}
+static int horizon_server_write_status( int fd, unsigned int status ) {{ return status; }}
+{block('static int horizon_server_handle_map_image_view(')}
+static void test_managed_view(void)
+{{
+    struct horizon_server_object object = {{0}};
+    struct horizon_server_connection connection = {{42, 0}};
+    struct horizon_map_image_view_request request = {{1, 0x1000, 0, 0, 0x400000}};
+    unsigned short saved = horizon_process_machine;
+    const unsigned int machines[] = {{0x14c, 0x8664, 0xaa64}};
+    object.type = HORIZON_SERVER_OBJECT_MAPPING;
+    object.mapping_has_image = 1;
+    mapped_entry.object = &object;
+    horizon_process_machine = 0x8664;
+    for (unsigned int i = 0; i < ARRAY_SIZE(machines); i++)
+    {{
+        unsigned int status;
+        request.machine = machines[i];
+        status = horizon_server_handle_map_image_view( &connection, (const unsigned char *)&request );
+        assert(status == (machines[i] == 0x14c ? HORIZON_STATUS_IMAGE_MACHINE_TYPE_MISMATCH : 0));
+        assert(horizon_image_views && horizon_image_views->mapping == &object);
+        assert(horizon_image_views->base == request.base && object.mapping_image.machine == machines[i]);
+        free(horizon_image_views);
+        horizon_image_views = NULL;
+    }}
+    assert(object.refs == ARRAY_SIZE(machines));
+    horizon_process_machine = saved;
+}}
 typedef uint16_t WORD, WCHAR;
 typedef unsigned int ULONG;
 typedef struct {{ unsigned int dwSignature, rest[12]; }} VS_FIXEDFILEINFO;
@@ -121,6 +180,7 @@ static enum loadorder get_load_order_value(void *std, void *app, const WCHAR *na
 int main( int argc, char **argv )
 {{
     int i;
+    test_managed_view();
 
     if (argc < 2) return 2;
     horizon_process_machine = strtoul( argv[1], NULL, 16 );
@@ -160,6 +220,53 @@ int main( int argc, char **argv )
     }}
     return 0;
 }}
+'''
+
+
+client_fixture = r'''
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+#include "windef.h"
+#include "winbase.h"
+#include "winternl.h"
+static TEB test_teb;
+static const USHORT current_machine = IMAGE_FILE_MACHINE_AMD64;
+#undef NtCurrentTeb
+#define NtCurrentTeb() (&test_teb)
+#define GetProcessHeap() ((HANDLE)1)
+#define RtlAllocateHeap(heap, flags, size) malloc(size)
+#define RtlFreeHeap(heap, flags, ptr) free(ptr)
+static NTSTATUS read_file(HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void *context,
+                          IO_STATUS_BLOCK *io, void *buffer, ULONG size, LARGE_INTEGER *offset, ULONG *key)
+{
+    ssize_t count = pread((int)(intptr_t)file, buffer, size, offset->QuadPart);
+    io->Information = count < 0 ? 0 : count;
+    return count < 0 ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+}
+#define NtReadFile read_file
+'''
+for marker in ('static ULONG read_image_directory(', 'static BOOL is_com_ilonly(',
+               'static BOOL has_chpe_metadata(', 'static BOOL is_valid_binary('):
+    client_fixture += block(marker, pe_loader) + '\n'
+client_fixture += r'''
+int main(int argc, char **argv)
+{
+    SECTION_IMAGE_INFORMATION info = {0};
+    assert(argc == 5);
+    int fd = open(argv[1], O_RDONLY);
+    assert(fd >= 0);
+    info.Machine = strtoul(argv[2], NULL, 16);
+    info.ImageFlags = strtoul(argv[3], NULL, 16);
+    info.ImageContainsCode = strtoul(argv[4], NULL, 16);
+    printf("%u\n", is_valid_binary((HANDLE)(intptr_t)fd, &info));
+    close(fd);
+}
 '''
 
 
@@ -225,6 +332,10 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-image-info-') as tmp:
     (tmp / 'test.c').write_text(fixture)
     subprocess.run(['cc', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
                     str(tmp / 'test.c'), '-o', str(tmp / 'test')], check=True)
+    (tmp / 'client.c').write_text(client_fixture)
+    subprocess.run(['cc', '-g', '-Wall', '-Werror', '-D__WINESRC__', '-DWINE_UNIX_LIB', '-D_WIN64',
+                    '-fsanitize=address,undefined', '-I' + str(root / 'include'),
+                    str(tmp / 'client.c'), '-o', str(tmp / 'client')], check=True)
 
     # SizeOfImage 0x678e4e: the last section's page runs to 0x679000 (speed.exe's layout).
     pe32(tmp / 'unaligned.exe', 0x678e4e, [(0x1000, 0x48e2a5, 0x1000, 0x1000), (0x638000, 0x40e4e, 0x2000, 0x1000)])
@@ -241,6 +352,12 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-image-info-') as tmp:
         out = subprocess.run([str(tmp / 'test'), f'{machine:x}'] + [str(p) for p in paths], check=True,
                              capture_output=True, text=True).stdout.splitlines()
         return {labels[int(line.split()[0])]: [int(v, 16) for v in line.split()[1:]] for line in out}
+
+    def client_accepts(path, row):
+        assert row[0] == 0, row
+        output = subprocess.check_output([str(tmp / 'client'), str(path),
+                                          f'{row[5]:x}', f'{row[3]:x}', f'{row[7]:x}'], text=True)
+        return bool(int(output))
 
     names = ['unaligned', 'aligned', 'align64k', 'late-section', 'flat', 'wraps']
     rows = run(0x14c, names, [tmp / (n + '.exe') for n in names])
@@ -260,6 +377,64 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-image-info-') as tmp:
     assert rows['arm64x'][3] & 0x04 and rows['arm64x'][10] == 1, rows['arm64x']
     assert rows['truncated'][0] == 0 and rows['truncated'][6] == 0, rows['truncated']
     assert run(0x14c, ['amd64'], [tmp / 'amd64.dll'])['amd64'][0] == 0xc000007b
+
+    def managed_image(path, flags=1, version=(2, 5), pe64_image=False, directory_size=72):
+        if pe64_image:
+            pe64(path, 0x8664)
+        else:
+            pe32(path, 0x2000, [(0x1000, 0x1000, 0x400, 0x400)], size_of_headers=0x400)
+        image = bytearray(path.read_bytes())
+        opt = struct.unpack_from('<I', image, 60)[0] + 24
+        struct.pack_into('<II', image, opt + (112 if pe64_image else 96) + 14 * 8,
+                         0x1100, directory_size)
+        struct.pack_into('<IHHIII', image, 0x500, 72, *version, 0x1180, 0x40, flags)
+        path.write_bytes(image)
+
+    for flags, expected in ((1, 3), (9, 3), (0x20001, 0x23), (3, 2), (0x20003, 0x22), (0, 0)):
+        path = tmp / 'managed.dll'
+        managed_image(path, flags)
+        row = run(0x14c, ['il'], [path])['il']
+        assert row[0] == 0 and row[3] == expected and row[8] == 1, row
+        row = run(0x8664, ['il'], [path])['il']
+        assert row[0] == 0 and row[3] == expected, row
+        assert client_accepts(path, row) == bool(flags & 1), row
+
+    for version in ((1, 1), (2, 0), (2, 4)):
+        managed_image(path, version=version)
+        row = run(0x8664, ['old-clr'], [path])['old-clr']
+        assert row[0] == 0 and row[3] == 0, row
+        assert client_accepts(path, row), row
+    managed_image(path, version=(4, 0))
+    assert run(0x8664, ['new-clr'], [path])['new-clr'][3] == 3
+    for directory_size in (0, 8, 16):
+        managed_image(path, directory_size=directory_size)
+        row = run(0x8664, ['short-clr'], [path])['short-clr']
+        assert row[0] == 0 and row[3] == 0 and not client_accepts(path, row), row
+    managed_image(path)
+    path.write_bytes(path.read_bytes()[:0x510])
+    row = run(0x8664, ['truncated-clr'], [path])['truncated-clr']
+    assert row[0] == 0 and row[3] == 0 and not client_accepts(path, row), row
+    path = tmp / 'aligned.exe'
+    row = run(0x8664, ['native32'], [path])['native32']
+    assert row[0] == 0 and not client_accepts(path, row), row
+    path = tmp / 'managed.dll'
+    managed_image(path, pe64_image=True)
+    row = run(0x8664, ['managed64'], [path])['managed64']
+    assert row[0] == 0 and row[3] == 2 and row[5] == 0x8664, row
+
+    if real_managed := os.environ.get('WINE_NX_MANAGED_DLL'):
+        for machine in (0x14c, 0x8664):
+            row = run(machine, ['mscorlib'], [Path(real_managed)])['mscorlib']
+            assert row[0] == 0 and row[8] == 1 and client_accepts(Path(real_managed), row), row
+        print(f'{real_managed}: managed image accepted in Win32 and Win64')
+
+    if mono_dir := os.environ.get('WINE_NX_MONO_DIR'):
+        assemblies = sorted(Path(mono_dir).rglob('*.dll'))
+        rows = run(0x8664, list(map(str, assemblies)), assemblies)
+        for assembly in assemblies:
+            row = rows[str(assembly)]
+            assert row[0] == 0 and client_accepts(assembly, row), (assembly, row)
+        print(f'Mono: all {len(assemblies)} packaged assemblies pass the Win64 section and DLL-loader checks')
 
     def version_node(key, value=b'', children=b'', text=False):
         data = bytearray(struct.pack('<HHH', 0, len(value) // (2 if text else 1), int(text)))
