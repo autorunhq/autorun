@@ -1343,6 +1343,10 @@ static void runtime_report_interpreter(void)
         extern unsigned int wine_nx_gl_persistent_failures __attribute__((weak));
         extern unsigned long long wine_nx_gl_swap_time __attribute__((weak)), wine_nx_gl_call_time __attribute__((weak));
         extern unsigned long long wine_nx_gl_copy_bytes __attribute__((weak));
+        extern unsigned long long wine_nx_gl_copy_read_bytes __attribute__((weak));
+        extern unsigned long long wine_nx_gl_copy_write_bytes __attribute__((weak));
+        extern unsigned long long wine_nx_gl_copy_back_bytes __attribute__((weak));
+        extern unsigned long long wine_nx_gl_copy_saved_bytes __attribute__((weak));
         extern void wine_nx_gl_profile( char *buffer, size_t size ) __attribute__((weak));
         extern unsigned long long wine_nx_nouveau_fence_wait_ns __attribute__((weak));
         extern unsigned int wine_nx_nouveau_tex_direct __attribute__((weak)), wine_nx_nouveau_tex_staging __attribute__((weak));
@@ -1465,6 +1469,15 @@ static void runtime_report_interpreter(void)
                                 (&wine_nx_gl_copy_bytes ? __atomic_load_n( &wine_nx_gl_copy_bytes, __ATOMIC_RELAXED ) : 0) >> 20,
                                 &wine_nx_gl_persistent_failures ? wine_nx_gl_persistent_failures : 0,
                                 &wine_nx_gl_pinned_memory ? wine_nx_gl_pinned_memory : 0 );
+            /* Those copies by kind: in for maps that read, in for maps that
+             * only write, back to the driver, and in no longer made for
+             * write-only maps with explicit flushes (unix_wgl.c). */
+            if (&wine_nx_gl_copy_saved_bytes && len > 0 && len < (int)sizeof(gl))
+                len += snprintf( gl + len, sizeof(gl) - len, " copy_in_read_mb=%llu copy_in_write_mb=%llu copy_back_mb=%llu copy_saved_mb=%llu",
+                                 __atomic_load_n( &wine_nx_gl_copy_read_bytes, __ATOMIC_RELAXED ) >> 20,
+                                 __atomic_load_n( &wine_nx_gl_copy_write_bytes, __ATOMIC_RELAXED ) >> 20,
+                                 __atomic_load_n( &wine_nx_gl_copy_back_bytes, __ATOMIC_RELAXED ) >> 20,
+                                 __atomic_load_n( &wine_nx_gl_copy_saved_bytes, __ATOMIC_RELAXED ) >> 20 );
             /* Mesa's nouveau: texture transfers mapped in place or through staging
              * buffers, buffer reads through a GPU copy, waits for the GPU with their
              * time, pinned buffers created and nvservices' last refusal to pin. */
