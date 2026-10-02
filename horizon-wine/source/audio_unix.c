@@ -1,7 +1,6 @@
 /* Copyright 2026 Wine-NX contributors. LGPL-2.1-or-later.
  * Native audout backend behind the packaged winenxaudio.drv PE module.
- * Shared render clients, stereo 48 kHz signed 16-bit PCM.
- * Wine's shared-mode converter handles other application formats. */
+ * Shared render clients mixed to stereo 48 kHz signed 16-bit PCM. */
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
@@ -112,20 +111,17 @@ static NTSTATUS nx_is_format_supported(void *args)
 static NTSTATUS nx_get_mix_format(void *args)
 {
     struct get_mix_format_params *p = args;
-    /* EXTENSIBLE, as Wine's other drivers report it: DirectSound copies this
-     * and only changes the subtype and sample size, so a plain WAVEFORMATEX
-     * (cbSize 0) made its Initialize fail with E_INVALIDARG. */
     memset(p->fmt, 0, sizeof(*p->fmt));
     p->fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
     p->fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
     p->fmt->Format.nChannels = 2;
     p->fmt->Format.nSamplesPerSec = NX_RATE;
-    p->fmt->Format.nAvgBytesPerSec = NX_RATE * 4;
-    p->fmt->Format.nBlockAlign = 4;
-    p->fmt->Format.wBitsPerSample = 16;
-    p->fmt->Samples.wValidBitsPerSample = 16;
+    p->fmt->Format.nAvgBytesPerSec = NX_RATE * 8;
+    p->fmt->Format.nBlockAlign = 8;
+    p->fmt->Format.wBitsPerSample = 32;
+    p->fmt->Samples.wValidBitsPerSample = 32;
     p->fmt->dwChannelMask = 0x3;  /* SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT */
-    p->fmt->SubFormat = nx_subtype_pcm;
+    p->fmt->SubFormat = nx_subtype_float;
     p->result = p->flow == eRender ? S_OK : AUDCLNT_E_UNSUPPORTED_FORMAT;
     return STATUS_SUCCESS;
 }

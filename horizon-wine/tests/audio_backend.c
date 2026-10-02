@@ -141,10 +141,7 @@ int main(void)
         release.stream = handle; nx_release_stream(&release);
         assert(release.result == S_OK);
     }
-    /* DirectSound (DSOUND_WaveFormat, DSOUND_ReopenDevice): the mix format made
-     * 32-bit float EXTENSIBLE, everything else copied, then Initialize with event
-     * callbacks. A plain WAVEFORMATEX mix format left cbSize 0 there, which
-     * mmdevapi's validate_wfx rejects with E_INVALIDARG. */
+    /* Shared clients may select float without changing the mix format's valid bits. */
     {
         WAVEFORMATEXTENSIBLE mix, ds;
         struct get_mix_format_params mixp = {.flow=eRender, .fmt=&mix};
@@ -156,12 +153,17 @@ int main(void)
         nx_get_mix_format(&mixp);
         assert(mixp.result == S_OK && mix.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE);
         assert(mix.Format.nChannels == 2 && mix.dwChannelMask == 0x3);
+        assert(mix.Format.wBitsPerSample == 32 && mix.Samples.wValidBitsPerSample == 32);
+        assert(mix.Format.nBlockAlign == 8 && mix.Format.nAvgBytesPerSec == NX_RATE * 8);
+        assert(!memcmp(&mix.SubFormat, &nx_subtype_float, sizeof(GUID)));
+        assert(nx_format(&mix.Format));
         ds = mix;
         ds.SubFormat = nx_subtype_float;
-        ds.Samples.wValidBitsPerSample = ds.Format.wBitsPerSample = 32;
+        ds.Format.wBitsPerSample = 32;
         ds.Format.nBlockAlign = ds.Format.nChannels * ds.Format.wBitsPerSample / 8;
         ds.Format.nAvgBytesPerSec = ds.Format.nSamplesPerSec * ds.Format.nBlockAlign;
         assert(ds.Format.cbSize == sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX));
+        assert(ds.Samples.wValidBitsPerSample == ds.Format.wBitsPerSample);
         nx_is_format_supported(&supported); assert(supported.result == S_OK);
         nx_create_stream(&ds_create); assert(ds_create.result == S_OK && handle);
         assert(nx_stream(handle)->source_tag == WAVE_FORMAT_IEEE_FLOAT);
