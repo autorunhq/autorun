@@ -41,7 +41,14 @@ fixed = fixed[:fixed.index('\nvoid *horizon_anon_mmap_fixed')]
 assert 'add_lazy_file_mapping_locked( start, size, prot, fd, offset )' in fixed
 
 # The runtime turns it on per program, and says so.
-assert 'launcher_setting_state( &kv, "lazy-file-views" ) == 1' in runtime
+assert 'wine_nx_lazy_file_views = settings.lazy_file_views;' in runtime
+settings = (root / 'horizon-wine/source/launcher_settings.h').read_text()
+assert 'settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;' in settings
+assert 'launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL )' in settings
+# A switch in each program's settings, off unless turned on.
+launcher = (root / 'horizon-wine/source/launcher.c').read_text()
+assert 'ADD_ROW( ROW_LAZY_FILE_VIEWS, SECTION_EMULATION, "Fast file loading",' in launcher
+assert 'case ROW_LAZY_FILE_VIEWS:' in launcher
 assert 'lazy-file-views.txt' in runtime
 assert '[INIT] views of files read on demand' in runtime
 print('lazy file views: ok')

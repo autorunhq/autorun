@@ -4098,7 +4098,7 @@ int main( int argc, char **argv )
         {
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
-            wine_nx_lazy_file_views = launcher_setting_state( &kv, "lazy-file-views" ) == 1;
+            wine_nx_lazy_file_views = settings.lazy_file_views;
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
 #endif
