@@ -17,6 +17,8 @@
 
 #ifdef __SWITCH__
 
+#include <limits.h>
+
 #ifdef HORIZON_STANDALONE_SYNTAX
 #include "horizon_syntax_shim.h"
 #else
@@ -720,6 +722,7 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_IMAGE_SCN_MEM_EXECUTE 0x20000000
 #define HORIZON_IMAGE_SCN_MEM_WRITE 0x80000000
 #define HORIZON_IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE 0x0040
+#define HORIZON_IMAGE_DIRECTORY_ENTRY_RESOURCE 2
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_BASERELOC 5
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
 #define HORIZON_IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14
@@ -3211,6 +3214,12 @@ struct horizon_session_view
 struct horizon_server_object;
 struct horizon_sync_waiter;
 
+struct horizon_pe_version
+{
+    unsigned int size;
+    unsigned char data[];
+};
+
 struct horizon_sync_link
 {
     struct horizon_sync_link *next, *prev;
@@ -3345,6 +3354,7 @@ struct horizon_server_object
     unsigned int file_completion_flags;  /* FILE_SKIP_* */
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
     struct horizon_server_object *mapping_shared_file;
+    struct horizon_pe_version *mapping_version;
 };
 
 struct horizon_server_handle_entry
@@ -4675,6 +4685,7 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (object->file_fd != -1) close( object->file_fd );
     if (object->file_peer_fd != -1) close( object->file_peer_fd );
     free( object->file_name );
+    free( object->mapping_version );
     free( object->dir_mask );
     free( object->name );
     free( object );
@@ -5043,12 +5054,14 @@ static size_t horizon_server_read_pe_dir( int fd, void *buffer, size_t buffer_si
         if (va < section_va || (virtual_size && va - section_va >= virtual_size)) continue;
         map_size = virtual_size ? virtual_size : raw_size;
         map_size = (map_size + align_mask) & ~(unsigned long long)align_mask;
-        if (!map_size || size >= map_size || va - section_va >= map_size - size) continue;
+        if (!map_size || size > map_size || va - section_va > map_size - size) continue;
 
         read_offset = (raw_offset & ~0x1ffu) + (unsigned long long)(va - section_va);
         read_size = (unsigned long long)raw_size + (raw_offset & 0x1ffu);
         read_size = (read_size + 0x1ff) & ~(unsigned long long)0x1ff;
         if (read_size > map_size) read_size = map_size;
+        if (va - section_va >= read_size) return 0;
+        read_size -= va - section_va;
         if (size < read_size) read_size = size;
         if (buffer_size < read_size) read_size = buffer_size;
         if (read_offset >= file_size) return 0;
@@ -5057,6 +5070,87 @@ static size_t horizon_server_read_pe_dir( int fd, void *buffer, size_t buffer_si
         return read_size;
     }
     return 0;
+}
+
+static unsigned int horizon_server_find_resource( int fd, unsigned int va, unsigned int size,
+                                                  unsigned int align_mask, const unsigned char *sections,
+                                                  unsigned int section_count, unsigned long long file_size,
+                                                  unsigned int id, unsigned int *offset )
+{
+    unsigned char dir[16], *entries;
+    unsigned int pos = *offset, count, i, candidate, fallback = 0, neutral = 0;
+
+    *offset = 0;
+    if (pos > size || sizeof(dir) > size - pos || va > UINT_MAX - pos) return HORIZON_STATUS_SUCCESS;
+    if (horizon_server_read_pe_dir( fd, dir, sizeof(dir), va + pos, sizeof(dir), align_mask,
+                                    sections, section_count, file_size ) != sizeof(dir))
+        return HORIZON_STATUS_SUCCESS;
+    pos += sizeof(dir);
+    count = horizon_get_le16( dir + 12 );
+    if (count > (size - pos) / 8) return HORIZON_STATUS_SUCCESS;
+    pos += count * 8;
+    count = horizon_get_le16( dir + 14 );
+    if (!count || count > (size - pos) / 8 || va > UINT_MAX - pos) return HORIZON_STATUS_SUCCESS;
+    if (!(entries = malloc( count * 8 ))) return HORIZON_STATUS_NO_MEMORY;
+    if (horizon_server_read_pe_dir( fd, entries, count * 8, va + pos, count * 8, align_mask,
+                                    sections, section_count, file_size ) == count * 8)
+    {
+        for (i = 0; i < count; i++)
+        {
+            unsigned int entry_id = horizon_get_le32( entries + i * 8 );
+            unsigned int value = horizon_get_le32( entries + i * 8 + 4 );
+
+            candidate = value & 0x7fffffff;
+            if (!!(value & 0x80000000) != !!id || candidate >= size) continue;
+            if (id ? entry_id == id : entry_id == 0x0409)
+            {
+                *offset = candidate;
+                break;
+            }
+            if (!id && !entry_id) neutral = candidate;
+            if (!id && !i) fallback = candidate;
+        }
+        if (!id && !*offset) *offset = neutral ? neutral : fallback;
+    }
+    free( entries );
+    return HORIZON_STATUS_SUCCESS;
+}
+
+static unsigned int horizon_server_read_pe_version( int fd, unsigned int va, unsigned int size,
+                                                    unsigned int align_mask, const unsigned char *sections,
+                                                    unsigned int section_count, unsigned long long file_size,
+                                                    struct horizon_pe_version **version )
+{
+    static const unsigned int ids[] = {16, 1, 0}; /* RT_VERSION, resource 1, language */
+    unsigned char entry[16];
+    struct horizon_pe_version *result;
+    unsigned int offset = 0, status, i, data_va, data_size, aligned_size;
+
+    for (i = 0; i < ARRAY_SIZE(ids); i++)
+    {
+        status = horizon_server_find_resource( fd, va, size, align_mask, sections, section_count,
+                                               file_size, ids[i], &offset );
+        if (status || !offset) return status;
+    }
+    if (sizeof(entry) > size - offset || va > UINT_MAX - offset) return HORIZON_STATUS_SUCCESS;
+    if (horizon_server_read_pe_dir( fd, entry, sizeof(entry), va + offset, sizeof(entry), align_mask,
+                                    sections, section_count, file_size ) != sizeof(entry))
+        return HORIZON_STATUS_SUCCESS;
+    data_va = horizon_get_le32( entry );
+    data_size = horizon_get_le32( entry + 4 );
+    if (!data_size || data_size > file_size || data_size > UINT_MAX - 3) return HORIZON_STATUS_SUCCESS;
+    aligned_size = (data_size + 3) & ~3u;
+    if (!(result = malloc( sizeof(*result) + (size_t)aligned_size ))) return HORIZON_STATUS_NO_MEMORY;
+    if (horizon_server_read_pe_dir( fd, result->data, data_size, data_va, data_size, align_mask,
+                                    sections, section_count, file_size ) != data_size)
+    {
+        free( result );
+        return HORIZON_STATUS_SUCCESS;
+    }
+    memset( result->data + data_size, 0, aligned_size - data_size );
+    result->size = aligned_size;
+    *version = result;
+    return HORIZON_STATUS_SUCCESS;
 }
 
 static unsigned int horizon_server_build_shared_image( int fd, const unsigned char *sections,
@@ -5170,7 +5264,8 @@ done:
 }
 
 static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe_image_info *info,
-                                                       struct horizon_server_object **shared_file )
+                                                       struct horizon_server_object **shared_file,
+                                                       struct horizon_pe_version **version )
 {
     static const char builtin_signature[] = "Wine builtin DLL";
     static const char fakedll_signature[] = "Wine placeholder DLL";
@@ -5180,6 +5275,7 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
     unsigned int pe_offset, opt_size, section_count, headers_size;
     unsigned int size_of_image, section_alignment, size_of_headers, align_mask;
     unsigned int reloc_va = 0, reloc_size = 0, cfg_va = 0, cfg_size = 0, clr_va = 0, clr_size = 0;
+    unsigned int res_va, res_size;
     unsigned long long header_end;
     unsigned int i;
     unsigned short machine, characteristics, dll_charact;
@@ -5188,6 +5284,7 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
 
     memset( info, 0, sizeof(*info) );
     *shared_file = NULL;
+    *version = NULL;
 
     if (fstat( fd, &st ) == -1) return horizon_server_errno_status( errno );
     if (st.st_size < (off_t)(sizeof(dos) + sizeof(nt))) return HORIZON_STATUS_INVALID_IMAGE_FORMAT;
@@ -5332,6 +5429,10 @@ static unsigned int horizon_server_read_pe_image_info( int fd, struct horizon_pe
 
     status = horizon_server_build_shared_image( fd, headers + opt_size, section_count, align_mask,
                                                 st.st_size, shared_file );
+    if (!status && !info->wine_builtin && !info->wine_fakedll &&
+        horizon_pe_data_dir( headers, opt_size, pe32, HORIZON_IMAGE_DIRECTORY_ENTRY_RESOURCE, &res_va, &res_size ))
+        status = horizon_server_read_pe_version( fd, res_va, res_size, align_mask, headers + opt_size,
+                                                section_count, st.st_size, version );
 
 done:
     free( headers );
@@ -13977,6 +14078,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
     struct horizon_server_handle_entry *mapping_entry = NULL;
     struct horizon_pe_image_info image_info;
     struct horizon_server_object *shared_file = NULL;
+    struct horizon_pe_version *version = NULL;
     struct horizon_object_name name;
     unsigned long long mapping_size = request->size;
     unsigned int mapping_flags = request->flags;
@@ -14029,7 +14131,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
 
     if (!reply.header.error && (request->flags & HORIZON_SEC_IMAGE))
     {
-        reply.header.error = horizon_server_read_pe_image_info( fd, &image_info, &shared_file );
+        reply.header.error = horizon_server_read_pe_image_info( fd, &image_info, &shared_file, &version );
         mapping_size = image_info.map_size;
 #ifdef __SWITCH__
         horizon_trace( "[HZ] create_mapping flags=0x%x SEC_IMAGE=1 read_pe=0x%x machine=0x%x map_size=0x%x name=%s",
@@ -14070,12 +14172,14 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
             mapping_entry->object->mapping_image = image_info;
             mapping_entry->object->mapping_memfile = horizon_memfile_from_fd( fd );
             mapping_entry->object->mapping_shared_file = shared_file;
+            mapping_entry->object->mapping_version = version;
             reply.handle = mapping_entry->handle;
 #ifdef __SWITCH__
             dbg_has_image = mapping_entry->object->mapping_has_image;
 #endif
             mapping_name = NULL;
             shared_file = NULL;
+            version = NULL;
             fd = -1;
         }
         /* As in wineserver, a section that already has the name is returned as it is. */
@@ -14097,6 +14201,7 @@ static int horizon_server_handle_create_mapping( struct horizon_server_connectio
         pthread_mutex_unlock( &horizon_server_objects_mutex );
     }
     free( mapping_name );
+    free( version );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -14139,26 +14244,40 @@ static int horizon_server_handle_get_mapping_info( struct horizon_server_connect
 #endif
         if (entry->object->mapping_has_image)
         {
+            const struct horizon_pe_version *version = entry->object->mapping_version;
+            unsigned int ver_len = version ? version->size : 0;
+            unsigned int name_len = horizon_server_utf16_name_len( entry->object->file_name );
+            unsigned long long total = sizeof(image_info) + (unsigned long long)ver_len + name_len;
+
             image_info = entry->object->mapping_image;
-            reply.name_len = horizon_server_utf16_name_len( entry->object->file_name );
-            data_size = sizeof(image_info) + reply.name_len;
-            if ((data = malloc( data_size )))
-            {
-                memcpy( data, &image_info, sizeof(image_info) );
-                horizon_server_write_utf16_name( data + sizeof(image_info), entry->object->file_name );
-                reply.total = data_size;
-                /* wineserver semantics: never send more reply data than the
-                 * client's wine_server_set_reply() buffer. Overrunning it
-                 * corrupts the client and desyncs the reply stream. */
-                if (request->header.reply_size && data_size > request->header.reply_size)
-                    data_size = request->header.reply_size;
-                reply.header.reply_size = data_size;
-            }
+            if (total > UINT_MAX) reply.header.error = HORIZON_STATUS_NO_MEMORY;
             else
             {
-                data_size = 0;
-                reply.name_len = 0;
-                reply.header.error = HORIZON_STATUS_NO_MEMORY;
+                data_size = reply.total = total;
+                if (data_size > request->header.reply_size) data_size = sizeof(image_info) + ver_len;
+                if (data_size > request->header.reply_size) data_size = sizeof(image_info);
+                if (data_size > request->header.reply_size) data_size = 0;
+                if (data_size && !(data = malloc( data_size )))
+                {
+                    data_size = 0;
+                    reply.header.error = HORIZON_STATUS_NO_MEMORY;
+                }
+                if (data_size)
+                {
+                    memcpy( data, &image_info, sizeof(image_info) );
+                    if (ver_len && data_size >= sizeof(image_info) + ver_len)
+                    {
+                        memcpy( data + sizeof(image_info), version->data, ver_len );
+                        reply.ver_len = ver_len;
+                    }
+                    if (data_size == reply.total)
+                    {
+                        horizon_server_write_utf16_name( data + sizeof(image_info) + ver_len,
+                                                         entry->object->file_name );
+                        reply.name_len = name_len;
+                    }
+                    reply.header.reply_size = data_size;
+                }
             }
         }
         if (!reply.header.error &&

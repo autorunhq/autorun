@@ -16,16 +16,17 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
+loadorder = (root / 'dlls/ntdll/unix/loadorder.c').read_text()
 
 
-def block(marker):
-    start = source.index(marker)
-    end = source.index('{', start) + 1
+def block(marker, text=source):
+    start = text.index(marker)
+    end = text.index('{', start) + 1
     depth = 1
     while depth:
-        depth += (source[end] == '{') - (source[end] == '}')
+        depth += (text[end] == '{') - (text[end] == '}')
         end += 1
-    return source[start:end]
+    return text[start:end]
 
 
 struct_start = source.index('struct horizon_pe_image_info\n{')
@@ -35,6 +36,9 @@ defines = '\n'.join(line for line in source.splitlines()
 
 fixture = f'''
 #include <errno.h>
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,9 +46,11 @@ fixture = f'''
 #include <unistd.h>
 #include <sys/stat.h>
 #define max(a,b) ((a) > (b) ? (a) : (b))
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 typedef int BOOL;
 {defines}
 {struct_text}
+{block('struct horizon_pe_version')} ;
 struct horizon_server_object {{ int unused; }};
 static unsigned short horizon_process_machine = HORIZON_IMAGE_FILE_MACHINE_I386;
 static unsigned int horizon_server_errno_status( int error ) {{ return 0xc0000000u | (unsigned int)error; }}
@@ -54,6 +60,8 @@ static unsigned int horizon_server_errno_status( int error ) {{ return 0xc000000
 {block('static unsigned long long horizon_get_le64(')}
 {block('static int horizon_pe_data_dir(')}
 {block('static size_t horizon_server_read_pe_dir(')}
+{block('static unsigned int horizon_server_find_resource(')}
+{block('static unsigned int horizon_server_read_pe_version(')}
 static unsigned int horizon_server_build_shared_image( int fd, const unsigned char *sections,
                                                        unsigned int section_count, unsigned int align_mask,
                                                        unsigned long long file_size,
@@ -63,6 +71,53 @@ static unsigned int horizon_server_build_shared_image( int fd, const unsigned ch
     return HORIZON_STATUS_SUCCESS;
 }}
 {block('static unsigned int horizon_server_read_pe_image_info(')}
+typedef uint16_t WORD, WCHAR;
+typedef unsigned int ULONG;
+typedef struct {{ unsigned int dwSignature, rest[12]; }} VS_FIXEDFILEINFO;
+typedef struct {{ unsigned short Length, MaximumLength; WCHAR *Buffer; }} UNICODE_STRING;
+#define FALSE 0
+#define TRUE 1
+#define TRACE(...) ((void)0)
+#define VS_FFI_SIGNATURE 0xfeef04bd
+enum loadorder {{ LO_INVALID, LO_DEFAULT, LO_BUILTIN, LO_NATIVE_BUILTIN }};
+struct pe_mapping_info
+{{
+    struct horizon_pe_image_info image;
+    unsigned int version_len;
+    const void *version_res;
+}};
+static size_t wcslen( const WCHAR *s ) {{ size_t n = 0; while (s[n]) n++; return n; }}
+static unsigned int fold( unsigned int c ) {{ return c >= 'A' && c <= 'Z' ? c + 32 : c; }}
+static int wcsnicmp( const WCHAR *a, const WCHAR *b, size_t n )
+{{
+    while (n--)
+    {{
+        if (fold(*a) != fold(*b)) return fold(*a) - fold(*b);
+        if (!*a) return 0;
+        a++; b++;
+    }}
+    return 0;
+}}
+static int wcsicmp( const WCHAR *a, const WCHAR *b ) {{ return wcsnicmp(a, b, wcslen(a) + 1); }}
+static WCHAR *wcsrchr( const WCHAR *s, WCHAR c )
+{{ WCHAR *found = NULL; do {{ if (*s == c) found = (WCHAR *)s; }} while (*s++); return found; }}
+static int wcsncmp( const WCHAR *a, const WCHAR *b, size_t n )
+{{ while (n--) {{ if (*a != *b) return *a - *b; if (!*a++) break; b++; }} return 0; }}
+static BOOL main_exe_loaded, init_done;
+static void *std_key, *app_key;
+static enum loadorder override;
+static void init_load_order(void) {{ init_done = TRUE; }}
+static void *open_app_key(const WCHAR *name) {{ return (void *)name; }}
+static enum loadorder get_load_order_value(void *std, void *app, const WCHAR *name) {{ return override; }}
+{block('static WCHAR *get_basename(', loadorder)}
+{block('static inline void remove_dll_ext(', loadorder)}
+{block('struct version_info', loadorder)};
+{block('struct version_entry', loadorder)};
+{block('static BOOL get_version_entry(', loadorder)}
+{block('static BOOL version_find_key(', loadorder)}
+{block('static enum loadorder version_heuristics(', loadorder)}
+{block('void set_load_order_app_name(', loadorder)}
+{block('enum loadorder get_load_order(', loadorder)}
 int main( int argc, char **argv )
 {{
     int i;
@@ -73,13 +128,34 @@ int main( int argc, char **argv )
     {{
         struct horizon_pe_image_info info;
         struct horizon_server_object *shared_file;
+        struct horizon_pe_version *version;
+        struct pe_mapping_info mapping;
         int fd = open( argv[i], O_RDONLY );
-        unsigned int status = horizon_server_read_pe_image_info( fd, &info, &shared_file );
+        unsigned int status = horizon_server_read_pe_image_info( fd, &info, &shared_file, &version );
 
-        printf( "%d %08x %x %x %x %x %x %x %x %x %x %x %x\\n", i - 2, status,
+        mapping.image = info;
+        mapping.version_len = version ? version->size : 0;
+        mapping.version_res = version ? version->data : NULL;
+
+        WCHAR name[] = {{'D',':','\\\\','G','a','m','e','\\\\','x','i','n','p','u','t','.','d','l','l',0}};
+        UNICODE_STRING nt_name = {{sizeof(name) - sizeof(WCHAR), sizeof(name), name}};
+        main_exe_loaded = FALSE;
+        override = LO_INVALID;
+        if (get_load_order(&nt_name, FALSE, &mapping) != LO_NATIVE_BUILTIN) abort();
+        set_load_order_app_name(name);
+        if (!main_exe_loaded || app_key != name + 8) abort();
+        enum loadorder expected = version_heuristics(NULL, &mapping);
+        if (expected == LO_INVALID) expected = LO_DEFAULT;
+        if (get_load_order(&nt_name, FALSE, &mapping) != expected) abort();
+        override = LO_BUILTIN;
+        if (get_load_order(&nt_name, FALSE, &mapping) != LO_BUILTIN) abort();
+
+        printf( "%d %08x %x %x %x %x %x %x %x %x %x %x %x %x %x\\n", i - 2, status,
                 info.map_size, info.header_map_size, info.image_flags, info.alignment, info.machine,
                 info.is_hybrid, info.contains_code, info.loader_flags, info.header_size,
-                info.wine_builtin, info.wine_fakedll );
+                info.wine_builtin, info.wine_fakedll, mapping.version_len,
+                version_heuristics( NULL, &mapping ) );
+        free( version );
         close( fd );
     }}
     return 0;
@@ -185,6 +261,84 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-image-info-') as tmp:
     assert rows['truncated'][0] == 0 and rows['truncated'][6] == 0, rows['truncated']
     assert run(0x14c, ['amd64'], [tmp / 'amd64.dll'])['amd64'][0] == 0xc000007b
 
+    def version_node(key, value=b'', children=b'', text=False):
+        data = bytearray(struct.pack('<HHH', 0, len(value) // (2 if text else 1), int(text)))
+        data += (key + '\0').encode('utf-16le')
+        data += bytes(-len(data) % 4)
+        data += value
+        data += bytes(-len(data) % 4)
+        data += children
+        struct.pack_into('<H', data, 0, len(data))
+        return data
+
+    def version_blob(vendor):
+        company = version_node('CompanyName', (vendor + '\0').encode('utf-16le'), text=True)
+        table = version_node('040904b0', children=company, text=True)
+        strings = version_node('StringFileInfo', children=table, text=True)
+        return version_node('VS_VERSION_INFO', struct.pack('<13I', 0xfeef04bd, *([0] * 12)), strings)
+
+    def add_version(path, vendor, languages=(0x409,), named=False, odd=False):
+        image = bytearray(path.read_bytes())
+        pe = struct.unpack_from('<I', image, 60)[0]
+        opt = pe + 24
+        pe32 = struct.unpack_from('<H', image, opt)[0] == 0x10b
+        section = opt + (224 if pe32 else 240)
+        raw = struct.unpack_from('<I', image, section + 20)[0]
+        va = struct.unpack_from('<I', image, section + 12)[0]
+        blob = version_blob(vendor)
+        if odd:
+            blob += b'X'
+        resource = bytearray(0x400)
+        struct.pack_into('<HH', resource, 12, int(named), 1)
+        if named:
+            struct.pack_into('<II', resource, 16, 0x800000f0, 0x800000e0)
+        struct.pack_into('<II', resource, 16 + int(named) * 8, 16, 0x80000030)
+        struct.pack_into('<H', resource, 0x30 + 14, 1)
+        struct.pack_into('<II', resource, 0x40, 1, 0x80000050)
+        struct.pack_into('<H', resource, 0x50 + 14, len(languages))
+        for i, language in enumerate(languages):
+            struct.pack_into('<II', resource, 0x60 + i * 8, language, 0x90 + i * 16)
+            selected = len(blob) if language == languages[-1] else 1
+            struct.pack_into('<4I', resource, 0x90 + i * 16, va + 0x200, selected, 0, 0)
+        resource[0x200:0x200 + len(blob)] = blob
+        image[raw:raw + len(resource)] = resource
+        struct.pack_into('<II', image, section + 16, len(resource), raw)
+        struct.pack_into('<II', image, opt + (96 if pe32 else 112) + 16, va, len(resource))
+        path.write_bytes(image)
+        return raw, len(blob)
+
+    for machine in (0x14c, 0x8664):
+        def make(path):
+            if machine == 0x14c:
+                pe32(path, 0x2000, [(0x1000, 0x1000, 0x400, 0x400)], size_of_headers=0x400)
+            else:
+                pe64(path, machine)
+        for vendor, expected in [('Microsoft Corporation', 1), ('Controller mod', 3), ('Twain Working Group', 2)]:
+            path = tmp / 'version.dll'
+            make(path)
+            raw, length = add_version(path, vendor, languages=(0x411, 0x409), named=True, odd=True)
+            row = run(machine, ['version'], [path])['version']
+            assert row[0] == 0 and row[-2:] == [(length + 3) & ~3, expected], row
+        for languages in ((0x411, 0), (0x411,)):
+            make(path)
+            _, length = add_version(path, 'Microsoft Corporation', languages=languages)
+            assert run(machine, ['v'], [path])['v'][-2:] == [length, 1]
+        original = path.read_bytes()
+        for offset, value in ((raw + 20, 0x80001000), (raw + 0x94, 0xffffffff),
+                              (raw + 0x90, 0xfffffff0), (raw + 12, 0xffffffff)):
+            damaged = bytearray(original)
+            struct.pack_into('<I', damaged, offset, value)
+            path.write_bytes(damaged)
+            row = run(machine, ['bad'], [path])['bad']
+            assert row[0] == 0 and row[-2:] == [0, 3], row
+        path.write_bytes(original[:raw + 0x205])
+        assert run(machine, ['short'], [path])['short'][-2:] == [0, 3]
+
+    if real_version := os.environ.get('WINE_NX_VERSION_INFO_DLL'):
+        row = run(0x8664, ['vendor'], [Path(real_version)])['vendor']
+        assert row[0] == 0 and row[-2] > 0 and row[-1] == 1, row
+        print(f'{real_version}: {row[-2]} bytes of version metadata, Microsoft built-in preference restored')
+
     default_real = root / 'horizon-wine/toolchains/build-wine-amd64-pe/dlls/ntdll/aarch64-windows/ntdll.dll'
     real = Path(os.environ.get('WINE_NX_IMAGE_INFO_EXE', default_real))
     if real.is_file():
@@ -194,4 +348,9 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-image-info-') as tmp:
         assert row[3] & 0x04 and row[5:8] == [0xaa64, 1, 1] and row[10] == 1, row
         print(f'{real}: map size {map_size:#x}, header map {header_map_size:#x}, ARM64X metadata found')
 
-print('Image info: range, machine, ARM64X, signatures, truncation and overflow passed')
+print('Image info: ranges, ARM64X, version resources, language selection and load-order heuristics passed')
+
+runtime = (root / 'horizon-wine/source/runtime.c').read_text()
+init = runtime.index('set_load_order_app_name( params->ImagePathName.Buffer )')
+assert runtime.index('runtime_init_peb_process( teb, module, params )') < init
+assert init < runtime.index('status = runtime_prepare_arm64ec()', init)

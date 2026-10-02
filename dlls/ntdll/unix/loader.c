@@ -1246,6 +1246,10 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     const char *pe_dir = get_pe_dir( search_machine );
     const char *so_dir = get_so_dir( current_machine );
     const char *pe_build_dir = build_dir;
+#ifdef __SWITCH__
+    const char *system_dir = search_machine == IMAGE_FILE_MACHINE_I386 ?
+                            WINE_NX_RUNTIME_SYSWOW64 : WINE_NX_RUNTIME_SYSTEM32;
+#endif
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status = STATUS_DLL_NOT_FOUND;
     BOOL found_image = FALSE;
@@ -1269,6 +1273,9 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
         maxlen = max( strlen(build_dir), strlen(pe_build_dir) ) + sizeof("/programs/") + len;
     }
     maxlen = max( maxlen, dll_path_maxlen + 1 ) + len + sizeof("/aarch64-windows") + sizeof(".so");
+#ifdef __SWITCH__
+    maxlen = max( maxlen, strlen(system_dir) + 1 + len + sizeof(".so") );
+#endif
 
     if (!(file = malloc( maxlen ))) return STATUS_NO_MEMORY;
 
@@ -1293,6 +1300,13 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
     file[--pos] = '/';
 
     TRACE( "looking for %s for file %s\n", debugstr_a(file + pos + 1), debugstr_us(nt_name) );
+
+#ifdef __SWITCH__
+    ptr = prepend( file + pos, system_dir, strlen(system_dir) );
+    status = open_builtin_pe_file( ptr, &attr, module, size_ptr, image_info, limit_low, limit_high,
+                                   load_machine, prefer_native, offset );
+    if (status != STATUS_DLL_NOT_FOUND) goto done;
+#endif
 
     if (build_dir)
     {

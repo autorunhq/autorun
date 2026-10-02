@@ -4335,6 +4335,7 @@ int main( int argc, char **argv )
             park_forever();
         }
         runtime_init_peb_process( teb, module, params );
+        set_load_order_app_name( params->ImagePathName.Buffer );
         log_line( "[PEB] image=%s nt=\\??\\%s", dos_path, dos_path );
 
 #ifdef WINE_NX_AMD64
