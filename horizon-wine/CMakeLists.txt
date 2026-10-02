@@ -966,6 +966,15 @@ if(WINE_NX_MESA_SWITCH_DIR)
         "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/winevulkan"
     )
     target_sources(wine-nx-runtime PRIVATE $<TARGET_OBJECTS:wine-winevulkan-unix-real>)
+    option(WINE_NX_SHADER_ALLOC_CACHE "Reuse temporary native shader compiler allocations" ON)
+    if(WINE_NX_SHADER_ALLOC_CACHE)
+        target_sources(wine-nx-runtime PRIVATE source/shader_compile.c source/shader_alloc_cache.c)
+        target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=nak_compile_shader)
+        set_property(SOURCE source/shader_compile.c source/shader_alloc_cache.c
+            APPEND PROPERTY COMPILE_OPTIONS -O2)
+        set_property(SOURCE source/native_heap.c
+            APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_SHADER_ALLOC_CACHE)
+    endif()
     option(WINE_NX_LSFG "Enable the GPL LSFG-VK frame-generation backend" ON)
     if(WINE_NX_LSFG)
         include(cmake/LsfgVk.cmake)

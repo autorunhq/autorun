@@ -29,6 +29,7 @@ static size_t small_free;
 static unsigned long mallinfo_calls;
 static pthread_mutex_t mutex;
 static _Thread_local unsigned int locks;
+static _Thread_local unsigned int fail_allocations;
 struct horizon_heap_chunk *__malloc_av_[258];
 static void __malloc_lock(struct _reent *r)
 { (void)r; assert(!pthread_mutex_lock(&mutex)); locks++; }
@@ -45,11 +46,14 @@ void *__real__sbrk_r(struct _reent *r, ptrdiff_t increment)
     return (void *)previous;
 }
 void *__real__memalign_r(struct _reent *r, size_t alignment, size_t size)
-{ void *result = NULL; (void)r; if (posix_memalign(&result, alignment, size)) return NULL; return result; }
-void *__real__malloc_r(struct _reent *r, size_t size) { (void)r; return malloc(size); }
-void *__real__calloc_r(struct _reent *r, size_t count, size_t size) { (void)r; return calloc(count, size); }
+{ void *result = NULL; (void)r; if (fail_allocations) { fail_allocations--; return NULL; }
+  if (posix_memalign(&result, alignment, size)) return NULL; return result; }
+void *__real__malloc_r(struct _reent *r, size_t size)
+{ (void)r; if (fail_allocations) { fail_allocations--; return NULL; } return malloc(size); }
+void *__real__calloc_r(struct _reent *r, size_t count, size_t size)
+{ (void)r; if (fail_allocations) { fail_allocations--; return NULL; } return calloc(count, size); }
 void *__real__realloc_r(struct _reent *r, void *pointer, size_t size)
-{ (void)r; return realloc(pointer, size); }
+{ (void)r; if (fail_allocations) { fail_allocations--; return NULL; } return realloc(pointer, size); }
 void __real__free_r(struct _reent *r, void *pointer) { (void)r; free(pointer); }
 size_t __real__malloc_usable_size_r(struct _reent *r, void *pointer)
 { (void)r; return malloc_usable_size(pointer); }
@@ -221,13 +225,24 @@ int main(void)
     p = __wrap__realloc_r(_REENT, NULL, 1024);
     assert(p && !owns_pointer(p));
     __wrap__free_r(_REENT, p);
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    shader_alloc_cache_tests();
+#endif
     pthread_mutex_destroy(&mutex);
     puts("native heap: concurrent allocation, resize, free, break and scan-free budget tests passed");
 }
 '''
+cache_flags = []
+if os.environ.get('SHADER_ALLOC_CACHE') == '1':
+    cache_flags = ['-DWINE_NX_SHADER_ALLOC_CACHE']
+    source += r'''
+#include "shader_alloc_cache.c"
+'''
+    source += (root / 'tests/shader_alloc_cache.c').read_text()
 with tempfile.TemporaryDirectory(prefix='autorun-native-heap-') as tmp:
     unit, binary = Path(tmp) / 'heap.c', Path(tmp) / 'heap'
     unit.write_text(fixture.replace('/* IMPLEMENTATION */', source))
     subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread',
-                    '-fsanitize=' + os.environ.get('SANITIZE', 'address,undefined'), '-I', str(root / 'source'), str(unit), '-o', str(binary)], check=True)
+                    '-fsanitize=' + os.environ.get('SANITIZE', 'address,undefined'), *cache_flags,
+                    '-I', str(root / 'source'), str(unit), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

@@ -6,6 +6,19 @@
 #include <string.h>
 #include <sys/reent.h>
 #include "../source/native_heap.h"
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+#include "../source/shader_alloc_cache.h"
+#endif
+
+/* Keep allocator calls observable without disabling optimization in the runtime. */
+extern void *test_malloc(size_t) __asm__("malloc");
+extern void *test_calloc(size_t, size_t) __asm__("calloc");
+extern void *test_realloc(void *, size_t) __asm__("realloc");
+extern void test_free(void *) __asm__("free");
+#define malloc test_malloc
+#define calloc test_calloc
+#define realloc test_realloc
+#define free test_free
 
 #define MiB ((size_t)1048576)
 static unsigned char area[256 * 1048576] __attribute__((aligned(2097152)));
@@ -13,6 +26,7 @@ char *fake_heap_start = (char *)area, *fake_heap_end = (char *)area + sizeof(are
 static char *heap_break = (char *)area;
 static struct _reent reent;
 static unsigned int locks;
+static unsigned long lock_calls, outer_lock_calls;
 static unsigned char tls_area[4096] __attribute__((aligned(16)));
 void *__aarch64_read_tp(void) { return tls_area; }
 extern bool __wrap_os_get_available_system_memory(uint64_t *);
@@ -41,7 +55,7 @@ static void check_budget(void)
 }
 
 struct _reent *__getreent(void) { return &reent; }
-void __malloc_lock(struct _reent *r) { (void)r; locks++; }
+void __malloc_lock(struct _reent *r) { (void)r; if (!locks) outer_lock_calls++; locks++; lock_calls++; }
 void __malloc_unlock(struct _reent *r) { (void)r; check(locks); locks--; }
 void *_sbrk_r(struct _reent *r, ptrdiff_t increment)
 {
@@ -72,6 +86,161 @@ static void mixed_lifetimes(int isolated)
     free(large);
     for (unsigned int i = 0; i < 192; i++) free(small[i]);
 }
+
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+static void shader_cache_drain(void)
+{
+    static const unsigned int sizes[] = {1, 31, 32, 33, 127, 128};
+    void *items[128];
+    struct mallinfo before = mallinfo();
+    for (unsigned int scope = 0; scope < 32; scope++)
+    {
+        unsigned int count = sizes[scope % (sizeof(sizes) / sizeof(sizes[0]))];
+        wine_nx_shader_alloc_begin();
+        for (unsigned int pass = 0; pass < 2; pass++)
+        {
+            for (unsigned int i = 0; i < count; i++)
+            {
+                items[i] = malloc(32 + i * 16);
+                check(items[i]);
+                memset(items[i], i, 32 + i * 16);
+            }
+            for (unsigned int i = 0; i < count; i++) free(items[i]);
+            check(mallinfo().uordblks > before.uordblks);
+            check(!locks);
+            unsigned long outer_before = outer_lock_calls;
+            errno = EIO;
+            if (!pass)
+            {
+                check(wine_nx_shader_alloc_trim());
+                check(wine_nx_shader_alloc_active && !wine_nx_shader_alloc_trim());
+            }
+            else
+            {
+                wine_nx_shader_alloc_end();
+                check(!wine_nx_shader_alloc_active);
+            }
+            check(errno == EIO);
+            check(!locks);
+            check(outer_lock_calls - outer_before == (count + 31) / 32);
+            check(mallinfo().uordblks == before.uordblks);
+            check_budget();
+        }
+    }
+}
+
+static void shader_cache(void)
+{
+    void *items[128] = {0};
+    unsigned int seed = 94783;
+    struct mallinfo before = mallinfo();
+    unsigned long calls = lock_calls;
+    for (unsigned int i = 0; i < 10000; i++)
+    {
+        void *p = memalign(64, 512);
+        check(p && !((uintptr_t)p & 63));
+        memset(p, 0x19, 512);
+        free(p);
+    }
+    unsigned long uncached = lock_calls - calls;
+    calls = lock_calls;
+    wine_nx_shader_alloc_begin();
+    for (unsigned int i = 0; i < 10000; i++)
+    {
+        void *p = memalign(64, 512);
+        check(p && !((uintptr_t)p & 63));
+        memset(p, 0x19, 512);
+        free(p);
+    }
+    wine_nx_shader_alloc_end();
+    check(lock_calls - calls < uncached / 100);
+    check(mallinfo().uordblks == before.uordblks);
+    check_budget();
+
+    for (unsigned int iteration = 0; iteration < 30000; iteration++)
+    {
+        if (!(iteration % 500)) wine_nx_shader_alloc_begin();
+        seed = seed * 1664525 + 1013904223;
+        unsigned int slot = (seed >> 16) % 128;
+        size_t size = 1 + (seed >> 4) % 100000;
+        if (items[slot])
+        {
+            check(((unsigned char *)items[slot])[0] == (unsigned char)slot);
+            if (seed & 2)
+            {
+                void *p = realloc(items[slot], size);
+                check(p && ((unsigned char *)p)[0] == (unsigned char)slot);
+                items[slot] = p;
+            }
+            else { free(items[slot]); items[slot] = NULL; }
+        }
+        else if (seed & 1)
+        {
+            size_t align = (size_t)16 << ((seed >> 9) % 7);
+            items[slot] = memalign(align, size);
+            check(items[slot] && !((uintptr_t)items[slot] & (align - 1)));
+            ((unsigned char *)items[slot])[0] = slot;
+        }
+        else
+        {
+            items[slot] = calloc(size, 1);
+            check(items[slot]);
+            for (size_t i = 0; i < size; i++) check(!((unsigned char *)items[slot])[i]);
+            ((unsigned char *)items[slot])[0] = slot;
+        }
+        if (iteration % 500 == 499) wine_nx_shader_alloc_end();
+        if (!(iteration % 100)) check_budget();
+    }
+    for (unsigned int i = 0; i < 128; i++) free(items[i]);
+    check(mallinfo().uordblks == before.uordblks);
+    check_budget();
+    wine_nx_shader_alloc_begin();
+    void *p = malloc(1024);
+    check(p);
+    free(p);
+    check(wine_nx_shader_alloc_trim());
+    check(!wine_nx_shader_alloc_trim());
+    check_budget();
+    wine_nx_shader_alloc_end();
+    check(mallinfo().uordblks == before.uordblks);
+    void *burst[256];
+    wine_nx_shader_alloc_begin();
+    for (unsigned int i = 0; i < 256; i++)
+    {
+        burst[i] = malloc(32768);
+        check(burst[i]);
+    }
+    for (unsigned int i = 0; i < 256; i++) free(burst[i]);
+    for (unsigned int i = 0; i < 256; i++)
+    {
+        burst[i] = malloc(128);
+        check(burst[i]);
+    }
+    for (unsigned int i = 0; i < 256; i++) free(burst[i]);
+    calls = lock_calls;
+    for (unsigned int iteration = 0; iteration < 20; iteration++)
+    {
+        for (unsigned int i = 0; i < 256; i++)
+        {
+            burst[i] = malloc(128);
+            check(burst[i]);
+            memset(burst[i], i, 128);
+        }
+        for (unsigned int i = 0; i < 256; i++)
+        {
+            for (unsigned int j = 0; j < 128; j++) check(((unsigned char *)burst[i])[j] == (unsigned char)i);
+            free(burst[i]);
+        }
+    }
+    check(lock_calls == calls);
+    check_budget();
+    wine_nx_shader_alloc_end();
+    check(mallinfo().uordblks == before.uordblks);
+    check_budget();
+    static const char message[] = "newlib shader cache: reuse, alignment, lifetime, realloc and exact accounting passed\n";
+    linux_call(64, 1, (long)message, sizeof(message) - 1);
+}
+#endif
 
 static void run(void)
 {
@@ -161,13 +330,17 @@ static void run(void)
     check_budget();
     small = malloc(1024);
     check(small);
-    check(!realloc(small, impossible_size));
+    check(!realloc(small, 2 * sizeof(area)) && !locks);
     check_budget();
     small = realloc(small, 0);
     check_budget();
     free(small);
     check(!calloc(impossible_size, 2));
     check_budget();
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    shader_cache();
+    shader_cache_drain();
+#endif
     static const char message[] = "newlib heap: mixed allocation, boundary, realloc, accounting and unmapped backing tests passed\n";
     linux_call(64, 1, (long)message, sizeof(message) - 1);
 }

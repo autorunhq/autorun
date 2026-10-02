@@ -7,6 +7,9 @@
 #include "backing_heap.h"
 #include "heap_snapshot.h"
 #include "native_heap.h"
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+#include "shader_alloc_cache.h"
+#endif
 
 extern char *fake_heap_start, *fake_heap_end;
 extern void *__real__sbrk_r( struct _reent *, ptrdiff_t );
@@ -37,9 +40,18 @@ static size_t small_allocation_size( struct _reent *reent, void *pointer )
 void *wine_nx_native_malloc( struct _reent *reent, size_t size )
 {
     void *result;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    if (!allocation_depth && wine_nx_shader_alloc_active &&
+        (result = wine_nx_shader_alloc_take( size, 16 ))) return result;
+retry:
+#endif
     allocation_depth++;
     result = __real__malloc_r( reent, size );
-    if (!--allocation_depth && result)
+    allocation_depth--;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    if (!result && !allocation_depth && wine_nx_shader_alloc_trim()) goto retry;
+#endif
+    if (!allocation_depth && result)
         __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
     return result;
 }
@@ -47,9 +59,22 @@ void *wine_nx_native_malloc( struct _reent *reent, size_t size )
 void *wine_nx_native_calloc( struct _reent *reent, size_t count, size_t size )
 {
     void *result;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    if (!allocation_depth && wine_nx_shader_alloc_active && size && count <= SIZE_MAX / size &&
+        (result = wine_nx_shader_alloc_take( count * size, 16 )))
+    {
+        memset( result, 0, count * size );
+        return result;
+    }
+retry:
+#endif
     allocation_depth++;
     result = __real__calloc_r( reent, count, size );
-    if (!--allocation_depth && result)
+    allocation_depth--;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+    if (!result && size && count <= SIZE_MAX / size && !allocation_depth && wine_nx_shader_alloc_trim()) goto retry;
+#endif
+    if (!allocation_depth && result)
         __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
     return result;
 }
@@ -111,9 +136,18 @@ void *wine_nx_native_memalign( struct _reent *reent, size_t alignment, size_t si
     uintptr_t floor;
     if (alignment < 4096 || (alignment & (alignment - 1)) || size < BACKING_UNIT)
     {
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+        if (!allocation_depth && wine_nx_shader_alloc_active &&
+            (result = wine_nx_shader_alloc_take( size, alignment ))) return result;
+retry:
+#endif
         allocation_depth++;
         result = __real__memalign_r( reent, alignment, size );
-        if (!--allocation_depth && result)
+        allocation_depth--;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+        if (!result && !allocation_depth && wine_nx_shader_alloc_trim()) goto retry;
+#endif
+        if (!allocation_depth && result)
             __atomic_fetch_add( &small_used, small_allocation_size( reent, result ), __ATOMIC_RELAXED );
         return result;
     }
@@ -128,12 +162,29 @@ void *wine_nx_native_memalign( struct _reent *reent, size_t alignment, size_t si
     return result;
 }
 
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+void wine_nx_native_free_cached( void *const *pointers, unsigned int count, size_t bytes )
+{
+    struct _reent *current_reent = _REENT;
+    __malloc_lock( current_reent );
+    for (unsigned int i = 0; i < count; i++) __real__free_r( current_reent, pointers[i] );
+    __atomic_fetch_sub( &small_used, bytes, __ATOMIC_RELAXED );
+    __malloc_unlock( current_reent );
+}
+#endif
+
 void __wrap__free_r( struct _reent *reent, void *pointer )
 {
     if (!owns_pointer( pointer ))
     {
         if (!allocation_depth && pointer)
-            __atomic_fetch_sub( &small_used, small_allocation_size( reent, pointer ), __ATOMIC_RELAXED );
+        {
+            size_t size = small_allocation_size( reent, pointer );
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+            if (wine_nx_shader_alloc_active && wine_nx_shader_alloc_put( pointer, size - sizeof(size_t) )) return;
+#endif
+            __atomic_fetch_sub( &small_used, size, __ATOMIC_RELAXED );
+        }
         __real__free_r( reent, pointer );
         return;
     }
@@ -160,9 +211,27 @@ void *wine_nx_native_realloc( struct _reent *reent, void *pointer, size_t size )
     if (!owns_pointer( pointer ))
     {
         previous = allocation_depth ? 0 : small_allocation_size( reent, pointer );
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+        if (!allocation_depth && wine_nx_shader_alloc_active && size)
+        {
+            size_t usable = pointer ? previous - sizeof(size_t) : 0;
+            if (size <= usable && usable <= 65536 && size > usable / 2) return pointer;
+            if ((result = wine_nx_shader_alloc_take( size, 16 )))
+            {
+                if (pointer) memcpy( result, pointer, size < usable ? size : usable );
+                __wrap__free_r( reent, pointer );
+                return result;
+            }
+        }
+retry:
+#endif
         allocation_depth++;
         result = __real__realloc_r( reent, pointer, size );
-        if (!--allocation_depth && (result || !size))
+        allocation_depth--;
+#ifdef WINE_NX_SHADER_ALLOC_CACHE
+        if (!result && size && !allocation_depth && wine_nx_shader_alloc_trim()) goto retry;
+#endif
+        if (!allocation_depth && (result || !size))
             __atomic_fetch_add( &small_used, small_allocation_size( reent, result ) - previous, __ATOMIC_RELAXED );
         return result;
     }
