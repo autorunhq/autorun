@@ -73,6 +73,7 @@ struct horizon_dll_file
     char missing[96];           /* the first feature the runtime lacks */
     unsigned int class_first, class_count;
     unsigned int feature_first, feature_count;
+    char *registry;
 };
 
 struct horizon_dll_feature

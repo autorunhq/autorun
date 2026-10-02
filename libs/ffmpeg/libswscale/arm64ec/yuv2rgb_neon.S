@@ -202,12 +202,12 @@
         add             v15.8h, v5.8h, v15.8h                           // Y2 + G2
         add             v10.8h, v4.8h, v10.8h                           // Y1 + B1
         add             v11.8h, v5.8h, v11.8h                           // Y2 + B2
+        sqrshrun        \b1, v10.8h, #1                                 // clip_u8((Y1 + B1) >> 1)
+        sqrshrun        \b2, v11.8h, #1                                 // clip_u8((Y2 + B1) >> 1)
         sqrshrun        \r1, v12.8h, #1                                 // clip_u8((Y1 + R1) >> 1)
         sqrshrun        \r2, v13.8h, #1                                 // clip_u8((Y2 + R1) >> 1)
         sqrshrun        \g1, v14.8h, #1                                 // clip_u8((Y1 + G1) >> 1)
         sqrshrun        \g2, v15.8h, #1                                 // clip_u8((Y2 + G1) >> 1)
-        sqrshrun        \b1, v10.8h, #1                                 // clip_u8((Y1 + B1) >> 1)
-        sqrshrun        \b2, v11.8h, #1                                 // clip_u8((Y2 + B1) >> 1)
 .endm
 
 .macro declare_func ifmt ofmt

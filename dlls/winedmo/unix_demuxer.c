@@ -43,6 +43,7 @@ struct stream
 struct demuxer
 {
     AVFormatContext *ctx;
+    AVIOContext *io;
     struct stream *streams;
 
     AVPacket *last_packet; /* last read packet */
@@ -120,15 +121,15 @@ static NTSTATUS demuxer_create_streams( struct demuxer *demuxer )
             else
             {
                 if (av_bsf_alloc( filter, &stream->filter ) < 0) return STATUS_UNSUCCESSFUL;
-                avcodec_parameters_copy( stream->filter->par_in, par );
-                av_bsf_init( stream->filter );
+                if (avcodec_parameters_copy( stream->filter->par_in, par ) < 0 ||
+                    av_bsf_init( stream->filter ) < 0) return STATUS_UNSUCCESSFUL;
                 continue;
             }
         }
 
-        av_bsf_get_null_filter( &stream->filter );
-        avcodec_parameters_copy( stream->filter->par_in, demuxer->ctx->streams[i]->codecpar );
-        avcodec_parameters_copy( stream->filter->par_out, demuxer->ctx->streams[i]->codecpar );
+        if (av_bsf_get_null_filter( &stream->filter ) < 0 ||
+            avcodec_parameters_copy( stream->filter->par_in, par ) < 0 ||
+            avcodec_parameters_copy( stream->filter->par_out, par ) < 0) return STATUS_UNSUCCESSFUL;
     }
 
     return STATUS_SUCCESS;
@@ -145,9 +146,11 @@ NTSTATUS demuxer_create( void *arg )
 
     TRACE( "context %p, url %s, mime %s\n", params->context, debugstr_a(params->url), debugstr_a(params->mime_type) );
 
+    if (!ext) ext = "";
     if (!(demuxer = calloc( 1, sizeof(*demuxer) ))) return STATUS_NO_MEMORY;
     if (!(demuxer->ctx = avformat_alloc_context())) goto failed;
-    if (!(demuxer->ctx->pb = avio_alloc_context( NULL, 0, 0, params->context, unix_read_callback, NULL, unix_seek_callback ))) goto failed;
+    if (!(demuxer->io = avio_alloc_context( NULL, 0, 0, params->context, unix_read_callback, NULL, unix_seek_callback ))) goto failed;
+    demuxer->ctx->pb = demuxer->io;
 
     if ((ret = avformat_open_input( &demuxer->ctx, NULL, NULL, NULL )) < 0)
     {
@@ -214,11 +217,9 @@ failed:
     for (i = 0; demuxer->streams && i < demuxer->ctx->nb_streams; i++)
         av_bsf_free( &demuxer->streams[i].filter );
     free( demuxer->streams );
-    if (demuxer->ctx)
-    {
-        avio_context_free( &demuxer->ctx->pb );
-        avformat_free_context( demuxer->ctx );
-    }
+    avformat_close_input( &demuxer->ctx );
+    if (demuxer->io) av_freep( &demuxer->io->buffer );
+    avio_context_free( &demuxer->io );
     free( demuxer );
     return STATUS_UNSUCCESSFUL;
 }
@@ -234,9 +235,11 @@ NTSTATUS demuxer_destroy( void *arg )
     for (i = 0; i < demuxer->ctx->nb_streams; i++)
         av_bsf_free( &demuxer->streams[i].filter );
     free( demuxer->streams );
-    params->context = demuxer->ctx->pb->opaque;
-    avio_context_free( &demuxer->ctx->pb );
-    avformat_free_context( demuxer->ctx );
+    params->context = demuxer->io->opaque;
+    av_packet_free( &demuxer->last_packet );
+    avformat_close_input( &demuxer->ctx );
+    av_freep( &demuxer->io->buffer );
+    avio_context_free( &demuxer->io );
     free( demuxer );
 
     return STATUS_SUCCESS;

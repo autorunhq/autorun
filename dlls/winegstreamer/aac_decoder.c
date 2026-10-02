@@ -524,7 +524,23 @@ static HRESULT WINAPI transform_ProcessEvent(IMFTransform *iface, DWORD id, IMFM
 
 static HRESULT WINAPI transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_TYPE message, ULONG_PTR param)
 {
-    FIXME("iface %p, message %#x, param %p stub!\n", iface, message, (void *)param);
+    struct aac_decoder *decoder = impl_from_IMFTransform(iface);
+
+    switch (message)
+    {
+    case MFT_MESSAGE_COMMAND_DRAIN:
+        return decoder->wg_transform ? wg_transform_drain(decoder->wg_transform) : MF_E_TRANSFORM_TYPE_NOT_SET;
+    case MFT_MESSAGE_COMMAND_FLUSH:
+        if (decoder->wg_transform)
+        {
+            HRESULT hr = wg_transform_flush(decoder->wg_transform);
+            if (FAILED(hr)) return hr;
+            wg_sample_queue_flush(decoder->wg_sample_queue, false);
+        }
+        break;
+    default:
+        break;
+    }
     return S_OK;
 }
 

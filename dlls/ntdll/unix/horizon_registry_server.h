@@ -314,7 +314,8 @@ static unsigned int horizon_registry_init(void)
             "[System\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Memory Management]\n"
             "\"PagingFiles\"=\"C:\\\\pagefile.sys 27 77\"\n";
         static const char user_seed[] =
-            "WINE REGISTRY Version 2\n[Software\\\\Wine\\\\Drivers]\n\"Audio\"=\"nxaudio\"\n";
+            "WINE REGISTRY Version 2\n[Software\\\\Wine\\\\Drivers]\n\"Audio\"=\"nxaudio\"\n"
+            "[Software\\\\Wine\\\\MediaFoundation]\n\"DisableGstByteStreamHandler\"=dword:00000001\n";
         unsigned int errors = 0;
         if (horizon_reg_load( &horizon_registry, machine, machine_seed, sizeof(machine_seed) - 1, &errors ) ||
             horizon_reg_load( &horizon_registry, user, user_seed, sizeof(user_seed) - 1, &errors ) || errors)

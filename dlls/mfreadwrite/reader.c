@@ -51,6 +51,7 @@ struct stream_response
     DWORD stream_flags;
     LONGLONG timestamp;
     IMFSample *sample;
+    IMFVideoSampleAllocatorEx *allocator;
 };
 
 enum media_stream_state
@@ -204,6 +205,7 @@ static struct source_reader_async_command *impl_from_async_command_IUnknown(IUnk
 }
 
 static void source_reader_release_responses(struct source_reader *reader, struct media_stream *stream);
+static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader, unsigned int index);
 
 static ULONG source_reader_addref(struct source_reader *reader)
 {
@@ -434,14 +436,15 @@ static void source_reader_response_ready(struct source_reader *reader, struct st
         stream->requests--;
 }
 
-static void source_reader_copy_sample_buffer(IMFSample *src, IMFSample *dst)
+static HRESULT source_reader_copy_sample_buffer(IMFSample *src, IMFSample *dst)
 {
     IMFMediaBuffer *buffer;
     LONGLONG time;
     DWORD flags;
     HRESULT hr;
 
-    IMFSample_CopyAllItems(src, (IMFAttributes *)dst);
+    if (FAILED(hr = IMFSample_CopyAllItems(src, (IMFAttributes *)dst)))
+        return hr;
 
     IMFSample_SetSampleDuration(dst, 0);
     IMFSample_SetSampleTime(dst, 0);
@@ -456,15 +459,13 @@ static void source_reader_copy_sample_buffer(IMFSample *src, IMFSample *dst)
     if (SUCCEEDED(IMFSample_GetSampleFlags(src, &flags)))
         IMFSample_SetSampleFlags(dst, flags);
 
-    if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(src, NULL)))
-    {
-        if (SUCCEEDED(IMFSample_GetBufferByIndex(dst, 0, &buffer)))
-        {
-            if (FAILED(hr = IMFSample_CopyToBuffer(src, buffer)))
-                WARN("Failed to copy a buffer, hr %#lx.\n", hr);
-            IMFMediaBuffer_Release(buffer);
-        }
-    }
+    if (FAILED(hr = IMFSample_ConvertToContiguousBuffer(src, NULL)))
+        return hr;
+    if (FAILED(hr = IMFSample_GetBufferByIndex(dst, 0, &buffer)))
+        return hr;
+    hr = IMFSample_CopyToBuffer(src, buffer);
+    IMFMediaBuffer_Release(buffer);
+    return hr;
 }
 
 static HRESULT source_reader_queue_response(struct source_reader *reader, struct media_stream *stream, HRESULT status,
@@ -481,7 +482,11 @@ static HRESULT source_reader_queue_response(struct source_reader *reader, struct
     response->timestamp = timestamp;
     response->sample = sample;
     if (response->sample)
+    {
         IMFSample_AddRef(response->sample);
+        if ((response->allocator = stream->allocator))
+            IMFVideoSampleAllocatorEx_AddRef(response->allocator);
+    }
 
     list_add_tail(&reader->responses, &response->entry);
     stream->responses++;
@@ -916,7 +921,11 @@ static HRESULT source_reader_pull_transform_samples(struct source_reader *reader
                     && SUCCEEDED(hr = IMFTransform_GetOutputCurrentType(entry->transform, 0, &media_type)))
             {
                 if (!next)
+                {
                     hr = IMFMediaType_CopyAllItems(media_type, (IMFAttributes *)stream->current);
+                    if (SUCCEEDED(hr))
+                        hr = source_reader_setup_sample_allocator(reader, stream->index);
+                }
                 else
                     hr = transform_entry_update_input_type(next, media_type);
                 IMFMediaType_Release(media_type);
@@ -929,7 +938,7 @@ static HRESULT source_reader_pull_transform_samples(struct source_reader *reader
             else
                 hr = source_reader_queue_sample(reader, stream, entry->pending_flags, out_buffer.pSample);
 
-            entry->pending_flags = 0;
+            if (SUCCEEDED(hr)) entry->pending_flags = 0;
         }
 
         if (hr == MF_E_TRANSFORM_STREAM_CHANGE && SUCCEEDED(hr = IMFTransform_GetOutputCurrentType(entry->transform, 0, &media_type)))
@@ -1253,23 +1262,32 @@ static struct stream_response *media_stream_pop_response(struct source_reader *r
         if (!stream && response->stream_index < reader->stream_count)
             stream = &reader->streams[response->stream_index];
 
-        if (response->sample && stream->allocator)
+        if (response->sample && response->allocator)
         {
             /* Return allocation error to the caller, while keeping original response sample in for later. */
-            if (SUCCEEDED(hr = IMFVideoSampleAllocatorEx_AllocateSample(stream->allocator, &sample)))
+            if (SUCCEEDED(hr = IMFVideoSampleAllocatorEx_AllocateSample(response->allocator, &sample)))
             {
-                source_reader_copy_sample_buffer(response->sample, sample);
+                if (FAILED(hr = source_reader_copy_sample_buffer(response->sample, sample)))
+                {
+                    WARN("Failed to copy a sample, hr %#lx.\n", hr);
+                    IMFSample_Release(sample);
+                    sample = NULL;
+                    response->status = hr;
+                    response->stream_flags |= MF_SOURCE_READERF_ERROR;
+                }
                 IMFSample_Release(response->sample);
                 response->sample = sample;
             }
             else
             {
-                if (!(response = calloc(1, sizeof(*response))))
+                struct stream_response *error;
+                if (!(error = calloc(1, sizeof(*error))))
                     return NULL;
 
-                response->status = hr;
-                response->stream_flags = MF_SOURCE_READERF_ERROR;
-                return response;
+                error->status = hr;
+                error->stream_index = response->stream_index;
+                error->stream_flags = MF_SOURCE_READERF_ERROR;
+                return error;
             }
         }
 
@@ -1283,6 +1301,8 @@ static void source_reader_release_response(struct stream_response *response)
 {
     if (response->sample)
         IMFSample_Release(response->sample);
+    if (response->allocator)
+        IMFVideoSampleAllocatorEx_Release(response->allocator);
     free(response);
 }
 
@@ -2011,6 +2031,7 @@ static HRESULT source_reader_create_sample_allocator_attributes(const struct sou
 static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader, unsigned int index)
 {
     struct media_stream *stream = &reader->streams[index];
+    IMFVideoSampleAllocatorEx *allocator;
     IMFAttributes *attributes = NULL;
     GUID major = { 0 };
     HRESULT hr;
@@ -2022,26 +2043,23 @@ static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader
     if (!(reader->flags & SOURCE_READER_HAS_DEVICE_MANAGER))
         return S_OK;
 
-    if (!stream->allocator)
+    if (FAILED(hr = MFCreateVideoSampleAllocatorEx(&IID_IMFVideoSampleAllocatorEx, (void **)&allocator)))
     {
-        if (FAILED(hr = MFCreateVideoSampleAllocatorEx(&IID_IMFVideoSampleAllocatorEx, (void **)&stream->allocator)))
-        {
-            WARN("Failed to create sample allocator, hr %#lx.\n", hr);
-            return hr;
-        }
+        WARN("Failed to create sample allocator, hr %#lx.\n", hr);
+        return hr;
     }
 
-    IMFVideoSampleAllocatorEx_UninitializeSampleAllocator(stream->allocator);
-    if (FAILED(hr = IMFVideoSampleAllocatorEx_SetDirectXManager(stream->allocator, reader->device_manager)))
+    if (FAILED(hr = IMFVideoSampleAllocatorEx_SetDirectXManager(allocator, reader->device_manager)))
     {
         WARN("Failed to set device manager, hr %#lx.\n", hr);
+        IMFVideoSampleAllocatorEx_Release(allocator);
         return hr;
     }
 
     if (FAILED(hr = source_reader_create_sample_allocator_attributes(reader, &attributes)))
         WARN("Failed to create allocator attributes, hr %#lx.\n", hr);
 
-    if (FAILED(hr = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(stream->allocator, 2, 8,
+    if (FAILED(hr = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(allocator, 2, 8,
             attributes, stream->current)))
     {
         WARN("Failed to initialize sample allocator, hr %#lx.\n", hr);
@@ -2049,6 +2067,14 @@ static HRESULT source_reader_setup_sample_allocator(struct source_reader *reader
 
     if (attributes)
         IMFAttributes_Release(attributes);
+
+    if (SUCCEEDED(hr))
+    {
+        if (stream->allocator)
+            IMFVideoSampleAllocatorEx_Release(stream->allocator);
+        stream->allocator = allocator;
+    }
+    else IMFVideoSampleAllocatorEx_Release(allocator);
 
     return hr;
 }

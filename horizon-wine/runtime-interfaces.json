@@ -16,6 +16,8 @@
   "opengl32.dll": ["include/wine/unixlib.h", "dlls/opengl32/unixlib.h", "dlls/opengl32/unix_thunks.h"],
   "winenxaudio.drv": ["include/wine/unixlib.h", "dlls/mmdevapi/unixlib.h"],
   "wmadmod.dll": ["include/wine/unixlib.h", "dlls/wmadmod/native_unixlib.h"],
+  "winedmo.dll": ["include/wine/unixlib.h", "dlls/winedmo/unixlib.h"],
+  "winegstreamer.dll": ["include/wine/unixlib.h", "dlls/winegstreamer/unixlib.h"],
   "xinput1_1.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
   "xinput1_2.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],
   "xinput1_3.dll": ["include/wine/unixlib.h", "dlls/xinput1_3/nx_pad.h"],

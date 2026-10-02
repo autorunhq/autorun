@@ -76,6 +76,7 @@ static int stream_context_read( struct stream_context *context )
     status = KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
     if (status || ret_len != sizeof(ULONG)) return AVERROR( EINVAL );
     context->size = *(ULONG *)ret_ptr;
+    if (context->size > context->capacity) return AVERROR( EIO );
     return 0;
 }
 
@@ -91,6 +92,7 @@ int unix_read_callback( void *opaque, uint8_t *buffer, int size )
         int step, buffer_offset = context->position % context->capacity;
 
         if (!context->size && (ret = stream_context_read( context )) < 0) return ret;
+        if (buffer_offset >= context->size) break;
         if (!(step = min( size, context->size - buffer_offset ))) break;
         memcpy( buffer, context->buffer + buffer_offset, step );
         buffer += step;
@@ -160,6 +162,10 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
 };
 
 C_ASSERT(ARRAY_SIZE(__wine_unix_call_funcs) == unix_funcs_count);
+
+#ifdef __SWITCH__
+const unsigned int wine_nx_winedmo_unix_count = unix_funcs_count;
+#endif
 
 #ifdef _WIN64
 

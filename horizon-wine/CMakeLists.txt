@@ -740,7 +740,7 @@ endif()
 # built as gnu99, does not have.
 set_source_files_properties(source/forwarder.c PROPERTIES COMPILE_OPTIONS "-std=gnu11")
 set_source_files_properties(source/audio_unix.c source/wma_unix.c source/xinput_unix.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
-include(cmake/Wma.cmake)
+include(cmake/Media.cmake)
 target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_PE_BUILD_DIR}/include")
 find_package(Git QUIET)
 set(AUTORUN_BUILD_TAG "")

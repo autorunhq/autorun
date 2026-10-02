@@ -1697,6 +1697,45 @@ static HRESULT session_add_media_source(struct media_session *session, IMFTopolo
     return hr;
 }
 
+static HRESULT session_select_source_streams(struct media_session *session, struct media_source *source)
+{
+    IMFStreamDescriptor *sd;
+    struct topo_node *node;
+    DWORD count, i, id;
+    BOOL selected;
+    HRESULT hr;
+
+    if (FAILED(hr = IMFPresentationDescriptor_GetStreamDescriptorCount(source->pd, &count)))
+        return hr;
+
+    for (i = 0; i < count; ++i)
+    {
+        if (FAILED(hr = IMFPresentationDescriptor_GetStreamDescriptorByIndex(source->pd, i, &selected, &sd)))
+            return hr;
+        hr = IMFStreamDescriptor_GetStreamIdentifier(sd, &id);
+        IMFStreamDescriptor_Release(sd);
+        if (FAILED(hr))
+            return hr;
+
+        selected = FALSE;
+        LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
+        {
+            if (node->type == MF_TOPOLOGY_SOURCESTREAM_NODE && node->u.source.source == source->source
+                    && node->u.source.stream_id == id)
+            {
+                selected = TRUE;
+                break;
+            }
+        }
+        hr = selected ? IMFPresentationDescriptor_SelectStream(source->pd, i)
+                : IMFPresentationDescriptor_DeselectStream(source->pd, i);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    return S_OK;
+}
+
 static void session_raise_topology_set(struct media_session *session, IMFTopology *topology, HRESULT status)
 {
     PROPVARIANT param;
@@ -2030,6 +2069,7 @@ static HRESULT session_append_node(struct media_session *session, IMFTopologyNod
 static HRESULT session_collect_nodes(struct media_session *session)
 {
     IMFTopology *topology = session->presentation.current_topology;
+    struct media_source *source;
     IMFTopologyNode *node;
     WORD i, count = 0;
     HRESULT hr;
@@ -2045,7 +2085,7 @@ static HRESULT session_collect_nodes(struct media_session *session)
         if (FAILED(hr = IMFTopology_GetNode(topology, i, &node)))
         {
             WARN("Failed to get node %u.\n", i);
-            break;
+            return hr;
         }
 
         hr = session_append_node(session, node);
@@ -2053,11 +2093,17 @@ static HRESULT session_collect_nodes(struct media_session *session)
         if (FAILED(hr))
         {
             WARN("Failed to add node %u.\n", i);
-            break;
+            return hr;
         }
     }
 
-    return hr;
+    LIST_FOR_EACH_ENTRY(source, &session->presentation.sources, struct media_source, entry)
+    {
+        if (FAILED(hr = session_select_source_streams(session, source)))
+            return hr;
+    }
+
+    return S_OK;
 }
 
 static HRESULT session_set_current_topology(struct media_session *session, IMFTopology *topology)
@@ -2075,7 +2121,8 @@ static HRESULT session_set_current_topology(struct media_session *session, IMFTo
         return hr;
     }
 
-    session_collect_nodes(session);
+    if (FAILED(hr = session_collect_nodes(session)))
+        return hr;
 
     LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
     {

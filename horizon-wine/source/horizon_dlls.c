@@ -313,6 +313,18 @@ static int read_file_field( struct parser *p, const char *key, void *data )
         f->class_count = 0;
         return array( p, read_class, r );
     }
+    if (!strcmp( key, "registry" ))
+    {
+        struct parser end = *p;
+        size_t capacity;
+        char *registry;
+        if (f->registry || !skip_value( &end )) return 0;
+        capacity = end.p - p->p + 1;
+        if (capacity > 65536 || !(registry = malloc( capacity ))) return 0;
+        if (!json_string( p, registry, capacity )) { free( registry ); return 0; }
+        f->registry = registry;
+        return 1;
+    }
     return skip_value( p );
 }
 
@@ -324,7 +336,7 @@ static int read_file( struct parser *p, void *data )
     int folder, category;
 
     if (!grow( (void **)&m->files, &m->capacity, m->count, sizeof(*m->files) )) return 0;
-    f = r->file = &m->files[m->count];
+    f = r->file = &m->files[m->count++];
     memset( f, 0, sizeof(*f) );
     f->satisfied = 1;
     f->class_first = m->class_count;
@@ -342,6 +354,8 @@ static int read_file( struct parser *p, void *data )
         m->class_count = f->class_first;
         m->feature_count = f->feature_first;
         m->skipped++;
+        free( f->registry );
+        m->count--;
         return 1;
     }
     /* A compressed copy that is not all there, or not the repository's, is
@@ -358,7 +372,6 @@ static int read_file( struct parser *p, void *data )
     if ((category = category_index( m, r->category[0] ? r->category : "system" )) < 0) return 0;
     f->folder = (unsigned char)folder;
     f->category = (unsigned char)category;
-    m->count++;
     return 1;
 }
 
@@ -423,6 +436,7 @@ invalid:
 
 void horizon_dlls_free( struct horizon_dll_manifest *m )
 {
+    for (unsigned int i = 0; i < m->count; i++) free( m->files[i].registry );
     free( m->files );
     free( m->classes );
     free( m->features );
@@ -971,7 +985,13 @@ static int write_record( const char *root, const struct horizon_dll_manifest *re
             add_string( &manifest, c->name );
             add( &manifest, ",\"threading\":\"%s\"}", c->threading );
         }
-        add( &manifest, "]}" );
+        add( &manifest, "]" );
+        if (f->registry)
+        {
+            add( &manifest, ",\"registry\":" );
+            add_string( &manifest, f->registry );
+        }
+        add( &manifest, "}" );
     }
     add( &manifest, "\n]}\n" );
 
@@ -999,6 +1019,7 @@ static int write_record( const char *root, const struct horizon_dll_manifest *re
                      (int)(dot ? dot - f->name : (long)strlen( f->name )), f->name, c->name, c->clsid,
                      f->name, c->threading );
             }
+            if (f->registry) add( &classes, "%s\n", f->registry );
         }
     ok = !manifest.failed && !classes.failed &&
          write_atomically( root, HORIZON_DLLS_CLASSES, classes.data, classes.size ) &&

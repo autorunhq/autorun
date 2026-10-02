@@ -931,6 +931,12 @@ extern const unixlib_entry_t wine_nx_opengl32_unix_funcs[];
 extern const unixlib_entry_t wine_nx_audio_unix_funcs[];
 extern const unixlib_entry_t wine_nx_wma_unix_funcs[];
 extern const unsigned int wine_nx_wma_unix_count;
+extern const unixlib_entry_t wine_nx_winedmo_unix_funcs[];
+extern const unixlib_entry_t wine_nx_winedmo_wow64_unix_funcs[];
+extern const unsigned int wine_nx_winedmo_unix_count;
+extern const unixlib_entry_t wine_nx_media_unix_funcs[];
+extern const unixlib_entry_t wine_nx_media_wow64_unix_funcs[];
+extern const unsigned int wine_nx_media_unix_count;
 extern const unixlib_entry_t wine_nx_xinput_unix_funcs[];
 #ifdef WINE_NX_MESA_SWITCH
 extern const unixlib_entry_t wine_nx_winevulkan_unix_funcs[];
@@ -969,6 +975,8 @@ static const struct
     { "opengl32.dll", wine_nx_opengl32_unix_funcs },
     { "winenxaudio.drv", wine_nx_audio_unix_funcs },
     { "wmadmod.dll", wine_nx_wma_unix_funcs },
+    { "winedmo.dll", wine_nx_winedmo_unix_funcs },
+    { "winegstreamer.dll", wine_nx_media_unix_funcs },
     { "xinput1_3.dll", wine_nx_xinput_unix_funcs },
     { "xinput1_4.dll", wine_nx_xinput_unix_funcs },
     { "dinput.dll", wine_nx_xinput_unix_funcs },
@@ -1010,6 +1018,8 @@ static const struct
     { "opengl32.dll", wine_nx_opengl32_wow64_unix_funcs, &wine_nx_opengl32_wow64_unix_count },
     { "winenxaudio.drv", wine_nx_audio_wow64_unix_funcs, &wine_nx_audio_wow64_unix_count },
     { "wmadmod.dll", wine_nx_wma_unix_funcs, &wine_nx_wma_unix_count },
+    { "winedmo.dll", wine_nx_winedmo_wow64_unix_funcs, &wine_nx_winedmo_unix_count },
+    { "winegstreamer.dll", wine_nx_media_wow64_unix_funcs, &wine_nx_media_unix_count },
     { "crypt32.dll", wine_nx_crypt32_wow64_unix_funcs, &wine_nx_crypt32_wow64_unix_count },
     /* xinput1_1, 1_2 and 1_4 build xinput1_3's main.c; xinput9_1_0 loads xinput1_4 */
     { "xinput1_1.dll", wine_nx_xinput_wow64_unix_funcs, &wine_nx_xinput_wow64_unix_count },

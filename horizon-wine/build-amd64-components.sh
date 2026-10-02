@@ -40,7 +40,7 @@ fi
         --enable-winebox64=aarch64 --enable-winebox64ec=arm64ec \
         --disable-tests --without-x --without-freetype --without-alsa --without-pulse \
         --without-dbus --without-fontconfig --without-udev --without-usb \
-        --without-gstreamer --without-vulkan
+        --without-gstreamer --enable-winegstreamer --without-vulkan
     make -j"$jobs" include/all
 )
 sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
