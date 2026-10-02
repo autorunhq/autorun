@@ -118,6 +118,7 @@ extern const char *wine_nx_loader_last_open_path(void);
 extern NTSTATUS wine_nx_loader_last_open_status(void);
 extern const char *wine_nx_loader_last_export_diag(void);
 extern int wine_nx_sd_cache_install(void);
+extern int wine_nx_lazy_file_views;  /* dlls/ntdll/unix/horizon.c */
 extern void wine_nx_sd_cache_flush(void);
 #ifdef WINE_NX_USB_STORAGE
 extern int wine_nx_usb_list( struct wine_nx_launcher_usb_volume *volumes, int max );
@@ -4090,12 +4091,14 @@ int main( int argc, char **argv )
 #endif
         runtime_vkd3d_version[0] = 0;
         runtime_dxvk_version[0] = 0;
+        wine_nx_lazy_file_views = 0;
         if (target[1] != ':' &&
             launcher_program_settings_path( RUNTIME_DIR, target, settings_path, sizeof(settings_path) ) &&
             launcher_kv_load( &kv, settings_path ))
         {
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
+            wine_nx_lazy_file_views = launcher_setting_state( &kv, "lazy-file-views" ) == 1;
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
 #endif
@@ -4160,6 +4163,20 @@ int main( int argc, char **argv )
         }
     }
 
+    /* Views of files read on demand (horizon.c, horizon_lazy_file_view_wanted):
+     * lazy-file-views=1 in the program's settings, or lazy-file-views.txt in
+     * its folder, which a game's own setup can leave there. */
+    if (!wine_nx_lazy_file_views)
+    {
+        char marker[520];
+        const char *slash = strrchr( target, '/' );
+        int length = slash ? snprintf( marker, sizeof(marker), "%.*slazy-file-views.txt",
+                                       (int)(slash + 1 - target), target ) : -1;
+
+        if (length > 0 && (size_t)length < sizeof(marker) && !access( marker, F_OK ))
+            wine_nx_lazy_file_views = 1;
+    }
+
     horizon_server_profile_enabled = runtime_profile;
     open_game_log( target );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
@@ -4168,6 +4185,8 @@ int main( int argc, char **argv )
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
                                       : "no sdmc device; reads are not cached" );
+    if (wine_nx_lazy_file_views)
+        log_line( "[INIT] views of files read on demand (lazy-file-views): only the parts a program touches come from the card" );
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );
     log_line( "[INIT] profiler %s (profile.txt)", runtime_profile ? "on" : "off" );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
