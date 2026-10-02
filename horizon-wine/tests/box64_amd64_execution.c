@@ -177,7 +177,7 @@ static void test_cpuid_and_stops( struct fixture *fixture )
 #endif
     init_context( &context, BASE + 0x200 );
     assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
-    assert( context.Rcx == 0x00180201 );
+    assert( context.Rcx == 0x00980201 );
 
     put_code( fixture, 0x280, jump_completion, sizeof(jump_completion) );
     init_context( &context, BASE + 0x280 );
@@ -199,6 +199,51 @@ static void test_cpuid_and_stops( struct fixture *fixture )
     init_context( &context, BASE + 0xffff );
     assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
     assert( context.Rip == NATIVE );
+}
+
+static void test_popcnt( struct fixture *fixture )
+{
+    static const struct
+    {
+        unsigned char code[5];
+        unsigned int size, bits;
+    } forms[] =
+    {
+        { {0x66,0xf3,0x0f,0xb8,0xc1}, 5, 16 },
+        { {0xf3,0x0f,0xb8,0xc1}, 4, 32 },
+        { {0xf3,0x48,0x0f,0xb8,0xc1}, 5, 64 },
+    };
+    static const uint64_t values[] = { 0, UINT64_MAX, UINT64_C(0xffffffff00000000),
+                                      UINT64_C(0x8000000100010001) };
+    const uint64_t initial = UINT64_C(0x1122334455667788);
+    unsigned char code[32], *cursor;
+    AMD64_CONTEXT context;
+    unsigned int i, j;
+
+    for (i = 0; i < sizeof(forms) / sizeof(forms[0]); i++)
+    {
+        const uint64_t mask = UINT64_MAX >> (64 - forms[i].bits);
+
+        memcpy( code, forms[i].code, forms[i].size );
+        cursor = code + forms[i].size;
+        mov_imm64( &cursor, 2, NATIVE );
+        emit8( &cursor, 0xff ); emit8( &cursor, 0xe2 );
+        put_code( fixture, 0x400 + i * 0x40, code, cursor - code );
+        for (j = 0; j < sizeof(values) / sizeof(values[0]); j++)
+        {
+            uint64_t expected = __builtin_popcountll( values[j] & mask );
+            const ULONG flags = expected ? 0 : 0x40;
+
+            if (forms[i].bits == 16) expected |= initial & ~mask;
+            init_context( &context, BASE + 0x400 + i * 0x40 );
+            context.Rax = initial;
+            context.Rcx = values[j];
+            context.EFlags |= 0x8d5;
+            assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
+            assert( context.Rip == NATIVE && context.Rax == expected );
+            assert( (context.EFlags & 0x8d5) == flags );
+        }
+    }
 }
 
 static void test_syscall_state( struct fixture *fixture )
@@ -497,6 +542,7 @@ int main(void)
     fixture.native[(NATIVE - BASE) >> 12] = TRUE;
     test_registers_gs_sse_call( &fixture );
     test_cpuid_and_stops( &fixture );
+    test_popcnt( &fixture );
     test_sse_features( &fixture );
     test_syscall_state( &fixture );
     test_x87_context( &fixture );

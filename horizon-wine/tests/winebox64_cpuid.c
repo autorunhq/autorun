@@ -39,7 +39,7 @@ int main(void)
     for (i = 0; i < sizeof(cpuid_features) / sizeof(cpuid_features[0]); i++)
         assert( !!(WINEBOX64_CPUID_EDX & (1u << cpuid_features[i].edx_bit)) ==
                 !!winebox64_x86_feature_present( cpuid_features[i].feature ) );
-    assert( WINEBOX64_CPUID_ECX == 0x00180201 );
+    assert( WINEBOX64_CPUID_ECX == 0x00980201 );
     for (i = 0; i < sizeof(extended_features) / sizeof(extended_features[0]); i++)
         assert( !!(WINEBOX64_CPUID_ECX & (1u << extended_features[i].ecx_bit)) ==
                 !!winebox64_x86_feature_present( extended_features[i].feature ) );

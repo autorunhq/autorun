@@ -587,7 +587,7 @@ int main(void)
         memcpy( &features, memory + 0x307c, 4 );
         assert( (features & 0x07808111) == 0x07808111 ); /* FPU TSC CX8 CMOV MMX FXSR SSE SSE2 */
         memcpy( &features, memory + 0x3090, 4 );
-        assert( features == 0x00180201 ); /* SSE3, SSSE3, SSE4.1, SSE4.2 */
+        assert( features == 0x00980201 ); /* SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT */
         memcpy( &first, memory + 0x3080, 8 );
         memcpy( &second, memory + 0x3088, 8 );
         assert( first && second >= first );
