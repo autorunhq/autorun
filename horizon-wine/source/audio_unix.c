@@ -21,6 +21,7 @@
  * NX_BUFFERS * NX_CHUNK frames (40 ms) between the mixer and silence. Two of
  * them (20 ms) broke up when a frame of the game overran its slice. */
 #define NX_BUFFERS 4
+#define NX_MAX_CHANNELS 8
 struct nx_audio_stream
 {
     struct nx_audio_stream *next;
@@ -28,12 +29,12 @@ struct nx_audio_stream
     unsigned int capacity, held, submitted, read, locked;
     UINT64 played;
     unsigned int frames[NX_BUFFERS];
-    float volume[2];
+    float volume[NX_MAX_CHANNELS], matrix[NX_MAX_CHANNELS][2];
     HANDLE event;
     DWORD flags;
     unsigned int source_rate, source_channels, source_bits, source_tag, source_frame_bytes;
-    unsigned int scratch_bytes;
-    BOOL running, failed;
+    unsigned int scratch_bytes, ring_channels;
+    BOOL running, failed, direct_stereo;
 };
 static pthread_mutex_t audio_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t audio_cond = PTHREAD_COND_INITIALIZER;
@@ -91,15 +92,60 @@ static unsigned int nx_format_tag(const WAVEFORMATEX *f)
     if (!memcmp(&e->SubFormat, &nx_subtype_float, sizeof(GUID))) return WAVE_FORMAT_IEEE_FLOAT;
     return 0;
 }
+static DWORD nx_channel_mask(const WAVEFORMATEX *f)
+{
+    DWORD mask = 0;
+    if (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        mask = ((const WAVEFORMATEXTENSIBLE *)f)->dwChannelMask;
+    if (!mask && f->nChannels <= 2)
+        mask = f->nChannels == 1 ? SPEAKER_FRONT_CENTER : SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    return mask;
+}
 static BOOL nx_format(const WAVEFORMATEX *f)
 {
     unsigned int tag;
-    if (!f || !f->nSamplesPerSec || f->nChannels < 1 || f->nChannels > 2) return FALSE;
+    DWORD mask;
+    if (!f || !f->nSamplesPerSec || f->nChannels < 1 || f->nChannels > NX_MAX_CHANNELS) return FALSE;
     if (!(tag = nx_format_tag(f))) return FALSE;
+    if (f->nChannels > 2 && f->wFormatTag != WAVE_FORMAT_EXTENSIBLE) return FALSE;
+    mask = nx_channel_mask(f);
+    if (!mask || (mask & ~0x3ffffu)) return FALSE;
     if (tag == WAVE_FORMAT_IEEE_FLOAT && f->wBitsPerSample != 32) return FALSE;
     return (f->wBitsPerSample == 8 || f->wBitsPerSample == 16 || f->wBitsPerSample == 24 || f->wBitsPerSample == 32) &&
         f->nBlockAlign == f->nChannels * (f->wBitsPerSample / 8) &&
         f->nAvgBytesPerSec == f->nSamplesPerSec * f->nBlockAlign;
+}
+static void nx_init_matrix(struct nx_audio_stream *s, DWORD mask)
+{
+    static const float speakers[][2] =
+    {
+        {1, 0}, {0, 1}, {.70710678f, .70710678f}, {.5f, .5f},
+        {.70710678f, 0}, {0, .70710678f}, {.70710678f, 0}, {0, .70710678f},
+        {.5f, .5f}, {.70710678f, 0}, {0, .70710678f}, {.5f, .5f},
+        {.70710678f, 0}, {.5f, .5f}, {0, .70710678f},
+        {.70710678f, 0}, {.5f, .5f}, {0, .70710678f}
+    };
+    unsigned int c = 0, bit;
+    float left = 0, right = 0, scale;
+
+    s->direct_stereo = (s->source_channels == 1 && mask == SPEAKER_FRONT_CENTER) ||
+                      (s->source_channels == 2 && mask == (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT));
+    for (bit = 0; bit < ARRAY_SIZE(speakers) && c < s->source_channels; bit++) if (mask & (1u << bit))
+    {
+        s->matrix[c][0] = speakers[bit][0];
+        s->matrix[c][1] = speakers[bit][1];
+        left += speakers[bit][0];
+        right += speakers[bit][1];
+        c++;
+    }
+    /* Reserve headroom for correlated channels without changing the balance. */
+    scale = max(1.0f, max(left, right));
+    for (c = 0; c < s->source_channels; c++)
+    {
+        s->matrix[c][0] /= scale;
+        s->matrix[c][1] /= scale;
+        s->volume[c] = 1.0f;
+    }
 }
 static NTSTATUS nx_is_format_supported(void *args)
 {
@@ -166,8 +212,10 @@ static NTSTATUS nx_create_stream(void *args)
     s->source_bits = p->fmt->wBitsPerSample;
     s->source_tag = nx_format_tag(p->fmt);
     s->source_frame_bytes = p->fmt->nBlockAlign;
+    s->ring_channels = max(2, s->source_channels);
+    nx_init_matrix(s, nx_channel_mask(p->fmt));
     s->scratch_bytes = (s->capacity * s->source_rate / NX_RATE + 2) * s->source_frame_bytes;
-    s->ring = malloc(s->capacity * 4);
+    s->ring = malloc(s->capacity * s->ring_channels * sizeof(short));
     bytes = s->scratch_bytes;
     /* Buffers exposed to a 32-bit client must reside below 4 GB. */
     if (!s->ring || NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&s->scratch,
@@ -180,12 +228,11 @@ static NTSTATUS nx_create_stream(void *args)
         output[i].buffer_size = 0x1000;
         if (!output[i].buffer) { nx_free(s); goto done; }
     }
-    s->volume[0] = s->volume[1] = 1.0f;
     s->flags = p->flags;
     s->next = active;
     active = s;
     *p->stream = (UINT_PTR)s;
-    *p->channel_count = 2;
+    *p->channel_count = s->source_channels;
     p->result = S_OK;
 done:
     pthread_mutex_unlock(&audio_lock);
@@ -277,9 +324,25 @@ static void nx_pump(void)
             s->frames[i] = pending;
             for (j = 0; j < pending; j++)
             {
-                const short *src = (const short *)s->ring + ((s->read + s->submitted + j) % s->capacity) * 2;
-                mix[j * 2] += src[0] * s->volume[0];
-                mix[j * 2 + 1] += src[1] * s->volume[1];
+                const short *src = (const short *)s->ring +
+                    ((s->read + s->submitted + j) % s->capacity) * s->ring_channels;
+                if (s->direct_stereo)
+                {
+                    mix[j * 2] += src[0] * s->volume[0];
+                    mix[j * 2 + 1] += src[1] * s->volume[s->source_channels > 1];
+                }
+                else
+                {
+                    float left = 0, right = 0;
+                    for (unsigned int c = 0; c < s->source_channels; c++)
+                    {
+                        float sample = src[c] * s->volume[c];
+                        left += sample * s->matrix[c][0];
+                        right += sample * s->matrix[c][1];
+                    }
+                    mix[j * 2] += (int)left;
+                    mix[j * 2 + 1] += (int)right;
+                }
             }
         }
         for (j = 0; j < frames * 2; j++) ((short *)output[i].buffer)[j] = nx_sample(mix[j]);
@@ -444,32 +507,32 @@ static NTSTATUS nx_release_render_buffer(void *args)
         if (out_frames > s->capacity - s->held) { p->result = AUDCLNT_E_BUFFER_TOO_LARGE; goto release_done; }
         for (i = 0; i < out_frames; i++)
         {
-            BYTE *dst = s->ring + ((s->read + s->held + i) % s->capacity) * 4;
+            short *dst = (short *)s->ring + ((s->read + s->held + i) % s->capacity) * s->ring_channels;
             unsigned int src_frame = (unsigned long long)i * s->source_rate / NX_RATE;
             const BYTE *src = s->scratch + src_frame * s->source_frame_bytes;
-            int left = 0, right = 0, c;
+            unsigned int c;
             if (!(p->flags & AUDCLNT_BUFFERFLAGS_SILENT))
             {
-                for (c = 0; c < (int)s->source_channels; c++)
+                for (c = 0; c < s->source_channels; c++)
                 {
                     int sample;
                     if (s->source_tag == WAVE_FORMAT_IEEE_FLOAT)
                     {
                         float value; memcpy(&value, src + c * (s->source_bits / 8), sizeof(value));
+                        if (value != value) value = 0;
                         if (value > 1.0f) value = 1.0f;
                         if (value < -1.0f) value = -1.0f;
                         sample = (int)(value * 32767.0f);
                     }
-                    else if (s->source_bits == 8) sample = ((int)src[c] - 128) << 8;
+                    else if (s->source_bits == 8) sample = ((int)src[c] - 128) * 256;
                     else if (s->source_bits == 16) { short value; memcpy(&value, src + c * 2, 2); sample = value; }
-                    else if (s->source_bits == 24) { sample = (int)((src[c*3] | (src[c*3+1]<<8) | (src[c*3+2]<<16)) << 8) >> 8; }
+                    else if (s->source_bits == 24) { sample = (short)(src[c*3+1] | (src[c*3+2] << 8)); }
                     else { int value; memcpy(&value, src + c * 4, 4); sample = value >> 16; }
-                    if (!c) left = sample; else right = sample;
+                    dst[c] = sample;
                 }
-                if (s->source_channels == 1) right = left;
+                if (s->source_channels == 1) dst[1] = dst[0];
             }
-            ((short *)dst)[0] = left * s->volume[0];
-            ((short *)dst)[1] = right * s->volume[1];
+            else memset(dst, 0, s->ring_channels * sizeof(*dst));
         }
         s->held += out_frames;
         s->locked = 0;
@@ -508,7 +571,7 @@ static NTSTATUS nx_set_volumes(void *args)
     struct nx_audio_stream *s = nx_stream(p->stream);
     unsigned int i;
     pthread_mutex_lock(&audio_lock);
-    for (i = 0; i < 2; i++)
+    for (i = 0; i < s->source_channels; i++)
     {
         float v = p->master_volume * p->volumes[i] * p->session_volumes[i];
         s->volume[i] = v >= 0 && v <= 1 ? v : 0;

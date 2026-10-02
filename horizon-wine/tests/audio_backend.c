@@ -60,6 +60,161 @@ void WINAPI RtlInitUnicodeString(PUNICODE_STRING string, PCWSTR source)
 NTSTATUS WINAPI NtSetInformationThread(HANDLE thread, THREADINFOCLASS info, LPCVOID data, ULONG size)
 { (void)thread; (void)info; (void)data; (void)size; return 0; }
 
+static WAVEFORMATEXTENSIBLE channel_format(unsigned int channels, DWORD mask, unsigned int bits)
+{
+    WAVEFORMATEXTENSIBLE fmt = {0};
+    fmt.Format = (WAVEFORMATEX){WAVE_FORMAT_EXTENSIBLE, channels, NX_RATE,
+        NX_RATE * channels * bits / 8, channels * bits / 8, bits, 22};
+    fmt.Samples.wValidBitsPerSample = bits;
+    fmt.dwChannelMask = mask;
+    fmt.SubFormat = bits == 32 ? nx_subtype_float : nx_subtype_pcm;
+    return fmt;
+}
+
+static void test_channel_layout(unsigned int channels, DWORD mask, const float weights[][2])
+{
+    WAVEFORMATEXTENSIBLE fmt = channel_format(channels, mask, 32);
+    stream_handle handle = 0;
+    UINT32 count = 0;
+    BYTE *data;
+    struct create_stream_params create = {.flow=eRender, .share=AUDCLNT_SHAREMODE_SHARED,
+        .duration=300000, .fmt=&fmt.Format, .channel_count=&count, .stream=&handle,
+        .flags=AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM};
+    struct get_render_buffer_params get = {.frames=channels + 2, .data=&data};
+    struct release_render_buffer_params put = {.written_frames=channels + 2};
+    struct start_params start;
+    struct set_event_handle_params event = {.event=(HANDLE)1};
+    struct release_stream_params release;
+    struct set_volumes_params volume;
+    float vols[NX_MAX_CHANNELS], session[NX_MAX_CHANNELS];
+    float totals[2] = {0};
+    struct nx_audio_stream *s;
+    short *out;
+    unsigned int i, c;
+
+    nx_create_stream(&create);
+    assert(create.result == S_OK && count == channels && handle);
+    s = nx_stream(handle);
+    get.stream = put.stream = start.stream = event.stream = release.stream = handle;
+    nx_set_event_handle(&event); assert(event.result == S_OK);
+    nx_get_render_buffer(&get); assert(get.result == S_OK);
+    memset(data, 0, get.frames * fmt.Format.nBlockAlign);
+    for (c = 0; c < channels; c++)
+    {
+        ((float *)data)[c * channels + c] = 1;
+        ((float *)data)[channels * channels + c] = 1;
+        ((float *)data)[(channels + 1) * channels + c] = -1;
+        totals[0] += weights[c][0]; totals[1] += weights[c][1];
+        vols[c] = session[c] = 1;
+    }
+    nx_release_render_buffer(&put); assert(put.result == S_OK);
+    nx_start(&start); assert(start.result == S_OK && queued_count == 1);
+    out = queued[0]->buffer;
+    for (c = 0; c < channels; c++) for (i = 0; i < 2; i++)
+        assert(abs(out[c * 2 + i] - (int)(weights[c][i] * 32767)) <= 2);
+    for (i = 0; i < 2; i++)
+    {
+        assert(abs(out[channels * 2 + i] - (int)(totals[i] * 32767)) <= 2);
+        assert(abs(out[(channels + 1) * 2 + i] + (int)(totals[i] * 32767)) <= 2);
+    }
+    ready = 1; nx_pump(); assert(!s->held && !queued_count);
+
+    get.frames = put.written_frames = 1;
+    for (c = 0; c < channels; c++)
+    {
+        nx_get_render_buffer(&get); assert(get.result == S_OK);
+        memset(data, 0, fmt.Format.nBlockAlign);
+        ((float *)data)[c] = 1;
+        nx_release_render_buffer(&put); assert(put.result == S_OK);
+        /* Changes after submission must affect queued audio exactly once. */
+        vols[c] = .5f; session[c] = .5f;
+        volume = (struct set_volumes_params){handle, .5f, vols, session};
+        nx_set_volumes(&volume);
+        nx_pump(); assert(queued_count == 1);
+        out = queued[0]->buffer;
+        for (i = 0; i < 2; i++)
+            assert(abs(out[i] - (int)(weights[c][i] * 32767 * .125f)) <= 2);
+        ready = 1; nx_pump();
+        vols[c] = session[c] = 1;
+        volume.master_volume = 1; nx_set_volumes(&volume);
+    }
+    put.flags = AUDCLNT_BUFFERFLAGS_SILENT;
+    s->read = s->capacity - 1;
+    get.frames = put.written_frames = 2;
+    nx_get_render_buffer(&get); assert(get.result == S_OK);
+    memset(data, 0xff, get.frames * fmt.Format.nBlockAlign);
+    nx_release_render_buffer(&put); assert(put.result == S_OK);
+    nx_pump(); assert(queued_count == 1);
+    out = queued[0]->buffer;
+    assert(!out[0] && !out[1] && !out[2] && !out[3]);
+    ready = 1; nx_pump(); assert(!s->held && s->read == 1);
+    nx_release_stream(&release); assert(release.result == S_OK && !active && !queued_count);
+}
+
+static void test_multichannel(void)
+{
+    const float root = .70710678f, scale = 1 + root * 2 + .5f;
+    const float surround[][2] = {{1/scale,0}, {0,1/scale}, {root/scale,root/scale},
+        {.5f/scale,.5f/scale}, {root/scale,0}, {0,root/scale}};
+    const float quad[][2] = {{1/(1+root),0}, {0,1/(1+root)}, {root/(1+root),0}, {0,root/(1+root)}};
+    const float stereo[][2] = {{1,0}, {0,1}};
+    const float mono[][2] = {{1,1}};
+    const float seven_scale = scale + root;
+    const float seven[][2] = {{1/seven_scale,0}, {0,1/seven_scale}, {root/seven_scale,root/seven_scale},
+        {.5f/seven_scale,.5f/seven_scale}, {root/seven_scale,0}, {0,root/seven_scale},
+        {root/seven_scale,0}, {0,root/seven_scale}};
+    const float left_center[][2] = {{1/(1+root),0}, {root/(1+root),root/(1+root)}};
+    WAVEFORMATEXTENSIBLE fmt = channel_format(6, 0x3f, 32);
+    struct is_format_supported_params supported = {.flow=eRender, .share=AUDCLNT_SHAREMODE_SHARED, .fmt_in=&fmt.Format};
+
+    test_channel_layout(1, SPEAKER_FRONT_CENTER, mono);
+    test_channel_layout(2, 3, stereo);
+    test_channel_layout(4, 0x33, quad);
+    test_channel_layout(6, 0x3f, surround);
+    test_channel_layout(6, 0x60f, surround);
+    test_channel_layout(8, 0x63f, seven);
+    test_channel_layout(2, SPEAKER_FRONT_LEFT | SPEAKER_FRONT_CENTER, left_center);
+    nx_is_format_supported(&supported); assert(supported.result == S_OK);
+    supported.share = AUDCLNT_SHAREMODE_EXCLUSIVE;
+    nx_is_format_supported(&supported); assert(supported.result == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED);
+    supported.share = AUDCLNT_SHAREMODE_SHARED;
+    fmt.dwChannelMask = 0;
+    nx_is_format_supported(&supported); assert(supported.result == AUDCLNT_E_UNSUPPORTED_FORMAT);
+    fmt.dwChannelMask = 0x8000003f;
+    assert(!nx_format(&fmt.Format));
+    fmt = channel_format(9, 0x1ff, 32); assert(!nx_format(&fmt.Format));
+    fmt = channel_format(6, 0x3f, 32);
+    fmt.Format.cbSize = 0; assert(!nx_format(&fmt.Format));
+    fmt.Format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT; assert(!nx_format(&fmt.Format));
+}
+
+static void test_pcm_channels(void)
+{
+    static const BYTE samples[][4] = {{0,0,0,0}, {0,0xc0,0,0}, {0,0,0xc0,0}, {0,0,0,0xc0}};
+    static const short expected[] = {-32768, -16384, -16384, -16384};
+    unsigned int bits, c;
+    for (bits = 8; bits <= 32; bits += 8)
+    {
+        WAVEFORMATEXTENSIBLE fmt = channel_format(6, 0x3f, bits);
+        stream_handle handle;
+        UINT32 channels;
+        BYTE *data;
+        struct create_stream_params create = {.flow=eRender, .share=AUDCLNT_SHAREMODE_SHARED,
+            .duration=300000, .fmt=&fmt.Format, .channel_count=&channels, .stream=&handle};
+        struct get_render_buffer_params get = {.frames=1, .data=&data};
+        struct release_render_buffer_params put = {.written_frames=1};
+        struct release_stream_params release;
+        fmt.SubFormat = nx_subtype_pcm;
+        nx_create_stream(&create); assert(create.result == S_OK && channels == 6);
+        get.stream = put.stream = release.stream = handle;
+        nx_get_render_buffer(&get); assert(get.result == S_OK);
+        for (c = 0; c < 6; c++) memcpy(data + c * bits / 8, samples[bits / 8 - 1], bits / 8);
+        nx_release_render_buffer(&put); assert(put.result == S_OK);
+        for (c = 0; c < 6; c++) assert(((short *)nx_stream(handle)->ring)[c] == expected[bits / 8 - 1]);
+        nx_release_stream(&release); assert(release.result == S_OK);
+    }
+}
+
 int main(void)
 {
     struct test_connect_params connect = {0};
@@ -253,6 +408,8 @@ int main(void)
         release.stream = b; nx_release_stream(&release);
         assert(release.result == S_OK && !active && !host_started && !queued_count);
     }
-    puts("Audio backend: native table, 64-bit pointers, zero MIDI/aux devices, playback and formats passed");
+    test_multichannel();
+    test_pcm_channels();
+    puts("Audio backend: playback, multichannel mixing, channel volumes and formats passed");
     return 0;
 }
