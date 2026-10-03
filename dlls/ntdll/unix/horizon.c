@@ -13032,6 +13032,39 @@ static unsigned int horizon_sock_ioctl_connect( unsigned int handle, const unsig
     return status;
 }
 
+static void horizon_sock_poll_entry_read( unsigned long long *socket, int *flags, int *status,
+                                          const unsigned char *src, unsigned int stride )
+{
+    unsigned int at = stride - 8;
+
+    if (at == 4)
+    {
+        unsigned int socket32;
+
+        memcpy( &socket32, src, sizeof(socket32) );
+        *socket = socket32;
+    }
+    else memcpy( socket, src, sizeof(*socket) );
+    memcpy( flags, src + at, sizeof(*flags) );
+    memcpy( status, src + at + 4, sizeof(*status) );
+}
+
+static void horizon_sock_poll_entry_write( unsigned char *dst, unsigned int stride,
+                                           unsigned long long socket, int flags, int status )
+{
+    unsigned int at = stride - 8;
+
+    if (at == 4)
+    {
+        unsigned int socket32 = (unsigned int)socket;
+
+        memcpy( dst, &socket32, sizeof(socket32) );
+    }
+    else memcpy( dst, &socket, sizeof(socket) );
+    memcpy( dst + at, &flags, sizeof(flags) );
+    memcpy( dst + at + 4, &status, sizeof(status) );
+}
+
 static unsigned int horizon_sock_ioctl_poll( unsigned int handle, const unsigned char *data,
                                              unsigned int data_size, unsigned char *out,
                                              unsigned int out_max, unsigned int *out_size )
@@ -13041,21 +13074,23 @@ static unsigned int horizon_sock_ioctl_poll( unsigned int handle, const unsigned
     struct pollfd pfds[64];
     struct { unsigned long long socket; int flags; int status; } entry;
     int timeout_ms, ret;
+    /* AFD socket entries follow the guest pointer size, not the host's. */
+    const unsigned int stride = horizon_process_machine == HORIZON_IMAGE_FILE_MACHINE_I386 ? 12 : 16;
 
     (void)handle;
     *out_size = 0;
     if (data_size < 16) return HORIZON_STATUS_INVALID_PARAMETER;
     memcpy( &timeout, data, sizeof(timeout) );
     memcpy( &count, data + 8, sizeof(count) );
-    if (!count || count > 64 || data_size < 16 + count * 16) return HORIZON_STATUS_INVALID_PARAMETER;
-    if (out_max < 16 + count * 16) return HORIZON_STATUS_BUFFER_TOO_SMALL;
+    if (!count || count > 64 || data_size < 16 + count * stride) return HORIZON_STATUS_INVALID_PARAMETER;
+    if (out_max < 16 + count * stride) return HORIZON_STATUS_BUFFER_TOO_SMALL;
 
     for (i = 0; i < count; i++)
     {
         unsigned int status;
         int fd = -1;
 
-        memcpy( &entry, data + 16 + i * 16, sizeof(entry) );
+        horizon_sock_poll_entry_read( &entry.socket, &entry.flags, &entry.status, data + 16 + i * stride, stride );
         status = horizon_server_get_sock_fd( (unsigned int)entry.socket, &fd, NULL );
         pfds[i].fd = status ? -1 : fd;
         pfds[i].events = 0;
@@ -13085,7 +13120,7 @@ static unsigned int horizon_sock_ioctl_poll( unsigned int handle, const unsigned
     {
         int flags = 0;
 
-        memcpy( &entry, data + 16 + i * 16, sizeof(entry) );
+        horizon_sock_poll_entry_read( &entry.socket, &entry.flags, &entry.status, data + 16 + i * stride, stride );
         if (pfds[i].fd == -1) flags = HORIZON_AFD_POLL_CLOSE;
         else
         {
@@ -13106,11 +13141,11 @@ static unsigned int horizon_sock_ioctl_poll( unsigned int handle, const unsigned
         if (!flags) continue;
         entry.flags = flags;
         if (!(pfds[i].revents & POLLERR)) entry.status = 0;
-        memcpy( out + 16 + signaled * 16, &entry, sizeof(entry) );
+        horizon_sock_poll_entry_write( out + 16 + signaled * stride, stride, entry.socket, entry.flags, entry.status );
         signaled++;
     }
     memcpy( out + 8, &signaled, sizeof(signaled) );
-    *out_size = 16 + signaled * 16;
+    *out_size = 16 + signaled * stride;
     return HORIZON_STATUS_SUCCESS;
 }
 
@@ -13633,9 +13668,21 @@ static int horizon_server_handle_ioctl( struct horizon_server_connection *connec
         unsigned long long event;
         int mask;
 
-        if (data_size < 12) { status = HORIZON_STATUS_INVALID_PARAMETER; break; }
-        memcpy( &event, data, sizeof(event) );
-        memcpy( &mask, data + 8, sizeof(mask) );
+        if (horizon_process_machine == HORIZON_IMAGE_FILE_MACHINE_I386)
+        {
+            unsigned int event32;
+
+            if (data_size < 8) { status = HORIZON_STATUS_INVALID_PARAMETER; break; }
+            memcpy( &event32, data, sizeof(event32) );
+            event = event32;
+            memcpy( &mask, data + 4, sizeof(mask) );
+        }
+        else
+        {
+            if (data_size < 12) { status = HORIZON_STATUS_INVALID_PARAMETER; break; }
+            memcpy( &event, data, sizeof(event) );
+            memcpy( &mask, data + 8, sizeof(mask) );
+        }
         pthread_mutex_lock( &horizon_server_objects_mutex );
         status = horizon_server_find_sock_locked( handle, &object );
         if (!status)
