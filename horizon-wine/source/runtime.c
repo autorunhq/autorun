@@ -32,6 +32,7 @@
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "fex_options.h"
+#include "dxvk_options.h"
 #include "config_json.h"
 #include "pointer_cursor.h"
 #include "compositor.h"
@@ -4117,9 +4118,21 @@ int main( int argc, char **argv )
             if (runtime_d3d != LAUNCHER_D3D_WINE)
             {
                 struct launcher_kv graphics;
+                struct dxvk_version selected;
+                USHORT machine;
 
                 if (!launcher_dxvk_config( &settings, graphics.text, sizeof(graphics.text) ))
                     return return_to_launcher();
+                if (!runtime_target_machine( target, &machine ))
+                {
+                    dxvk_resolve_version( runtime_dxvk_source, RUNTIME_DIR, machine, runtime_dxvk_version, &selected );
+                    if (selected.installed && !dxvk_options_apply( &kv, runtime_dxvk_source, selected.version,
+                                                                  graphics.text, sizeof(graphics.text) ))
+                    {
+                        log_line( "[DXVK] graphics settings exceed the configuration limit" );
+                        return return_to_launcher();
+                    }
+                }
                 {
                     struct launcher_kv game;
                     char game_conf[520], *slash;

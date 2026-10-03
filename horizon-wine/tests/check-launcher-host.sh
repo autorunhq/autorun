@@ -22,6 +22,9 @@ shots="${LAUNCHER_SHOTS:-$build}"
 
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
+clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+    "$horizon_wine/tests/dxvk_options.c" "$horizon_wine/source/dxvk_options.c" -o "$build/dxvk_options"
+"$build/dxvk_options"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$horizon_wine/tests/launcher_svg.c" "$horizon_wine/source/launcher_svg.c" -o "$build/launcher_svg"
 "$build/launcher_svg"
@@ -63,7 +66,8 @@ python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" wine_nx_ic
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include -I/opt/homebrew/opt/openssl/include \
     "$horizon_wine/tests/launcher_host.c" "$horizon_wine/source/launcher.c" "$horizon_wine/source/launcher_catalog.c" "$horizon_wine/source/launcher_ui.c" "$horizon_wine/source/launcher_audio.c" \
-    "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
+    "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_dxvk.c" "$horizon_wine/source/dxvk_options.c" \
+    "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
     "$horizon_wine/source/launcher_setup.c" "$horizon_wine/source/setup_boot.c" \
     "$horizon_wine/source/steamgriddb.c" "$horizon_wine/source/launcher_artwork.c" \
     "$horizon_wine/source/launcher_svg.c" \

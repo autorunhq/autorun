@@ -48,6 +48,7 @@
 #include "launcher_setup.h"
 #include "setup_boot.h"
 #include "launcher_graphics.h"
+#include "launcher_dxvk.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
@@ -1765,7 +1766,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
@@ -2505,6 +2506,12 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 row->kind = UI_ROW_DROPDOWN;
                 snprintf( row->value, sizeof(row->value), "%s", launcher_hud_labels[p->settings.dxvk_hud] );
                 row->choices = LAUNCHER_HUD_COUNT;
+
+                ADD_ROW( ROW_DXVK_OPTIONS, SECTION_GRAPHICS, "DXVK options",
+                         "Per-game performance, memory and compatibility options for the selected DXVK release. "
+                         "Default preserves DXVK's game profile. A local dxvk.conf takes priority." );
+                snprintf( row->value, sizeof(row->value), "Configure" );
+                row->disabled = !dxvk_ready;
             }
 
             ADD_ROW( ROW_FRAME_LIMIT, SECTION_GRAPHICS, "Frame rate limit",
@@ -2846,6 +2853,13 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                     save_program_settings( l, p );
                 }
             }
+            break;
+
+        case ROW_DXVK_OPTIONS:
+            if (action != UI_ACTION_CHOOSE) break;
+            launcher_dxvk_options( ui, l->options->runtime_dir, p->path, p->title,
+                                   p->settings.dxvk_source, dxvk.version );
+            load_program_settings( l, p );
             break;
 
         case ROW_DXVK_HUD:
