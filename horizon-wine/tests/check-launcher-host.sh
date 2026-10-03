@@ -23,6 +23,9 @@ shots="${LAUNCHER_SHOTS:-$build}"
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+    "$horizon_wine/tests/input_profile.c" "$horizon_wine/source/input_profile.c" -lm -o "$build/input_profile"
+"$build/input_profile"
+clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
     "$horizon_wine/tests/dxvk_options.c" "$horizon_wine/source/dxvk_options.c" -o "$build/dxvk_options"
 "$build/dxvk_options"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -62,10 +65,13 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     $(sdl2-config --libs) -L/opt/homebrew/lib -lpng -lturbojpeg -o "$build/launcher_image"
 "$build/launcher_image" "$horizon_wine/assets/logo.png" "$horizon_wine/assets/autorun.jpg"
 
-python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" wine_nx_icon_any "$horizon_wine/assets/autorun.jpg"
+python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" \
+    wine_nx_icon_any "$horizon_wine/assets/autorun.jpg" \
+    wine_nx_joycons "$horizon_wine/assets/controls/joycons.png"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include -I/opt/homebrew/opt/openssl/include \
     "$horizon_wine/tests/launcher_host.c" "$horizon_wine/source/launcher.c" "$horizon_wine/source/launcher_catalog.c" "$horizon_wine/source/launcher_ui.c" "$horizon_wine/source/launcher_audio.c" \
+    "$horizon_wine/source/input_profile.c" "$horizon_wine/source/launcher_input.c" \
     "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_dxvk.c" "$horizon_wine/source/dxvk_options.c" \
     "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
     "$horizon_wine/source/launcher_setup.c" "$horizon_wine/source/setup_boot.c" \

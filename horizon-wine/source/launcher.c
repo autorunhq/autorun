@@ -37,7 +37,7 @@
 #include "launcher_icons.h"
 #include "launcher_list.h"
 #include "launcher_pe.h"
-#include "key_names.h"
+#include "launcher_input.h"
 #include "launcher_settings.h"
 #include "launcher_ui.h"
 #include "launcher_forwarder.h"
@@ -350,20 +350,6 @@ static int file_exists( const char *path )
 static void runtime_file( const struct launcher *l, const char *name, char *out, size_t size )
 {
     snprintf( out, size, "%s/%s", l->options->runtime_dir, name );
-}
-
-/* The key map everything shares. It lives in the config folder; a card written
- * by an earlier build has it beside the launcher, and the runtime reads that
- * one too. Returns whether either is there, with the path of the one to show. */
-static void controls_screen( struct launcher *l, const char *path, const char *under_path,
-                             const char *title );
-
-static int shared_keys( const struct launcher *l, char *out, size_t size )
-{
-    runtime_file( l, "config/keys.txt", out, size );
-    if (file_exists( out )) return 1;
-    runtime_file( l, "keys.txt", out, size );
-    return file_exists( out );
 }
 
 /* Nonzero when the line reached the card, which the handoff in start_program
@@ -1769,7 +1755,7 @@ enum program_row
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_OWN_CONTROLS, ROW_CONTROLS, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2327,6 +2313,7 @@ enum program_section
     SECTION_GENERAL,
     SECTION_EMULATION,
     SECTION_GRAPHICS,
+    SECTION_CONTROLS,
 #ifdef WINE_NX_LSFG
     SECTION_FRAME_GENERATION,
 #endif
@@ -2336,7 +2323,7 @@ enum program_section
 
 static int program_menu( struct launcher *l, struct program *p, char *target, size_t size )
 {
-    static const char *const sections[] = { "General", "Emulation", "Graphics",
+    static const char *const sections[] = { "General", "Emulation", "Graphics", "Controls",
 #ifdef WINE_NX_LSFG
                                             "Frame Generation",
 #endif
@@ -2592,23 +2579,11 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 #endif
 
         {
-            int has_own = launcher_keys_path( p->path, path, sizeof(path) ) && file_exists( path );
-            /* Not set means its own when it has any, which is what a card
-             * written before this setting existed means. */
-            int own = p->settings.own_controls < 0 ? has_own : p->settings.own_controls;
-
-            ADD_ROW( ROW_OWN_CONTROLS, SECTION_DIAGNOSTICS, "Controls",
-                     "Autorun's controls, or this program's own over them. Turning them off keeps "
-                     "the keys that were set, for when they are wanted again." );
-            snprintf( row->value, sizeof(row->value), "%s", own ? "Its own" : "Autorun's" );
-            row->kind = UI_ROW_SWITCH;
-            row->on = own;
-
-            if (own)
+            launcher_input_rows( rows + count, l->options->runtime_dir, p->path, l->options->swkbd_auto );
+            for (i = 0; i < INPUT_ROW_COUNT; i++, count++)
             {
-                ADD_ROW( ROW_CONTROLS, SECTION_DIAGNOSTICS, "Edit controls",
-                         "The keys this program's controls send, over the ones everything else sends." );
-                snprintf( row->value, sizeof(row->value), "%s", has_own ? "Set" : "Default" );
+                ids[count] = ROW_INPUT + i;
+                rows[count].group = SECTION_CONTROLS;
             }
         }
 
@@ -2652,6 +2627,13 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         for (id = 0, i = 0; i < count; i++)
             if (rows[i].group == section && id++ == list.selection) break;
         id = i < count ? ids[i] : ids[0];
+        if (id >= ROW_INPUT && id <= ROW_INPUT_END)
+        {
+            launcher_input_edit( ui, &list, id - ROW_INPUT, action, l->options->runtime_dir,
+                                 p->path, p->title, l->options->swkbd_auto );
+            load_program_settings( l, p );
+            continue;
+        }
         switch (id)
         {
         case ROW_START:
@@ -2954,30 +2936,6 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
 #endif
 
-        case ROW_OWN_CONTROLS:
-        {
-            int has_own = launcher_keys_path( p->path, path, sizeof(path) ) && file_exists( path );
-
-            if (action == UI_ACTION_RESET) p->settings.own_controls = -1;
-            else p->settings.own_controls = !(p->settings.own_controls < 0 ? has_own :
-                                              p->settings.own_controls);
-            save_program_settings( l, p );
-            break;
-        }
-
-        case ROW_CONTROLS:
-            if (action != UI_ACTION_CHOOSE) break;
-            if (launcher_keys_path( p->path, path, sizeof(path) ))
-            {
-                char under[512];
-
-                /* What this program alone sends, over what everything does. */
-                shared_keys( l, under, sizeof(under) );
-                controls_screen( l, path, under, "Controls" );
-                ui_start_screen( &l->ui );
-            }
-            break;
-
         case ROW_BOX64:
             if (action != UI_ACTION_CHOOSE) break;
             box64_options_menu( l, p );
@@ -3036,8 +2994,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_SWKBD,
-    SET_CONTROLS, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
+    SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
     SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE,
@@ -3084,6 +3042,8 @@ static const struct { const char *name, *by; } credits[] =
     { "devkitPro", "devkitA64 and portlibs" },
     { "Atmosphere", "Atmosphere-NX  /  Horizon platform reference" },
     { "INTERFACE & LIBRARIES", NULL },
+    { "Joy-Con illustration", "0 Noctis 0  /  CC BY-SA 4.0" },
+    { "Controller button icons", "Zacksly  /  CC BY 3.0" },
     { "SDL2 & SDL2_ttf", "Sam Lantinga and contributors  /  zlib" },
     { "FreeType", "FreeType Project  /  FTL" },
     { "HarfBuzz", "HarfBuzz authors  /  MIT" },
@@ -3098,259 +3058,6 @@ static const struct { const char *name, *by; } credits[] =
     { "WineBox64 NX", "Ibnuard" },
 };
 #define CREDIT_COUNT (sizeof(credits) / sizeof(credits[0]))
-
-/* The keys a controller sends, as a screen rather than a file to be written by
- * hand. One row for each control, the key it sends beside it; left and right
- * step through the keys, A opens the whole list, and Y puts a control back to
- * what it sends with no line of its own.
- *
- * What is written is the same keys.txt the runtime has always read -- a
- * NAME=code line for each control that differs -- so a file written here can
- * still be edited on a computer, and one edited there opens here. */
-static unsigned short control_key( const struct launcher_kv *keys, const struct launcher_kv *under,
-                                   int control )
-{
-    const char *name = wine_nx_controls[control].name;
-    char value[64];
-
-    if (launcher_kv_get( keys, name, value, sizeof(value) ) && value[0])
-        return (unsigned short)strtoul( value, NULL, 0 );
-    /* A program's own keys are applied over the shared ones, so a control the
-     * program says nothing about shows what the shared file gives it. */
-    if (under && launcher_kv_get( under, name, value, sizeof(value) ) && value[0])
-        return (unsigned short)strtoul( value, NULL, 0 );
-    return wine_nx_controls[control].sends;
-}
-
-static void set_control_key( struct launcher_kv *keys, int control, int code )
-{
-    char value[32];
-
-    /* Back to the default is the line taken away, not a line saying the
-     * default: a later build that changes what a control sends should reach a
-     * controller nobody has touched. */
-    if (code < 0) launcher_kv_set( keys, wine_nx_controls[control].name, NULL );
-    else
-    {
-        snprintf( value, sizeof(value), "0x%02x", code );
-        launcher_kv_set( keys, wine_nx_controls[control].name, value );
-    }
-}
-
-/* What one of the three that point is set to do. The keys file says it in
- * words -- LSTICK=mouse -- because it is not a key. */
-enum device_choice { DEVICE_MOUSE, DEVICE_DPAD, DEVICE_ARROWS, DEVICE_WASD, DEVICE_CUSTOM };
-
-static const char *const device_choice_names[] =
-    { "Mouse", "Same as d-pad", "Arrow keys", "W A S D", "Its own keys" };
-
-static int device_points( const struct launcher_kv *keys, const struct launcher_kv *under, int device )
-{
-    const char *name = wine_nx_devices[device].name;
-    char value[32];
-
-    if (launcher_kv_get( keys, name, value, sizeof(value) ) && value[0])
-        return strcasecmp( value, "keys" ) == 0 ? 0 : 1;
-    if (under && launcher_kv_get( under, name, value, sizeof(value) ) && value[0])
-        return strcasecmp( value, "keys" ) == 0 ? 0 : 1;
-    return wine_nx_devices[device].points;
-}
-
-static enum device_choice device_choice( const struct launcher_kv *keys, const struct launcher_kv *under,
-                                         int device )
-{
-    const struct wine_nx_device *d = &wine_nx_devices[device];
-    unsigned short code[4];
-    int i, unset = 1;
-
-    if (device_points( keys, under, device )) return DEVICE_MOUSE;
-    for (i = 0; i < 4; i++)
-    {
-        code[i] = control_key( keys, under, d->first + i );
-        if (code[i]) unset = 0;
-    }
-    if (unset && d->follows_dpad) return DEVICE_DPAD;
-    if (!memcmp( code, wine_nx_preset_arrows, sizeof(code) )) return DEVICE_ARROWS;
-    if (!memcmp( code, wine_nx_preset_wasd, sizeof(code) )) return DEVICE_WASD;
-    return DEVICE_CUSTOM;
-}
-
-static void set_device_choice( struct launcher_kv *keys, int device, enum device_choice choice )
-{
-    const struct wine_nx_device *d = &wine_nx_devices[device];
-    const unsigned short *preset = choice == DEVICE_WASD ? wine_nx_preset_wasd : wine_nx_preset_arrows;
-    int i;
-
-    launcher_kv_set( keys, d->name, choice == DEVICE_MOUSE ? "mouse" : "keys" );
-    if (choice == DEVICE_MOUSE || choice == DEVICE_CUSTOM) return;
-    for (i = 0; i < 4; i++)
-        set_control_key( keys, d->first + i, choice == DEVICE_DPAD ? -1 : preset[i] );
-}
-
-/* Round the choices for this one, leaving out those it does not have. */
-static enum device_choice next_device_choice( int device, enum device_choice from, int forward )
-{
-    int at = from == DEVICE_CUSTOM ? DEVICE_CUSTOM : from;
-
-    for (;;)
-    {
-        at += forward ? 1 : -1;
-        if (at < 0) at = DEVICE_CUSTOM;
-        if (at > DEVICE_CUSTOM) at = DEVICE_MOUSE;
-        /* Its own keys is where a file written by hand puts it, not somewhere
-         * to step into; the d-pad is the left stick's alone. */
-        if (at == DEVICE_CUSTOM) continue;
-        if (at == DEVICE_DPAD && !wine_nx_devices[device].follows_dpad) continue;
-        return (enum device_choice)at;
-    }
-}
-
-/* The whole list of keys, starting on the one the control sends now. Returns
- * the code chosen, or -1 for the way out. */
-static int key_screen( struct launcher *l, const char *control_label, unsigned short current )
-{
-    static struct ui_row rows[WINE_NX_KEY_NAME_COUNT];
-    struct ui_list list = {0};
-    char title[128];
-    int i, at = wine_nx_key_index( current );
-
-    memset( rows, 0, sizeof(rows) );
-    for (i = 0; i < WINE_NX_KEY_NAME_COUNT; i++)
-    {
-        snprintf( rows[i].label, sizeof(rows[i].label), "%s", wine_nx_key_names[i].name );
-        if (wine_nx_key_names[i].code)
-            snprintf( rows[i].value, sizeof(rows[i].value), "0x%02x", wine_nx_key_names[i].code );
-    }
-    snprintf( title, sizeof(title), "%s sends", control_label );
-    list.selection = at > 0 ? at : 0;
-    for (;;)
-    {
-        enum ui_action action = ui_list_run( &l->ui, &list, title, "Controls", rows,
-                                             WINE_NX_KEY_NAME_COUNT, 0 );
-
-        if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return -1;
-        if (action == UI_ACTION_CHOOSE) return wine_nx_key_names[list.selection].code;
-    }
-}
-
-static void controls_screen( struct launcher *l, const char *path, const char *under_path,
-                             const char *title )
-{
-    struct ui_row rows[WINE_NX_DEVICE_COUNT_UI + WINE_NX_CONTROL_COUNT];
-    struct launcher_kv keys, under;
-    struct ui_list list = {0};
-    int changed = 0, i;
-
-    if (under_path) launcher_kv_load( &under, under_path );
-    if (!launcher_kv_load( &keys, path ))
-    {
-        ui_message( &l->ui, "Controls", "That file is too large to open here; edit it on a computer." );
-        ui_start_screen( &l->ui );
-        return;
-    }
-    for (;;)
-    {
-        const struct launcher_kv *base = under_path ? &under : NULL;
-        enum ui_action action;
-        char label[64];
-        unsigned short code;
-        int device;
-
-        memset( rows, 0, sizeof(rows) );
-        for (device = 0; device < WINE_NX_DEVICE_COUNT_UI; device++)
-        {
-            snprintf( rows[device].label, sizeof(rows[0].label), "%s", wine_nx_devices[device].label );
-            snprintf( rows[device].value, sizeof(rows[0].value), "%s",
-                      device_choice_names[device_choice( &keys, base, device )] );
-            rows[device].adjustable = 1;
-            rows[device].kind = UI_ROW_VALUE;
-            rows[device].help = "Move the mouse, or send four keys. A game played with the mouse "
-                                "wants both sticks on it; one played with the keyboard wants the "
-                                "keys it walks with.";
-        }
-        for (i = 0; i < WINE_NX_CONTROL_COUNT; i++)
-        {
-            struct ui_row *row = &rows[WINE_NX_DEVICE_COUNT_UI + i];
-
-            snprintf( row->label, sizeof(row->label), "%s", wine_nx_controls[i].label );
-            snprintf( row->value, sizeof(row->value), "%s",
-                      wine_nx_key_label( i, control_key( &keys, base, i ), label, sizeof(label) ) );
-            row->adjustable = 1;
-            row->kind = UI_ROW_VALUE;
-            /* A stick on the mouse has no keys to give: say so rather than
-             * offer four rows that do nothing. */
-            for (device = 0; device < WINE_NX_DEVICE_COUNT_UI; device++)
-            {
-                if (i < wine_nx_devices[device].first || i >= wine_nx_devices[device].first + 4) continue;
-                if (!device_points( &keys, base, device )) continue;
-                snprintf( row->value, sizeof(row->value), "Moves the mouse" );
-                row->adjustable = 0;
-                row->disabled = 1;
-            }
-        }
-        rows[WINE_NX_DEVICE_COUNT_UI].help =
-            "A and B are the mouse buttons until they are given a key of their own.";
-        action = ui_list_run( &l->ui, &list, title, "Controls", rows,
-                              WINE_NX_DEVICE_COUNT_UI + WINE_NX_CONTROL_COUNT, 1 );
-        if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) break;
-        if (list.selection < WINE_NX_DEVICE_COUNT_UI)
-        {
-            enum device_choice choice = device_choice( &keys, base, list.selection );
-
-            if (action == UI_ACTION_LEFT || action == UI_ACTION_RIGHT || action == UI_ACTION_CHOOSE)
-            {
-                set_device_choice( &keys, list.selection,
-                                   next_device_choice( list.selection, choice,
-                                                       action != UI_ACTION_LEFT ) );
-                changed = 1;
-            }
-            else if (action == UI_ACTION_RESET)
-            {
-                launcher_kv_set( &keys, wine_nx_devices[list.selection].name, NULL );
-                changed = 1;
-            }
-            continue;
-        }
-        i = list.selection - WINE_NX_DEVICE_COUNT_UI;
-        code = control_key( &keys, base, i );
-        switch (action)
-        {
-        case UI_ACTION_CHOOSE:
-        {
-            int picked = key_screen( l, wine_nx_controls[i].label, code );
-
-            ui_start_screen( &l->ui );
-            if (picked >= 0 && picked != code) { set_control_key( &keys, i, picked ); changed = 1; }
-            break;
-        }
-        case UI_ACTION_LEFT:
-        case UI_ACTION_RIGHT:
-        {
-            int at = wine_nx_key_index( code );
-
-            /* A code the list does not name steps from the start rather than
-             * nowhere, so a hand-written file can be changed here too. */
-            if (at < 0) at = 0;
-            else at += action == UI_ACTION_RIGHT ? 1 : -1;
-            if (at < 0) at = WINE_NX_KEY_NAME_COUNT - 1;
-            if (at >= WINE_NX_KEY_NAME_COUNT) at = 0;
-            set_control_key( &keys, i, wine_nx_key_names[at].code );
-            changed = 1;
-            break;
-        }
-        case UI_ACTION_RESET:
-            set_control_key( &keys, i, -1 );
-            changed = 1;
-            break;
-        default: break;
-        }
-    }
-    if (changed && !launcher_kv_save( &keys, path ))
-    {
-        ui_message( &l->ui, "Controls", "The keys could not be saved to the card." );
-        ui_start_screen( &l->ui );
-    }
-}
 
 static void credits_screen( struct launcher *l )
 {
@@ -3468,11 +3175,11 @@ static void credits_screen( struct launcher *l )
 }
 
 /* The sections of Settings, in the order they stand in the list. */
-enum settings_section { SET_SECTION_LIBRARY, SET_SECTION_DEFAULTS, SET_SECTION_ARTWORK, SET_SECTION_SYSTEM };
+enum settings_section { SET_SECTION_LIBRARY, SET_SECTION_DEFAULTS, SET_SECTION_CONTROLS, SET_SECTION_ARTWORK, SET_SECTION_SYSTEM };
 
 static void settings_menu( struct launcher *l )
 {
-    static const char *const sections[] = { "Library", "Game defaults", "Artwork", "System" };
+    static const char *const sections[] = { "Library", "Game defaults", "Controls", "Artwork", "System" };
     static const char *on_off[2] = { "Off", "On" };
     static int section;
     struct ui_row rows[SETTINGS_ROWS];
@@ -3490,8 +3197,7 @@ static void settings_menu( struct launcher *l )
             [SET_HIDE_MISSING] = SET_SECTION_LIBRARY,
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
-            [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_CONTROLS] = SET_SECTION_DEFAULTS,
-            [SET_SWKBD] = SET_SECTION_DEFAULTS,
+            [SET_WINDOWS] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
@@ -3542,14 +3248,9 @@ static void settings_menu( struct launcher *l )
                   l->options->framebuffer ? "Framebuffer" : "Compositor" );
         rows[SET_WINDOWS].help = "The framebuffer copies window pixels straight to the screen, "
                                  "for when the OpenGL compositor misbehaves.";
-        snprintf( rows[SET_CONTROLS].label, sizeof(rows[0].label), "Controls" );
-        snprintf( rows[SET_CONTROLS].value, sizeof(rows[0].value), "%s",
-                  shared_keys( l, path, sizeof(path) ) ? "Set" : "Default" );
-        rows[SET_CONTROLS].help = "The keys every program's controls send, unless the program has its own.";
-        /* A row that opens a screen, not one that is changed where it stands:
-         * left and right have nothing to do here and A must go in. */
-        rows[SET_CONTROLS].adjustable = 0;
-        rows[SET_CONTROLS].kind = UI_ROW_ACTION;
+        launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
+        for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
+
         snprintf( rows[SET_STEAMGRIDDB].label, sizeof(rows[0].label), "SteamGridDB API key" );
         snprintf( rows[SET_STEAMGRIDDB].value, sizeof(rows[0].value), "%s",
                   launcher_kv_get( &l->look, "steamgriddb-key", path, sizeof(path) ) && path[0] ? "Configured" : "Not set" );
@@ -3607,12 +3308,6 @@ static void settings_menu( struct launcher *l )
                                        "GPU and shared memory stay in RAM. Off removes the swap files.";
         }
 #endif
-        snprintf( rows[SET_SWKBD].label, sizeof(rows[0].label), "On-screen keyboard" );
-        snprintf( rows[SET_SWKBD].value, sizeof(rows[0].value), "%s", on_off[!!l->options->swkbd_auto] );
-        rows[SET_SWKBD].kind = UI_ROW_SWITCH;
-        rows[SET_SWKBD].on = !!l->options->swkbd_auto;
-        rows[SET_SWKBD].help = "Opens by itself when a text field takes focus. Off leaves it to Minus + the "
-                               "right stick click, which opens it in any program.";
         snprintf( rows[SET_CREDITS].label, sizeof(rows[0].label), "Credits" );
         rows[SET_CREDITS].kind = UI_ROW_ACTION;
         rows[SET_CREDITS].help = "People and projects behind Autorun.";
@@ -3627,8 +3322,14 @@ static void settings_menu( struct launcher *l )
             int shown = 0;
 
             for (i = 0; i < SETTINGS_ROWS; i++)
-                if (row_section[i] == section && shown++ == list.selection) break;
+                if (rows[i].group == section && shown++ == list.selection) break;
             if (i >= SETTINGS_ROWS) continue;
+        }
+        if (i >= SET_INPUT && i <= SET_INPUT_END)
+        {
+            launcher_input_edit( ui, &list, i - SET_INPUT, action, l->options->runtime_dir,
+                                 NULL, "All games", l->options->swkbd_auto );
+            continue;
         }
         switch (i)
         {
@@ -3651,14 +3352,6 @@ static void settings_menu( struct launcher *l )
             break;
         case SET_SETUP:
             if (action == UI_ACTION_CHOOSE) quick_setup( l );
-            break;
-        case SET_CONTROLS:
-            if (action != UI_ACTION_CHOOSE) break;
-            /* Written where the runtime looks first, whichever of the two the
-             * card has now. */
-            runtime_file( l, "config/keys.txt", path, sizeof(path) );
-            controls_screen( l, path, NULL, "Controls" );
-            ui_start_screen( ui );
             break;
         case SET_STEAMGRIDDB:
         {
@@ -3718,7 +3411,6 @@ static void settings_menu( struct launcher *l )
         }
 #endif
 
-        case SET_SWKBD: l->options->swkbd_auto = !l->options->swkbd_auto; break;
         case SET_CREDITS:
             credits_screen( l );
             ui_start_screen( ui );

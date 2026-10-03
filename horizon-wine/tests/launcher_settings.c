@@ -217,7 +217,6 @@ static void test_settings( const char *dir )
     load_text( &kv, "# written by hand\n" );
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
-    settings.own_controls = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     strcpy( settings.title, "Need for Speed" );
     settings.hidden = 1;
@@ -237,7 +236,7 @@ static void test_settings( const char *dir )
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
     settings.d3d = LAUNCHER_D3D_DXVK;
-    settings.verbose = settings.profile = settings.framebuffer = settings.own_controls = -1;
+    settings.verbose = settings.profile = settings.framebuffer = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     assert( launcher_settings_write( &kv, &settings ) && !strcmp( kv.text, "# written by hand\n" ) );
     assert( launcher_kv_save( &kv, path ) && !access( path, F_OK ) );

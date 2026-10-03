@@ -5,6 +5,9 @@
 
 #include "../source/xinput_unix.c"
 
+struct input_profile wine_nx_input_profile;
+uint64_t wine_nx_input_swallowed;
+
 static int mock_connected;
 static u64 mock_buttons, mock_tick;
 static HidAnalogStickState mock_sticks[2];
@@ -22,6 +25,7 @@ int wine_nx_osk_visible( void ) { return mock_keyboard; }
 int main(void)
 {
     XINPUT_GAMEPAD gamepad;
+    input_profile_defaults( &wine_nx_input_profile, 1 );
 
     /* Nothing held, sticks centred. */
     memset( &gamepad, 0xcc, sizeof(gamepad) );
@@ -76,8 +80,7 @@ int main(void)
         mock_tick = 0x100000001ull;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && state.state.Gamepad.wButtons == XINPUT_GAMEPAD_A);
-        assert(state.state.Gamepad.bRightTrigger == 255 && state.state.Gamepad.sThumbLX == 123);
-        assert(wine_nx_xinput_last_poll == mock_tick);
+        assert(state.state.Gamepad.bRightTrigger == 255 && !state.state.Gamepad.sThumbLX);
         /* The floating keyboard has the controller while it is up: still
          * there, nothing held. */
         mock_keyboard = 1;
@@ -87,6 +90,22 @@ int main(void)
         mock_keyboard = 0;
         wine_nx_xinput_unix_funcs[nx_xinput_set_state](&vibration);
         assert(vibration.connected);
+        wine_nx_input_profile.pad[1] = (struct input_binding){{1, 3}, 2};
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(state.state.Gamepad.wButtons == (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_Y));
+        wine_nx_input_swallowed = NX_PAD_B;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.state.Gamepad.wButtons && state.state.Gamepad.bRightTrigger == 255);
+        wine_nx_input_swallowed = 0;
+        wine_nx_input_profile.mode = INPUT_KEYBOARD_MOUSE;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.connected);
+        wine_nx_input_profile.mode = INPUT_CONTROLLER;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(state.connected && state.state.Gamepad.wButtons);
+        mock_buttons = NX_PAD_MINUS | NX_PAD_STICKR;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.state.Gamepad.wButtons);
         state.index = 1;
         state.connected = 1;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);

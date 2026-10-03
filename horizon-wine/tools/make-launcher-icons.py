@@ -29,7 +29,8 @@ def generate():
            '    const char *d;',
            '};',
            '']
-    for svg in sorted((horizon_wine / 'assets').glob('*.svg')):
+    assets = horizon_wine / 'assets'
+    for svg in sorted([*assets.glob('*.svg'), *assets.glob('controls/buttons/*.svg')]):
         text = svg.read_text()
         view_box = re.search(r'viewBox="([^"]+)"', text)
         paths = re.findall(r'<path\b[^>]*\sd="([^"]+)"', text)
@@ -39,7 +40,9 @@ def generate():
         # A licence notice in the file (Font Awesome's <!--! ... -->) stays with the path.
         notices = [n.strip() for n in re.findall(r'<!--!?(.*?)-->', text, re.S)]
         name = re.sub(r'[^a-z0-9]+', '_', svg.stem.lower()).strip('_')
-        out.append(f'/* assets/{svg.name}' + (f': {" ".join(notices)}' if notices else '') + ' */')
+        if svg.parent != assets:
+            name = 'input_' + name
+        out.append(f'/* assets/{svg.relative_to(assets).as_posix()}' + (f': {" ".join(notices)}' if notices else '') + ' */')
         out.append(f'static const struct launcher_svg_icon icon_{name} =')
         out.append(f'    {{ {x}, {y}, {w}, {h}, {c_string(paths[0])} }};')
         out.append('')

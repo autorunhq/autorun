@@ -11,6 +11,10 @@
 #include "xinput.h"
 #include "wine/unixlib.h"
 #include "../../dlls/xinput1_3/nx_pad.h"
+#include "input_profile.h"
+
+extern struct input_profile wine_nx_input_profile;
+extern uint64_t wine_nx_input_swallowed;
 
 _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX_PAD_X == HidNpadButton_X &&
                 NX_PAD_Y == HidNpadButton_Y && NX_PAD_STICKL == HidNpadButton_StickL &&
@@ -20,11 +24,6 @@ _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX
                 NX_PAD_LEFT == HidNpadButton_Left && NX_PAD_UP == HidNpadButton_Up &&
                 NX_PAD_RIGHT == HidNpadButton_Right && NX_PAD_DOWN == HidNpadButton_Down,
                 "nx_pad.h button bits match libnx" );
-
-/* When a program last read the pad through XInput, in system ticks. While it is
- * recent the runtime stops turning the pad into keys and mouse clicks
- * (wine_nx_pointer_poll in runtime.c), so the program does not get both. */
-u64 wine_nx_xinput_last_poll;
 
 static pthread_mutex_t pad_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* The floating keyboard (osk.c). */
@@ -41,7 +40,7 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
     XINPUT_GAMEPAD gamepad;
 
     params->connected = 0;
-    if (params->index) return STATUS_SUCCESS;  /* player 1 only */
+    if (params->index || wine_nx_input_profile.mode == INPUT_KEYBOARD_MOUSE) return STATUS_SUCCESS;
     pthread_mutex_lock( &pad_mutex );
     if (!pad_ready)
     {
@@ -54,9 +53,16 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
     {
         HidAnalogStickState left = padGetStickPos( &pad, 0 ), right = padGetStickPos( &pad, 1 );
 
-        nx_xinput_map( padGetButtons( &pad ), left.x, left.y, right.x, right.y, &gamepad );
+        struct input_pad raw = { padGetButtons( &pad ), { left.x, left.y, right.x, right.y } }, mapped;
+        const u64 keyboard = HidNpadButton_Minus | HidNpadButton_StickR;
+
+        raw.buttons &= ~__atomic_load_n( &wine_nx_input_swallowed, __ATOMIC_RELAXED );
+        if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;
+        input_map_pad( &wine_nx_input_profile, &raw, &mapped );
+        nx_xinput_map( mapped.buttons, mapped.axis[0], mapped.axis[1], mapped.axis[2], mapped.axis[3], &gamepad );
         /* The floating keyboard has the controller while it is up (osk.c). */
-        if (wine_nx_osk_visible()) memset( &gamepad, 0, sizeof(gamepad) );
+        if (wine_nx_osk_visible())
+            memset( &gamepad, 0, sizeof(gamepad) );
         if (memcmp( &gamepad, &last_gamepad, sizeof(gamepad) ))
         {
             last_gamepad = gamepad;
@@ -65,7 +71,6 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
         params->connected = 1;
         params->state.dwPacketNumber = packet;
         params->state.Gamepad = gamepad;
-        wine_nx_xinput_last_poll = armGetSystemTick();
     }
     pthread_mutex_unlock( &pad_mutex );
     return STATUS_SUCCESS;

@@ -1,0 +1,14 @@
+Joy-Con illustration by 0 Noctis 0 (2017), CC BY-SA 4.0.
+https://commons.wikimedia.org/wiki/File:Nintendo_Switch_Joy-Con_illustration.svg
+https://creativecommons.org/licenses/by-sa/4.0/
+
+joycons.svg is the original artwork. joycons.png is its 1280-pixel rendering.
+The launcher displays selected views and adds interactive button highlights.
+
+Switch Button Icons and Controls by Zacksly, CC BY 3.0.
+https://zacksly.itch.io/switch-button-icons-and-controls
+https://creativecommons.org/licenses/by/3.0/
+The Switch button SVGs in buttons/ have their shapes combined into single paths.
+Source mirror: https://github.com/tabrnicus/Switch-CFW-Guide/tree/master/overrides/.icons/nx-buttons
+
+Mouse artwork (mouse*.svg) and wheel-arrow.svg: LGPL-2.1-or-later.

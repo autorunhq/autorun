@@ -11,15 +11,19 @@ events = source[source.index('/* The button flags that take the delivered button
 fixture = r'''
 #include <assert.h>
 #include <stdio.h>
+#include "input_events.h"
 typedef int BOOL, INT;
 typedef unsigned int UINT, DWORD;
-typedef void *HWND, *HCURSOR;
+typedef unsigned char BYTE;
+typedef void *HWND, *HCURSOR, *HKL;
 typedef int NTSTATUS;
 typedef unsigned int user_handle_t;
 #define STATUS_PENDING 0x103
 struct object_lock { int id; };
 #define OBJECT_LOCK_INIT {0}
 typedef struct { user_handle_t cursor; int cursor_count; } input_shm_t;
+typedef struct { int x, y; } POINT;
+typedef struct { POINT cursor; } desktop_shm_t;
 #define wine_server_ptr_handle(h) ((void *)(unsigned long)(h))
 /* The input state the program's SetCursor and ShowCursor calls leave. */
 static input_shm_t shared_input;
@@ -32,36 +36,60 @@ static NTSTATUS get_shared_input(unsigned int tid, struct object_lock *lock, con
 }
 static int cursor_shown = 1;
 static void wine_nx_cursor_show(int visible) { cursor_shown = visible; }
+static NTSTATUS get_shared_desktop(struct object_lock *lock, const desktop_shm_t **desktop) { return -1; }
+static void wine_nx_pointer_follow(int x, int y) { assert(0); }
+extern void wine_nx_runtime_trace(const char *line) __attribute__((weak));
 typedef long LPARAM;
 #define TRUE 1
 #define FALSE 0
 #define INPUT_MOUSE 0
+#define INPUT_KEYBOARD 1
+#define VK_RETURN 0x0d
+#define MAPVK_VK_TO_VSC_EX 4
+#define KEYEVENTF_EXTENDEDKEY 0x0001
+#define KEYEVENTF_KEYUP 0x0002
 #define MOUSEEVENTF_MOVE 0x0001
 #define MOUSEEVENTF_LEFTDOWN 0x0002
 #define MOUSEEVENTF_LEFTUP 0x0004
 #define MOUSEEVENTF_RIGHTDOWN 0x0008
 #define MOUSEEVENTF_RIGHTUP 0x0010
+#define MOUSEEVENTF_MIDDLEDOWN 0x0020
+#define MOUSEEVENTF_MIDDLEUP 0x0040
+#define MOUSEEVENTF_XDOWN 0x0080
+#define MOUSEEVENTF_XUP 0x0100
+#define MOUSEEVENTF_WHEEL 0x0800
+#define MOUSEEVENTF_HWHEEL 0x1000
 #define MOUSEEVENTF_ABSOLUTE 0x8000
+#define XBUTTON1 1
+#define XBUTTON2 2
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 typedef struct { int dx, dy; DWORD mouseData, dwFlags, time; unsigned long dwExtraInfo; } MOUSEINPUT;
-typedef struct { DWORD type; MOUSEINPUT mi; } INPUT;
+typedef struct { unsigned short wVk, wScan; DWORD dwFlags; } KEYBDINPUT;
+typedef struct { DWORD type; union { MOUSEINPUT mi; KEYBDINPUT ki; }; } INPUT;
 /* What the runtime's polls saw since the last take (the background thread's included). */
-static struct { int moved, x, y; unsigned int held, pressed, released; } state;
-static INPUT sent[32];
+static struct input_snapshot state;
+static INPUT sent[128];
 static int sent_count, presents, polls, set_x = -1, set_y = -1;
+static int reenter;
+BOOL wine_nx_drv_ProcessEvents(DWORD mask);
 static int wine_nx_pointer_poll(int *x, int *y, unsigned int *buttons) {
-    polls++; *x = state.x; *y = state.y; *buttons = state.held; return state.moved;
+    polls++; *x = state.x; *y = state.y; *buttons = state.buttons; return state.moved;
 }
-static int wine_nx_pointer_take(int *x, int *y, unsigned int *buttons, unsigned int *pressed, unsigned int *released) {
-    *x = state.x; *y = state.y; *buttons = state.held; *pressed = state.pressed; *released = state.released;
-    return state.moved;
-}
+static void wine_nx_input_take(struct input_snapshot *out) { *out = state; }
 static void wine_nx_pointer_set_pos(int x, int y) { set_x = x; set_y = y; }
 static void wine_nx_fb_present(void) { presents++; }
 static void nxdrv_trace(const char *fmt, int a, int b, int c, int d) {}
 static void nxdrv_trace_hot(const char *fmt, int a, int b, int c, int d) {}
+static HKL NtUserGetKeyboardLayout(DWORD id) { return (HKL)1; }
+static UINT NtUserMapVirtualKeyEx(UINT vk, UINT type, HKL layout) {
+    assert(type == MAPVK_VK_TO_VSC_EX && layout == (HKL)1);
+    if (vk == 0xa3) return 0xe01d;
+    if (vk == VK_RETURN) return 0x1c;
+    return 0x1e;
+}
 static UINT NtUserSendHardwareInput(HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam) {
-    assert(!hwnd && !flags && !lparam && input->type == INPUT_MOUSE && sent_count < 32);
+    assert(!hwnd && !flags && !lparam && sent_count < 128);
+    if (reenter) { reenter = 0; assert(!wine_nx_drv_ProcessEvents(0)); }
     sent[sent_count++] = *input; return TRUE;
 }
 '''
@@ -72,8 +100,8 @@ static long long take(int moved, int x, int y, unsigned int held, unsigned int p
     long long flags = 0;
     int before = sent_count, i;
     BOOL ret;
-    state.moved = moved; state.x = x; state.y = y;
-    state.held = held; state.pressed = pressed; state.released = released;
+    state = (struct input_snapshot){ .moved = moved, .placed = moved, .x = x, .y = y,
+        .buttons = held, .pressed = pressed, .released = released };
     ret = wine_nx_drv_ProcessEvents(0);
     assert(sent_count - before <= 2);
     assert(ret == (sent_count != before));
@@ -144,6 +172,42 @@ int main(void) {
     assert(cursor_shown);
     shared_input_status = 0;
     assert(wine_nx_drv_SetCursorPos(12, 34) && set_x == 12 && set_y == 34);
+
+    /* Relative motion must stay relative, including when the game clips its cursor. */
+    sent_count = 0;
+    state = (struct input_snapshot){ .moved = 1, .dx = 7, .dy = -3 };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 1);
+    assert(sent[0].mi.dwFlags == MOUSEEVENTF_MOVE && sent[0].mi.dx == 7 && sent[0].mi.dy == -3);
+
+    /* Modifier-click chords enclose the mouse events and cannot interleave on reentry. */
+    sent_count = 0;
+    reenter = 1;
+    state = (struct input_snapshot){ .pressed = L, .released = L, .key_count = 2,
+        .keys = {{0xa3, 1}, {0xa3, 0}} };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 4 && !reenter);
+    assert(sent[0].type == INPUT_KEYBOARD && sent[0].ki.wVk == 0xa3 && sent[0].ki.wScan == 0x1d);
+    assert(sent[0].ki.dwFlags == KEYEVENTF_EXTENDEDKEY);
+    assert(sent[1].type == INPUT_MOUSE && sent[1].mi.dwFlags == (ABS | MOUSEEVENTF_LEFTDOWN));
+    assert(sent[2].type == INPUT_MOUSE && sent[2].mi.dwFlags == (ABS | MOUSEEVENTF_LEFTUP));
+    assert(sent[3].type == INPUT_KEYBOARD && sent[3].ki.dwFlags == (KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+
+    sent_count = 0;
+    state = (struct input_snapshot){ .key_count = 2, .keys = {{INPUT_NUMPAD_ENTER, 1}, {INPUT_NUMPAD_ENTER, 0}} };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 2);
+    assert(sent[0].ki.wVk == VK_RETURN && sent[0].ki.wScan == 0x1c && sent[0].ki.dwFlags == KEYEVENTF_EXTENDEDKEY);
+    assert(sent[1].ki.dwFlags == (KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+
+    sent_count = 0;
+    state = (struct input_snapshot){ .pressed = 4 | 8 | 16, .released = 4 | 8 | 16, .wheel = 120, .hwheel = -120 };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 8);
+    assert(sent[0].mi.dwFlags == (ABS | MOUSEEVENTF_MIDDLEDOWN));
+    assert(sent[1].mi.dwFlags == (ABS | MOUSEEVENTF_MIDDLEUP));
+    assert(sent[2].mi.dwFlags == MOUSEEVENTF_XDOWN && sent[2].mi.mouseData == XBUTTON1);
+    assert(sent[3].mi.dwFlags == MOUSEEVENTF_XUP && sent[3].mi.mouseData == XBUTTON1);
+    assert(sent[4].mi.dwFlags == MOUSEEVENTF_XDOWN && sent[4].mi.mouseData == XBUTTON2);
+    assert(sent[5].mi.dwFlags == MOUSEEVENTF_XUP && sent[5].mi.mouseData == XBUTTON2);
+    assert(sent[6].mi.dwFlags == MOUSEEVENTF_WHEEL && sent[6].mi.mouseData == 120);
+    assert(sent[7].mi.dwFlags == MOUSEEVENTF_HWHEEL && (int)sent[7].mi.mouseData == -120);
     puts("PASS: stick moves, A left and B right clicks, drag, touch press, clicks between calls, cursor visibility "
          "and SetCursorPos");
     return 0;
@@ -154,5 +218,5 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-pointer-') as temp:
     exe = Path(temp) / 'test'
     src.write_text(fixture + defines + events + tests)
     subprocess.run(['cc', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
-                    str(src), '-o', str(exe)], check=True)
+                    '-I', str(root / 'horizon-wine/source'), str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

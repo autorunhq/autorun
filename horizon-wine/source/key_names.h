@@ -1,87 +1,5 @@
-/*
- * The controls a Switch has, and the keys they can be made to send.
- *
- * keys.txt is a NAME=code line for each control, where code is a Windows
- * virtual-key code; the launcher's Controls screen writes those lines, so it
- * needs the same names the runtime reads and a readable name for each code to
- * put on the screen. A code with no name here is shown as its number, which is
- * what a hand-written file may hold.
- */
 #ifndef WINE_NX_KEY_NAMES_H
 #define WINE_NX_KEY_NAMES_H
-
-#include <stddef.h>
-#include <stdio.h>
-
-struct wine_nx_control
-{
-    const char *name;      /* as keys.txt spells it */
-    const char *label;     /* as the screen says it */
-    const char *unset;     /* what no key at all means for this control */
-    unsigned short sends;  /* what it sends with no line of its own */
-};
-
-/* In the order a hand falls on them: the face buttons, the shoulders, the
- * middle, then the two ways of steering. */
-static const struct wine_nx_control wine_nx_controls[] =
-{
-    { "A",      "A",                 "Left mouse button",    0x00 },
-    { "B",      "B",                 "Right mouse button",   0x00 },
-    { "X",      "X",                 "Nothing",              0x20 },
-    { "Y",      "Y",                 "Nothing",              0x46 },
-    { "L",      "L",                 "Nothing",              0x09 },
-    { "R",      "R",                 "Nothing",              0x10 },
-    { "ZL",     "ZL",                "Nothing",              0x28 },
-    { "ZR",     "ZR",                "Nothing",              0x26 },
-    { "PLUS",   "Plus",              "Nothing",              0x1b },
-    { "MINUS",  "Minus",             "Nothing",              0x09 },
-    { "STICKL", "Left stick press",  "Nothing",              0x11 },
-    { "STICKR", "Right stick press", "Nothing",              0x12 },
-    { "UP",     "D-pad up",          "Nothing",              0x26 },
-    { "DOWN",   "D-pad down",        "Nothing",              0x28 },
-    { "LEFT",   "D-pad left",        "Nothing",              0x25 },
-    { "RIGHT",  "D-pad right",       "Nothing",              0x27 },
-    { "LUP",    "Left stick up",     "What the d-pad sends", 0x00 },
-    { "LDOWN",  "Left stick down",   "What the d-pad sends", 0x00 },
-    { "LLEFT",  "Left stick left",   "What the d-pad sends", 0x00 },
-    { "LRIGHT", "Left stick right",  "What the d-pad sends", 0x00 },
-    { "RUP",    "Right stick up",     "Nothing",             0x26 },
-    { "RDOWN",  "Right stick down",   "Nothing",             0x28 },
-    { "RLEFT",  "Right stick left",   "Nothing",             0x25 },
-    { "RRIGHT", "Right stick right",  "Nothing",             0x27 },
-    { "TUP",    "Finger up",          "Nothing",             0x26 },
-    { "TDOWN",  "Finger down",        "Nothing",             0x28 },
-    { "TLEFT",  "Finger left",        "Nothing",             0x25 },
-    { "TRIGHT", "Finger right",       "Nothing",             0x27 },
-};
-
-#define WINE_NX_CONTROL_COUNT ((int)(sizeof(wine_nx_controls) / sizeof(wine_nx_controls[0])))
-
-/* The three things that point. Each either moves the mouse or sends the four
- * keys of its own, which is what keys.txt says with LSTICK=mouse or RSTICK=keys.
- * `first` is where its four are in the list above. */
-struct wine_nx_device
-{
-    const char *name;    /* as keys.txt spells it */
-    const char *label;   /* as the screen says it */
-    int first;           /* its Up control */
-    int follows_dpad;    /* its keys unset means the d-pad's, as the left stick's do */
-    int points;          /* what it does with no line of its own */
-};
-
-static const struct wine_nx_device wine_nx_devices[] =
-{
-    { "LSTICK", "Left stick",  16, 1, 0 },
-    { "RSTICK", "Right stick", 20, 0, 1 },
-    { "DPAD",   "D-pad",       12, 0, 0 },
-    { "TOUCH",  "Finger drag", 24, 0, 1 },
-};
-
-#define WINE_NX_DEVICE_COUNT_UI ((int)(sizeof(wine_nx_devices) / sizeof(wine_nx_devices[0])))
-
-/* Up, down, left, right, for the two sets of keys worth a name of their own. */
-static const unsigned short wine_nx_preset_arrows[4] = { 0x26, 0x28, 0x25, 0x27 };
-static const unsigned short wine_nx_preset_wasd[4]   = { 0x57, 0x53, 0x41, 0x44 };
 
 struct wine_nx_key_name
 {
@@ -89,8 +7,6 @@ struct wine_nx_key_name
     const char *name;
 };
 
-/* The keys a game is likely to want, the common ones first so that holding a
- * direction on the list reaches them before the alphabet. */
 static const struct wine_nx_key_name wine_nx_key_names[] =
 {
     { 0x00, "Nothing" },
@@ -134,21 +50,6 @@ static inline int wine_nx_key_index( unsigned short code )
     for (i = 0; i < WINE_NX_KEY_NAME_COUNT; i++)
         if (wine_nx_key_names[i].code == code) return i;
     return -1;
-}
-
-/* What to show for a control set to this code. A control that sends nothing
- * says what that means for it, which is not the same for every one: A with no
- * key of its own is the left mouse button, and the left stick steers with the
- * d-pad. */
-static inline const char *wine_nx_key_label( int control, unsigned short code, char *out, size_t size )
-{
-    int i = wine_nx_key_index( code );
-
-    if (!code && control >= 0 && control < WINE_NX_CONTROL_COUNT)
-        snprintf( out, size, "%s", wine_nx_controls[control].unset );
-    else if (i >= 0) snprintf( out, size, "%s", wine_nx_key_names[i].name );
-    else snprintf( out, size, "0x%02x", code );
-    return out;
 }
 
 #endif /* WINE_NX_KEY_NAMES_H */

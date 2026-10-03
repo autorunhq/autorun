@@ -204,7 +204,6 @@ struct launcher_settings
      * when it has a file of them, which is what a card written before this
      * setting existed means; 0 Autorun's keys alone, the file kept for when it
      * is turned on again. */
-    int own_controls;
 };
 
 enum {
@@ -435,7 +434,6 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         settings->dxvk_source = DXVK_SOURCE_OFFICIAL;
         settings->dxvk_version[0] = 0;
     }
-    settings->own_controls = launcher_setting_state( kv, "own-controls" );
     settings->dxvk_hud = 0;
     if (launcher_kv_get( kv, "dxvk-hud", value, sizeof(value) ))
         for (int i = 1; i < LAUNCHER_HUD_COUNT; i++)
@@ -508,8 +506,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "upscaling", settings->upscaling ?
                             launcher_upscaling_values[settings->upscaling] : NULL ) &&
            launcher_kv_set( kv, "upscaling-sharpness", settings->upscaling == 1 && settings->upscaling_sharpness != 2 ?
-                            launcher_sharpness_labels[settings->upscaling_sharpness] : NULL ) &&
-           launcher_kv_set( kv, "own-controls", states[settings->own_controls + 1] );
+                            launcher_sharpness_labels[settings->upscaling_sharpness] : NULL );
 }
 
 #endif

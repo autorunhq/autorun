@@ -61,7 +61,7 @@ python3 "$root/horizon-wine/tests/check_commit_chunks.py"
 python3 "$root/horizon-wine/tests/check_waitable_timer.py"
 "${CC:-clang}" $flags -D__WINESRC__ -DWINE_UNIX_LIB -D_WIN64 \
     -I"$root/horizon-wine/tests/xinput-shims" -I"$root/include" \
-    "$root/horizon-wine/tests/xinput_nx_pad.c" -o "$build/xinput_pad"
+    "$root/horizon-wine/tests/xinput_nx_pad.c" "$root/horizon-wine/source/input_profile.c" -lm -o "$build/xinput_pad"
 "$build/xinput_pad"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/thread_profile.c" -o "$build/thread_profile"
 "$build/thread_profile"
