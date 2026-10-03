@@ -70,6 +70,7 @@ struct buffer
     BOOL explicit_flush;
     size_t map_length;
     GLbitfield map_access;
+    BOOL copy_on_flush;
 #endif
 
     /* members of Vulkan-backed buffer storages */
@@ -1494,6 +1495,17 @@ static void flush_buffer( TEB *teb, struct buffer *buffer, size_t offset, size_t
         }
         return;
     }
+    if (buffer->copy_on_flush)
+    {
+        if (!buffer->map_ptr || offset > buffer->map_length || length > buffer->map_length - offset)
+        {
+            set_gl_error( teb, GL_INVALID_VALUE );
+            return;
+        }
+        memcpy( (char *)buffer->host_ptr + offset, (char *)buffer->map_ptr + offset, length );
+        __atomic_add_fetch( &wine_nx_gl_copy_bytes, length, __ATOMIC_RELAXED );
+        return;
+    }
 #endif
     if (!buffer->vk_memory) return;
 
@@ -1756,6 +1768,17 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
     if (!buffer_vm_alloc( teb, buffer, length + (offset & 0xf) )) goto unmap;
     buffer->map_ptr = (char *)buffer->vm_ptr + (offset & 0xf);
     buffer->copy_length = (access & GL_MAP_WRITE_BIT) ? length : 0;
+#ifdef __SWITCH__
+    /* Write-only explicit maps need copies only for the flushed ranges. */
+    buffer->copy_on_flush = (access & (GL_MAP_WRITE_BIT | GL_MAP_READ_BIT | GL_MAP_FLUSH_EXPLICIT_BIT))
+                            == (GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT);
+    buffer->map_length = length;
+    if (buffer->copy_on_flush)
+    {
+        buffer->copy_length = 0;
+        return buffer->map_ptr;
+    }
+#endif
     if (!(access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)))
     {
         static int once;
@@ -1935,6 +1958,9 @@ static BOOL wow64_unmap_buffer( TEB *teb, struct buffer *buffer )
 #endif
         buffer->copy_length = 0;
     }
+#ifdef __SWITCH__
+    buffer->copy_on_flush = FALSE;
+#endif
 
     buffer->host_ptr = buffer->map_ptr = NULL;
     return TRUE;
