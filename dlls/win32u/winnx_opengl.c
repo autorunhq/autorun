@@ -45,7 +45,58 @@ struct nx_gl_drawable
 {
     struct opengl_drawable base;
     BOOL screen;  /* this drawable shares the screen's EGL surface */
+    LONG generation;
 };
+
+struct nx_client_surface
+{
+    struct client_surface base;
+    SIZE size;
+    LONG generation;
+};
+
+static void nx_client_surface_destroy( struct client_surface *client )
+{
+}
+
+static void nx_client_surface_update( struct client_surface *client )
+{
+    struct nx_client_surface *surface = CONTAINING_RECORD( client, struct nx_client_surface, base );
+    const RECT *rect = client->raw ? &client->monitor_rect : &client->virtual_rect;
+    SIZE size;
+    BOOL offscreen, changed;
+
+    if (!client->format) return; /* Vulkan clients have no WGL pixel format. */
+    size = (SIZE){ max( 1, rect->right - rect->left ), max( 1, rect->bottom - rect->top ) };
+    offscreen = !(get_window_long( client->hwnd, GWL_STYLE ) & WS_VISIBLE);
+    if (!offscreen && client->hwnd != client->toplevel) offscreen = !is_window_visible( client->hwnd );
+    changed = InterlockedExchange( &client->offscreen, offscreen ) != offscreen;
+
+    if (changed || (offscreen && (size.cx != surface->size.cx || size.cy != surface->size.cy)))
+        InterlockedIncrement( &surface->generation );
+    surface->size = size;
+}
+
+static void nx_client_surface_present( struct client_surface *client, HDC hdc )
+{
+}
+
+static const struct client_surface_funcs nx_client_surface_funcs =
+{
+    .size = sizeof(struct nx_client_surface),
+    .destroy = nx_client_surface_destroy,
+    .detach = nx_client_surface_destroy,
+    .update = nx_client_surface_update,
+    .present = nx_client_surface_present,
+};
+
+struct client_surface *wine_nx_drv_CreateClientSurface( HWND hwnd, int format, BOOL raw )
+{
+    struct client_surface *client = client_surface_create( &nx_client_surface_funcs, hwnd, format, raw );
+
+    if (client) nx_client_surface_update( client );
+    return client;
+}
 
 /* The one EGL surface on the screen's NWindow, and the drawables sharing it.
  * win32u gives a window a second drawable whenever another context is made
@@ -60,6 +111,17 @@ static int nx_screen_format;
 static struct nx_gl_drawable *impl_from_opengl_drawable( struct opengl_drawable *base )
 {
     return CONTAINING_RECORD( base, struct nx_gl_drawable, base );
+}
+
+BOOL wine_nx_gl_drawable_matches_window( struct opengl_drawable *base )
+{
+    struct nx_client_surface *client;
+
+    if (base->funcs != &nx_drawable_funcs) return TRUE;
+    if (!base->client || base->client->funcs != &nx_client_surface_funcs) return TRUE;
+    client = CONTAINING_RECORD( base->client, struct nx_client_surface, base );
+    return impl_from_opengl_drawable( base )->generation ==
+           InterlockedCompareExchange( &client->generation, 0, 0 );
 }
 
 static void nx_log( const char *format, ... )
@@ -113,7 +175,8 @@ static void nx_drawable_flush( struct opengl_drawable *base, UINT flags )
 {
     TRACE( "drawable %s, flags %#x\n", debugstr_opengl_drawable( base ), flags );
 
-    if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
+    if (impl_from_opengl_drawable( base )->screen && (flags & GL_FLUSH_INTERVAL))
+        funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
 }
 
 /* Frames presented and the time inside eglSwapBuffers, for [PROGRESS]. */
@@ -251,6 +314,8 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
     unsigned long long start;
     BOOL ret;
 
+    if (!impl_from_opengl_drawable( base )->screen)
+        return funcs->p_eglSwapBuffers( egl->display, base->surface );
     nx_osk_draw( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
@@ -267,19 +332,21 @@ static const struct opengl_drawable_funcs nx_drawable_funcs =
     .swap = nx_drawable_swap,
 };
 
-/* A window surface covers the whole screen: the Switch has one NWindow, and
- * window surfaces and EGL cannot share it. Programs drawing with OpenGL are
- * expected to be full screen; other windows are not shown meanwhile. */
+/* Visible OpenGL windows share the screen; hidden windows render offscreen. */
 static BOOL nx_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
     HWND hwnd = client->hwnd;
     struct opengl_drawable *previous;
     struct nx_gl_drawable *gl;
+    struct nx_client_surface *nx_client = CONTAINING_RECORD( client, struct nx_client_surface, base );
+    LONG generation = client->funcs == &nx_client_surface_funcs ?
+                      InterlockedCompareExchange( &nx_client->generation, 0, 0 ) : 0;
     void *window;
 
     TRACE( "hwnd %p, format %d\n", hwnd, format );
 
-    if ((previous = *drawable) && previous->format == format) return TRUE;
+    if ((previous = *drawable) && previous->format == format && wine_nx_gl_drawable_matches_window( previous ))
+        return TRUE;
     /* A previous surface may hold the screen: let it go first. */
     if (previous)
     {
@@ -289,10 +356,28 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
 
     gl = opengl_drawable_create( &nx_drawable_funcs, format, client, NULL );
     if (!gl) return FALSE;
+    gl->generation = generation;
     gl->base.buffer_map[0] = GL_BACK_LEFT;
     gl->base.buffer_map[1] = GL_BACK_RIGHT;
     gl->base.buffer_map[GL_FRONT - GL_FRONT_LEFT] = GL_BACK;
     gl->base.buffer_map[GL_FRONT_AND_BACK - GL_FRONT_LEFT] = GL_BACK;
+
+    if (InterlockedCompareExchange( &client->offscreen, 0, 0 ))
+    {
+        /* Capability probes must not take the screen away from Vulkan. */
+        SIZE size = client->raw ? gl->base.monitor_size : gl->base.virtual_size;
+        const EGLint attribs[] = { EGL_WIDTH, size.cx, EGL_HEIGHT, size.cy, EGL_NONE };
+
+        if (!(gl->base.surface = funcs->p_eglCreatePbufferSurface( egl->display, nx_config_for_format( format ), attribs )))
+        {
+            ERR( "hwnd %p: eglCreatePbufferSurface failed, error %#x\n", hwnd, funcs->p_eglGetError() );
+            goto err;
+        }
+        TRACE( "hwnd %p: offscreen surface %p, size %s\n", hwnd, gl->base.surface,
+               wine_dbgstr_point( (POINT *)&size ) );
+        *drawable = &gl->base;
+        return TRUE;
+    }
 
     pthread_mutex_lock( &nx_screen_mutex );
     if (nx_screen_surface && nx_screen_format == format)

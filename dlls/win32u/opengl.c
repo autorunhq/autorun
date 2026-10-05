@@ -617,6 +617,16 @@ static struct opengl_drawable *get_target( struct opengl_drawable *drawable )
     return drawable;
 }
 
+static BOOL drawable_matches_window( struct opengl_drawable *drawable )
+{
+#ifdef __SWITCH__
+    extern BOOL wine_nx_gl_drawable_matches_window( struct opengl_drawable *drawable );
+
+    if ((drawable = get_target( drawable ))) return wine_nx_gl_drawable_matches_window( drawable );
+#endif
+    return TRUE;
+}
+
 static void make_client_context_current(void)
 {
     struct opengl_context *context, *internal = NtCurrentTeb()->glReserved2;
@@ -2036,6 +2046,7 @@ void set_window_opengl_drawable( HWND hwnd, struct opengl_drawable *new_drawable
     struct opengl_drawable *old_drawable = NULL;
     WND *win;
 
+    if (new_drawable && !drawable_matches_window( new_drawable )) new_drawable = NULL;
     if ((win = get_win_ptr( hwnd )) && win != WND_DESKTOP && win != WND_OTHER_PROCESS)
     {
         struct opengl_drawable **ptr = current ? &win->current_drawable : &win->unused_drawable;
@@ -2074,7 +2085,7 @@ static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format
         release_win_ptr( win );
     }
 
-    if (drawable && drawable->format != format)
+    if (drawable && (drawable->format != format || !drawable_matches_window( drawable )))
     {
         opengl_drawable_release( drawable );
         drawable = NULL;
@@ -2471,13 +2482,24 @@ static struct opengl_drawable *get_updated_drawable( HDC hdc, int format, struct
     /* if the drawable we were using is for the same window, keep using it */
     if (drawable && is_client_surface_window( drawable->client, hwnd ))
     {
-        opengl_drawable_add_ref( drawable );
-        return drawable;
+        if (drawable_matches_window( drawable ))
+        {
+            opengl_drawable_add_ref( drawable );
+            return drawable;
+        }
+        /* Drop the cached references before switching a hidden window's drawable. */
+        set_window_opengl_drawable( hwnd, NULL, TRUE );
+        set_window_opengl_drawable( hwnd, NULL, FALSE );
     }
 
     /* retrieve D3D internal drawables from the DCs if they have any */
     if (!hdc && drawable) hdc = drawable->owner_hdc;
-    if (hdc && (drawable = get_dc_opengl_drawable( hdc ))) return drawable;
+    if (hdc && (drawable = get_dc_opengl_drawable( hdc )))
+    {
+        if (drawable_matches_window( drawable )) return drawable;
+        set_dc_opengl_drawable( hdc, NULL );
+        opengl_drawable_release( drawable );
+    }
 
     /* get an updated drawable with the desired format */
     return get_window_unused_drawable( hwnd, format );

@@ -1052,6 +1052,7 @@ static void load_display_driver(void)
          * driver so windows are created and their pixels reach the screen. */
         {
             extern BOOL wine_nx_drv_CreateWindow( HWND );
+            extern struct client_surface *wine_nx_drv_CreateClientSurface( HWND, int, BOOL );
             extern BOOL wine_nx_drv_CreateWindowSurface( HWND, BOOL, const RECT *, struct window_surface ** );
             extern void wine_nx_drv_WindowPosChanged( HWND, HWND, HWND, UINT,
                                                       const struct window_rects *, struct window_surface * );
@@ -1066,6 +1067,7 @@ static void load_display_driver(void)
 #endif
             extern int wine_nx_display_devices __attribute__((weak));
             null_user_driver.pCreateWindow         = wine_nx_drv_CreateWindow;
+            null_user_driver.pCreateClientSurface  = wine_nx_drv_CreateClientSurface;
             null_user_driver.pCreateWindowSurface  = wine_nx_drv_CreateWindowSurface;
             null_user_driver.pWindowPosChanged     = wine_nx_drv_WindowPosChanged;
             null_user_driver.pProcessEvents        = wine_nx_drv_ProcessEvents;
