@@ -633,6 +633,8 @@ add_executable(wine-nx-runtime
     source/ntdll_pe_compat.c
     source/ws2_32_unix_stub.c
     source/dnsapi_unix.c
+    source/schannel_mbedtls.c
+    source/crypt32_roots.c
     source/audio_unix.c
     source/wma_unix.c
     source/xinput_unix.c
@@ -742,7 +744,8 @@ endif()
 # libnx's service macros use C11's static_assert, which the rest of the tree,
 # built as gnu99, does not have.
 set_source_files_properties(source/forwarder.c PROPERTIES COMPILE_OPTIONS "-std=gnu11")
-set_source_files_properties(source/audio_unix.c source/wma_unix.c source/xinput_unix.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
+set_source_files_properties(source/audio_unix.c source/wma_unix.c source/xinput_unix.c
+    source/schannel_mbedtls.c source/crypt32_roots.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
 include(cmake/Media.cmake)
 target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_PE_BUILD_DIR}/include")
 find_package(Git QUIET)
@@ -892,9 +895,9 @@ find_library(SWITCH_Z z HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_ZSTD zstd HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 find_library(SWITCH_CURL curl HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_MINIZIP minizip HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
-find_library(SWITCH_MBEDTLS mbedtls HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-find_library(SWITCH_MBEDX509 mbedx509 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-find_library(SWITCH_MBEDCRYPTO mbedcrypto HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
+find_library(SWITCH_MBEDTLS mbedtls HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+find_library(SWITCH_MBEDX509 mbedx509 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+find_library(SWITCH_MBEDCRYPTO mbedcrypto HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 # devkitPro's Mesa for OpenGL through EGL on the GPU (nouveau over nvservices);
 # its nouveau compiler is C++.
 find_library(SWITCH_EGL EGL HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")

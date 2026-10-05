@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import os
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text(errors='surrogateescape')
@@ -41,7 +42,8 @@ def struct(name):
 
 defines = '\n'.join(line for line in source.splitlines()
                     if re.match(r'#define HORIZON_(STATUS_\w+ |APC_|ASYNC_STALE|NT_ERROR|WS_AF_INET6?\b|'
-                                r'IOCTL_AFD_WINE_(GET_INFO|[GS]ET_IPV6_V6ONLY)\b)', line))
+                                r'REQ_(RECV|SEND)_SOCKET\b|SERVER_SOCKET_IO_FORCE_ASYNC|'
+                                r'IOCTL_AFD_WINE_(GET_INFO|[GS]ET_IPV6_V6ONLY|[GS]ET_SO_(RCV|SND)TIMEO)\b)', line))
 
 # The select handler takes a result before anything else, and hands out a
 # system APC before it would wait, but not before a signal-and-wait signals.
@@ -55,6 +57,9 @@ ioctl = definition('horizon_server_handle_ioctl')
 assert 'horizon_server_ioctl_start' in ioctl and 'horizon_server_ioctl_done' in ioctl
 for code in ('LISTEN', 'WINE_ACCEPT', 'WINE_ACCEPT_INTO', 'WINE_SET_SO_REUSEADDR', 'WINE_SET_TCP_NODELAY'):
     assert f'case HORIZON_IOCTL_AFD_{code}:' in ioctl, code
+for direction in ('RCV', 'SND'):
+    for operation in ('GET', 'SET'):
+        assert f'case HORIZON_IOCTL_AFD_WINE_{operation}_SO_{direction}TIMEO:' in ioctl
 # Ports can be tied to sockets.
 assert 'HORIZON_SERVER_OBJECT_SOCK' in definition('horizon_server_find_io_object_locked')
 assert 'horizon_server_find_io_object_locked' in definition('horizon_server_handle_set_completion_info')
@@ -64,12 +69,14 @@ functions = '\n\n'.join(definition(name) for name in (
     'horizon_server_get_sock_fd', 'horizon_sock_ioctl_create',
     'horizon_sock_ioctl_connect',
     'horizon_sock_ioctl_family',
+    'horizon_sock_ioctl_timeout',
     'horizon_server_async_create_locked', 'horizon_server_async_free_locked',
     'horizon_server_accepted_sock_locked', 'horizon_sock_accept_output_locked',
-    'horizon_sock_accept_async_locked', 'horizon_sock_poll_asyncs_locked',
+    'horizon_sock_accept_async_locked', 'horizon_sock_poll_asyncs_locked', 'horizon_sock_poll_all_asyncs_locked',
     'horizon_sock_ioctl_listen', 'horizon_sock_ioctl_accept', 'horizon_sock_ioctl_accept_into',
     'horizon_server_ioctl_start', 'horizon_server_ioctl_done', 'horizon_server_select_signals',
-    'horizon_async_finish_locked', 'horizon_server_async_result_locked', 'horizon_server_async_apc_locked'))
+    'horizon_async_finish_locked', 'horizon_server_async_result_locked', 'horizon_server_async_apc_locked',
+    'horizon_server_handle_socket_io', 'horizon_server_handle_set_async_direct_result'))
 
 fixture = r'''
 #include <assert.h>
@@ -92,6 +99,9 @@ fixture = r'''
 @DEFINES@
 #define HORIZON_FILE_SKIP_COMPLETION_PORT_ON_SUCCESS 0x1
 #define LONG int
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define FILE_SYNCHRONOUS_IO_ALERT 0x10
+#define FILE_SYNCHRONOUS_IO_NONALERT 0x20
 
 @HEADER@
 @SOCKADDR@
@@ -101,12 +111,14 @@ enum { HORIZON_SELECT_NONE, HORIZON_SELECT_WAIT, HORIZON_SELECT_WAIT_ALL, HORIZO
 
 struct horizon_server_request_header { int req; unsigned int request_size; unsigned int reply_size; };
 @SELECT@
+@SOCKET_REQUESTS@
 
 struct horizon_server_object
 {
     int type, refs, signaled, file_fd;
     unsigned int file_access, file_options;
     int sock_bound, sock_nonblocking;
+    unsigned int sock_rcvtimeo, sock_sndtimeo;
     int sock_family, sock_type, sock_protocol, sock_v6only;
     unsigned int sock_event_handle;
     int sock_event_mask, sock_pending_events;
@@ -117,7 +129,7 @@ struct horizon_server_object
     struct horizon_server_object *thread_next;
 };
 struct horizon_server_handle_entry { unsigned int handle; struct horizon_server_object *object; };
-struct horizon_server_connection { unsigned int tid; };
+struct horizon_server_connection { unsigned int tid; int reply_fd; };
 
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct horizon_async_list horizon_asyncs;
@@ -132,6 +144,23 @@ static struct { void *port; unsigned long long key, value; unsigned int status; 
 static int nposts;
 static struct { unsigned int tid; unsigned char call[64]; } user_apcs[4];
 static int nuser_apcs;
+static unsigned char last_reply[64];
+static int fail_allocation;
+
+static int horizon_server_write_reply( int fd, const void *reply, unsigned int size,
+                                       const void *data, unsigned int data_size )
+{
+    (void)fd; (void)data;
+    assert( size <= sizeof(last_reply) && !data_size );
+    memcpy( last_reply, reply, size );
+    return 0;
+}
+
+static void *test_calloc( size_t count, size_t size )
+{
+    if (fail_allocation) { fail_allocation = 0; return NULL; }
+    return calloc( count, size );
+}
 
 static void horizon_trace( const char *format, ... ) { (void)format; }
 static void wine_nx_runtime_trace( const char *message ) { (void)message; }
@@ -178,6 +207,7 @@ static unsigned int horizon_server_find_io_object_locked( unsigned int handle, s
     return horizon_server_find_sock_locked( handle, object );
 }
 
+
 static void horizon_server_post_completion_locked( struct horizon_server_object *port, unsigned long long ckey,
                                                    unsigned long long cvalue, unsigned int status,
                                                    unsigned long long information )
@@ -203,7 +233,9 @@ static unsigned int horizon_server_queue_user_apc_locked( struct horizon_server_
 static void horizon_async_finish_locked( struct horizon_async *async, unsigned int status,
                                          unsigned long long total );
 
+#define calloc test_calloc
 @FUNCTIONS@
+#undef calloc
 
 static unsigned int u32( const unsigned char *p ) { unsigned int v; memcpy( &v, p, 4 ); return v; }
 static unsigned long long u64( const unsigned char *p ) { unsigned long long v; memcpy( &v, p, 8 ); return v; }
@@ -586,9 +618,171 @@ int main( void )
     }
 
     assert( !horizon_asyncs.head && port->refs == 3 );
+
+    {
+        struct horizon_recv_socket_request request = {0};
+        struct horizon_send_socket_request send_request = {0};
+        struct horizon_set_async_direct_result_request result = {0};
+        const struct horizon_socket_io_reply *reply = (const void *)last_reply;
+        struct horizon_server_object *sock = entries[target_h].object;
+        unsigned int value, got;
+        unsigned char byte;
+
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO, target_h,
+                                             NULL, 0, (unsigned char *)&value, 4, &got ) && !value && got == 4 );
+        value = 9;
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO, target_h,
+                                             (unsigned char *)&value, 4, NULL, 0, &got ) );
+        value = 25;
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_SET_SO_SNDTIMEO, target_h,
+                                             (unsigned char *)&value, 4, NULL, 0, &got ) );
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_GET_SO_SNDTIMEO, target_h,
+                                             NULL, 0, (unsigned char *)&value, 4, &got ) && value == 25 && got == 4 );
+        assert( horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO, target_h,
+                                            (unsigned char *)&value, 3, NULL, 0, &got ) == HORIZON_STATUS_BUFFER_TOO_SMALL );
+        assert( sock->sock_rcvtimeo == 9 );
+        assert( horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO, target_h,
+                                            NULL, 0, (unsigned char *)&value, 3, &got ) == HORIZON_STATUS_BUFFER_TOO_SMALL );
+        assert( horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO, 0,
+                                            NULL, 0, (unsigned char *)&value, 4, &got ) == HORIZON_STATUS_INVALID_HANDLE );
+
+        request.header.req = HORIZON_REQ_RECV_SOCKET;
+        request.async.handle = target_h;
+        request.async.user = 0xdead;
+        request.async.event = event_h;
+        sock->sock_nonblocking = 0;
+        assert( recv( sock->file_fd, &byte, 1, 0 ) == -1 && errno == EWOULDBLOCK );
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->header.error == HORIZON_STATUS_ALERTED && !reply->nonblocking && reply->wait );
+        async = horizon_async_find_id( &horizon_asyncs, reply->wait );
+        assert( async && async->deadline == fake_now + 90000 );
+        result.handle = reply->wait;
+        result.status = HORIZON_STATUS_PENDING;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        assert( async->state == HORIZON_ASYNC_QUEUED && !horizon_sock_poll_all_asyncs_locked() );
+        assert( send( client, "r", 1, 0 ) == 1 );
+        assert( poll_ready( target_h ) );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        assert( apc && u32( call + 4 ) == HORIZON_STATUS_ALERTED );
+        assert( recv( sock->file_fd, &byte, 1, 0 ) == 1 && byte == 'r' );
+        send_result( apc, HORIZON_STATUS_SUCCESS, 1 );
+        assert( entries[event_h].object->signaled && !horizon_asyncs.head );
+
+        /* A blocking receive times out through its normal completion event. */
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        async = horizon_async_find_id( &horizon_asyncs, reply->wait );
+        result.handle = reply->wait;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        fake_now += 89999;
+        assert( !horizon_sock_poll_all_asyncs_locked() && async->state == HORIZON_ASYNC_QUEUED );
+        fake_now++;
+        assert( horizon_sock_poll_all_asyncs_locked() && async->status == HORIZON_STATUS_IO_TIMEOUT );
+        assert( !horizon_sock_poll_all_asyncs_locked() );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        assert( apc && u32( call + 4 ) == HORIZON_STATUS_IO_TIMEOUT );
+        send_result( apc, HORIZON_STATUS_IO_TIMEOUT, 0 );
+        assert( entries[event_h].object->signaled && !horizon_asyncs.head );
+
+        /* A readiness retry retains the original deadline. */
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        async = horizon_async_find_id( &horizon_asyncs, reply->wait );
+        result.handle = reply->wait;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        horizon_async_ready( &horizon_asyncs, async, HORIZON_STATUS_ALERTED, fake_now );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        fake_now += 50000;
+        send_result( apc, HORIZON_STATUS_PENDING, 0 );
+        assert( async->state == HORIZON_ASYNC_QUEUED && async->deadline == fake_now + 40000 );
+        fake_now += 40000;
+        assert( horizon_sock_poll_all_asyncs_locked() && async->status == HORIZON_STATUS_IO_TIMEOUT );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        send_result( apc, HORIZON_STATUS_IO_TIMEOUT, 0 );
+
+        sock->sock_nonblocking = 1;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->nonblocking && !horizon_async_find_id( &horizon_asyncs, reply->wait )->deadline );
+        result.handle = reply->wait;
+        result.status = HORIZON_STATUS_DEVICE_NOT_READY;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        assert( !horizon_asyncs.head );
+
+        /* Overlapped I/O ignores synchronous socket timeouts. */
+        sock->sock_nonblocking = 0;
+        request.force_async = 1;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        async = horizon_async_find_id( &horizon_asyncs, reply->wait );
+        assert( !async->deadline );
+        result.handle = reply->wait;
+        result.status = HORIZON_STATUS_PENDING;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        fake_now += 1000000;
+        assert( !horizon_sock_poll_all_asyncs_locked() && async->state == HORIZON_ASYNC_QUEUED );
+        assert( horizon_async_cancel( &horizon_asyncs, target_h, 0, owner.tid, fake_now, 0 ) == 1 );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        send_result( apc, HORIZON_ASYNC_STATUS_CANCELLED, 0 );
+
+        send_request.header.req = HORIZON_REQ_SEND_SOCKET;
+        send_request.async = request.async;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&send_request ) );
+        async = horizon_async_find_id( &horizon_asyncs, reply->wait );
+        assert( async->deadline == fake_now + 250000 );
+        result.handle = reply->wait;
+        result.status = HORIZON_STATUS_PENDING;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        fake_now += 250000;
+        assert( horizon_sock_poll_all_asyncs_locked() && async->status == HORIZON_STATUS_IO_TIMEOUT );
+        apc = horizon_server_async_apc_locked( &owner, call );
+        send_result( apc, HORIZON_STATUS_IO_TIMEOUT, 0 );
+        send_request.flags = HORIZON_SERVER_SOCKET_IO_FORCE_ASYNC;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&send_request ) );
+        assert( !horizon_async_find_id( &horizon_asyncs, reply->wait )->deadline );
+        result.handle = reply->wait;
+        result.status = HORIZON_STATUS_SUCCESS;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+
+        request.force_async = 0;
+        sock->file_options = FILE_SYNCHRONOUS_IO_NONALERT;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->options == FILE_SYNCHRONOUS_IO_NONALERT );
+        assert( !horizon_async_find_id( &horizon_asyncs, reply->wait )->deadline );
+        result.handle = reply->wait;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        sock->file_options = 0;
+
+        value = 0;
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO, target_h,
+                                             (unsigned char *)&value, 4, NULL, 0, &got ) );
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( !horizon_async_find_id( &horizon_asyncs, reply->wait )->deadline );
+        result.handle = reply->wait;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        value = 0xffffffff;
+        assert( !horizon_sock_ioctl_timeout( HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO, target_h,
+                                             (unsigned char *)&value, 4, NULL, 0, &got ) );
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( horizon_async_find_id( &horizon_asyncs, reply->wait )->deadline ==
+                fake_now + 0xffffffffULL * 10000 );
+        result.handle = reply->wait;
+        assert( !horizon_server_handle_set_async_direct_result( &owner, (unsigned char *)&result ) );
+        {
+            struct horizon_server_handle_entry *accepted = horizon_server_accepted_sock_locked( sock, dup(sock->file_fd) );
+            assert( accepted && accepted->object->sock_rcvtimeo == 0xffffffff && accepted->object->sock_sndtimeo == 25 );
+            close( accepted->object->file_fd );
+        }
+
+        fail_allocation = 1;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->header.error == HORIZON_STATUS_NO_MEMORY && !reply->wait && !horizon_asyncs.head );
+        request.async.handle = 0;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->header.error == HORIZON_STATUS_INVALID_HANDLE && !reply->wait && !horizon_asyncs.head );
+        request.async.handle = event_h;
+        assert( !horizon_server_handle_socket_io( &owner, (unsigned char *)&request ) );
+        assert( reply->header.error == HORIZON_STATUS_OBJECT_TYPE_MISMATCH && !reply->wait && !horizon_asyncs.head );
+    }
     close( client ); close( client2 ); close( client3 );
     printf( "overlapped sockets: AcceptEx, accept, pending recv, completion routine, cancel and ConnectEx "
-            "end on the port as Windows ends them; IPv6 and nonblocking connect semantics passed\n" );
+            "end on the port as Windows ends them; IPv6, blocking I/O and socket timeouts passed\n" );
     return 0;
 }
 '''
@@ -597,11 +791,16 @@ fixture = (fixture.replace('@DEFINES@', defines)
                   .replace('@HEADER@', header)
                   .replace('@SOCKADDR@', sockaddr_header)
                   .replace('@SELECT@', struct('horizon_select_request') + '\n' + struct('horizon_select_signal_and_wait_op'))
+                  .replace('@SOCKET_REQUESTS@', '\n'.join(struct(name) for name in (
+                      'horizon_server_reply_header', 'horizon_recv_socket_request', 'horizon_send_socket_request',
+                      'horizon_socket_io_reply', 'horizon_set_async_direct_result_request',
+                      'horizon_set_async_direct_result_reply')))
                   .replace('@FUNCTIONS@', functions))
 
-with tempfile.TemporaryDirectory(prefix='wine-nx-async-sockets-') as tmp:
-    tmp = Path(tmp)
-    (tmp / 'test.c').write_text(fixture, errors='surrogateescape')
-    subprocess.run(['cc', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
-                    str(tmp / 'test.c'), '-o', str(tmp / 'test')], check=True)
-    print(subprocess.run([str(tmp / 'test')], check=True, capture_output=True, text=True).stdout.strip())
+if __name__ == '__main__':
+    with tempfile.TemporaryDirectory(prefix='wine-nx-async-sockets-') as tmp:
+        tmp = Path(tmp)
+        (tmp / 'test.c').write_text(fixture, errors='surrogateescape')
+        subprocess.run([os.environ.get('CC', 'cc'), '-g', '-Wall', '-Werror', '-Wno-unused-function',
+                        '-fsanitize=address,undefined', str(tmp / 'test.c'), '-o', str(tmp / 'test')], check=True)
+        print(subprocess.run([str(tmp / 'test')], check=True, capture_output=True, text=True).stdout.strip())

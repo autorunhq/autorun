@@ -78,6 +78,7 @@ struct horizon_async
     struct horizon_async_data data;
     unsigned int status;       /* what the APC tells the client: ALERTED to do it, or how it ended */
     unsigned long long ready_at;
+    unsigned long long deadline;
     /* The socket's completion port as it was when the operation started,
      * referenced, which is where the result goes even if the socket is closed
      * before it comes. */

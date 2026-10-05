@@ -3326,6 +3326,7 @@ struct horizon_server_object
     int dir_queried;                /* a directory query has run on this handle */
     char *dir_mask;
     int sock_nonblocking;
+    unsigned int sock_rcvtimeo, sock_sndtimeo;
     int sock_bound;                 /* bind() succeeded; Windows fails a second bind */
     int sock_family;                /* what the program asked for: WS AF_INET, or AF_INET6 on IPv4 */
     int sock_type, sock_protocol;
@@ -11993,8 +11994,8 @@ done:
  * via REQ_ioctl and run directly against the unix fd.  Data ioctls
  * (recvmsg/sendmsg/sockopts) run client-side in ntdll's socket.c using
  * the fd from get_handle_fd; recv_socket/send_socket only ask us for
- * permission, answered with ALERTED + nonblocking so the client does
- * the actual I/O itself and maps EAGAIN to WSAEWOULDBLOCK.
+ * permission to try I/O; operations that would block wait through the
+ * async queue unless the socket is logically nonblocking.
  */
 
 /* AFD ioctl codes, mirrored from include/wine/afd.h (CTL_CODE expanded;
@@ -12029,6 +12030,10 @@ done:
 #define HORIZON_IOCTL_AFD_WINE_GET_SO_RCVBUF     0x00120398 /* NETWORK/230/BUFFERED */
 #define HORIZON_IOCTL_AFD_WINE_GET_SO_REUSEADDR  0x001203a4 /* NETWORK/233/BUFFERED */
 #define HORIZON_IOCTL_AFD_WINE_GET_SO_SNDBUF     0x001203b0 /* NETWORK/236/BUFFERED */
+#define HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO   0x0012039c /* NETWORK/231/BUFFERED */
+#define HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO   0x001203a0 /* NETWORK/232/BUFFERED */
+#define HORIZON_IOCTL_AFD_WINE_GET_SO_SNDTIMEO   0x001203b4 /* NETWORK/237/BUFFERED */
+#define HORIZON_IOCTL_AFD_WINE_SET_SO_SNDTIMEO   0x001203b8 /* NETWORK/238/BUFFERED */
 #define HORIZON_IOCTL_AFD_WINE_GET_TCP_NODELAY   0x00120470 /* NETWORK/284/BUFFERED */
 #define HORIZON_IOCTL_AFD_WINE_GET_INFO          0x00120368 /* NETWORK/218/BUFFERED */
 #define HORIZON_IOCTL_AFD_WINE_GET_IPV6_V6ONLY   0x0012045c /* NETWORK/279/BUFFERED */
@@ -12047,6 +12052,8 @@ done:
 #define HORIZON_WS_AF_UNSPEC 0
 #define HORIZON_WS_AF_INET   2
 #define HORIZON_WS_AF_INET6  23
+
+#define HORIZON_SERVER_SOCKET_IO_FORCE_ASYNC 0x01
 
 static unsigned int horizon_sock_errno_status( int err )
 {
@@ -12316,6 +12323,8 @@ static struct horizon_server_handle_entry *horizon_server_accepted_sock_locked( 
     sock->file_fd = fd;
     sock->sock_bound = 1;
     sock->sock_nonblocking = listener->sock_nonblocking;
+    sock->sock_rcvtimeo = listener->sock_rcvtimeo;
+    sock->sock_sndtimeo = listener->sock_sndtimeo;
     sock->sock_event_handle = listener->sock_event_handle;
     sock->sock_event_mask = listener->sock_event_mask;
     sock->sock_family = listener->sock_family;
@@ -12478,11 +12487,19 @@ static int horizon_sock_poll_all_asyncs_locked(void)
     struct horizon_server_object *sock;
     struct horizon_async *async;
     unsigned int handles[64], count = 0, i;
+    unsigned long long now = horizon_async_now();
     int changed = 0;
 
-    for (async = horizon_asyncs.head; async && count < ARRAY_SIZE(handles); async = async->next)
+    for (async = horizon_asyncs.head; async; async = async->next)
     {
         if (async->state != HORIZON_ASYNC_QUEUED) continue;
+        if (async->deadline && now >= async->deadline)
+        {
+            horizon_async_ready( &horizon_asyncs, async, HORIZON_STATUS_IO_TIMEOUT, now );
+            changed = 1;
+            continue;
+        }
+        if (count == ARRAY_SIZE(handles)) continue;
         for (i = 0; i < count; i++) if (handles[i] == async->sock) break;
         if (i == count) handles[count++] = async->sock;
     }
@@ -12641,12 +12658,12 @@ static void *horizon_sock_poller_thread( void *param )
 
 static void horizon_sock_poller_start(void)
 {
-    if (horizon_sock_poller_running) return;
+    if (__atomic_exchange_n( &horizon_sock_poller_running, 1, __ATOMIC_ACQ_REL )) return;
     if (!pthread_create( &horizon_sock_poller_thread_id, NULL, horizon_sock_poller_thread, NULL ))
     {
         pthread_detach( horizon_sock_poller_thread_id );
-        horizon_sock_poller_running = 1;
     }
+    else __atomic_store_n( &horizon_sock_poller_running, 0, __ATOMIC_RELEASE );
 }
 
 static unsigned int horizon_server_get_sock_fd( unsigned int handle, int *fd, int *nonblocking )
@@ -12984,6 +13001,7 @@ static unsigned int horizon_sock_ioctl_create( unsigned int handle, const unsign
         if (object->file_fd != -1) close( object->file_fd );
         object->file_fd = fd;
         object->sock_nonblocking = 0;
+        object->sock_rcvtimeo = object->sock_sndtimeo = 0;
         object->sock_bound = 0;
         object->sock_family = params[0];
         object->sock_type = params[1];
@@ -13201,6 +13219,35 @@ static unsigned int horizon_sock_ioctl_bind( unsigned int handle, const unsigned
                    (unsigned)((((const unsigned char *)&bound.sin_port)[0] << 8) |
                               ((const unsigned char *)&bound.sin_port)[1]) );
     return HORIZON_STATUS_SUCCESS;
+}
+
+static unsigned int horizon_sock_ioctl_timeout( unsigned int code, unsigned int handle,
+                                                const unsigned char *data, unsigned int data_size,
+                                                unsigned char *out, unsigned int out_max,
+                                                unsigned int *out_size )
+{
+    struct horizon_server_object *object;
+    unsigned int status, *timeout;
+    int set = code == HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO ||
+              code == HORIZON_IOCTL_AFD_WINE_SET_SO_SNDTIMEO;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    status = horizon_server_find_sock_locked( handle, &object );
+    if (!status)
+    {
+        timeout = code == HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO ||
+                  code == HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO ?
+                  &object->sock_rcvtimeo : &object->sock_sndtimeo;
+        if ((set ? data_size : out_max) < sizeof(*timeout)) status = HORIZON_STATUS_BUFFER_TOO_SMALL;
+        else if (set) memcpy( timeout, data, sizeof(*timeout) );
+        else
+        {
+            memcpy( out, timeout, sizeof(*timeout) );
+            *out_size = sizeof(*timeout);
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return status;
 }
 
 /* The socket options set before a bind. Each carries its value alone, except
@@ -13580,6 +13627,13 @@ static int horizon_server_handle_ioctl( struct horizon_server_connection *connec
         status = horizon_sock_ioctl_setsockopt( request->code, handle, data, data_size );
         break;
 
+    case HORIZON_IOCTL_AFD_WINE_SET_SO_RCVTIMEO:
+    case HORIZON_IOCTL_AFD_WINE_GET_SO_RCVTIMEO:
+    case HORIZON_IOCTL_AFD_WINE_SET_SO_SNDTIMEO:
+    case HORIZON_IOCTL_AFD_WINE_GET_SO_SNDTIMEO:
+        status = horizon_sock_ioctl_timeout( request->code, handle, data, data_size, out, out_max, &out_size );
+        break;
+
     case HORIZON_IOCTL_AFD_WINE_GET_SO_BROADCAST:
     case HORIZON_IOCTL_AFD_WINE_GET_SO_KEEPALIVE:
     case HORIZON_IOCTL_AFD_WINE_GET_SO_OOBINLINE:
@@ -13764,33 +13818,42 @@ static int horizon_server_handle_socket_io( struct horizon_server_connection *co
     const struct horizon_server_request_header *header = (const void *)message;
     const struct horizon_async_data *data;
     struct horizon_socket_io_reply reply;
+    struct horizon_server_object *sock;
     struct horizon_async *async;
-    int direction;
+    unsigned int timeout;
+    int direction, force_async;
 
     if (header->req == HORIZON_REQ_RECV_SOCKET)
     {
         data = &((const struct horizon_recv_socket_request *)message)->async;
         direction = HORIZON_ASYNC_READ;
+        force_async = ((const struct horizon_recv_socket_request *)message)->force_async;
     }
     else
     {
         data = &((const struct horizon_send_socket_request *)message)->async;
         direction = HORIZON_ASYNC_WRITE;
+        force_async = ((const struct horizon_send_socket_request *)message)->flags & HORIZON_SERVER_SOCKET_IO_FORCE_ASYNC;
     }
     memset( &reply, 0, sizeof(reply) );
-    /* ALERTED tells ntdll's socket.c to do the recvmsg/sendmsg itself on the
-     * cached fd, and to tell set_async_direct_result how it went. The async
-     * behind the wait token is what that result is kept against: an
-     * overlapped operation that would block goes pending there and is
-     * finished later, when the socket is ready. nonblocking keeps a plain
-     * blocking call surfacing EAGAIN as WSAEWOULDBLOCK, as before. */
-    reply.header.error = HORIZON_STATUS_ALERTED;
-    reply.wait = 1;
-    reply.options = 0;
-    reply.nonblocking = 1;
     pthread_mutex_lock( &horizon_server_objects_mutex );
-    if ((async = horizon_server_async_create_locked( connection, data, direction, HORIZON_ASYNC_IO )))
-        reply.wait = async->id;
+    reply.header.error = horizon_server_find_sock_locked( data->handle, &sock );
+    if (!reply.header.error)
+    {
+        if (!(async = horizon_server_async_create_locked( connection, data, direction, HORIZON_ASYNC_IO )))
+            reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        else
+        {
+            reply.header.error = HORIZON_STATUS_ALERTED;
+            reply.wait = async->id;
+            reply.options = sock->file_options;
+            reply.nonblocking = sock->sock_nonblocking;
+            timeout = direction == HORIZON_ASYNC_READ ? sock->sock_rcvtimeo : sock->sock_sndtimeo;
+            if (timeout && !force_async && !sock->sock_nonblocking &&
+                !(sock->file_options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
+                async->deadline = horizon_async_now() + (unsigned long long)timeout * 10000;
+        }
+    }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }

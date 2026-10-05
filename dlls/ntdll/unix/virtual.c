@@ -926,6 +926,7 @@ static NTSTATUS get_unixlib_funcs( void *so_handle, BOOL wow, const void **funcs
 extern const unixlib_entry_t wine_nx_ws2_32_unix_funcs[];
 extern const unixlib_entry_t wine_nx_dnsapi_unix_funcs[];
 extern const unixlib_entry_t wine_nx_crypt32_unix_funcs[];
+extern const unixlib_entry_t wine_nx_secur32_unix_funcs[];
 extern NTSTATUS wine_nx_win32u_unix_init(void);
 extern const unixlib_entry_t wine_nx_opengl32_unix_funcs[];
 extern const unixlib_entry_t wine_nx_audio_unix_funcs[];
@@ -971,6 +972,7 @@ static const struct
     { "ws2_32.dll", wine_nx_ws2_32_unix_funcs },
     { "dnsapi.dll", wine_nx_dnsapi_unix_funcs },
     { "crypt32.dll", wine_nx_crypt32_unix_funcs },
+    { "secur32.dll", wine_nx_secur32_unix_funcs },
     { "win32u.dll", NULL, wine_nx_win32u_unix_init },
     { "opengl32.dll", wine_nx_opengl32_unix_funcs },
     { "winenxaudio.drv", wine_nx_audio_unix_funcs },
@@ -999,6 +1001,8 @@ extern const unixlib_entry_t wine_nx_audio_wow64_unix_funcs[];
 extern const unsigned int wine_nx_audio_wow64_unix_count;
 extern const unixlib_entry_t wine_nx_crypt32_wow64_unix_funcs[];
 extern const unsigned int wine_nx_crypt32_wow64_unix_count;
+extern const unixlib_entry_t wine_nx_secur32_wow64_unix_funcs[];
+extern const unsigned int wine_nx_secur32_wow64_unix_count;
 extern const unixlib_entry_t wine_nx_xinput_wow64_unix_funcs[];
 extern const unsigned int wine_nx_xinput_wow64_unix_count;
 #ifdef WINE_NX_MESA_SWITCH
@@ -1021,6 +1025,7 @@ static const struct
     { "winedmo.dll", wine_nx_winedmo_wow64_unix_funcs, &wine_nx_winedmo_unix_count },
     { "winegstreamer.dll", wine_nx_media_wow64_unix_funcs, &wine_nx_media_unix_count },
     { "crypt32.dll", wine_nx_crypt32_wow64_unix_funcs, &wine_nx_crypt32_wow64_unix_count },
+    { "secur32.dll", wine_nx_secur32_wow64_unix_funcs, &wine_nx_secur32_wow64_unix_count },
     /* xinput1_1, 1_2 and 1_4 build xinput1_3's main.c; xinput9_1_0 loads xinput1_4 */
     { "xinput1_1.dll", wine_nx_xinput_wow64_unix_funcs, &wine_nx_xinput_wow64_unix_count },
     { "xinput1_2.dll", wine_nx_xinput_wow64_unix_funcs, &wine_nx_xinput_wow64_unix_count },

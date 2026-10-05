@@ -13,6 +13,7 @@
   "winebox64.dll": ["include/wine/unixlib.h", "dlls/winebox64/unixlib.h"],
   "ws2_32.dll": ["include/wine/unixlib.h", "dlls/ws2_32/ws2_32_private.h"],
   "crypt32.dll": ["include/wine/unixlib.h", "dlls/crypt32/crypt32_private.h"],
+  "secur32.dll": ["include/wine/unixlib.h", "dlls/secur32/secur32_priv.h"],
   "opengl32.dll": ["include/wine/unixlib.h", "dlls/opengl32/unixlib.h", "dlls/opengl32/unix_thunks.h"],
   "winenxaudio.drv": ["include/wine/unixlib.h", "dlls/mmdevapi/unixlib.h"],
   "wmadmod.dll": ["include/wine/unixlib.h", "dlls/wmadmod/native_unixlib.h"],

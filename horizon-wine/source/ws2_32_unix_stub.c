@@ -32,17 +32,6 @@ static NTSTATUS stub_not_implemented( void *args )
     (void)args;
     return STATUS_NOT_IMPLEMENTED;
 }
-
-/* For DllMain process_attach hooks: returning SUCCESS without doing anything
- * is correct for "feature not available". The PE DllMain treats SUCCESS as
- * "subsystem initialized" and proceeds. Failures from later calls fail at
- * the API boundary instead of breaking DllMain. */
-static NTSTATUS stub_success( void *args )
-{
-    (void)args;
-    return STATUS_SUCCESS;
-}
-
 /* Windows-side types, mirrored from ws2_32 (64-bit PE layout).  The real
  * winsock headers can't be included next to the newlib socket headers. */
 struct ws_addrinfo
@@ -480,37 +469,3 @@ const unixlib_entry_t wine_nx_ws2_32_wow64_unix_funcs[5] =
 
 /* The x86 unix call gate calls these tables only below their sizes. */
 const unsigned int wine_nx_ws2_32_wow64_unix_count = ARRAY_SIZE(wine_nx_ws2_32_wow64_unix_funcs);
-
-/* crypt32: enum unix_funcs in
- * dlls/crypt32/crypt32_private.h. process_attach must succeed for DllMain
- * to complete (it does global setup). The rest can fail until we have a
- * crypto backend. */
-const unixlib_entry_t wine_nx_crypt32_unix_funcs[] =
-{
-    stub_success,          /* unix_process_attach */
-    stub_success,          /* unix_process_detach */
-    stub_not_implemented,  /* unix_open_cert_store */
-    stub_not_implemented,  /* unix_import_store_key */
-    stub_not_implemented,  /* unix_import_store_cert */
-    stub_not_implemented,  /* unix_close_cert_store */
-    stub_not_implemented,  /* unix_enum_root_certs */
-    stub_not_implemented,  /* unix_export_cert_store */
-};
-
-/* The same for the 32-bit crypt32 a WoW64 program loads. Its DllMain returns
- * FALSE when the unix side is missing (dlls/crypt32/main.c), and a failed
- * DllMain of a statically imported DLL ends the process before it starts:
- * Quake III Arena imports crypt32 and stopped with c0000142. */
-const unixlib_entry_t wine_nx_crypt32_wow64_unix_funcs[8] =
-{
-    stub_success,          /* unix_process_attach */
-    stub_success,          /* unix_process_detach */
-    stub_not_implemented,  /* unix_open_cert_store */
-    stub_not_implemented,  /* unix_import_store_key */
-    stub_not_implemented,  /* unix_import_store_cert */
-    stub_not_implemented,  /* unix_close_cert_store */
-    stub_not_implemented,  /* unix_enum_root_certs */
-    stub_not_implemented,  /* unix_export_cert_store */
-};
-
-const unsigned int wine_nx_crypt32_wow64_unix_count = ARRAY_SIZE(wine_nx_crypt32_wow64_unix_funcs);
