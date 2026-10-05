@@ -12,6 +12,7 @@ fixture = rf'''
 #define __WINESRC__
 #define WINE_UNIX_LIB
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,7 +36,24 @@ static _Thread_local TEB *active_teb;
 static TEB *mock_current_teb(void) {{ return active_teb; }}
 #define NtCurrentTeb mock_current_teb
 #define __SWITCH__
+static unsigned int once_calls;
+static unsigned int key_creations;
+static int key_failure;
+static int counted_pthread_once( pthread_once_t *once, void (*init)(void) )
+{{
+    __atomic_add_fetch( &once_calls, 1, __ATOMIC_RELAXED );
+    return pthread_once( once, init );
+}}
+static int counted_pthread_key_create( pthread_key_t *key, void (*destroy)(void *) )
+{{
+    __atomic_add_fetch( &key_creations, 1, __ATOMIC_RELAXED );
+    return key_failure ? ENOMEM : pthread_key_create( key, destroy );
+}}
+#define pthread_once counted_pthread_once
+#define pthread_key_create counted_pthread_key_create
 #include "{source.as_posix()}"
+#undef pthread_key_create
+#undef pthread_once
 #undef NtCurrentTeb
 
 static void *horizon_start, *horizon_end;
@@ -535,8 +553,54 @@ static void test_thread_ownership(void)
     pthread_mutex_destroy( &remote.mutex );
 }}
 
-int main(void)
+static pthread_barrier_t key_barrier;
+
+static void *initialize_key_concurrently( void *unused )
 {{
+    unsigned int i;
+
+    (void)unused;
+    pthread_barrier_wait( &key_barrier );
+    for (i = 0; i < 10000; i++) assert( !initialize_thread_key() );
+    assert( !current_thread( 1 ) );
+    return NULL;
+}}
+
+int main( int argc, char **argv )
+{{
+    if (argc > 1)
+    {{
+        unsigned int i, before;
+
+        if (!strcmp( argv[1], "--concurrent" ))
+        {{
+            pthread_t threads[8];
+
+            assert( !pthread_barrier_init( &key_barrier, NULL, 8 ) );
+            for (i = 0; i < 8; i++)
+                assert( !pthread_create( &threads[i], NULL, initialize_key_concurrently, NULL ) );
+            for (i = 0; i < 8; i++) assert( !pthread_join( threads[i], NULL ) );
+            pthread_barrier_destroy( &key_barrier );
+            assert( key_creations == 1 );
+            before = once_calls;
+            for (i = 0; i < 10000; i++) assert( !initialize_thread_key() );
+            assert( once_calls == before );
+            puts( "Concurrent key initialization and lock-free initialized path passed" );
+        }}
+        else
+        {{
+            assert( !strcmp( argv[1], "--failure" ) );
+            key_failure = 1;
+            for (i = 0; i < 10000; i++)
+            {{
+                assert( initialize_thread_key() == ENOMEM );
+                assert( !current_thread( 1 ) );
+            }}
+            assert( once_calls == 1 && key_creations == 1 );
+            puts( "Key allocation failure remains cached and rejects thread lookup" );
+        }}
+        return 0;
+    }}
     horizon_start = (void *)0x10000;
     horizon_end = (void *)0x9000000000ull;
     native_bitmap = calloc( 1, 0x1000000 );
@@ -548,6 +612,7 @@ int main(void)
     test_engine_exits_and_callbacks();
     test_notifications();
     test_thread_ownership();
+    assert( once_calls == 1 );
     free( native_bitmap );
     puts( "ARM64EC Box64 Unix bridge: ABI, ownership, contexts, suspension, exits and invalidation passed" );
     return 0;
@@ -565,3 +630,5 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-arm64ec-unix-') as tmp:
                     '-I' + str(root / 'include'), '-I' + str(root / 'dlls/ntdll/unix'),
                     '-I' + str(root), str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
+    subprocess.run([str(exe), '--concurrent'], check=True)
+    subprocess.run([str(exe), '--failure'], check=True)

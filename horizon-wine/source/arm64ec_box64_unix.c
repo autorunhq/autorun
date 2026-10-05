@@ -27,20 +27,28 @@ static struct amd64_process process;
 static pthread_key_t thread_key;
 static pthread_once_t thread_once = PTHREAD_ONCE_INIT;
 static int thread_key_error;
+static int thread_key_ready;
 
 extern void wine_nx_box64_invalidate( uintptr_t address, size_t size, int destroy ) __attribute__((weak));
 
 static void create_thread_key(void)
 {
     thread_key_error = pthread_key_create( &thread_key, free );
+    __atomic_store_n( &thread_key_ready, 1, __ATOMIC_RELEASE );
+}
+
+static int initialize_thread_key(void)
+{
+    if (!__atomic_load_n( &thread_key_ready, __ATOMIC_ACQUIRE ))
+        pthread_once( &thread_once, create_thread_key );
+    return thread_key_error;
 }
 
 static struct amd64_thread *current_thread( ULONGLONG token )
 {
     struct amd64_thread *thread;
 
-    pthread_once( &thread_once, create_thread_key );
-    if (thread_key_error) return NULL;
+    if (initialize_thread_key()) return NULL;
     thread = pthread_getspecific( thread_key );
     return token && token == (ULONG_PTR)thread ? thread : NULL;
 }
@@ -114,8 +122,7 @@ static NTSTATUS init_thread( void *args )
         p->cpu_area != (ULONG_PTR)teb->ChpeV2CpuAreaInfo ||
         p->suspend_doorbell != (ULONG_PTR)teb->ChpeV2CpuAreaInfo->SuspendDoorbell)
         return STATUS_INVALID_PARAMETER;
-    pthread_once( &thread_once, create_thread_key );
-    if (thread_key_error) return STATUS_NO_MEMORY;
+    if (initialize_thread_key()) return STATUS_NO_MEMORY;
     if (!(thread = pthread_getspecific( thread_key )))
     {
         if (!(thread = calloc( 1, sizeof(*thread) ))) return STATUS_NO_MEMORY;
