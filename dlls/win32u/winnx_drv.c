@@ -975,16 +975,17 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
                 window_surface_flush( surface );
 
             /* Child controls can paint while the top-level still owns the dummy
-             * surface during ShowWindow.  Repaint the complete hierarchy once
+             * surface during ShowWindow.  Invalidate the complete hierarchy once
              * the real surface has been installed so those discarded pixels are
-             * produced again on the drawable surface. */
+             * produced again on the drawable surface.  The paint is left to the
+             * program's message loop, as on Windows: painting here, in the middle
+             * of CreateWindow or ShowWindow, runs its window procedure before the
+             * program has set the window up (SimCity 4 faults in WM_PAINT). */
             if (initial_redraw)
             {
                 nxdrv_trace( "[NXDRV] initial redraw hwnd=%p", (int)(ULONG_PTR)hwnd, 0, 0, 0 );
                 NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME |
-                                   RDW_ALLCHILDREN | RDW_UPDATENOW );
-                wine_nx_surface_mark_full_dirty( surface );
-                wine_nx_surface_present_full( surface );
+                                   RDW_ALLCHILDREN );
             }
         }
         else window_surface_flush( surface );

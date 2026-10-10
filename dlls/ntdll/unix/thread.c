@@ -1853,6 +1853,19 @@ NTSTATUS WINAPI NtSuspendThread( HANDLE handle, ULONG *count )
         }
     }
     SERVER_END_REQ;
+#ifdef __SWITCH__
+    /* Elsewhere the server stops a thread that suspends itself with a signal,
+     * before NtSuspendThread returns. Horizon has no signals: a suspended
+     * thread stops at its next wait, so one that suspends itself would run on
+     * and could suspend itself again and again before it waits. SimCity 4's
+     * worker threads sleep this way, SuspendThread( GetCurrentThread() ) until
+     * another thread resumes them: each ran on, its count reached 127, and the
+     * one ResumeThread that came later never woke it. Stop here instead, as
+     * wait_suspend does: a wait with no objects and no timeout returns once
+     * the thread is resumed. */
+    if (!ret && is_current_thread_handle( handle ))
+        server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, NULL, NULL );
+#endif
     return ret;
 }
 
