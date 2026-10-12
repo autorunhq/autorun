@@ -681,6 +681,13 @@ static void wine_nx_send_mouse_motion( int dx, int dy )
     NtUserSendHardwareInput( 0, 0, &input, 0 );
 }
 
+static void wine_nx_flush_mouse(void)
+{
+    static const INPUT input = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
+
+    NtUserSendHardwareInput( 0, 0, &input, 0 );
+}
+
 /* Where the cursor really is. NtUserGetCursorPos is not it: without a recent
  * change it asks the display driver, which is this one, and maps the answer
  * through the thread's DPI. The stick works in the screen's own coordinates,
@@ -812,6 +819,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
     if (stepped) wine_nx_send_mouse_motion( dx, dy );
     if (second) wine_nx_send_mouse( x, y, second );
+    wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
     for (unsigned int i = key_after; i < key_count; i++) wine_nx_send_key( key_events + i );
     if (moved || placed || stepped)
