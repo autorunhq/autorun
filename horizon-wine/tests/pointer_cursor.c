@@ -275,6 +275,21 @@ static void test_held_cursor_still_moves(void)
     }
 }
 
+static void test_speed_scales_the_stick(void)
+{
+    struct pointer_cursor a = cursor_at( 0, 360 );
+    struct pointer_cursor b = cursor_at( 0, 360 );
+    struct pointer_cursor c = cursor_at( 0, 360 );
+
+    /* Half the speed, half the distance over the same second. */
+    b.speed = POINTER_CURSOR_SPEED * 0.5;
+    for (int i = 0; i < 50; i++) { pointer_cursor_step( &a, 32767, 0, 20 * MS ); pointer_cursor_step( &b, 32767, 0, 20 * MS ); }
+    assert( fabs( a.x - 1000 ) < 0.01 && fabs( b.x - 500 ) < 0.01 );
+    /* A speed of zero (a cursor no one configured) keeps the built-in one. */
+    for (int i = 0; i < 50; i++) pointer_cursor_step( &c, 32767, 0, 20 * MS );
+    assert( fabs( c.x - a.x ) < 0.01 );
+}
+
 int main(void)
 {
     test_buttons_between_takes();
@@ -287,7 +302,8 @@ int main(void)
     test_paint_restores_pixels();
     test_warp_keeps_unsent_motion();
     test_held_cursor_still_moves();
+    test_speed_scales_the_stick();
     puts( "pointer cursor: buttons between takes, dead zone, speed curve, time scaling, edges, sprite "
-          "restore, motion kept across warps and a held cursor still moving passed" );
+          "restore, motion kept across warps, a held cursor still moving and the speed scale passed" );
     return 0;
 }

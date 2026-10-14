@@ -9,6 +9,17 @@
 #define INPUT_SOURCE_COUNT 24
 #define INPUT_PAD_TARGET_COUNT 24
 
+/* The analog-stick cursor's speed, as a percentage of the built-in one: the
+ * stick sets how fast the pointer moves, and this scales that. 100 is the
+ * default (see pointer_cursor.h); lower is finer, higher crosses the screen
+ * sooner. The picker offers INPUT_MOUSE_SPEED_COUNT stops from
+ * input_mouse_speed_values. */
+#define INPUT_MOUSE_SPEED_DEFAULT 100
+#define INPUT_MOUSE_SPEED_MIN 25
+#define INPUT_MOUSE_SPEED_MAX 400
+#define INPUT_MOUSE_SPEED_COUNT 7
+static const int input_mouse_speed_values[INPUT_MOUSE_SPEED_COUNT] = { 25, 50, 75, 100, 150, 200, 400 };
+
 enum input_mode { INPUT_CONTROLLER = 1, INPUT_KEYBOARD_MOUSE };
 enum input_mouse_code
 {
@@ -25,6 +36,7 @@ struct input_profile
     struct input_binding pad[INPUT_SOURCE_COUNT], keys[INPUT_SOURCE_COUNT];
     int mode, deadzone[2], keyboard_auto;
     unsigned int left_inherit;
+    int mouse_speed;   /* percent of the built-in cursor speed; 100 is the default */
 };
 struct input_pad { uint64_t buttons; int axis[4]; };
 struct input_output

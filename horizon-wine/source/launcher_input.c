@@ -503,12 +503,14 @@ static const struct
     { "keyboard-auto", "On-screen keyboard", "Automatic: open when a text field gains focus." },
     { "left-deadzone", "Left stick deadzone", "Ignore small movements near the stick centre." },
     { "right-deadzone", "Right stick deadzone", "Ignore small movements near the stick centre." },
+    { "mouse-speed", "Mouse speed", "How fast the analog stick moves the mouse pointer." },
 };
 
 static int option_count( int row )
 {
     if (row == INPUT_ROW_PAD || row == INPUT_ROW_KEYS) return 0;
     if (row == INPUT_ROW_MODE || row == INPUT_ROW_KEYBOARD) return 2;
+    if (row == INPUT_ROW_MOUSE_SPEED) return INPUT_MOUSE_SPEED_COUNT;
     return 6;
 }
 
@@ -520,8 +522,19 @@ static int option_value( int row, const struct input_profile *p )
     case INPUT_ROW_KEYBOARD: return p->keyboard_auto;
     case INPUT_ROW_LEFT_ZONE: return p->deadzone[0];
     case INPUT_ROW_RIGHT_ZONE: return p->deadzone[1];
+    case INPUT_ROW_MOUSE_SPEED: return p->mouse_speed;
     default: return 0;
     }
+}
+
+/* The value a choice stands for: deadzones step by five, the mouse speed
+ * picks from its own table, anything else is the index itself. */
+static int option_choice_value( int row, int item )
+{
+    if (row == INPUT_ROW_MODE) return item + INPUT_CONTROLLER;
+    if (row == INPUT_ROW_MOUSE_SPEED) return input_mouse_speed_values[item];
+    if (row >= INPUT_ROW_LEFT_ZONE) return item * 5;
+    return item;
 }
 
 static void option_label( int row, int value, char *out, size_t size )
@@ -588,10 +601,9 @@ void launcher_input_edit( struct ui *ui, struct ui_list *list, int row, enum ui_
         for (int i = offset; i < count; i++)
         {
             int item = i - offset;
-            values[i] = row == INPUT_ROW_MODE ? item + INPUT_CONTROLLER :
-                        row >= INPUT_ROW_LEFT_ZONE ? item*5 : item;
+            values[i] = option_choice_value( row, item );
             if ((!program || custom) && values[i] <= current) selected = i;
-            option_label(row, values[i], choices[i].label, sizeof(choices[i].label));
+            option_label( row, values[i], choices[i].label, sizeof(choices[i].label) );
         }
         selected = ui_settings_dropdown(ui, list, choices, count, selected);
         if (selected < 0) return;

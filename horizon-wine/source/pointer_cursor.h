@@ -32,6 +32,7 @@ struct pointer_cursor
     double x, y;       /* sub-pixel position; the hot spot is the arrow tip */
     double motion_x, motion_y; /* movement not yet handed over, sub-pixel */
     int width, height; /* screen size */
+    double speed;      /* pixels per second at full tilt; 0 means the default */
     uint32_t under[POINTER_CURSOR_W * POINTER_CURSOR_H];
 };
 
@@ -62,13 +63,15 @@ static inline int pointer_cursor_step( struct pointer_cursor *c, int stick_x, in
 {
     int old_x = (int)c->x, old_y = (int)c->y;
     double dx = stick_x, dy = -(double)stick_y;
-    double deflection = sqrt( dx * dx + dy * dy ), tilt, distance;
+    double deflection = sqrt( dx * dx + dy * dy ), tilt, distance, speed;
 
     if (deflection <= POINTER_CURSOR_DEAD_ZONE) return 0;
     if (elapsed_ns > POINTER_CURSOR_MAX_STEP_NS) elapsed_ns = POINTER_CURSOR_MAX_STEP_NS;
     tilt = (deflection - POINTER_CURSOR_DEAD_ZONE) / (POINTER_CURSOR_STICK_MAX - POINTER_CURSOR_DEAD_ZONE);
     if (tilt > 1) tilt = 1;
-    distance = POINTER_CURSOR_SPEED * tilt * tilt * (double)elapsed_ns / 1e9;
+    /* The caller's speed, or the built-in one when it left it at zero. */
+    speed = c->speed > 0 ? c->speed : POINTER_CURSOR_SPEED;
+    distance = speed * tilt * tilt * (double)elapsed_ns / 1e9;
     dx = dx / deflection * distance;
     dy = dy / deflection * distance;
     c->motion_x += dx;

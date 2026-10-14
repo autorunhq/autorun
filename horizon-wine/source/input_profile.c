@@ -62,6 +62,7 @@ void input_profile_defaults( struct input_profile *p, int keyboard_auto )
     memset( p, 0, sizeof(*p) );
     p->mode = INPUT_CONTROLLER;
     p->deadzone[0] = p->deadzone[1] = 5;
+    p->mouse_speed = INPUT_MOUSE_SPEED_DEFAULT;
     p->keyboard_auto = !!keyboard_auto;
     for (unsigned int i = 0; i < INPUT_SOURCE_COUNT; i++)
     {
@@ -141,6 +142,8 @@ void input_profile_apply( struct input_profile *p, const struct launcher_kv *kv 
     p->deadzone[0] = setting( kv, "left-deadzone", p->deadzone[0], 0, 25 );
     p->deadzone[1] = setting( kv, "right-deadzone", p->deadzone[1], 0, 25 );
     p->keyboard_auto = setting( kv, "keyboard-auto", p->keyboard_auto, 0, 1 );
+    p->mouse_speed = setting( kv, "mouse-speed", p->mouse_speed,
+                              INPUT_MOUSE_SPEED_MIN, INPUT_MOUSE_SPEED_MAX );
 }
 
 int input_profile_global( const char *root, int keyboard_auto, struct input_profile *profile,

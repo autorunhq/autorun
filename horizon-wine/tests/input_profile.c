@@ -27,6 +27,7 @@ static void mapping( void )
     assert(p.keys[0].code[0] == INPUT_MOUSE_LEFT && p.keys[1].code[0] == INPUT_MOUSE_RIGHT);
     assert(p.keys[2].code[0] == 0x20 && p.keys[3].code[0] == 0x46);
     assert(p.mode == INPUT_CONTROLLER && p.deadzone[0] == 5 && p.deadzone[1] == 5);
+    assert(p.mouse_speed == INPUT_MOUSE_SPEED_DEFAULT);
     assert(p.keys[16].code[0] == 'W' && p.keys[17].code[0] == 'S' && p.keys[18].code[0] == 'A' && p.keys[19].code[0] == 'D');
     for (unsigned int i = 0; i < 4; i++)
     {
@@ -62,7 +63,12 @@ static void mapping( void )
     launcher_kv_set(&kv, "UP", "0x57");
     launcher_kv_set(&kv, "LUP", "0");
     launcher_kv_set(&kv, "key.A", "none");
+    launcher_kv_set(&kv, "mouse-speed", "200");
     input_profile_apply(&p, &kv);
+    assert(p.mouse_speed == 200);
+    launcher_kv_set(&kv, "mouse-speed", "9999");   /* out of range: the value in hand stays */
+    input_profile_apply(&p, &kv);
+    assert(p.mouse_speed == 200);
     assert(p.keys[12].code[0] == 0x57 && p.keys[16].code[0] == 0x57 && !p.keys[0].count);
     launcher_kv_set(&kv, "key.LUP", "none");
     input_profile_apply(&p, &kv);

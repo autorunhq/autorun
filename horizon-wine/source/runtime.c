@@ -916,6 +916,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         output.wheels = mapped.wheels;
         output.mouse_x = mapped.mouse_x;
         output.mouse_y = mapped.mouse_y;
+        /* The profile's mouse-speed scales the built-in cursor speed. */
+        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile->mouse_speed / 100.0;
         moved |= pointer_cursor_step( &wine_nx_pointer, output.mouse_x, output.mouse_y, elapsed );
     }
     input_key_edges_update( &runtime_key_edges, output.keys );
