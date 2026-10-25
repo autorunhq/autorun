@@ -20577,7 +20577,79 @@ static Result check_thread_local_reservations( u64 *conflict )
 
 extern Result __real_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core );
 
-Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+#define HORIZON_THREAD_WAIT_NS        20000000000ull
+#define HORIZON_THREAD_WAIT_SLOW_NS   100000000ull
+#define HORIZON_THREAD_WAIT_NOTE_NS   5000000000ull
+#define HORIZON_THREAD_WAIT_STEP_NS   2000000ll
+#define HORIZON_THREAD_WAIT_SLOW_STEP 20000000ll
+
+int horizon_pthread_ended( pthread_t thread )
+{
+    return R_SUCCEEDED( svcWaitSynchronizationSingle( *(Handle *)thread, 0 ) );
+}
+
+static unsigned int horizon_zombie_reap_ended( struct horizon_zombie_list *list )
+{
+    struct horizon_zombie **link, *node, *ended = NULL;
+    unsigned int joined = 0;
+
+    pthread_mutex_lock( &list->lock );
+    for (link = &list->head; (node = *link);)
+    {
+        if (!horizon_pthread_ended( node->thread ))
+        {
+            link = &node->next;
+            continue;
+        }
+        *link = node->next;
+        node->next = ended;
+        ended = node;
+    }
+    pthread_mutex_unlock( &list->lock );
+    for (; (node = ended); joined++)
+    {
+        ended = node->next;
+        pthread_join( node->thread, NULL );
+        free( node );
+    }
+    if (!joined) return 0;
+    pthread_mutex_lock( &list->lock );
+    list->pending -= joined;
+    list->reaped += joined;
+    pthread_mutex_unlock( &list->lock );
+    return joined;
+}
+
+static unsigned int horizon_reap_ended_threads( void )
+{
+    extern unsigned int horizon_join_ended_thread(void);
+
+    return horizon_zombie_reap_ended( &horizon_server_zombies ) + horizon_join_ended_thread();
+}
+
+static int horizon_threads_at_limit( void )
+{
+    s64 used = 0, limit = 0;
+    u64 resource = 0;
+    Result rc;
+
+    if (R_FAILED( svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 ) ) || !resource) return 0;
+    rc = svcGetResourceLimitCurrentValue( &used, resource, LimitableResource_Threads );
+    if (R_SUCCEEDED(rc)) rc = svcGetResourceLimitLimitValue( &limit, resource, LimitableResource_Threads );
+    svcCloseHandle( resource );
+    return R_SUCCEEDED(rc) && limit > 0 && used >= limit;
+}
+
+static int horizon_thread_may_wait( void )
+{
+    extern volatile int wine_nx_quit_requested __attribute__((weak));
+
+    if (&wine_nx_quit_requested && wine_nx_quit_requested) return 0;
+    return __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) > 0;
+}
+
+static Result horizon_create_thread_once( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority,
+                                          s32 core, int may_wait, unsigned int *tls_retries )
 {
     Result rc = 0;
     unsigned int retries = 0;
@@ -20590,6 +20662,11 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         Handle created;
         Result close_rc;
 
+        if (may_wait && horizon_threads_at_limit())
+        {
+            rc = MAKERESULT( Module_Kernel, KernelError_OutOfResource );
+            break;
+        }
         rc = __real_svcCreateThread( &created, entry, arg, stack, priority, core );
         if (R_FAILED(rc)) break;
         rc = check_thread_local_reservations( &conflict );
@@ -20608,6 +20685,37 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         }
     }
     pthread_mutex_unlock( &mapping_mutex );
+    *tls_retries += retries;
+    return rc;
+}
+
+Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+{
+    unsigned long long waited_from = 0, noted = 0, now;
+    unsigned int retries = 0;
+    Result rc;
+
+    for (;;)
+    {
+        int may_wait = horizon_thread_may_wait();
+        char message[96];
+
+        rc = horizon_create_thread_once( handle, entry, arg, stack, priority, core, may_wait, &retries );
+        if (rc != MAKERESULT( Module_Kernel, KernelError_OutOfResource ) || !may_wait) break;
+        if (horizon_reap_ended_threads()) continue;
+        now = armTicksToNs( armGetSystemTick() );
+        if (!waited_from) waited_from = noted = now;
+        else if (now - waited_from >= HORIZON_THREAD_WAIT_NS) break;
+        if (now - noted >= HORIZON_THREAD_WAIT_NOTE_NS)
+        {
+            snprintf( message, sizeof(message), "[THREAD] limit reached; still waiting for a place after %llu s",
+                      (now - waited_from) / 1000000000ull );
+            wine_nx_runtime_trace( message );
+            noted = now;
+        }
+        svcSleepThread( now - waited_from < HORIZON_THREAD_WAIT_SLOW_NS ? HORIZON_THREAD_WAIT_STEP_NS
+                                                                       : HORIZON_THREAD_WAIT_SLOW_STEP );
+    }
     if (R_FAILED(rc))
     {
         u64 resource = 0;
