@@ -453,6 +453,7 @@ struct horizon_fd_message
 {
     int fd;
     unsigned int handle;
+    const struct horizon_pipe *owner;
     struct horizon_fd_message *next;
 };
 
@@ -4660,7 +4661,18 @@ int horizon_poll_pipe_write( int fd, size_t size, int timeout )
     return horizon_poll_pipe( &pfd, timeout, size );
 }
 
-static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle )
+static const struct horizon_pipe *horizon_fd_client_owner(void)
+{
+    return horizon_pipe_from_fd( get_thread_data()->request_fd );
+}
+
+static const struct horizon_pipe *horizon_fd_server_owner(void)
+{
+    return horizon_server_current ? horizon_server_current->request_pipe : NULL;
+}
+
+static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle,
+                                   const struct horizon_pipe *owner )
 {
     struct horizon_fd_message *message = malloc( sizeof(*message) );
 
@@ -4673,6 +4685,7 @@ static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsig
 
     message->fd = fd;
     message->handle = handle;
+    message->owner = owner;
     message->next = NULL;
 
     pthread_mutex_lock( &queue->mutex );
@@ -4683,7 +4696,8 @@ static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsig
     pthread_mutex_unlock( &queue->mutex );
 }
 
-static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle )
+static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle,
+                                       const struct horizon_pipe *owner )
 {
     int passed_fd = dup( fd );
 
@@ -4693,21 +4707,28 @@ static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, u
         exit(1);
     }
 
-    horizon_fd_queue_push( queue, passed_fd, handle );
+    horizon_fd_queue_push( queue, passed_fd, handle, owner );
 }
 
-static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, unsigned int *handle )
+static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, const struct horizon_pipe *owner,
+                                 unsigned int *handle )
 {
-    struct horizon_fd_message *message;
+    struct horizon_fd_message *message, **link;
     int fd;
 
     pthread_mutex_lock( &queue->mutex );
     while (!queue->head)
         horizon_cond_wait_quit( &queue->cond, &queue->mutex );
 
-    message = queue->head;
-    queue->head = message->next;
-    if (!queue->head) queue->tail = NULL;
+    for (link = &queue->head; *link && (*link)->owner != owner; link = &(*link)->next);
+    if (!*link) link = &queue->head;
+    message = *link;
+    *link = message->next;
+    if (queue->tail == message)
+    {
+        queue->tail = NULL;
+        for (link = &queue->head; *link; link = &(*link)->next) queue->tail = *link;
+    }
     pthread_mutex_unlock( &queue->mutex );
 
     fd = message->fd;
@@ -4718,12 +4739,12 @@ static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, unsigned int *h
 
 void horizon_server_queue_fd( int fd, unsigned int handle )
 {
-    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle );
+    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle, horizon_fd_server_owner() );
 }
 
 int horizon_server_take_client_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_client_to_server_fds, handle );
+    return horizon_fd_queue_pop( &horizon_client_to_server_fds, horizon_fd_server_owner(), handle );
 }
 
 static int horizon_read_exact( int fd, void *buffer, size_t size )
@@ -17313,12 +17334,12 @@ int horizon_server_connect(void)
 
 void horizon_server_send_fd( int fd )
 {
-    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0 );
+    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0, horizon_fd_client_owner() );
 }
 
 int horizon_server_receive_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_server_to_client_fds, handle );
+    return horizon_fd_queue_pop( &horizon_server_to_client_fds, horizon_fd_client_owner(), handle );
 }
 
 #ifndef HORIZON_NO_LIBNX_EXCEPTION_HANDLER
