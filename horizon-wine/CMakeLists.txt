@@ -641,6 +641,7 @@ add_executable(wine-nx-runtime
     source/thread_profile.c
     source/compositor.c
     source/osk.c
+    source/controls_overlay.c
     source/compositor_gl.c
     source/compositor_egl.c
     $<TARGET_OBJECTS:wine-horizon-real>
@@ -669,7 +670,7 @@ add_executable(wine-nx-runtime
 
 target_sources(wine-nx-runtime PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
-    source/launcher.c source/launcher_graphics.c source/launcher_dxvk.c source/dxvk_options.c source/launcher_catalog.c source/launcher_console.c
+    source/launcher.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_voodoo.c source/dxvk_options.c source/launcher_catalog.c source/launcher_console.c
     source/input_profile.c source/launcher_input.c
     source/game_settings.c source/launcher_game_settings.c
     source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
@@ -989,7 +990,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_voodoo.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c source/controls_overlay.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)

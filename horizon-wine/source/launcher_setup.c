@@ -35,7 +35,7 @@ static int setup_worker(void *opaque)
     if (job->forwarder)
     {
         const char *step = NULL;
-        job->forwarder_result = job->launcher->install_forwarder(&step);
+        job->forwarder_result = job->launcher->install_forwarder(3, &step);
         if (job->forwarder_result)
             snprintf(job->detail, sizeof(job->detail), "Could not install while %s (0x%X).",
                      step ? step : "writing the forwarder", job->forwarder_result);
@@ -115,7 +115,9 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
     size_t entry_count = 0;
     int step = 0, selected = 0, top = 0, installed = 0, updating = 0, result = 0;
     enum setup_boot_loader installed_loader = SETUP_BOOT_STOCK;
-    int forwarder = options->own_forwarder && options->address_space_bits == 39 && options->four_cores_available;
+    int forwarder = options->own_forwarder &&
+                    ((options->address_space_bits == 39 && options->four_cores_available) ||
+                     options->address_space_bits == 32);
     char detail[512] = "", description[768], title[160], notice_text[256];
     enum setup_boot_result status;
     int romfs_mounted = 0;

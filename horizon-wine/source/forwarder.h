@@ -1,7 +1,9 @@
 /*
  * Making a forwarder: an application the console installs and lists on the home
  * menu, whose only job is to start the homebrew loader with Autorun's NRO, in
- * a 39-bit address space. Fixed-low Win32 images require the low-window patch.
+ * the address space it is made for. A 32-bit one has every mapping in the low
+ * 4 GB, where fixed-low Win32 images expect their own; the 39-bit one reaches
+ * those addresses through the low-window patch instead.
  *
  * The pieces are sphaira's (src/owo.cpp, ISC, TotalJustice), as is the loader
  * the program NCA carries (hbl/, nx-hbloader).
@@ -20,9 +22,13 @@ struct wine_nx_forwarder
     const unsigned char *icon;  /* a 256x256 JPEG */
     size_t icon_size;
     unsigned int game_id;
+    unsigned int address_space;  /* the NPDM ProcessAddressSpace: 2 = 32-bit no reserved ("no alias"),
+                                * 3 = 39-bit, 0 means 3 (Atmosphere ldr_types.hpp) */
 };
 
 unsigned long long wine_nx_forwarder_title_id( const char *nro_path, const char *args );
+unsigned long long wine_nx_forwarder_title_id_as( const char *nro_path, const char *args,
+                                                 unsigned int address_space );
 unsigned long long wine_nx_forwarder_game_title_id( unsigned int game_id );
 
 /* Where the installer says what the console made of what it wrote. */

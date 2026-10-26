@@ -68,6 +68,42 @@ static void show_keyboard( int shown, uint32_t color )
     wine_nx_compositor_redraw();
 }
 
+/* The desktop -> panel fit of runtime.c: recorded here, with the desktop
+ * mapped onto the panel as an identity so the pixel checks are desktop
+ * coordinates.  The compositor presents the largest window on the desktop
+ * (the picture), so the fit names that window's rectangle; check_fit reads
+ * what the last presented frame named. */
+static pthread_mutex_t fit_lock = PTHREAD_MUTEX_INITIALIZER;
+static int fit_w, fit_h, fit_x, fit_y, fit_set;
+
+void wine_nx_desktop_size( int *width, int *height )
+{
+    if (width) *width = SCREEN_W;
+    if (height) *height = SCREEN_H;
+}
+
+void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                          int *dst_x, int *dst_y, int *dst_w, int *dst_h )
+{
+    pthread_mutex_lock( &fit_lock );
+    fit_w = src_w;
+    fit_h = src_h;
+    fit_x = src_x;
+    fit_y = src_y;
+    fit_set = 1;
+    pthread_mutex_unlock( &fit_lock );
+    if (dst_x) *dst_x = 0;
+    if (dst_y) *dst_y = 0;
+    if (dst_w) *dst_w = SCREEN_W;
+    if (dst_h) *dst_h = SCREEN_H;
+}
+
+void wine_nx_screen_to_panel( double x, double y, int *px, int *py )
+{
+    if (px) *px = (int)(x + 0.5);
+    if (py) *py = (int)(y + 0.5);
+}
+
 /* What the backend saw, guarded by shot_lock. */
 static pthread_mutex_t shot_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shot_cond = PTHREAD_COND_INITIALIZER;
@@ -206,6 +242,17 @@ static void check( const char *what, int ok )
     failures++;
 }
 
+/* The picture the last presented frame named (the fit stub records it). */
+static void check_fit( const char *what, int w, int h, int x, int y )
+{
+    int ok;
+
+    pthread_mutex_lock( &fit_lock );
+    ok = fit_set && fit_w == w && fit_h == h && fit_x == x && fit_y == y;
+    pthread_mutex_unlock( &fit_lock );
+    check( what, ok );
+}
+
 static uint32_t *filled( int width, int height, uint32_t value )
 {
     uint32_t *pixels = malloc( sizeof(*pixels) * width * height );
@@ -270,11 +317,13 @@ int main(void)
     wine_nx_layer_place( a, 100, 100, 128, 128 );
     wait_pixel( "placed layer", 110, 110, 0xff0000 );
     wait_pixel( "unplaced layer stays hidden", 160, 160, 0xff0000 );
+    check_fit( "the largest window is the picture", 128, 128, 100, 100 );
     wine_nx_layer_place( b, 150, 150, 64, 64 );
     stack[0] = b;
     stack[1] = a;
     wine_nx_compositor_restack( stack, 2 );
     wait_pixel( "topmost layer", 160, 160, 0x00ff00 );
+    check_fit( "a smaller window on top leaves the picture", 128, 128, 100, 100 );
     stack[0] = a;
     stack[1] = b;
     wine_nx_compositor_restack( stack, 2 );

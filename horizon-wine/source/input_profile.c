@@ -2,6 +2,7 @@
 #include <math.h>
 #include <sys/stat.h>
 #include "input_profile.h"
+#include "games/controls.h"
 #include "key_names.h"
 
 const struct input_source input_sources[INPUT_SOURCE_COUNT] =
@@ -142,8 +143,14 @@ void input_profile_apply( struct input_profile *p, const struct launcher_kv *kv 
     p->deadzone[0] = setting( kv, "left-deadzone", p->deadzone[0], 0, 25 );
     p->deadzone[1] = setting( kv, "right-deadzone", p->deadzone[1], 0, 25 );
     p->keyboard_auto = setting( kv, "keyboard-auto", p->keyboard_auto, 0, 1 );
-    p->mouse_speed = setting( kv, "mouse-speed", p->mouse_speed,
-                              INPUT_MOUSE_SPEED_MIN, INPUT_MOUSE_SPEED_MAX );
+    if (launcher_kv_get( kv, "mouse-speed", value, sizeof(value) ))
+    {
+        /* The key's being there is the player's word on it, which the game's
+         * recommended speed must not quietly overrule. */
+        p->mouse_speed = setting( kv, "mouse-speed", p->mouse_speed,
+                                  INPUT_MOUSE_SPEED_MIN, INPUT_MOUSE_SPEED_MAX );
+        p->mouse_speed_explicit = 1;
+    }
 }
 
 int input_profile_global( const char *root, int keyboard_auto, struct input_profile *profile,
@@ -164,6 +171,9 @@ int input_profile_program( const char *root, const char *program, int keyboard_a
     struct launcher_kv global;
     size_t len = strlen( program );
     if (!input_profile_global( root, keyboard_auto, profile, &global, path, size )) return 0;
+    /* A game recognised here (games/controls.h) gets its recommended layout
+     * over the player's global controls and under their own per-game file. */
+    game_controls_apply( profile, game_controls_find( program ) );
     if (len > 4 && !strcasecmp( program + len - 4, ".exe" ))
     {
         if ((size_t)snprintf( path, size, "%.*s.keys.txt", (int)len - 4, program ) >= size ||

@@ -883,13 +883,24 @@ static void framebuffer_surface_destroy( struct opengl_drawable *drawable )
     if (surface->target) opengl_drawable_release( surface->target );
 }
 
+/* The Switch runtime presents the desktop on a fixed panel and fits each
+ * present to it, centred (horizon-wine/source/runtime.c).  Without the hook
+ * the picture goes to the drawable's own rectangle, as on desktops. */
+extern void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                                 int *dst_x, int *dst_y, int *dst_w, int *dst_h ) __attribute__((weak));
+
 static void blit_framebuffer_surface( struct opengl_drawable *drawable )
 {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
 
     const struct opengl_funcs *funcs = &display_funcs;
     SIZE src = drawable->virtual_size, dst = drawable->monitor_size;
+    int fit_x = 0, fit_y = 0, fit_w = dst.cx, fit_h = dst.cy;
     float ramp_data[GAMMA_RAMP_SIZE * 4];
+
+    if (&wine_nx_present_fit && drawable->client)
+        wine_nx_present_fit( src.cx, src.cy, drawable->client->virtual_rect.left,
+                             drawable->client->virtual_rect.top, &fit_x, &fit_y, &fit_w, &fit_h );
 
     TRACE( "%s src %s dst %s fbo %u\n", debugstr_opengl_drawable( drawable ), wine_dbgstr_point( (POINT *)&src ),
            wine_dbgstr_point( (POINT *)&dst ), drawable->read_fbo );
@@ -902,7 +913,8 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
     if (drawable->read_fbo == drawable->draw_fbo && use_default_gamma_ramp())
     {
         funcs->p_glReadBuffer( GL_COLOR_ATTACHMENT0 );
-        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, 0, 0, dst.cx, dst.cy, GL_COLOR_BUFFER_BIT, GL_LINEAR );
+        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, fit_x, fit_y, fit_x + fit_w, fit_y + fit_h,
+                                    GL_COLOR_BUFFER_BIT, GL_LINEAR );
     }
     else
     {
@@ -926,7 +938,7 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
         funcs->p_glWaitSync( gamma_sync, 0, GL_TIMEOUT_IGNORED );
         pthread_mutex_unlock( &gamma_lock );
 
-        funcs->p_glViewport( 0, 0, dst.cx, dst.cy );
+        funcs->p_glViewport( fit_x, fit_y, fit_w, fit_h );
 
         /* macOS OpenGL requires a VAO for glDrawArrays */
         funcs->p_glGenVertexArrays( 1, &vao );

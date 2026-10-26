@@ -13,8 +13,10 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from zipfile import ZipFile, ZIP_DEFLATED
 import argparse
+import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -27,7 +29,20 @@ build = horizon_wine / 'build-autorun'
 stage_root = build / 'sd-card'
 stage = stage_root / 'switch/wine'
 marker = re.search(r'nx-wow64-dynarec-(\d+)', (horizon_wine / 'source/runtime.c').read_text()).group(1)
-toolchain = horizon_wine / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
+# The toolchain build.sh fetches: its release name is per-platform, and the
+# build exports WINE_NX_LLVM_MINGW with the one it chose. Anything already
+# fetched will do as a last resort.
+llvm_version = '20260505'
+machine = 'aarch64' if platform.machine() in ('aarch64', 'arm64') else 'x86_64'
+name = ('llvm-mingw-%s-ucrt-macos-universal' % llvm_version if platform.system() == 'Darwin'
+        else 'llvm-mingw-%s-ucrt-ubuntu-22.04-%s' % (llvm_version, machine))
+toolchain = (Path(os.environ['WINE_NX_LLVM_MINGW']) / 'bin' if os.environ.get('WINE_NX_LLVM_MINGW')
+             else horizon_wine / 'toolchains' / name / 'bin')
+if not (toolchain / 'i686-w64-mingw32-clang').is_file():
+    toolchain = next((p / 'bin' for p in sorted((horizon_wine / 'toolchains').glob('llvm-mingw-*'))
+                      if (p / 'bin' / 'i686-w64-mingw32-clang').is_file()), toolchain)
+assert (toolchain / 'i686-w64-mingw32-clang').is_file(), \
+    f'No llvm-mingw toolchain in {horizon_wine / "toolchains"}; run build.sh, or set WINE_NX_LLVM_MINGW.'
 # The FEX build when there is one, as build-amd64-components.sh names it.
 default_amd64 = next((path for path in (horizon_wine / f'build-switch-amd64/wine-nx-amd64-box64{kind}-mesa-dxvk-vkd3d.zip'
                                         for kind in ('-fex', '')) if path.is_file()),
@@ -38,6 +53,8 @@ parser.add_argument('--amd64', type=Path,
 parser.add_argument('--x86', action='store_true', help='ship the x86-only runtime instead of the AMD64 one')
 parser.add_argument('--dlls', type=Path, default=root / 'horizon-dlls/switch/wine',
                     help="the DLL repository's card tree, to check the package against")
+parser.add_argument('--extra', type=Path,
+                    help='a switch/wine overlay to stage last: the tuned FEX modules a build fetched')
 parser.add_argument('--fixes', type=Path, default=root / 'game-fixes/switch/wine/game-fixes/index.json',
                     help="the game fixes repository's index, shipped so a card offline knows of them")
 args = parser.parse_args()
@@ -84,14 +101,79 @@ compile_setup(tools / 'autorun_setup.c', drive / 'windows/autorun-setup.exe', '-
 # registry keys, settings files, controls -- comes from the game fixes
 # repository (autorun-game-fixes): the launcher recognises the game and offers
 # its fix before it starts. The archive ships the index it was built with, so a
-# card offline when a game starts still says the game has a fix to download.
+# card offline when a game starts still says the game has a fix to download,
+# and the files of the fixes game-fixes-extra/ adds, which then apply offline.
 (drive / 'WarCraft III').mkdir()
 (drive / 'The Sims 2').mkdir()
 assert args.fixes.is_file(), f'{args.fixes} is missing; check out game-fixes'
 fixes_index = json.loads(args.fixes.read_text())
 assert fixes_index['schema'] == 1 and fixes_index['fixes'], f'{args.fixes} is not a game fixes index'
 (stage / 'game-fixes').mkdir()
-shutil.copy2(args.fixes, stage / 'game-fixes/bundled.json')
+
+# Game fixes this build adds, from game-fixes-extra/. The game fixes repository
+# is where every fix belongs; a folder here is one this build carries until it
+# is published there -- a fix.json as that repository takes it (its AGENTS.md),
+# written out the way its build would: registry.txt from the registry list and
+# the generic setup beside it, the repository's own build of that program. The
+# files go into the archive under game-fixes/<id>/, so the launcher applies
+# them with no network. The index serial is one past the repository's: a card
+# reads whichever index has the higher serial and would read past these fixes
+# otherwise. Once the repository has them, the folder goes.
+extra_fixes = []
+extra_root = root / 'game-fixes-extra'
+if extra_root.is_dir():
+    setups = list(args.fixes.parent.glob('*/autorun-registry.exe'))
+    assert setups, f'no autorun-registry.exe beside {args.fixes}'
+    setup = setups[0].read_bytes()
+    assert all(p.read_bytes() == setup for p in setups), 'autorun-registry.exe differs between fixes'
+    for extra in sorted(p for p in extra_root.iterdir() if p.is_dir()):
+        assert re.fullmatch(r'[a-z0-9-]{1,31}', extra.name), f'{extra.name} is not a fix id'
+        fix = json.loads((extra / 'fix.json').read_text(encoding='utf-8'))
+        assert set(fix) <= {'title', 'version', 'required', 'summary', 'match', 'registry'}, \
+            f'{extra}/fix.json has fields this packer does not write out'
+        assert 'registry' in fix and 'match' in fix and fix['match'].get('exe')
+        assert isinstance(fix['version'], int) and fix['version'] >= 1
+        assert len(fix['title'].encode()) < 96 and len(fix['summary'].encode()) < 640
+        edits = []
+        for edit in fix['registry']:
+            assert set(edit) <= {'key', 'name', 'string', 'dword', 'delete', 'view'}
+            assert edit['key'].startswith(('HKCU\\', 'HKLM\\')) and '\\' in edit['key'][5:]
+            if edit.get('delete'):
+                kind, value = 'delete', ''
+            elif 'dword' in edit:
+                kind, value = 'dword', str(edit['dword'])
+            else:
+                kind, value = 'sz', edit['string']
+                assert '\t' not in value and '\n' not in value and len(value) < 1000
+            edits.append('\t'.join((str(edit.get('view', 32)), edit['key'], edit.get('name', ''), kind, value)))
+        assert edits, f'{extra}/fix.json writes nothing'
+        registry_txt = ('\n'.join(edits) + '\n').encode('utf-8')
+        folder = stage / 'game-fixes' / extra.name
+        folder.mkdir()
+        (folder / 'autorun-registry.exe').write_bytes(setup)
+        (folder / 'registry.txt').write_bytes(registry_txt)
+        extra_fixes.append({
+            'id': extra.name,
+            'title': fix['title'],
+            'version': fix['version'],
+            'required': bool(fix.get('required')),
+            'summary': fix['summary'],
+            'match': fix['match'],
+            'run': 'autorun-registry.exe',
+            'files': [
+                {'name': 'autorun-registry.exe', 'size': len(setup),
+                 'sha256': hashlib.sha256(setup).hexdigest()},
+                {'name': 'registry.txt', 'size': len(registry_txt),
+                 'sha256': hashlib.sha256(registry_txt).hexdigest()},
+            ],
+        })
+if extra_fixes:
+    fixes_index['fixes'] = fixes_index['fixes'] + extra_fixes
+    fixes_index['serial'] += 1
+    (stage / 'game-fixes/bundled.json').write_text(
+        json.dumps(fixes_index, indent=1, ensure_ascii=False) + '\n', encoding='utf-8')
+else:
+    shutil.copy2(args.fixes, stage / 'game-fixes/bundled.json')
 
 
 # --- Settings ----------------------------------------------------------------
@@ -172,7 +254,9 @@ repository (github.com/autorunhq/autorun-game-fixes). When a game in the
 library has one, the launcher asks before the game starts, and says when the
 game may not start without it; the fix is downloaded, checked and applied, and
 the game starts after it. This archive knows which games have fixes even
-offline; applying one needs the internet once. Which games have one:
+offline; applying one needs the internet once, except a fix whose files this
+archive holds under game-fixes/, which applies offline as well. Which games
+have one:
 github.com/autorunhq/autorun-game-fixes/blob/main/FIXES.md. A game's Library
 settings show its fix, and choosing it asks again at the next
 start. Without a network, copy the switch folder of autorun-game-fixes to the
@@ -269,6 +353,14 @@ if args.x86:
 else:
     assert args.amd64.is_file(), f'{args.amd64} is missing; run build-amd64-components.sh, or pass --x86'
     print(f'AMD64 runtime build {merge_amd64(args.amd64, stage_root)} merged')
+# The tuned FEX modules a build fetched (build.sh, from the fex-opt release),
+# staged last beside the DLL repository's own: the variant file that came with
+# them turns them on. horizon-wine/fex/variants-build.md is why this exists.
+if args.extra:
+    assert args.extra.is_dir(), f'{args.extra} is missing'
+    shutil.copytree(args.extra, stage, dirs_exist_ok=True)
+    print(f'{args.extra} overlaid')
+
 subprocess.run([sys.executable, str(tools / 'verify-package.py'), str(stage), '--dlls', str(args.dlls)],
                check=True)
 

@@ -106,9 +106,12 @@ static BOOL register_dll( const WCHAR *name )
     }
     if (!(register_server = (void *)GetProcAddress( module, "DllRegisterServer" )))
     {
-        report( "register", name, "has no DllRegisterServer, error", GetLastError() );
+        /* Drivers and helpers such as msdmo.dll and mciqtz32.dll register
+         * through the filter mapper or not at all, and regsvr32 has nothing
+         * to call on them either. Nothing was left undone here. */
+        report( "register", name, "has no DllRegisterServer, skipped, error", GetLastError() );
         FreeLibrary( module );
-        return FALSE;
+        return TRUE;
     }
     hr = register_server();
     report( "register", name, SUCCEEDED(hr) ? "ok, hr" : "failed, hr", (DWORD)hr );

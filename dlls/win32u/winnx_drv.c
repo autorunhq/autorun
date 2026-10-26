@@ -42,6 +42,7 @@ extern void  wine_nx_input_take( struct input_snapshot *out );
 extern void  wine_nx_pointer_set_pos( int x, int y );
 extern void  wine_nx_pointer_follow( int x, int y );
 extern void  wine_nx_cursor_show( int visible );
+extern volatile int wine_nx_close_asked __attribute__((weak));
 extern void  wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int   wine_nx_runtime_verbose __attribute__((weak));
 /* Whether the runtime's OpenGL compositor presents the screen instead of the
@@ -461,7 +462,6 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
     int sh = abs( color_info->bmiHeader.biHeight );
     int fbw = 0, fbh = 0, fbstride = 0;
     DWORD *fb;
-    int sy, sx;
 
     (void)rect;
 
@@ -485,25 +485,43 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
     nxdrv_trace_hot( "[NXDRV] fb_lock -> fb=%d fbw=%d fbh=%d stride=%d", fb ? 1 : 0, fbw, fbh, fbstride );
     if (!fb) return TRUE;
 
-    for (sy = blit.top; sy < blit.bottom; sy++)
+    /* The desktop may be larger than the panel; the same fit the compositor
+     * and the OpenGL presents use maps this window onto it, centred. */
     {
-        int v = sy;
-        int dy = nx_surface->screen_origin.y + sy;
-        const DWORD *src;
-        DWORD *dst;
+        extern void wine_nx_desktop_size( int *width, int *height );
+        extern void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                                         int *dst_x, int *dst_y, int *dst_w, int *dst_h );
+        extern void wine_nx_panel_to_screen( int px, int py, double *x, double *y );
+        extern void wine_nx_screen_to_panel( double x, double y, int *px, int *py );
+        int desktop_w, desktop_h, px0, py0, px1, py1, px, py;
 
-        if (v < 0 || v >= sh || dy < 0 || dy >= fbh) continue;
-        src = (const DWORD *)color_bits + (size_t)v * sw;
-        dst = fb + (size_t)dy * fbstride;
-        for (sx = blit.left; sx < blit.right; sx++)
+        wine_nx_desktop_size( &desktop_w, &desktop_h );
+        wine_nx_present_fit( desktop_w, desktop_h, 0, 0, NULL, NULL, NULL, NULL );
+        wine_nx_screen_to_panel( nx_surface->screen_origin.x + blit.left,
+                                 nx_surface->screen_origin.y + blit.top, &px0, &py0 );
+        wine_nx_screen_to_panel( nx_surface->screen_origin.x + blit.right,
+                                 nx_surface->screen_origin.y + blit.bottom, &px1, &py1 );
+        for (py = max( py0, 0 ); py < min( py1, fbh ); py++)
         {
-            int u = sx;
-            int dx = nx_surface->screen_origin.x + sx;
-            DWORD p;
-            if (u < 0 || u >= sw || dx < 0 || dx >= fbw) continue;
-            p = src[u];
-            /* BGRX (0x00RRGGBB) -> RGBA8888 (R,G,B,A bytes), opaque */
-            dst[dx] = 0xff000000u | (p & 0x0000ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+            DWORD *dst = fb + (size_t)py * fbstride;
+
+            for (px = max( px0, 0 ); px < min( px1, fbw ); px++)
+            {
+                double dx, dy;
+                int u, v;
+                const DWORD *src;
+                DWORD p;
+
+                wine_nx_panel_to_screen( px, py, &dx, &dy );
+                u = (int)dx - nx_surface->screen_origin.x;
+                v = (int)dy - nx_surface->screen_origin.y;
+                if (u < blit.left || u >= blit.right || v < blit.top || v >= blit.bottom) continue;
+                if (u < 0 || u >= sw || v < 0 || v >= sh) continue;
+                src = (const DWORD *)color_bits + (size_t)v * sw;
+                p = src[u];
+                /* BGRX (0x00RRGGBB) -> RGBA8888 (R,G,B,A bytes), opaque */
+                dst[px] = 0xff000000u | (p & 0x0000ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+            }
         }
     }
 
@@ -539,37 +557,71 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
 /**********************************************************************
  *           wine_nx_drv_UpdateDisplayDevices
  *
- * Report a single 1280x720 primary monitor so win32u has a real virtual
- * screen; without it the desktop is 0x0 and every window clips to nothing.
+ * Report one primary monitor of the desktop's size so win32u has a real
+ * virtual screen; without it the desktop is 0x0 and every window clips to
+ * nothing.  The desktop need not be the panel's 1280x720: games choose
+ * their own resolution and the runtime presents the desktop onto the panel
+ * fitted and centred (horizon-wine/source/runtime.c).
  */
-#define WINE_NX_SCREEN_W 1280
-#define WINE_NX_SCREEN_H 720
+extern void wine_nx_desktop_size( int *width, int *height );
 
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
     static const DWORD source_flags = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP |
                                       DISPLAY_DEVICE_PRIMARY_DEVICE | DISPLAY_DEVICE_VGA_COMPATIBLE;
-    RECT rc = { 0, 0, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H };
+    int screen_w = 1280, screen_h = 720;
     struct pci_id pci_id = { 0 };
-    struct gdi_monitor monitor = { .rc_monitor = rc, .rc_work = rc };
+    RECT rc = {0};
+    struct gdi_monitor monitor = {0};
     DEVMODEW mode =
     {
         .dmSize   = sizeof(mode),
         .dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL |
                     DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY,
-        .dmBitsPerPel = 32, .dmPelsWidth = WINE_NX_SCREEN_W, .dmPelsHeight = WINE_NX_SCREEN_H,
-        .dmDisplayFrequency = 60,
+        .dmBitsPerPel = 32, .dmDisplayFrequency = 60,
     };
     UINT dpi = NtUserGetSystemDpiForProcess( NULL );
-    DEVMODEW current = mode;
+    DEVMODEW current;
+
+    wine_nx_desktop_size( &screen_w, &screen_h );
+    rc.right = screen_w; rc.bottom = screen_h;
+    monitor.rc_monitor = rc; monitor.rc_work = rc;
+    mode.dmPelsWidth = screen_w; mode.dmPelsHeight = screen_h;
+    current = mode;
+
+    /* The screen's own coordinates are the ones programs see.  A source that
+     * carries a scaled DPI makes win32u's raw<->virt monitor map shrink and
+     * shift every cursor coordinate a program reads, and a program then
+     * drives its pointer sprite off a shrunken copy of the real cursor. */
+    dpi = USER_DEFAULT_SCREEN_DPI;
 
     dm->add_gpu( "Tegra X1 GM20B", &pci_id, NULL, param );
     dm->add_source( "Default", source_flags, dpi, param );
     dm->add_monitor( &monitor, param );
     current.dmFields |= DM_POSITION;
     dm->add_modes( &current, 1, &mode, param );
-    nxdrv_trace( "[NXDRV] UpdateDisplayDevices -> %dx%d", WINE_NX_SCREEN_W, WINE_NX_SCREEN_H, 0, 0 );
+    nxdrv_trace( "[NXDRV] UpdateDisplayDevices -> %dx%d", screen_w, screen_h, 0, 0 );
     return STATUS_SUCCESS;
+}
+
+/**********************************************************************
+ *           wine_nx_drv_ChangeDisplaySettings
+ *
+ * A program setting a display mode switches the screen to its resolution
+ * (the numbers only - no modeset).  It happens before win32u re-registers
+ * the display devices for the new mode, which is what keeps the physical
+ * and the current mode the same size: when they differ, the raw<->virt
+ * map comes out scaled and every cursor coordinate is wrong.
+ */
+extern void wine_nx_desktop_set( int width, int height );
+
+LONG wine_nx_drv_ChangeDisplaySettings( LPDEVMODEW displays, LPCWSTR primary_name, HWND hwnd,
+                                        DWORD flags, LPVOID lparam )
+{
+    (void)primary_name; (void)hwnd; (void)flags; (void)lparam;
+    if (displays && (displays->dmFields & DM_PELSWIDTH) && (displays->dmFields & DM_PELSHEIGHT))
+        wine_nx_desktop_set( displays->dmPelsWidth, displays->dmPelsHeight );
+    return DISP_CHANGE_SUCCESSFUL;
 }
 
 /**********************************************************************
@@ -764,6 +816,7 @@ static BOOL wine_nx_cursor_visible_for( HCURSOR cursor, int count, BOOL *seen )
 static void wine_nx_update_cursor( void )
 {
     static BOOL seen;
+    static int last_shown = -1, last_count, last_cursor;
     struct object_lock lock = OBJECT_LOCK_INIT;
     const input_shm_t *input_shm;
     HCURSOR cursor = 0;
@@ -776,12 +829,42 @@ static void wine_nx_update_cursor( void )
         count = input_shm->cursor_count;
     }
     if (status) return;
-    wine_nx_cursor_show( wine_nx_cursor_visible_for( cursor, count, &seen ) );
+    {
+        int shown = wine_nx_cursor_visible_for( cursor, count, &seen );
+
+        /* What the program wants on screen: its own cursor, none, or the
+         * arrow. Logged when it changes, so a log can say whose cursor a
+         * picture is showing. */
+        if (shown != last_shown || count != last_count || (int)(INT_PTR)cursor != last_cursor)
+        {
+            char line[96];
+
+            last_shown = shown;
+            last_count = count;
+            last_cursor = (int)(INT_PTR)cursor;
+            snprintf( line, sizeof(line), "[INPUT] the program's cursor: shown %d, count %d, handle %p",
+                      shown, count, (void *)cursor );
+            if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+        }
+        wine_nx_cursor_show( shown );
+    }
+}
+
+/* A close the way a caption's X sends it, to every visible top level window:
+ * the program's own exit code runs (it writes its settings on the way out)
+ * before the runtime parks its threads. */
+static void close_program_windows( void )
+{
+    HWND hwnd;
+
+    for (hwnd = get_window_relative( get_desktop_window(), GW_CHILD ); hwnd;
+         hwnd = get_window_relative( hwnd, GW_HWNDNEXT ))
+        if (is_window_visible( hwnd )) NtUserPostMessage( hwnd, WM_CLOSE, 0, 0 );
 }
 
 BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 {
-    static unsigned int delivering;
+    static unsigned int delivering, close_asked_delivered;
     struct input_snapshot snapshot;
     const struct input_key_event *key_events = snapshot.keys;
     unsigned int key_count, key_after;
@@ -794,6 +877,11 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 
     (void)mask;
     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
+    if (&wine_nx_close_asked && wine_nx_close_asked && !close_asked_delivered)
+    {
+        close_asked_delivered = 1;
+        close_program_windows();
+    }
     wine_nx_fb_present();
     /* Poll here too, then deliver everything the polls saw since the last
      * call, including those of the background thread. */
@@ -817,7 +905,27 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
     if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
-    if (stepped) wine_nx_send_mouse_motion( dx, dy );
+    if (stepped)
+    {
+        /* What the program is told the mouse did: the first few plainly,
+         * then one line every couple of seconds, so a log can say whether
+         * the cursor races because these grow or because the program runs
+         * away with what it got. */
+        static unsigned int motion_logged;
+        static DWORD motion_last;
+        DWORD motion_now = NtGetTickCount();
+
+        if (motion_logged < 40 || motion_now - motion_last >= 2000)
+        {
+            char line[96];
+
+            snprintf( line, sizeof(line), "[INPUT] sent the program mouse motion %d,%d", dx, dy );
+            if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+            motion_logged++;
+            motion_last = motion_now;
+        }
+        wine_nx_send_mouse_motion( dx, dy );
+    }
     if (second) wine_nx_send_mouse( x, y, second );
     wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );

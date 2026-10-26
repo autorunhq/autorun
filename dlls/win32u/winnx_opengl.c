@@ -28,14 +28,22 @@
 #include "wine/opengl_driver.h"
 #include "wine/debug.h"
 #include "../../horizon-wine/source/osk.h"
+#include "../../horizon-wine/source/controls_overlay.h"
+#include "../../horizon-wine/source/graphics_config.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 
 /* The runtime hands the screen's NWindow to one OpenGL surface at a time
  * (horizon-wine/source/runtime.c). */
-extern void *wine_nx_gl_acquire_window( void );
+extern void *wine_nx_gl_acquire_window( int width, int height );
 extern void wine_nx_gl_release_window( void );
+extern int wine_nx_vulkan_owns_screen( void ) __attribute__((weak));
+extern void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                                 int *dst_x, int *dst_y, int *dst_w, int *dst_h ) __attribute__((weak));
+extern void wine_nx_desktop_size( int *width, int *height ) __attribute__((weak));
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+extern int wine_nx_screenshot_requested( void ) __attribute__((weak));
+extern int wine_nx_screenshot_take( const void *pixels, int width, int height, int stride_px, int format ) __attribute__((weak));
 
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
@@ -59,6 +67,23 @@ static void nx_client_surface_destroy( struct client_surface *client )
 {
 }
 
+/* The size of the picture the program draws: the window's own, except a window
+ * that covers the whole screen takes the screen's size.  An exclusive game
+ * draws its display mode's picture 1:1 at the origin whatever its window is
+ * left at, and a window larger than the mode it set would hold that picture in
+ * its corner while the crop shows the empty middle of the buffer. */
+static SIZE nx_picture_size( struct client_surface *client, const RECT *rect )
+{
+    SIZE size = { max( 1, rect->right - rect->left ), max( 1, rect->bottom - rect->top ) };
+    int width = 0, height = 0;
+
+    if (&wine_nx_desktop_size) wine_nx_desktop_size( &width, &height );
+    if (width > 0 && height > 0 && rect->left <= 0 && rect->top <= 0 &&
+        size.cx >= width && size.cy >= height)
+        size = (SIZE){ width, height };
+    return size;
+}
+
 static void nx_client_surface_update( struct client_surface *client )
 {
     struct nx_client_surface *surface = CONTAINING_RECORD( client, struct nx_client_surface, base );
@@ -67,12 +92,15 @@ static void nx_client_surface_update( struct client_surface *client )
     BOOL offscreen, changed;
 
     if (!client->format) return; /* Vulkan clients have no WGL pixel format. */
-    size = (SIZE){ max( 1, rect->right - rect->left ), max( 1, rect->bottom - rect->top ) };
+    size = nx_picture_size( client, rect );
     offscreen = !(get_window_long( client->hwnd, GWL_STYLE ) & WS_VISIBLE);
     if (!offscreen && client->hwnd != client->toplevel) offscreen = !is_window_visible( client->hwnd );
     changed = InterlockedExchange( &client->offscreen, offscreen ) != offscreen;
 
-    if (changed || (offscreen && (size.cx != surface->size.cx || size.cy != surface->size.cy)))
+    /* A size change remakes the drawable: a visible window that takes a
+     * display mode of its own would otherwise keep a surface of the old size
+     * and draw the new picture into its corner. */
+    if (changed || size.cx != surface->size.cx || size.cy != surface->size.cy)
         InterlockedIncrement( &surface->generation );
     surface->size = size;
 }
@@ -119,6 +147,10 @@ BOOL wine_nx_gl_drawable_matches_window( struct opengl_drawable *base )
 
     if (base->funcs != &nx_drawable_funcs) return TRUE;
     if (!base->client || base->client->funcs != &nx_client_surface_funcs) return TRUE;
+    /* Measure the window now: a display mode of the program's own changes the
+     * picture's size without the window moving, and nothing else would raise
+     * the generation the drawable is kept or remade by. */
+    client_surface_update( base->client );
     client = CONTAINING_RECORD( base->client, struct nx_client_surface, base );
     return impl_from_opengl_drawable( base )->generation ==
            InterlockedCompareExchange( &client->generation, 0, 0 );
@@ -187,7 +219,9 @@ unsigned long long wine_nx_gl_swap_time;  /* 100 ns */
 /* The floating keyboard (horizon-wine/source/osk.c), put into the back
  * buffer just before it is shown: its picture in a texture of each context's
  * own, blitted from a framebuffer of its own onto the window's. Everything
- * the blit and the upload depend on is put back as the program left it. */
+ * the blit and the upload depend on is put back as the program left it.
+ * The controls overlay draws through the same calls, so this is whichever
+ * overlay is up. */
 struct nx_osk_gl
 {
     EGLContext context;
@@ -215,10 +249,18 @@ static void nx_osk_draw( struct opengl_drawable *base )
     GLboolean scissor, srgb;
     unsigned int i;
 
-    if (!wine_nx_osk_visible()) return;
+    if (!wine_nx_osk_visible() && !wine_nx_controls_overlay_visible()) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
-        !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
-        !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
+        !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ))
+        return;
+    /* The picture is laid out for the 1280x720 panel -- the screen its taps
+     * are read against (controls_overlay.c) -- not for this surface: the
+     * surface is the panel's picture scaled to the window, a 4:3 game's
+     * 800x600 stretched widescreen among them, and drawing the layout at the
+     * surface's own size made the overlay a stretched, cropped thing that no
+     * tap lined up with. The blit below maps the panel's rectangle into the
+     * surface's, so it lands on the panel as it was drawn. */
+    if (!wine_nx_osk_frame( 1280, 720, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
         return;
     if (!p_glBlitFramebuffer)
     {
@@ -282,7 +324,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
         osk->generation = 0;
     }
     if (osk->pixels && osk->generation != frame.generation &&
-        (osk->generation = wine_nx_osk_copy( width, height, osk->pixels, frame.width * 4, 0 )))
+        (osk->generation = wine_nx_osk_copy( 1280, 720, osk->pixels, frame.width * 4, 0 )))
         funcs->p_glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height, GL_BGRA, GL_UNSIGNED_BYTE,
                                   osk->pixels );
     if (osk->generation)
@@ -292,9 +334,17 @@ static void nx_osk_draw( struct opengl_drawable *base )
         p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
         if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
         if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
-        /* The picture's first row is its top; the window's first is its bottom. */
-        p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
-                             frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+        /* The picture's first row is its top; the window's first is its
+         * bottom. Panel pixels, mapped into the surface's own. */
+        {
+            int dst_x0 = (int)((long long)frame.x * width / 1280);
+            int dst_y0 = (int)((long long)frame.y * height / 720);
+            int dst_x1 = (int)((long long)(frame.x + frame.width) * width / 1280);
+            int dst_y1 = (int)((long long)(frame.y + frame.height) * height / 720);
+
+            p_glBlitFramebuffer( 0, 0, frame.width, frame.height, dst_x0, height - dst_y0,
+                                 dst_x1, height - dst_y1, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+        }
         if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
         if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
     }
@@ -309,6 +359,29 @@ static void nx_osk_draw( struct opengl_drawable *base )
     funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, alignment );
 }
 
+/* The frame about to be shown, kept when the player asked for it (Minus+R;
+ * horizon-wine/source/runtime.c).  glReadPixels comes up bottom-up, which the
+ * sink is told.  The read buffer is taken back to whatever the program left
+ * bound. */
+static void nx_drawable_screenshot( struct opengl_drawable *base )
+{
+    GLint width = 0, height = 0, read_fb = 0;
+    void *pixels;
+
+    if (!&wine_nx_screenshot_requested || !wine_nx_screenshot_requested()) return;
+    if (!&wine_nx_screenshot_take || !funcs->p_glReadPixels || !p_glBindFramebuffer) return;
+    if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
+        !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
+        width < 1 || height < 1) return;
+    if (!(pixels = malloc( (size_t)width * height * 4 ))) return;
+    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &read_fb );
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
+    funcs->p_glReadPixels( 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );
+    wine_nx_screenshot_take( pixels, width, height, width * 4, WINE_NX_SHOT_RGBA8_BOTTOM_UP );
+    free( pixels );
+}
+
 static BOOL nx_drawable_swap( struct opengl_drawable *base )
 {
     unsigned long long start;
@@ -316,7 +389,31 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
     if (!impl_from_opengl_drawable( base )->screen)
         return funcs->p_eglSwapBuffers( egl->display, base->surface );
+    if (&wine_nx_vulkan_owns_screen && wine_nx_vulkan_owns_screen())
+    {
+        /* A Vulkan surface has the screen and shows it; an OpenGL surface left
+         * holding on (a ddraw proxy's wined3d, a GDI paint) must not queue
+         * buffers behind the picture. */
+        static int stood_down;
+
+        if (!stood_down)
+        {
+            stood_down = 1;
+            nx_log( "[NXGL] OpenGL swaps stand down; a Vulkan surface shows the screen" );
+        }
+        return TRUE;
+    }
+    if (&wine_nx_present_fit && base->client)
+    {
+        EGLint width = 0, height = 0;
+
+        if (funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) &&
+            funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ))
+            wine_nx_present_fit( width, height, base->client->virtual_rect.left,
+                                 base->client->virtual_rect.top, NULL, NULL, NULL, NULL );
+    }
     nx_osk_draw( base );
+    nx_drawable_screenshot( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
@@ -400,10 +497,14 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
     }
     pthread_mutex_unlock( &nx_screen_mutex );
 
-    if (!(window = wine_nx_gl_acquire_window()))
     {
-        ERR( "hwnd %p: the screen already has an OpenGL surface\n", hwnd );
-        goto err;
+        SIZE size = nx_picture_size( client, client->raw ? &client->monitor_rect : &client->virtual_rect );
+
+        if (!(window = wine_nx_gl_acquire_window( size.cx, size.cy )))
+        {
+            ERR( "hwnd %p: the screen already has an OpenGL surface\n", hwnd );
+            goto err;
+        }
     }
     gl->screen = TRUE;
     if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, nx_config_for_format( format ),

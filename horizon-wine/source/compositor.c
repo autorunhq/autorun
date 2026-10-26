@@ -10,6 +10,13 @@
 
 #include "compositor.h"
 #include "osk.h"
+
+/* From runtime.c: the compositor maps the desktop onto the panel through the
+ * same fit the OpenGL presents use, and input maps through it too. */
+void wine_nx_desktop_size( int *width, int *height );
+void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                          int *dst_x, int *dst_y, int *dst_w, int *dst_h );
+void wine_nx_screen_to_panel( double x, double y, int *px, int *py );
 #include "thread_profile.h"
 #include "compositor_gl.h"
 
@@ -429,15 +436,77 @@ static void *presenter_thread( void *arg )
             drawn[i] = layer;
             count++;
         }
+        /* The desktop may be larger than the panel; the fit maps the
+         * picture the program is showing onto the whole panel and input maps
+         * through the same transform.  The picture is the largest window on
+         * the desktop (the topmost of the largest), not the desktop: a game
+         * or an FMV movie that runs in a window of its own -- a 640x480
+         * player on a 1280x720 desktop, GDI movies especially -- stretches
+         * over the panel the way a surface that holds the screen does,
+         * instead of showing as a box in the middle.  No window visible: the
+         * desktop itself is the picture, as before. */
+        int desktop_w, desktop_h, pic_w, pic_h, pic_x, pic_y, win_w, win_h;
+        struct wine_nx_layer *picture = NULL;
+        long long picture_area = 0;
+
+        wine_nx_desktop_size( &desktop_w, &desktop_h );
         for (i = 0; i < count; i++)
         {
+            long long area;
+
+            layer = drawn[i];
+            win_w = layer->visible_width < layer->width ? layer->visible_width : layer->width;
+            win_h = layer->visible_height < layer->height ? layer->visible_height : layer->height;
+            /* Bottom first, so the topmost of the largest windows wins. */
+            if ((area = (long long)win_w * win_h) >= picture_area)
+            {
+                picture = layer;
+                picture_area = area;
+            }
+        }
+        if (picture)
+        {
+            pic_x = picture->x;
+            pic_y = picture->y;
+            pic_w = picture->visible_width < picture->width ? picture->visible_width : picture->width;
+            pic_h = picture->visible_height < picture->height ? picture->visible_height : picture->height;
+        }
+        else
+        {
+            pic_x = pic_y = 0;
+            pic_w = desktop_w;
+            pic_h = desktop_h;
+        }
+        wine_nx_present_fit( pic_w, pic_h, pic_x, pic_y, NULL, NULL, NULL, NULL );
+        {
+            /* The window geometry, whenever it changes: what a screenshot
+               taken with Minus+R at the same moment lines up with. */
+            static int logged_w, logged_h, logged_x, logged_y;
+
+            if (pic_w != logged_w || pic_h != logged_h || pic_x != logged_x || pic_y != logged_y)
+            {
+                comp_log( "[NXWIN] the picture is %dx%d at %d,%d", pic_w, pic_h, pic_x, pic_y );
+                logged_w = pic_w;
+                logged_h = pic_h;
+                logged_x = pic_x;
+                logged_y = pic_y;
+            }
+        }
+        for (i = 0; i < count; i++)
+        {
+            int x0, y0, x1, y1;
+
             layer = drawn[i];
             quads[i].texture = &layer->texture;
-            quads[i].x = layer->x;
-            quads[i].y = layer->y;
-            quads[i].width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
-            quads[i].height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
+            quads[i].src_width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
+            quads[i].src_height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
             quads[i].src_x = quads[i].src_y = 0;
+            wine_nx_screen_to_panel( layer->x, layer->y, &x0, &y0 );
+            wine_nx_screen_to_panel( layer->x + quads[i].src_width, layer->y + quads[i].src_height, &x1, &y1 );
+            quads[i].x = x0;
+            quads[i].y = y0;
+            quads[i].width = x1 - x0;
+            quads[i].height = y1 - y0;
         }
         if (count < capacity && wine_nx_osk_frame( comp.width, comp.height, &osk ))
         {
@@ -478,6 +547,7 @@ static void *presenter_thread( void *arg )
                 quads[count].width = keyboard->width;
                 quads[count].height = keyboard->height;
                 quads[count].src_x = quads[count].src_y = 0;
+                quads[count].src_width = quads[count].src_height = 0;
                 drawn[count++] = keyboard;
             }
         }

@@ -179,9 +179,116 @@ static void persistence( void )
     assert(!rmdir(root));
 }
 
+static void game_layouts( void )
+{
+    char root[]="/tmp/autorun-input-game-XXXXXX", path[768], game[768];
+    struct input_profile p;
+    struct launcher_kv kv={0};
+    assert(mkdtemp(root));
+
+    /* Septerra Core: the mouse layout over the global controls. */
+    snprintf(game,sizeof(game),"%s/septerra.exe",root);
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mode==INPUT_KEYBOARD_MOUSE && p.mouse_speed==150);
+    assert(p.keys[6].code[0]==INPUT_MOUSE_LEFT);            /* ZL: left click */
+    assert(p.keys[11].code[0]==INPUT_MOUSE_RIGHT);          /* right stick click: right click */
+    assert(p.keys[20].code[0]==INPUT_MOUSE_UP && p.keys[23].code[0]==INPUT_MOUSE_MOVE_RIGHT);
+    assert(p.keys[7].count==2 && p.keys[7].code[0]==0x10 && p.keys[7].code[1]==INPUT_MOUSE_LEFT);
+    assert(p.keys[9].code[0]==0x09 && p.keys[12].code[0]=='Q');  /* Tab and the party keys */
+
+    /* The player's global controls stay under the game's layout... */
+    snprintf(path,sizeof(path),"%s/config/keys.txt",root);
+    assert(input_profile_save(&(struct launcher_kv){0},path));
+    {
+        struct launcher_kv global={0};
+        assert(launcher_kv_set(&global,"key.A","0x20"));
+        assert(launcher_kv_set(&global,"input-mode","1"));
+        assert(input_profile_save(&global,path));
+    }
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.keys[0].code[0]==INPUT_MOUSE_LEFT && p.mode==INPUT_KEYBOARD_MOUSE);
+
+    /* ...and their own per-game changes win over it, and clearing them brings
+     * the game's layout back. */
+    assert(launcher_kv_set(&kv,"key.A","0x1b"));
+    assert(input_profile_save(&kv,path));
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.keys[0].code[0]==0x1b);
+    assert(input_binding_save(&kv,0,0,NULL));
+    assert(input_profile_save(&kv,path));
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.keys[0].code[0]==INPUT_MOUSE_LEFT);
+
+    /* The recompiled executable goes by its own name. */
+    snprintf(game,sizeof(game),"%s/SR-Septerra.exe",root);
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.keys[11].code[0]==INPUT_MOUSE_RIGHT && p.mode==INPUT_KEYBOARD_MOUSE);
+
+    /* Harbinger: attack, walk, heal, and the stand-and-shoot shift. */
+    snprintf(game,sizeof(game),"%s/Harbinger.exe",root);
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mode==INPUT_KEYBOARD_MOUSE && p.mouse_speed==150);
+    assert(p.keys[6].code[0]==INPUT_MOUSE_LEFT);
+    assert(p.keys[11].code[0]==INPUT_MOUSE_RIGHT);
+    assert(p.keys[3].code[0]==INPUT_MOUSE_MIDDLE);
+    assert(p.keys[4].code[0]==0x10);
+    assert(p.keys[7].count==2 && p.keys[7].code[0]==0x10);
+
+    /* The player's own mouse speed is theirs: the game's suggested speed
+     * stands over the global defaults, not over a choice they made. */
+    snprintf(game,sizeof(game),"%s/septerra.exe",root);
+    snprintf(path,sizeof(path),"%s/config/keys.txt",root);
+    {
+        struct launcher_kv global={0};
+        assert(launcher_kv_set(&global,"key.A","0x20"));
+        assert(launcher_kv_set(&global,"input-mode","1"));
+        assert(launcher_kv_set(&global,"mouse-speed","25"));
+        assert(input_profile_save(&global,path));
+    }
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mouse_speed==25 && p.mouse_speed_explicit);
+    /* Their per-game choice wins over even that, and the new low stops
+     * count; clearing it falls back to the global one. */
+    assert(launcher_kv_set(&kv,"mouse-speed","5"));
+    assert(input_profile_save(&kv,path));
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mouse_speed==5);
+    assert(launcher_kv_set(&kv,"mouse-speed",NULL));
+    assert(input_profile_save(&kv,path));
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mouse_speed==25);
+    /* With no speed named anywhere, the game's own comes back. */
+    snprintf(path,sizeof(path),"%s/config/keys.txt",root);
+    {
+        struct launcher_kv global={0};
+        assert(launcher_kv_set(&global,"key.A","0x20"));
+        assert(launcher_kv_set(&global,"input-mode","1"));
+        assert(input_profile_save(&global,path));
+    }
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mouse_speed==150 && !p.mouse_speed_explicit);
+
+    /* A game without a layout keeps the player's own global controls. */
+    snprintf(game,sizeof(game),"%s/Game.exe",root);
+    assert(input_profile_program(root,game,1,&p,&kv,path,sizeof(path)));
+    assert(p.mode==INPUT_CONTROLLER && p.keys[0].code[0]==0x20 && p.keys[3].code[0]==0x46);
+
+    /* The last reset left the program's settings empty, and an empty settings
+     * file is removed rather than kept. */
+    snprintf(path,sizeof(path),"%s/septerra.wine-nx.txt",root);
+    assert(access(path,F_OK));
+    snprintf(path,sizeof(path),"%s/config/keys.txt",root);
+    assert(!unlink(path));
+    snprintf(path,sizeof(path),"%s/config",root);
+    assert(!rmdir(path));
+    snprintf(path,sizeof(path),"%s/program-settings",root);
+    rmdir(path);
+    assert(!rmdir(root));
+}
+
 int main(void)
 {
-    mapping(); transitions(); persistence();
-    puts("Input profiles: mapping, deadzones, chords, transitions and inheritance passed");
+    mapping(); transitions(); persistence(); game_layouts();
+    puts("Input profiles: mapping, deadzones, chords, transitions, inheritance and game layouts passed");
     return 0;
 }

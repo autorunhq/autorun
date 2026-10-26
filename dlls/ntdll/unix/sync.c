@@ -2468,6 +2468,28 @@ NTSTATUS WINAPI NtYieldExecution(void)
  * a few sessions: a sleeping thread could wait there forever (OpenTTD's game
  * loop never woke from its first Sleep). NtDelayExecution sleeps the thread. */
 extern void svcSleepThread( int64_t nano );
+
+/* Sleep(0) in a row means "poll again": wined3d waits for its command stream
+ * thread with a loop that sleeps zero (wined3d_pause, after two hundred bare
+ * spins), and a busy game reached that sleep three quarters of a million times
+ * a second -- a whole core in the kernel, yielding and migrating between the
+ * cores each time, while the thread it waited for drew one frame at a time.
+ * A thread that has slept zero back-to-back this many times is waiting, not
+ * yielding: from then on it rests thirty-two microseconds between the sleeps.
+ * The wait still ends, thirty-two microseconds of granularity later, and the
+ * core goes to real work meanwhile. A thread that comes back to Sleep(0) after
+ * two milliseconds is not polling and counts from the start again, so a single
+ * Sleep(0) in a frame -- the yield idiom -- is never touched. */
+#define NX_SLEEP_SPIN_GAP     500    /* back to back: sleeps closer than 50 us */
+#define NX_SLEEP_SPIN_COUNT   16     /* ... this many of them in a row */
+#define NX_SLEEP_SPIN_LEAVE   20000  /* away for 2 ms: no longer polling */
+#define NX_SLEEP_SPIN_REST_NS 32000  /* rest 32 us between the sleeps */
+
+static __thread unsigned int nx_sleep_spin_count, nx_sleep_spin_resting;
+static __thread ULONGLONG nx_sleep_spin_last;
+static unsigned int nx_sleep_spin_logged;
+
+extern void wine_nx_runtime_trace( const char *msg );
 #endif
 
 /******************************************************************
@@ -2527,7 +2549,47 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
         /* Note that we yield after establishing the desired timeout, but
            we only care about the result of the yield for zero timeouts */
         status = NtYieldExecution();
-        if (!when) return status;
+        if (!when)
+        {
+#ifdef __SWITCH__
+            ULONGLONG value = monotonic_counter();
+
+            if (nx_sleep_spin_resting)
+            {
+                if (value - nx_sleep_spin_last > NX_SLEEP_SPIN_LEAVE) nx_sleep_spin_resting = nx_sleep_spin_count = 0;
+                else
+                {
+                    svcSleepThread( NX_SLEEP_SPIN_REST_NS );
+                    value = monotonic_counter();
+                }
+            }
+            if (!nx_sleep_spin_resting)
+            {
+                if (nx_sleep_spin_last && value - nx_sleep_spin_last < NX_SLEEP_SPIN_GAP)
+                {
+                    if (++nx_sleep_spin_count >= NX_SLEEP_SPIN_COUNT)
+                    {
+                        nx_sleep_spin_resting = 1;
+                        if (nx_sleep_spin_logged++ < 4)
+                        {
+                            char buf[128];
+
+                            snprintf( buf, sizeof(buf), "[CLOCK] tid %04x spins on Sleep(0); resting between the sleeps",
+                                      (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+                            wine_nx_runtime_trace( buf );
+                        }
+                    }
+                }
+                else nx_sleep_spin_count = 0;
+            }
+            nx_sleep_spin_last = value;
+#endif
+            return status;
+        }
+#ifdef __SWITCH__
+        /* a sleep of real length is not polling */
+        nx_sleep_spin_count = nx_sleep_spin_resting = 0;
+#endif
 
         for (;;)
         {
@@ -2554,9 +2616,67 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
 /******************************************************************************
  *              NtQueryPerformanceCounter (NTDLL.@)
  */
+#ifdef __SWITCH__
+/* A program that paces itself by reading the performance counter in a loop,
+ * "QueryPerformanceCounter until the next frame is due", spins at full tilt
+ * here and keeps a whole core to itself (Septerra Core read the counter 350
+ * thousand times a second between frames). A thread that has read the counter
+ * back-to-back this many times is waiting for a deadline, not measuring: from
+ * then on it sleeps a hundred microseconds between the reads. The deadline
+ * still comes, a hundred microseconds of granularity later, and the core goes
+ * to real work meanwhile. A thread that comes back to the counter after two
+ * milliseconds is not spinning and counts from the start again, so a loop that
+ * reads the clock a handful of times per frame -- wined3d's and DXVK's
+ * precision spins before a deadline among them -- is never touched. */
+#define NX_CLOCK_SPIN_GAP     500    /* back to back: reads closer than 50 us */
+#define NX_CLOCK_SPIN_COUNT   512    /* ... this many of them in a row */
+#define NX_CLOCK_SPIN_LEAVE   20000  /* away for 2 ms: no longer spinning */
+#define NX_CLOCK_SPIN_REST_NS 100000 /* sleep 0.1 ms between the reads */
+
+static __thread unsigned int nx_clock_spin_count, nx_clock_spin_resting;
+static __thread ULONGLONG nx_clock_spin_last;
+static unsigned int nx_clock_spin_logged;
+
+extern void wine_nx_runtime_trace( const char *msg );
+#endif
+
 NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER *frequency )
 {
-    counter->QuadPart = monotonic_counter();
+    ULONGLONG value = monotonic_counter();
+
+#ifdef __SWITCH__
+    if (nx_clock_spin_resting)
+    {
+        if (value - nx_clock_spin_last > NX_CLOCK_SPIN_LEAVE) nx_clock_spin_resting = nx_clock_spin_count = 0;
+        else
+        {
+            svcSleepThread( NX_CLOCK_SPIN_REST_NS );
+            value = monotonic_counter();
+        }
+    }
+    if (!nx_clock_spin_resting)
+    {
+        if (nx_clock_spin_last && value - nx_clock_spin_last < NX_CLOCK_SPIN_GAP)
+        {
+            if (++nx_clock_spin_count >= NX_CLOCK_SPIN_COUNT)
+            {
+                nx_clock_spin_resting = 1;
+                if (nx_clock_spin_logged++ < 4)
+                {
+                    char buf[128];
+
+                    snprintf( buf, sizeof(buf), "[CLOCK] tid %04x spins on the performance counter; resting between the reads",
+                              (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+                    wine_nx_runtime_trace( buf );
+                }
+            }
+        }
+        else nx_clock_spin_count = 0;
+    }
+    nx_clock_spin_last = value;
+#endif
+
+    counter->QuadPart = value;
     if (frequency) frequency->QuadPart = TICKSPERSEC;
     return STATUS_SUCCESS;
 }

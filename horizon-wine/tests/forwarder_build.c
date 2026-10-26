@@ -287,7 +287,7 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
-static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
+static void check_exefs_npdm( const u8 *data, u64 tid, int relay, unsigned int as )
 {
     const struct nca_header *header = nca_of( data );
     u64 start = (u64)header->fs_table[0].media_start_offset * 0x200;
@@ -322,7 +322,7 @@ static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
     /* The three bits that decide where the program's address space begins. */
-    assert( ((meta->flags >> 1) & 7) == 3 );
+    assert( ((meta->flags >> 1) & 7) == (int)as );
     assert( meta->sys_resource_size == 16 * 1024 * 1024 );
     aci0 = (const struct npdm_aci0 *)((const u8 *)meta + meta->aci0_offset);
     acid = (const struct npdm_acid *)((const u8 *)meta + meta->acid_offset);
@@ -420,7 +420,7 @@ int main( int argc, char **argv )
     const char *step = NULL;
     size_t program_size, control_size, meta_size;
     u8 *program, *control, *meta;
-    u64 tid, plain_hash[SHA256_HASH_SIZE / sizeof(u64)], plain_tid;
+    u64 tid, tid32, plain_hash[SHA256_HASH_SIZE / sizeof(u64)], plain_tid;
 
     if (argc < 4)
     {
@@ -448,7 +448,14 @@ int main( int argc, char **argv )
     sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
     assert( wine_nx_forwarder_title_id( nro_path, NULL ) ==
             (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
-    forwarder_hash( nro_file, NULL, 0, plain_hash );
+    assert( wine_nx_forwarder_title_id_as( nro_path, NULL, 3 ) == wine_nx_forwarder_title_id( nro_path, NULL ) );
+    /* The 32-bit variant's id has the address space in it, and differs. */
+    snprintf( title_key, sizeof(title_key), "%s%s\naddress-space=2\nautorun-forwarder=2", nro_path, nro_path );
+    sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
+    assert( wine_nx_forwarder_title_id_as( nro_path, NULL, 2 ) ==
+            (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
+    assert( wine_nx_forwarder_title_id_as( nro_path, NULL, 2 ) != wine_nx_forwarder_title_id( nro_path, NULL ) );
+    forwarder_hash( nro_file, NULL, 0, 0, plain_hash );
     plain_tid = 0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull);
     assert( tid != plain_tid );
 
@@ -473,7 +480,7 @@ int main( int argc, char **argv )
     control = read_nca( 2, &control_size );
     meta = read_nca( 3, &meta_size );
     check_program( program, program_size, nro_file );
-    check_exefs_npdm( program, tid, 0 );
+    check_exefs_npdm( program, tid, 0, 3 );
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     assert( nca_of( meta )->content_type == NCA_CONTENT_META );
     assert( nca_of( meta )->fs_header[0].fs_type == NCA_FS_PFS0 );
@@ -485,8 +492,22 @@ int main( int argc, char **argv )
 
     assert( !wine_nx_forwarder_install( &request, &step ) );
     program = read_nca( 4, &program_size );
-    check_exefs_npdm( program, tid, 0 );
+    check_exefs_npdm( program, tid, 0, 3 );
     free( program );
+
+    /* The 32-bit variant is its own entry beside the 39-bit one: the address
+     * space is part of the id, and of the NPDM's flags. */
+    request.address_space = 2;
+    placeholders = registered = deleted_completely_count = deleted_after_write = 0;
+    tid32 = wine_nx_forwarder_title_id_as( nro_file, NULL, 2 );
+    assert( tid32 != tid );
+    assert( !wine_nx_forwarder_install( &request, &step ) );
+    assert( !step );
+    assert( registered == 3 );
+    program = read_nca( 1, &program_size );
+    check_exefs_npdm( program, tid32, 0, 2 );
+    free( program );
+    request.address_space = 0;
 
     request.game_id = 42;
     placeholders = registered = deleted_completely_count = deleted_after_write = 0;
@@ -496,7 +517,7 @@ int main( int argc, char **argv )
     assert( !wine_nx_forwarder_install( &request, &step ) );
     assert( deleted_completely_count == 1 && deleted_completely[0] == tid );
     program = read_nca( 1, &program_size );
-    check_exefs_npdm( program, tid, 1 );
+    check_exefs_npdm( program, tid, 1, 3 );
     {
         const struct nca_header *header = nca_of( program );
         const struct integrity_level *levels = header->fs_header[1].hash_data.integrity_meta_info.info_level_hash.levels;

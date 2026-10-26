@@ -1061,6 +1061,7 @@ static void load_display_driver(void)
             extern void wine_nx_drv_SetCursor( HWND, HCURSOR );
             extern BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND );
             extern UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *, void * );
+            extern LONG wine_nx_drv_ChangeDisplaySettings( LPDEVMODEW, LPCWSTR, HWND, DWORD, LPVOID );
             extern UINT wine_nx_drv_OpenGLInit( UINT, const struct opengl_funcs *, const struct opengl_driver_funcs ** );
 #ifdef WINE_NX_MESA_SWITCH
             extern UINT wine_nx_drv_VulkanInit( UINT, void *, const struct vulkan_driver_funcs ** );
@@ -1087,6 +1088,7 @@ static void load_display_driver(void)
              * forced virtual screen of get_virtual_screen_rect back. */
             if (!&wine_nx_display_devices || wine_nx_display_devices)
                 null_user_driver.pUpdateDisplayDevices = wine_nx_drv_UpdateDisplayDevices;
+            null_user_driver.pChangeDisplaySettings = wine_nx_drv_ChangeDisplaySettings;
         }
         __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );
         return;

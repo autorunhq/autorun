@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <png.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -43,14 +44,17 @@
 #include "input_profile.h"
 #include "config_json.h"
 #include "pointer_cursor.h"
+#include "log_repeat.h"
 #include "compositor.h"
 #include "osk.h"
+#include "controls_overlay.h"
 #include "std_stream_lines.h"
 #include "thread_profile.h"
 #include "dxvk_releases.h"
 #include "horizon_dlls.h"
 #include "horizon_dll_features.h"
 #include "game_fixes.h"
+#include "screen_fit.h"
 #ifdef WINE_NX_SWAP_POC
 #include "swap_file.h"
 #include "horizon_swap.h"
@@ -201,6 +205,7 @@ static int log_line_is_urgent( const char *line )
 {
     return !strncmp( line, "[EXC]", 5 ) || !strncmp( line, "[EXIT]", 6 ) ||
            !strncmp( line, "[FAIL]", 6 ) || !strncmp( line, "[PE32 TEST]", 11 ) ||
+           !strncmp( line, "[INIT]", 6 ) || !strncmp( line, "[IMAGE]", 7 ) ||
            !strncmp( line, "[LIFECYCLE] final", 17 ) || !strncmp( line, "[LIFECYCLE] verdict", 19 );
 }
 
@@ -275,6 +280,16 @@ static volatile int stall_watch_quit;
 static int stall_watch_running;
 static Thread stall_watch_thread;
 
+/* The quit chord's first ask: the program is told to close itself (the display
+ * driver sends its windows a WM_CLOSE) and given a moment to run its own exit
+ * code, so whatever it writes on the way out -- settings, saves -- reaches the
+ * card before its threads are parked. Asking again, or the moment's end, ends
+ * it the way the chord always did. */
+volatile int wine_nx_close_asked;
+static u64 close_asked_at;
+extern volatile int wine_nx_quit_requested;
+void wine_nx_request_quit( const char *why );
+
 /* Flushing each line to the SD card serialized every thread behind the file
  * lock. Buffer instead and flush often enough that a hang loses under 200 ms.
  * The same thread emits idle partial output lines and reports interpreter speed. */
@@ -316,8 +331,39 @@ static void *log_flusher( void *arg )
         /* Writes held back from the card, the log's own among them: they
          * reach it as soon as they did when every write went straight out. */
         wine_nx_sd_cache_flush();
+        /* The program was asked to close itself and is taking too long: the
+         * chord's quit goes through the way it always did. */
+        if (__atomic_load_n( (int *)&wine_nx_close_asked, __ATOMIC_SEQ_CST ) &&
+            !__atomic_load_n( (int *)&wine_nx_quit_requested, __ATOMIC_SEQ_CST ) && close_asked_at &&
+            armTicksToNs( armGetSystemTick() - close_asked_at ) >= 5000000000ull)
+            wine_nx_request_quit( "the program did not close itself" );
     }
     return NULL;
+}
+
+/* KUSER_SHARED_DATA sits at 0x7ffe0000, where every 32-bit program's ntdll
+ * reads it. Under the 32-bit address space the kernel heap region -- this
+ * runtime's whole memory budget -- runs straight past that address, and the
+ * page cannot be taken away again: the loader's lent pages share the region,
+ * and the kernel refuses to shrink the heap through them. What is left is to
+ * keep the pool from ever handing that page out -- the shared data adopts it
+ * where it stands -- by ending the pool below it. */
+static void cap_heap_pool_for_shared_data(void)
+{
+    u64 heap_base = 0, heap_size = 0;
+    const uintptr_t shared = 0x7ffe0000, end = 0x7fe00000;
+    extern char *fake_heap_start, *fake_heap_end;
+
+    svcGetInfo( &heap_base, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0 );
+    svcGetInfo( &heap_size, InfoType_HeapRegionSize, CUR_PROCESS_HANDLE, 0 );
+    if (!heap_size || heap_base >= shared || heap_base + heap_size <= shared + 0x1000) return;
+    if ((uintptr_t)fake_heap_start >= end) return;
+    if ((uintptr_t)fake_heap_end > end)
+    {
+        fake_heap_end = (char *)end;
+        log_line( "[INIT] heap pool ends at 0x%llx (region 0x%llx+0x%llx); 0x7ffe0000 stays out of the allocator",
+                  (unsigned long long)end, (unsigned long long)heap_base, (unsigned long long)heap_size );
+    }
 }
 
 /* A running thread keeps its stack, which libnx maps out of the heap, lent to
@@ -364,6 +410,18 @@ static int log_lock_bounded( void )
     return 0;
 }
 
+/* The log's floods folded into one summary per while (log_repeat.h): the same
+ * loader line a hundred times over, one fault a program polls on.  The policy
+ * has a lock of its own, taken with a trylock like the file's -- an exception
+ * handler may be the one logging, on the thread that faulted. */
+static struct log_repeat_table log_repeats;
+static pthread_mutex_t log_repeat_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned long long log_repeat_now_ms( void )
+{
+    return armTicksToNs( armGetSystemTick() ) / 1000000ull;
+}
+
 static void log_line( const char *fmt, ... )
 {
     /* The software console aborts the process (framebufferBegin →
@@ -380,6 +438,21 @@ static void log_line( const char *fmt, ... )
     len = vsnprintf( line, sizeof(line) - 1, fmt, args );
     va_end( args );
     if (len < 0) return;
+    /* The same line a hundred times over says nothing its first two did not. */
+    if (log_repeat_wanted( line ) && !pthread_mutex_trylock( &log_repeat_mutex ))
+    {
+        char summary[256];
+        enum log_repeat_action action = log_repeat_next( &log_repeats, log_repeat_now_ms(),
+                                                         line, summary, sizeof(summary) );
+
+        pthread_mutex_unlock( &log_repeat_mutex );
+        if (action == LOG_REPEAT_SUPPRESS) return;
+        if (action == LOG_REPEAT_SUMMARY)
+        {
+            len = snprintf( line, sizeof(line) - 1, "%s", summary );
+            if (len < 0) return;
+        }
+    }
     if (len > (int)sizeof(line) - 2) len = sizeof(line) - 2;
     line[len++] = '\n';
     line[len] = 0;
@@ -403,6 +476,17 @@ static void log_line( const char *fmt, ... )
         pthread_mutex_unlock( &log_mutex );
     }
     if (on_main && strncmp( line, "[SYSCALL]", 9 )) consoleUpdate( NULL );
+}
+
+/* The folds not said yet, for the way out and before a program's own log
+ * starts: nothing counted is lost. */
+static void log_repeat_flush_now( void )
+{
+    char summary[256];
+
+    if (pthread_mutex_trylock( &log_repeat_mutex )) return;
+    while (log_repeat_flush( &log_repeats, summary, sizeof(summary) )) log_line( "%s", summary );
+    pthread_mutex_unlock( &log_repeat_mutex );
 }
 
 /* A program's own log, kept from the moment it is about to start: everything
@@ -455,6 +539,7 @@ static void open_game_log( const char *target )
     }
     pthread_mutex_unlock( &log_mutex );
     log_line( "[LOG] this run is kept in %s", path );
+    log_repeat_flush_now();
 }
 
 static void stall_watch( void *arg )
@@ -504,10 +589,21 @@ int wine_nx_runtime_verbose;
 static enum launcher_d3d_renderer runtime_d3d;
 static enum dxvk_source runtime_dxvk_source;
 static int runtime_fex;
+/* The program's CPU translator choice: "opt", "" for the stock modules, or
+ * NULL when it has none and fex-variant.txt decides. */
+static const char *runtime_fex_variant;
 static int runtime_four_cores;
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
 static char runtime_dxvk_version[32];
+
+/* The dgVoodoo2 wrappers, when the user drops the release folder at C:\dgVoodoo
+ * (or C:\dgVoodoo2, C:\voodoo): the folders in it that hold wrapper DLLs, in
+ * C:\ form.  With a game's Voodoo on they go on its DLL path ahead of the
+ * graphics payloads, and the conf the menu writes goes beside them -- the
+ * wrapper reads its conf from beside its own DLLs first. */
+static char runtime_voodoo_dirs[3][80];
+static int runtime_voodoo_dir_count;
 
 /* libdrm_nouveau's switch for CPU-cacheable pinned GPU memory, cleared by
  * sdmc:/switch/wine/gl-uncached.txt containing 1. */
@@ -530,6 +626,34 @@ int wine_nx_display_devices = 1;
 int wine_nx_swkbd_auto_enabled = 1;
 struct input_profile wine_nx_input_profile;
 uint64_t wine_nx_input_swallowed;
+static pthread_mutex_t wine_nx_input_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* The controls overlay writes the profile the game runs on (controls_overlay.c)
+ * while the polls read it. Publish hands over a whole profile at a time, and
+ * the polls take a copy of it, so a row being remapped mid-frame is never half
+ * of one layout and half of another. */
+void wine_nx_input_profile_publish( const struct input_profile *profile )
+{
+    int speed = profile->mouse_speed, changed;
+
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    changed = wine_nx_input_profile.mouse_speed != speed;
+    if (profile != &wine_nx_input_profile) wine_nx_input_profile = *profile;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+    if (changed) log_line( "[INPUT] mouse speed %d%% of the built-in", speed );
+}
+
+void wine_nx_input_profile_copy( struct input_profile *profile )
+{
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    *profile = wine_nx_input_profile;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+}
+/* Where the controls overlay (controls_overlay.c) writes what it changes: the
+ * runtime directory and the program the runtime started, kept from the load
+ * below so remapping while the game runs lands in the same per-game file. */
+static char wine_nx_input_root[256];
+static char wine_nx_input_program[768];
 
 /***********************************************************************
  * Framebuffer platform hooks used by the win32u Switch display driver
@@ -539,16 +663,236 @@ uint64_t wine_nx_input_swallowed;
 #define WINE_NX_FB_W 1280
 #define WINE_NX_FB_H 720
 
+/* The Wine desktop ("screen") may be larger than the panel: games pick their
+ * own resolution (a widescreen-patched game asks for 1920x1080 on a 1280x720
+ * screen), and a window bigger than the desktop would clip: the cursor could
+ * never leave the desktop, and the picture would present as a crop.  So the
+ * desktop is its own size, and every present maps it onto the panel, fitted
+ * and centred; input maps through the same transform.  The default is the
+ * panel itself, so a game that follows the screen draws 1280x720 and nothing
+ * has to be scaled; the Resolution setting of the program (wine_nx_desktop_
+ * start_size) and sdmc:/switch/wine/desktop.txt ("1920x1080") pick another. */
+static int wine_nx_desktop_w = WINE_NX_FB_W, wine_nx_desktop_h = WINE_NX_FB_H;
+static int wine_nx_desktop_default_w, wine_nx_desktop_default_h;
+static int wine_nx_desktop_wanted_w, wine_nx_desktop_wanted_h;
+/* The display mode the program asked for itself (ChangeDisplaySettings), if
+ * any: it outranks the size a surface pretends while it holds the screen. */
+static int wine_nx_desktop_mode_w, wine_nx_desktop_mode_h;
+
+/* 1: present the central 4:3 of every picture stretched over the whole
+ * screen (the classic "widescreen hack" look). Set per game. */
+int wine_nx_fit_stretch43;
+
+/* The transform the last present used: panel = screen * scale + offset.
+ * The scales differ per axis: presents fill the panel like the Switch
+ * display compositor does, so a 4:3 game window becomes the widescreen look
+ * and input maps through the very same stretch. */
+static pthread_mutex_t wine_nx_fit_mutex = PTHREAD_MUTEX_INITIALIZER;
+static double wine_nx_fit_scale_x = 1.0, wine_nx_fit_scale_y = 1.0;
+static double wine_nx_fit_off_x, wine_nx_fit_off_y;
+static int wine_nx_fit_ready;
+
+static void wine_nx_desktop_init( void )
+{
+    static int done;
+    char text[64] = {0};
+    FILE *f;
+    int w, h;
+
+    if (done) return;
+    done = 1;
+    if (wine_nx_desktop_wanted_w)
+    {
+        wine_nx_desktop_w = wine_nx_desktop_wanted_w;
+        wine_nx_desktop_h = wine_nx_desktop_wanted_h;
+    }
+    else if ((f = fopen( "sdmc:/switch/wine/desktop.txt", "r" )))
+    {
+        size_t n = fread( text, 1, sizeof(text) - 1, f );
+        (void)n;
+        fclose( f );
+        if (sscanf( text, "%d x %d", &w, &h ) == 2 && w >= 320 && h >= 240 && w <= 4096 && h <= 4096)
+        {
+            wine_nx_desktop_w = w;
+            wine_nx_desktop_h = h;
+        }
+    }
+    wine_nx_desktop_default_w = wine_nx_desktop_w;
+    wine_nx_desktop_default_h = wine_nx_desktop_h;
+    log_line( "[INIT] the desktop is %dx%d, the panel %dx%d", wine_nx_desktop_w, wine_nx_desktop_h,
+              WINE_NX_FB_W, WINE_NX_FB_H );
+}
+
+/* A program setting a display mode (ddraw/Direct3D SetDisplayMode) switches
+ * the screen to its resolution: win32u re-registers the display devices right
+ * after, and both the physical and current mode must then be the program's,
+ * or the raw<->virt monitor map comes out scaled and shifted and every
+ * cursor coordinate a program sees is a shrunken copy of the real one. */
+void wine_nx_desktop_set( int width, int height )
+{
+    if (width <= 0 || height <= 0) return;
+    if (!wine_nx_desktop_default_w)
+    {
+        wine_nx_desktop_default_w = wine_nx_desktop_w;
+        wine_nx_desktop_default_h = wine_nx_desktop_h;
+    }
+    if (wine_nx_desktop_w != width || wine_nx_desktop_h != height)
+    {
+        log_line( "[NXGL] the screen is %dx%d (a display mode; was %dx%d)",
+                  width, height, wine_nx_desktop_w, wine_nx_desktop_h );
+        wine_nx_desktop_w = width;
+        wine_nx_desktop_h = height;
+    }
+    wine_nx_desktop_mode_w = width;
+    wine_nx_desktop_mode_h = height;
+}
+
+/* The screen a program starts with, from the Resolution setting: picked
+ * before the desktop is set up, or put in place at once once it is. A program
+ * that asks for a display mode of its own still gets it (wine_nx_desktop_set). */
+void wine_nx_desktop_start_size( int width, int height )
+{
+    if (width <= 0 || height <= 0) return;
+    wine_nx_desktop_wanted_w = width;
+    wine_nx_desktop_wanted_h = height;
+    wine_nx_desktop_mode_w = wine_nx_desktop_mode_h = 0;  /* a new program starts */
+    if (wine_nx_desktop_default_w)  /* the desktop is already up */
+    {
+        wine_nx_desktop_default_w = width;
+        wine_nx_desktop_default_h = height;
+        if (wine_nx_desktop_w != width || wine_nx_desktop_h != height)
+        {
+            log_line( "[NXGL] the screen is %dx%d (the program's start size; was %dx%d)",
+                      width, height, wine_nx_desktop_w, wine_nx_desktop_h );
+            wine_nx_desktop_w = width;
+            wine_nx_desktop_h = height;
+        }
+    }
+}
+
+void wine_nx_desktop_size( int *width, int *height )
+{
+    wine_nx_desktop_init();
+    if (width) *width = wine_nx_desktop_w;
+    if (height) *height = wine_nx_desktop_h;
+}
+
+/* Where a src_w x src_h picture lands on the panel: stretched to fill it,
+ * exactly like the display compositor scales a layer's buffer.  The picture
+ * goes to the whole panel (dst_x/dst_y are 0); src_x/src_y are the presented
+ * window's origin in desktop coordinates, and together with the scales this
+ * is the desktop -> panel transform that input maps through. */
+void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                          int *dst_x, int *dst_y, int *dst_w, int *dst_h )
+{
+    double scale_x, scale_y;
+
+    if (wine_nx_fit_stretch43)
+    {
+        int crop_w = src_w, crop_h = src_h;
+
+        screen_crop_4_3( &crop_w, &crop_h );
+        src_x += (src_w - crop_w) / 2;
+        src_y += (src_h - crop_h) / 2;
+        src_w = crop_w;
+        src_h = crop_h;
+    }
+    screen_fill_scales( src_w, src_h, WINE_NX_FB_W, WINE_NX_FB_H, &scale_x, &scale_y );
+
+    pthread_mutex_lock( &wine_nx_fit_mutex );
+    wine_nx_fit_scale_x = scale_x;
+    wine_nx_fit_scale_y = scale_y;
+    wine_nx_fit_off_x = -(double)src_x * scale_x;
+    wine_nx_fit_off_y = -(double)src_y * scale_y;
+    wine_nx_fit_ready = 1;
+    pthread_mutex_unlock( &wine_nx_fit_mutex );
+
+    if (dst_x) *dst_x = 0;
+    if (dst_y) *dst_y = 0;
+    if (dst_w) *dst_w = WINE_NX_FB_W;
+    if (dst_h) *dst_h = WINE_NX_FB_H;
+}
+
+/* The present's scale, so stick speeds can mean panel pixels per second no
+ * matter how large the desktop is. */
+double wine_nx_fit_scale_now( void )
+{
+    double scale_x, scale_y;
+
+    pthread_mutex_lock( &wine_nx_fit_mutex );
+    scale_x = wine_nx_fit_ready ? wine_nx_fit_scale_x : 0.0;
+    scale_y = wine_nx_fit_ready ? wine_nx_fit_scale_y : 0.0;
+    pthread_mutex_unlock( &wine_nx_fit_mutex );
+    if (scale_x <= 0 || scale_y <= 0)
+    {
+        screen_fill_scales( wine_nx_desktop_w, wine_nx_desktop_h, WINE_NX_FB_W, WINE_NX_FB_H,
+                            &scale_x, &scale_y );
+    }
+    return (scale_x + scale_y) / 2.0 > 0 ? (scale_x + scale_y) / 2.0 : 1.0;
+}
+
+/* Where a point of the desktop lands on the panel, and the way back (the way
+ * input needs: a finger touches a panel pixel, the program wants the desktop
+ * coordinate the picture at that pixel came from). */
+void wine_nx_screen_to_panel( double x, double y, int *px, int *py )
+{
+    double scale_x = 1.0, scale_y = 1.0, off_x = 0, off_y = 0;
+
+    pthread_mutex_lock( &wine_nx_fit_mutex );
+    if (wine_nx_fit_ready)
+    {
+        scale_x = wine_nx_fit_scale_x;
+        scale_y = wine_nx_fit_scale_y;
+        off_x = wine_nx_fit_off_x;
+        off_y = wine_nx_fit_off_y;
+    }
+    else
+    {
+        /* No present yet: the default map of the whole desktop. */
+        screen_fill_scales( wine_nx_desktop_w, wine_nx_desktop_h, WINE_NX_FB_W, WINE_NX_FB_H,
+                            &scale_x, &scale_y );
+    }
+    pthread_mutex_unlock( &wine_nx_fit_mutex );
+    if (px) *px = (int)(x * scale_x + off_x + 0.5);
+    if (py) *py = (int)(y * scale_y + off_y + 0.5);
+}
+
+void wine_nx_panel_to_screen( int px, int py, double *x, double *y )
+{
+    double scale_x = 1.0, scale_y = 1.0, off_x = 0, off_y = 0;
+
+    pthread_mutex_lock( &wine_nx_fit_mutex );
+    if (wine_nx_fit_ready)
+    {
+        scale_x = wine_nx_fit_scale_x;
+        scale_y = wine_nx_fit_scale_y;
+        off_x = wine_nx_fit_off_x;
+        off_y = wine_nx_fit_off_y;
+    }
+    else
+    {
+        screen_fill_scales( wine_nx_desktop_w, wine_nx_desktop_h, WINE_NX_FB_W, WINE_NX_FB_H,
+                            &scale_x, &scale_y );
+    }
+    pthread_mutex_unlock( &wine_nx_fit_mutex );
+    if (scale_x <= 0) scale_x = 1.0;
+    if (scale_y <= 0) scale_y = 1.0;
+    if (x) *x = (px - off_x) / scale_x;
+    if (y) *y = (py - off_y) / scale_y;
+}
+
 /* The drawn cursor, guarded by wine_nx_fb_mutex. */
 static struct pointer_cursor wine_nx_cursor =
     { .x = WINE_NX_FB_W / 2, .y = WINE_NX_FB_H / 2, .width = WINE_NX_FB_W, .height = WINE_NX_FB_H };
 static int wine_nx_cursor_moved;
 static int wine_nx_cursor_visible = 1;  /* 0 while the program hides the mouse cursor */
 static int wine_nx_gl_window;  /* an OpenGL window surface owns the screen's NWindow */
-/* Controller and touchscreen state, guarded by wine_nx_pointer_mutex. */
+static int wine_nx_vulkan_window;  /* a Vulkan surface owns it (DXVK's presents) */
+/* Controller and touchscreen state, guarded by wine_nx_pointer_mutex.  The
+ * pointer lives in desktop coordinates (what Wine and the program see); a
+ * touch arrives in panel pixels and is mapped through the present's fit. */
 static pthread_mutex_t wine_nx_pointer_mutex = PTHREAD_MUTEX_INITIALIZER;
-static struct pointer_cursor wine_nx_pointer =
-    { .x = WINE_NX_FB_W / 2, .y = WINE_NX_FB_H / 2, .width = WINE_NX_FB_W, .height = WINE_NX_FB_H };
+static struct pointer_cursor wine_nx_pointer;
 static PadState wine_nx_pad;
 static u64 wine_nx_pointer_tick;
 static int wine_nx_pointer_ready;
@@ -562,12 +906,32 @@ static int wine_nx_pointer_placed;
 /* The position Wine last had, from a take or the program's SetCursorPos. */
 static int wine_nx_pointer_sent_x = WINE_NX_FB_W / 2, wine_nx_pointer_sent_y = WINE_NX_FB_H / 2;
 
+/* The pointer belongs to the desktop, whose size is known once.  SetCursorPos
+ * arrives on the program's own thread, so the one-time init is a once. */
+static pthread_once_t wine_nx_pointer_once = PTHREAD_ONCE_INIT;
+
+static void wine_nx_pointer_setup_cb( void )
+{
+    wine_nx_desktop_init();
+    wine_nx_pointer.width = wine_nx_desktop_w;
+    wine_nx_pointer.height = wine_nx_desktop_h;
+    wine_nx_pointer.x = wine_nx_desktop_w / 2.0;
+    wine_nx_pointer.y = wine_nx_desktop_h / 2.0;
+    wine_nx_pointer_sent_x = wine_nx_desktop_w / 2;
+    wine_nx_pointer_sent_y = wine_nx_desktop_h / 2;
+}
+
+static void wine_nx_pointer_setup( void )
+{
+    pthread_once( &wine_nx_pointer_once, wine_nx_pointer_setup_cb );
+}
+
 /* Take the screen from the text console and bring up a linear framebuffer. */
 int wine_nx_fb_init(void)
 {
     Result rc;
     if (wine_nx_fb_ready) return 0;
-    if (wine_nx_gl_window) return -1;  /* an OpenGL surface has the screen */
+    if (wine_nx_gl_window || wine_nx_vulkan_window) return -1;  /* a surface has the screen */
     log_line( "[NXFB] fb_init: taking screen from console" );
     if (wine_nx_console_active)
     {
@@ -582,6 +946,9 @@ int wine_nx_fb_init(void)
         return -1;
     }
     framebufferMakeLinear( &wine_nx_fb );
+    /* A finished OpenGL surface can leave its widescreen crop on the window;
+     * the framebuffer's picture is fitted as it is drawn and stays whole. */
+    nwindowSetCrop( nwindowGetDefault(), 0, 0, 0, 0 );
     wine_nx_fb_ready = 1;
     log_line( "[NXFB] framebuffer ready %dx%d", WINE_NX_FB_W, WINE_NX_FB_H );
     return 0;
@@ -667,18 +1034,60 @@ int wine_nx_compositor_enabled(void)
     return 1;
 }
 
-/* An OpenGL window surface takes the screen. libnx's framebuffer and EGL cannot
+/* A window surface takes the screen. libnx's framebuffer and EGL cannot
  * both queue buffers to the default NWindow, so the framebuffer is closed, or
  * the compositor gives the screen up, while the surface exists; GDI keeps
  * drawing into window surfaces, shown again once the surface is gone. Returns
- * NULL while another surface has the screen or the framebuffer is being drawn. */
-void *wine_nx_gl_acquire_window(void)
+ * NULL while another surface has the screen or the framebuffer is being drawn.
+ * OpenGL and Vulkan take turns with the screen: a Vulkan surface (DXVK's
+ * presents) takes it over from an OpenGL surface that is only holding it, so
+ * a D3D game behind DXVK is never kept off the screen by the wined3d or GDI
+ * OpenGL surface its ddraw proxy opens first. */
+static void *wine_nx_screen_acquire( int width, int height, int vulkan )
 {
     int compositor = wine_nx_compositor_enabled();
     NWindow *window = NULL;
+    int taken_over = 0;
+
+    /* An exclusive D3D game expects the screen to take on its mode, the way a
+     * real display modeset would: its ClipCursor, centring and cursor maths
+     * all measure against the monitor size.  We do not modeset, so pretend the
+     * screen is the program's own resolution while its surface holds the
+     * display; every mapping through the present fit then lines up with the
+     * picture, and the game's clip box lands on its window. */
+    if (width > 0 && height > 0 &&
+        (wine_nx_desktop_w != width || wine_nx_desktop_h != height))
+    {
+        log_line( "[NXGL] the screen is %dx%d while the program runs (was %dx%d)",
+                  width, height, wine_nx_desktop_w, wine_nx_desktop_h );
+        wine_nx_desktop_w = width;
+        wine_nx_desktop_h = height;
+    }
+    else if (width < 1 && wine_nx_desktop_mode_w &&
+             (wine_nx_desktop_w != wine_nx_desktop_mode_w || wine_nx_desktop_h != wine_nx_desktop_mode_h))
+    {
+        /* A Vulkan surface is the panel's own size and takes the screen again
+         * whenever its swapchain is reset; between two takes, the size a
+         * release puts back must not outlast the program's own display mode. */
+        log_line( "[NXGL] the screen is %dx%d (the program's mode; was %dx%d)",
+                  wine_nx_desktop_mode_w, wine_nx_desktop_mode_h, wine_nx_desktop_w, wine_nx_desktop_h );
+        wine_nx_desktop_w = wine_nx_desktop_mode_w;
+        wine_nx_desktop_h = wine_nx_desktop_mode_h;
+    }
 
     pthread_mutex_lock( &wine_nx_fb_mutex );
-    if (!wine_nx_gl_window && !wine_nx_fb_lock_depth)
+    if (vulkan && wine_nx_vulkan_window)
+        window = nwindowGetDefault();  /* a swapchain reset reuses the screen it has */
+    else if (vulkan && wine_nx_gl_window)
+    {
+        /* Take the screen over from the OpenGL surface holding it: it is not
+         * the presenter when the program presents through Vulkan. */
+        taken_over = 1;
+        wine_nx_gl_window = 0;
+        wine_nx_vulkan_window = 1;
+        window = nwindowGetDefault();
+    }
+    else if (!wine_nx_gl_window && !wine_nx_vulkan_window && !wine_nx_fb_lock_depth)
     {
         if (compositor)
             ;  /* suspended below, without this lock, as it waits for the presenter */
@@ -696,26 +1105,179 @@ void *wine_nx_gl_acquire_window(void)
             wine_nx_console_active = 0;
         }
         window = nwindowGetDefault();
-        wine_nx_gl_window = 1;
+        if (vulkan) wine_nx_vulkan_window = 1;
+        else wine_nx_gl_window = 1;
     }
     pthread_mutex_unlock( &wine_nx_fb_mutex );
     if (window && compositor) wine_nx_compositor_suspend();
-    if (window) nwindowSetDimensions( window, WINE_NX_FB_W, WINE_NX_FB_H );
-    log_line( "[NXGL] %s", window ? "screen handed to an OpenGL surface" : "screen busy; OpenGL surface refused" );
+    /* The surface is the window's own size: the program draws 1:1 and the
+     * display compositor scales the buffer onto the panel, like it does for
+     * every other layer.  The panel's own size kept the program's viewport
+     * (its window's size) clipped to a crop of the picture. */
+    if (width < 1) width = WINE_NX_FB_W;
+    if (height < 1) height = WINE_NX_FB_H;
+    /* libnx's nwindowSetDimensions clears the crop, and nwindowSetCrop clamps
+     * to the dimensions in effect (nx/source/display/native_window.c), so the
+     * crop is only given after the dimensions: before them it never survived
+     * to a single presented frame.  The widescreen hack: the display
+     * compositor shows only the central 4:3 of the buffer, stretched over the
+     * whole panel.  The Vulkan screen buffers are drawn already cropped and
+     * stay whole. */
+    if (window) nwindowSetDimensions( window, width, height );
+    if (window && vulkan)
+        nwindowSetCrop( window, 0, 0, 0, 0 );  /* the Vulkan buffers carry their own crop */
+    else if (window && wine_nx_fit_stretch43)
+    {
+        int crop_w = width, crop_h = height, left, top;
+
+        screen_crop_4_3( &crop_w, &crop_h );
+        left = (width - crop_w) / 2;
+        top = (height - crop_h) / 2;
+        nwindowSetCrop( window, left, top, left + crop_w, top + crop_h );
+        log_line( "[NXGL] the crop is %d,%d-%d,%d", left, top, left + crop_w, top + crop_h );
+    }
+    else if (window) nwindowSetCrop( window, 0, 0, 0, 0 );
+    log_line( "[NXGL] %s", window ? (vulkan ? "screen handed to a Vulkan surface" : "screen handed to an OpenGL surface")
+                          : (vulkan ? "screen busy; Vulkan surface refused" : "screen busy; OpenGL surface refused") );
+    if (taken_over) log_line( "[NXGL] the screen is taken over from the OpenGL surface" );
+    if (window) log_line( "[NXGL] the surface is %dx%d, scaled onto the %dx%d panel", width, height,
+                          WINE_NX_FB_W, WINE_NX_FB_H );
     return window;
 }
 
-/* The OpenGL surface is destroyed; the framebuffer or the compositor may take
- * the screen back. */
-void wine_nx_gl_release_window(void)
+void *wine_nx_gl_acquire_window( int width, int height )
+{
+    return wine_nx_screen_acquire( width, height, 0 );
+}
+
+void *wine_nx_gl_acquire_window_vulkan( int width, int height )
+{
+    return wine_nx_screen_acquire( width, height, 1 );
+}
+
+int wine_nx_vulkan_owns_screen( void )
+{
+    return wine_nx_vulkan_window;
+}
+
+/* The screen goes back to the framebuffer or the compositor once the last
+ * surface is done with it. */
+static void wine_nx_screen_return( void )
 {
     int compositor = wine_nx_compositor_running();
 
-    pthread_mutex_lock( &wine_nx_fb_mutex );
-    wine_nx_gl_window = 0;
-    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (wine_nx_desktop_default_w &&
+        (wine_nx_desktop_w != wine_nx_desktop_default_w ||
+         wine_nx_desktop_h != wine_nx_desktop_default_h))
+    {
+        log_line( "[NXGL] the screen is back to %dx%d",
+                  wine_nx_desktop_default_w, wine_nx_desktop_default_h );
+        wine_nx_desktop_w = wine_nx_desktop_default_w;
+        wine_nx_desktop_h = wine_nx_desktop_default_h;
+    }
     log_line( "[NXGL] screen returned to the %s", compositor ? "compositor" : "framebuffer" );
     if (compositor) wine_nx_compositor_resume();
+}
+
+/* The OpenGL surface is destroyed; the screen goes back to the framebuffer or
+ * the compositor, unless a Vulkan surface has meanwhile taken it over. */
+void wine_nx_gl_release_window(void)
+{
+    int give_back = 0;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (wine_nx_gl_window && !wine_nx_vulkan_window)
+    {
+        wine_nx_gl_window = 0;
+        give_back = 1;
+    }
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give_back) wine_nx_screen_return();
+}
+
+/* The Vulkan surface is destroyed (a swapchain reset makes a new one at once,
+ * or the program is done); the screen goes back the same way. */
+void wine_nx_vulkan_release_window(void)
+{
+    int give_back = 0;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (wine_nx_vulkan_window)
+    {
+        wine_nx_vulkan_window = 0;
+        give_back = 1;
+    }
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give_back) wine_nx_screen_return();
+}
+
+/* Screenshots: Minus and R together keep the frame the player is looking at,
+ * as a PNG under sdmc:/switch/wine/screenshots/.  Each present path hands the
+ * sink its own pixels -- the framebuffer's, an OpenGL surface's back buffer,
+ * the Vulkan screen buffer's readback -- and the sink does the rest.  (+ and -
+ * held together still quits, so the shutter needed a chord of its own.) */
+static volatile int screenshot_pending;
+
+void wine_nx_screenshot_request( void )
+{
+    if (__atomic_exchange_n( &screenshot_pending, 1, __ATOMIC_ACQ_REL )) return;
+    log_line( "[SHOT] capture asked for; the next frame is saved to screenshots/" );
+}
+
+int wine_nx_screenshot_requested( void )
+{
+    return __atomic_load_n( &screenshot_pending, __ATOMIC_ACQUIRE );
+}
+
+int wine_nx_screenshot_take( const void *pixels, int width, int height, int stride_px, int format )
+{
+    static unsigned int shot_count;
+    png_image image = { .version = PNG_IMAGE_VERSION };
+    unsigned char *rows;
+    char path[320];
+    FILE *file;
+    int y, ok = 0;
+
+    if (!__atomic_exchange_n( &screenshot_pending, 0, __ATOMIC_ACQ_REL )) return 0;
+    if (!pixels || width < 1 || height < 1 || stride_px < width * 4)
+    {
+        log_line( "[SHOT] no picture to keep" );
+        return 0;
+    }
+    if (!(rows = malloc( (size_t)width * height * 4 )))
+    {
+        log_line( "[SHOT] no room for a %dx%d picture", width, height );
+        return 0;
+    }
+    /* Rows the way PNG wants them: glReadPixels comes up bottom-up. */
+    for (y = 0; y < height; y++)
+    {
+        const unsigned char *row = (const unsigned char *)pixels +
+                                   (size_t)(format == WINE_NX_SHOT_RGBA8_BOTTOM_UP ? height - 1 - y : y) * stride_px;
+
+        memcpy( rows + (size_t)y * width * 4, row, (size_t)width * 4 );
+    }
+    mkdir( "sdmc:/switch/wine/screenshots", 0777 );
+    for (;;)
+    {
+        struct stat st;
+
+        if (++shot_count > 9999) break;
+        snprintf( path, sizeof(path), "sdmc:/switch/wine/screenshots/shot-%04u.png", shot_count );
+        if (stat( path, &st )) break;  /* the first free name */
+    }
+    if (shot_count <= 9999 && (file = fopen( path, "wb" )))
+    {
+        image.width = width;
+        image.height = height;
+        image.format = format == WINE_NX_SHOT_BGRA8 ? PNG_FORMAT_BGRA : PNG_FORMAT_RGBA;
+        ok = png_image_write_to_stdio( &image, file, 0, rows, 0, NULL );
+        fclose( file );
+    }
+    free( rows );
+    if (ok) log_line( "[SHOT] saved %s (%dx%d)", path, width, height );
+    else log_line( "[SHOT] could not keep the picture" );
+    return ok;
 }
 
 /* Each present converts the whole screen, so frames that only move the
@@ -742,6 +1304,9 @@ void wine_nx_fb_present(void)
         {
             if (wine_nx_cursor_visible)
                 pointer_cursor_paint( &wine_nx_cursor, wine_nx_fb_pending_bits, wine_nx_fb_pending_stride, 1 );
+            if (wine_nx_screenshot_requested())
+                wine_nx_screenshot_take( wine_nx_fb_pending_bits, WINE_NX_FB_W, WINE_NX_FB_H,
+                                         wine_nx_fb_pending_stride, WINE_NX_SHOT_BGRA8 );
             framebufferEnd( &wine_nx_fb );
             if (wine_nx_cursor_visible)
                 pointer_cursor_paint( &wine_nx_cursor, wine_nx_fb_pending_bits, wine_nx_fb_pending_stride, 0 );
@@ -758,6 +1323,8 @@ void wine_nx_fb_present(void)
 
 static void wine_nx_cursor_move( int x, int y )
 {
+    /* x,y are desktop coordinates; the arrow is painted on the panel. */
+    wine_nx_screen_to_panel( x, y, &x, &y );
     pthread_mutex_lock( &wine_nx_fb_mutex );
     if (x != (int)wine_nx_cursor.x || y != (int)wine_nx_cursor.y)
     {
@@ -833,6 +1400,9 @@ uint64_t wine_nx_osk_clock( void )
 
 void wine_nx_keyboard_open( void )
 {
+    /* Whichever overlay is up gives way to the keyboard the program asked
+     * for; it opened first only if nothing else is on the screen. */
+    wine_nx_controls_overlay_show( 0, 0, NULL, NULL );
     if (!wine_nx_osk_visible()) log_line( "[OSK] opened by the program" );
     wine_nx_osk_show( 1, __atomic_load_n( &osk_last_held, __ATOMIC_RELAXED ) );
 }
@@ -845,19 +1415,24 @@ static int runtime_wheel[2];
 
 void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
+void wine_nx_ask_program_quit( const char *why );
 
 
 int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
 {
+    wine_nx_pointer_setup();
     HidTouchScreenState touch = {0};
     struct input_pad raw = {0};
     struct input_output output = {0};
-    const struct input_profile *profile = &wine_nx_input_profile;
+    struct input_profile profile_store;
+    const struct input_profile *profile = &profile_store;
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
-    static int osk_combo;
+    static int osk_combo, remap_combo, shot_combo;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
+
+    wine_nx_input_profile_copy( &profile_store );
 
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     if (!wine_nx_pointer_ready)
@@ -881,17 +1456,44 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     {
         const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
+        /* Minus and the left stick click open the controls overlay instead:
+         * remapping where the game is, rather than back in the launcher. */
+        const u64 remap = HidNpadButton_Minus | HidNpadButton_StickL;
+        /* Minus and R keep the screen as a screenshot. */
+        const u64 shot = HidNpadButton_Minus | HidNpadButton_R;
         unsigned int bits = osk_buttons( held );
-        if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible())
+        if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible() && !wine_nx_controls_overlay_visible())
             wine_nx_osk_show( 1, bits );
         osk_combo = (held & osk) == osk;
+        if ((held & remap) == remap && !remap_combo)
+        {
+            if (wine_nx_controls_overlay_visible()) wine_nx_controls_overlay_show( 0, bits, NULL, NULL );
+            else if (!wine_nx_osk_visible() &&
+                     !wine_nx_controls_overlay_show( 1, bits, wine_nx_input_root, wine_nx_input_program ))
+                log_line( "[INPUT] could not read controller settings for the controls overlay" );
+        }
+        remap_combo = (held & remap) == remap;
+        if ((held & shot) == shot)
+        {
+            if (!shot_combo) wine_nx_screenshot_request();
+            /* The game sees none of it: the shutter is ours alone. */
+            swallowed = held;
+        }
+        shot_combo = (held & shot) == shot;
         __atomic_store_n( &osk_last_held, bits, __ATOMIC_RELAXED );
-        if (wine_nx_osk_visible())
+        if (wine_nx_osk_visible() || wine_nx_controls_overlay_visible())
         {
             int touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
-            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], touching,
-                                             touching ? (int)touch.touches[0].x : 0,
-                                             touching ? (int)touch.touches[0].y : 0, armTicksToNs( now ) );
+            if (wine_nx_osk_visible())
+                on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], touching,
+                                                 touching ? (int)touch.touches[0].x : 0,
+                                                 touching ? (int)touch.touches[0].y : 0, armTicksToNs( now ) );
+            else
+                on_keyboard = wine_nx_controls_overlay_input( bits, raw.axis[0], raw.axis[1],
+                                                              raw.axis[2], raw.axis[3], touching,
+                                                              touching ? (int)touch.touches[0].x : 0,
+                                                              touching ? (int)touch.touches[0].y : 0,
+                                                              armTicksToNs( now ) );
             keyboard = 1;
             swallowed = held;
         }
@@ -899,7 +1501,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
-        unsigned int generation = wine_nx_osk_generation();
+        unsigned int generation = wine_nx_osk_generation() ^ wine_nx_controls_overlay_generation();
         if (generation != drawn_generation)
         {
             drawn_generation = generation;
@@ -911,7 +1513,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
-        pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
+        double tx, ty;
+        wine_nx_panel_to_screen( (int)touch.touches[0].x, (int)touch.touches[0].y, &tx, &ty );
+        pointer_cursor_place( &wine_nx_pointer, tx, ty );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
         wine_nx_pointer_placed |= moved;
         output.buttons |= WINE_NX_POINTER_LEFT;
@@ -925,8 +1529,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         output.wheels = mapped.wheels;
         output.mouse_x = mapped.mouse_x;
         output.mouse_y = mapped.mouse_y;
-        /* The profile's mouse-speed scales the built-in cursor speed. */
-        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile->mouse_speed / 100.0;
+        /* The profile's mouse-speed scales the built-in cursor speed, which
+         * counts panel pixels per second whatever the desktop's size. */
+        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile->mouse_speed / 100.0 / wine_nx_fit_scale_now();
         moved |= pointer_cursor_step( &wine_nx_pointer, output.mouse_x, output.mouse_y, elapsed );
     }
     input_key_edges_update( &runtime_key_edges, output.keys );
@@ -951,7 +1556,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         else if (armTicksToNs( now - quit_since ) >= 1000000000ull) leave = 1;
     }
     pthread_mutex_unlock( &wine_nx_pointer_mutex );
-    if (leave) wine_nx_request_quit( "+ and - held" );
+    if (leave) wine_nx_ask_program_quit( "+ and - held" );
     wine_nx_cursor_move( *x, *y );
     return moved;
 }
@@ -961,6 +1566,7 @@ void wine_nx_input_take( struct input_snapshot *out )
     struct input_key_edges edges;
     struct pointer_buttons buttons;
 
+    wine_nx_pointer_setup();
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     out->x = wine_nx_pointer_sent_x = (int)wine_nx_pointer.x;
     out->y = wine_nx_pointer_sent_y = (int)wine_nx_pointer.y;
@@ -984,6 +1590,7 @@ void wine_nx_input_take( struct input_snapshot *out )
  * motion Wine has not been handed yet (pointer_cursor_warp). */
 void wine_nx_pointer_set_pos( int x, int y )
 {
+    wine_nx_pointer_setup();
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     wine_nx_pointer_moved = pointer_cursor_warp( &wine_nx_pointer, wine_nx_pointer_sent_x,
                                                  wine_nx_pointer_sent_y, x, y );
@@ -1002,6 +1609,7 @@ void wine_nx_pointer_set_pos( int x, int y )
  * not in where the arrow happens to be. */
 void wine_nx_pointer_follow( int x, int y )
 {
+    wine_nx_pointer_setup();
     pthread_mutex_lock( &wine_nx_pointer_mutex );
     pointer_cursor_place( &wine_nx_pointer, x, y );
     wine_nx_pointer_sent_x = x;
@@ -1863,6 +2471,85 @@ static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, 
     return STATUS_SUCCESS;
 }
 
+/* Where a whole dgVoodoo2 release can be dropped once instead of copying its
+ * DLLs beside each program: MS\x86 holds the wrappers for 32-bit games and
+ * MS\x64 those for 64-bit ones, or the folder root can hold them flat.  The
+ * first of the named folders holding any wrapper DLL wins. */
+static int voodoo_drop_directories( void )
+{
+    static const char *const bases[] = { "dgVoodoo", "dgVoodoo2", "voodoo" };
+    static const char *const arch_host[] = { "MS/x86", "MS/x64" };
+    static const char *const arch_dos[] = { "MS\\x86", "MS\\x64" };
+    static const char *const wrappers[] = { "DDraw.dll", "D3DImm.dll", "D3D8.dll", "D3D9.dll" };
+    char host[260];
+    unsigned int i, j, k;
+
+    for (i = 0; i < sizeof(bases) / sizeof(bases[0]); i++)
+    {
+        runtime_voodoo_dir_count = 0;
+        for (j = 0; j < sizeof(arch_host) / sizeof(arch_host[0]); j++)
+        {
+            for (k = 0; k < sizeof(wrappers) / sizeof(wrappers[0]); k++)
+            {
+                snprintf( host, sizeof(host), "%s/%s/%s/%s", WINE_DRIVE_C, bases[i], arch_host[j], wrappers[k] );
+                if (access( host, F_OK )) continue;
+                snprintf( runtime_voodoo_dirs[runtime_voodoo_dir_count], sizeof(runtime_voodoo_dirs[0]),
+                          "%s\\%s", bases[i], arch_dos[j] );
+                runtime_voodoo_dir_count++;
+                break;
+            }
+        }
+        if (!runtime_voodoo_dir_count)  /* flat: the DLLs right in the folder */
+        {
+            for (k = 0; k < sizeof(wrappers) / sizeof(wrappers[0]); k++)
+            {
+                snprintf( host, sizeof(host), "%s/%s/%s", WINE_DRIVE_C, bases[i], wrappers[k] );
+                if (access( host, F_OK )) continue;
+                snprintf( runtime_voodoo_dirs[0], sizeof(runtime_voodoo_dirs[0]), "%s", bases[i] );
+                runtime_voodoo_dir_count = 1;
+                break;
+            }
+        }
+        if (runtime_voodoo_dir_count) return runtime_voodoo_dir_count;
+    }
+    return 0;
+}
+
+/* A DirectDraw the user put in the system folders themselves (D7VK's ddraw.dll
+ * standing in for the Wine one, and the like) cannot share a process with the
+ * dgVoodoo wrappers: the program would get one DirectDraw beside it and
+ * another from the system's own loads. Voodoo sets the system copy aside --
+ * renamed, never deleted -- and turning Voodoo off brings the file back at the
+ * next start, whatever happened in between. */
+static void voodoo_system_ddraw( int on )
+{
+    static const char *const dirs[] = { WINE_DRIVE_C "/windows/system32", WINE_DRIVE_C "/windows/syswow64" };
+    char from[300], to[300];
+    unsigned int i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+    {
+        snprintf( from, sizeof(from), "%s/ddraw.dll", dirs[i] );
+        snprintf( to, sizeof(to), "%s/ddraw.dll.voodoo-away", dirs[i] );
+        if (on)
+        {
+            if (access( from, F_OK ) || !access( to, F_OK )) continue;
+            if (rename( from, to ))
+                log_line( "[VOODOO] %s could not be set aside; a system DirectDraw may shadow the wrappers", from );
+            else
+                log_line( "[VOODOO] %s set aside while Voodoo is on (back with Voodoo off)", from );
+        }
+        else
+        {
+            if (access( to, F_OK ) || !access( from, F_OK )) continue;
+            if (rename( to, from ))
+                log_line( "[VOODOO] %s could not be brought back", to );
+            else
+                log_line( "[VOODOO] %s brought back", from );
+        }
+    }
+}
+
 static NTSTATUS runtime_prepare_left4dead( const char *target, const char *dos_path, int *enabled );
 
 static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *target,
@@ -1877,7 +2564,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     size_t chars, size, i, fex_environment_size;
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
-    char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "";
+    char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", voodoo_path[240] = "", graphics_path[320] = "";
     struct dxvk_version dxvk = {0}, vkd3d = {0};
     int left4dead = 0;
     NTSTATUS status;
@@ -1907,13 +2594,20 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         snprintf( vkd3d_path, sizeof(vkd3d_path), "C:\\%s;", vkd3d_dir );
         log_line( "[VKD3D] payload C:\\%s; application-local DLLs take priority", vkd3d_dir );
     }
+    /* The dgVoodoo2 wrappers dropped at C:\dgVoodoo wrap the program's own
+     * DirectDraw/D3D before anything below sees it, and hand their output to
+     * the payload beneath them.  The program's own folder is searched first,
+     * so DLLs copied beside it still win. */
+    for (i = 0; i < (size_t)runtime_voodoo_dir_count; i++)
+        snprintf( voodoo_path + strlen(voodoo_path), sizeof(voodoo_path) - strlen(voodoo_path),
+                  "C:\\%s;", runtime_voodoo_dirs[i] );
     /* Keep native DXVK DLLs separate for each guest architecture. */
     if (dxvk.installed &&
         launcher_dxvk_version_directory( main_image_info.Machine, runtime_dxvk_source,
                                          dxvk.bundled ? "" : dxvk.version,
                                          dxvk_dir, sizeof(dxvk_dir) ))
     {
-        snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
+        snprintf( graphics_path, sizeof(graphics_path), "%s%sC:\\%s;", vkd3d_path, voodoo_path, dxvk_dir );
         if (dxvk.version[0])
             log_line( "[DXVK] %s payload C:\\%s (version %s); application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir, dxvk.version );
@@ -1921,8 +2615,12 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
             log_line( "[DXVK] %s bundled payload C:\\%s; application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir );
     }
-    else if (runtime_d3d != LAUNCHER_D3D_WINE)
-        log_line( "[DXVK] selected payload is not installed; using Wine Direct3D" );
+    else
+    {
+        snprintf( graphics_path, sizeof(graphics_path), "%s%s", vkd3d_path, voodoo_path );
+        if (runtime_d3d != LAUNCHER_D3D_WINE)
+            log_line( "[DXVK] selected payload is not installed; using Wine Direct3D" );
+    }
     snprintf( dll_path, sizeof(dll_path), "%s;%sC:\\windows\\system32;C:\\windows;C:\\",
               current_dir, graphics_path );
     /* The current directory ends in a backslash, as RtlSetCurrentDirectory_U
@@ -1943,7 +2641,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
             input_profile_program( RUNTIME_DIR, target, wine_nx_swkbd_auto_enabled,
                                    &wine_nx_input_profile, &kv, input_path, sizeof(input_path) );
         if (!loaded) log_line( "[INPUT] could not read controller settings" );
+        wine_nx_input_profile_publish( &wine_nx_input_profile );
+        log_line( "[INPUT] mouse speed %d%% of the built-in (%s); %d panel px/s at full tilt",
+                  wine_nx_input_profile.mouse_speed,
+                  wine_nx_input_profile.mouse_speed_explicit ? "yours" : "the game's default",
+                  wine_nx_input_profile.mouse_speed * 10 );
         wine_nx_swkbd_auto_enabled = wine_nx_input_profile.keyboard_auto;
+        /* Kept for the controls overlay, which reads and writes the same
+         * per-game controls while the program runs. */
+        snprintf( wine_nx_input_root, sizeof(wine_nx_input_root), "%s", RUNTIME_DIR );
+        snprintf( wine_nx_input_program, sizeof(wine_nx_input_program), "%s", target[1] == ':' ? "" : target );
     }
     /* Its own Box64 options, read when its first x86 code runs: SPEED2.box64.txt. */
     {
@@ -2460,7 +3167,59 @@ static int launcher_machine( const char *path, unsigned short *machine )
 #ifdef WINE_NX_BOX64_INTERPRETER
 extern NTSTATUS wine_nx_init_wow64_peb( RTL_USER_PROCESS_PARAMETERS *, void * );
 extern NTSTATUS wine_nx_prepare_wow64_ntdll( HMODULE, HMODULE );
-extern NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *, void **, BOOL );
+/* Two FEX builds can sit in system32 at once: the stock CPU modules and a
+ * differently built pair named libwow64fex-<variant>.dll and
+ * libarm64ecfex-<variant>.dll. fex-variant.txt in the runtime folder names
+ * the variant, so a faster and a safer build can be compared without
+ * touching anything else; a missing module falls back to the stock one. */
+static const char *runtime_fex_cpu_module( int amd64 )
+{
+    static char variant[40], warned[2], names[2][80];
+    static int read;
+    const char *stem = amd64 ? "libarm64ecfex" : "libwow64fex";
+    char line[64], path[300];
+    size_t i, at = 0;
+    FILE *file;
+
+    if (!read)
+    {
+        read = 1;
+        if (runtime_fex_variant)
+        {
+            /* The program's own choice in Game Settings pins the modules. */
+            snprintf( variant, sizeof(variant), "%s", runtime_fex_variant );
+            if (variant[0]) log_line( "[CPU] the program's settings name the \"%s\" modules", variant );
+        }
+        else
+        {
+            if ((file = fopen( WINE_ROOT "/fex-variant.txt", "r" )))
+            {
+                if (fgets( line, sizeof(line), file ))
+                    for (i = 0; line[i] && line[i] != '\n' && line[i] != '\r' && at + 1 < sizeof(variant); i++)
+                    {
+                        if (!at && (line[i] == ' ' || line[i] == '\t' || line[i] == '-')) continue;
+                        variant[at++] = line[i];
+                    }
+                fclose( file );
+            }
+            variant[at] = 0;
+            if (variant[0]) log_line( "[CPU] fex-variant.txt names the \"%s\" modules", variant );
+        }
+    }
+    if (variant[0])
+    {
+        snprintf( names[amd64 != 0], sizeof(names[0]), "%s-%s.dll", stem, variant );
+        snprintf( path, sizeof(path), "%s/%s", WINE_SYSTEM_DIR, names[amd64 != 0] );
+        if (!access( path, R_OK )) return names[amd64 != 0];
+        if (!warned[amd64 != 0]++)
+            log_line( "[CPU] %s is not under %s; the stock %s.dll serves instead",
+                      names[amd64 != 0], WINE_SYSTEM_DIR, stem );
+    }
+    snprintf( names[amd64 != 0], sizeof(names[0]), "%s.dll", stem );
+    return names[amd64 != 0];
+}
+
+extern NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *, void **, const char * );
 
 static void *runtime_wow64_initialize;
 extern void (*wine_nx_wow64_thread_start)( PRTL_THREAD_START_ROUTINE, void *, BOOL, TEB * );
@@ -2515,7 +3274,8 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
     status = wine_nx_loader_bootstrap( main_nt_name );
     log_line( "[WOW64] native loader bootstrap status=%08x", status );
     if (status) return status;
-    status = wine_nx_loader_prepare_wow64( &native, &initialize, runtime_fex );
+    status = wine_nx_loader_prepare_wow64( &native, &initialize,
+                                           runtime_fex ? runtime_fex_cpu_module( 0 ) : "winebox64.dll" );
     log_line( "[WOW64] native DLLs status=%08x", status );
     if (status) return status;
     status = map_pe_image( WINE_NX_RUNTIME_SYSWOW64 "/ntdll.dll", (void **)&guest, &size );
@@ -2695,7 +3455,7 @@ static NTSTATUS runtime_prepare_arm64ec(void)
 {
     static const char key_path[] = "\\Registry\\Machine\\Software\\Microsoft\\Wow64\\amd64";
     WCHAR cpu_name[32];
-    const char *cpu_module = runtime_fex ? "libarm64ecfex.dll" : "winebox64ec.dll";
+    const char *cpu_module = runtime_fex ? runtime_fex_cpu_module( 1 ) : "winebox64ec.dll";
     unsigned int i;
     UNICODE_STRING value = {0};
     HMODULE ntdll = NULL;
@@ -3205,6 +3965,7 @@ static int leave_cleanly( void )
 {
     int left = memory_left_behind( 0 ), after;
 
+    log_repeat_flush_now();
     wine_nx_sd_cache_flush();
     /* Services opened for the whole run hold heap pages of their own: the
      * sockets take a transfer memory at start-up and nothing ever gave it back.
@@ -3320,6 +4081,23 @@ void wine_nx_request_quit( const char *why )
     if (__atomic_exchange_n( (int *)&wine_nx_quit_requested, 1, __ATOMIC_SEQ_CST )) return;
     log_line( "[QUIT] %s; ending %u threads to return to the launcher", why, wine_nx_threads_other() );
     wine_nx_threads_wake();
+}
+
+/* The chord's first press: ask the program to close itself and give it a
+ * moment.  Its own exit code then runs -- Vampire, for one, writes
+ * masquerade.ini on the way out, and the chord used to tear the threads down
+ * before it got there, so the game remembered nothing.  A second press, or
+ * five seconds of the program not going, ends it the hard way. */
+void wine_nx_ask_program_quit( const char *why )
+{
+    if (__atomic_load_n( (int *)&wine_nx_quit_requested, __ATOMIC_SEQ_CST )) return;
+    if (__atomic_exchange_n( (int *)&wine_nx_close_asked, 1, __ATOMIC_SEQ_CST ))
+    {
+        wine_nx_request_quit( why );
+        return;
+    }
+    close_asked_at = armGetSystemTick();
+    log_line( "[QUIT] %s; asking the program to close itself first", why );
 }
 
 /* Wine calls this where it used to park after the program it ran terminated.
@@ -3486,6 +4264,11 @@ static void run_components_first( char *target, size_t size )
 static int return_to_launcher( void )
 {
     int i, still_lent = 0;
+
+    /* The widescreen hack belongs to the game: the launcher's own screen comes
+     * back through the plain fill-the-panel transform again. */
+    wine_nx_fit_stretch43 = 0;
+    log_repeat_flush_now();
 
     /* Only reached with the program's threads already gone. Both of these wait
      * for the thread they end: a thread of the runtime's own has no quit point
@@ -3702,23 +4485,24 @@ static void log_line_plain( const char *line )
     log_line( "%s", line );
 }
 
-static unsigned int launcher_install_forwarder( const char **step )
+static unsigned int launcher_install_forwarder( unsigned int address_space, const char **step )
 {
     struct wine_nx_forwarder request =
     {
         .nro_path = RUNTIME_DIR "/wine-nx-runtime.nro",
         .args = NULL,
-        .name = "Autorun",
+        .name = address_space == 2 ? "Autorun (32-bit)" : "Autorun",
         .author = "ticoverse.com",
         .icon = wine_nx_icon_any,
         .icon_size = wine_nx_icon_any_size,
+        .address_space = address_space,
     };
     unsigned int rc;
 
     wine_nx_forwarder_report = log_line_plain;
     rc = wine_nx_forwarder_install( &request, step );
     log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
-              wine_nx_forwarder_title_id( request.nro_path, NULL ), rc,
+              wine_nx_forwarder_title_id_as( request.nro_path, NULL, address_space ), rc,
               rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
 }
@@ -3732,9 +4516,12 @@ static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwar
     *step = "checking the Autorun forwarder";
     if (R_FAILED( rc = nsInitialize() )) return rc;
     rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
+    if (R_SUCCEEDED( rc ) && !installed)
+        rc = nsIsAnyApplicationEntityInstalled( wine_nx_forwarder_title_id_as( AUTORUN_NRO, NULL, 2 ),
+                                                &installed );
     nsExit();
     if (R_FAILED( rc )) return rc;
-    if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    if (!installed && (rc = launcher_install_forwarder( 3, step ))) return rc;
     wine_nx_forwarder_report = log_line_plain;
     return wine_nx_forwarder_install( request, step );
 }
@@ -3898,6 +4685,8 @@ int main( int argc, char **argv )
             return 0;
         }
     }
+    /* Before the first allocation can reach it: see cap_heap_pool_for_shared_data. */
+    cap_heap_pool_for_shared_data();
     /* The launcher can access SteamGridDB before a game is selected. */
     log_memory_map( "start-up" );
     log_line( "[MAP] start-up: %d regions the loader already had lent", loader_lent_count );
@@ -4054,7 +4843,8 @@ int main( int argc, char **argv )
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
             .four_cores_available = wine_nx_four_cores_available(),
-            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ),
+            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ) ||
+                             runtime_title_id() == wine_nx_forwarder_title_id_as( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 2 ),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
@@ -4154,9 +4944,11 @@ int main( int argc, char **argv )
 #endif
         runtime_four_cores = 1;
         horizon_fast_sync_enabled = 0;
+        wine_nx_fit_stretch43 = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
         wine_nx_upscaling_configure( 0, 0.4f );
+        wine_nx_aspect_configure( 0 );
 #endif
 #ifdef WINE_NX_LSFG
         wine_nx_lsfg_configure( 0, 1, 1 );
@@ -4172,7 +4964,8 @@ int main( int argc, char **argv )
             horizon_fast_sync_enabled = settings.fast_sync;
             wine_nx_lazy_file_views = settings.lazy_file_views;
 #ifdef WINE_NX_FEX
-            runtime_fex = settings.fex;
+            runtime_fex = settings.fex != 0;
+            runtime_fex_variant = settings.fex == 2 ? "opt" : settings.fex == 1 ? "" : NULL;
 #endif
             runtime_four_cores = settings.four_cores;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
@@ -4184,6 +4977,7 @@ int main( int argc, char **argv )
             runtime_dxvk_hud = settings.dxvk_hud;
             wine_nx_graphics_configure( launcher_frame_limits[settings.frame_limit], settings.vsync );
             wine_nx_upscaling_configure( settings.upscaling, launcher_sharpness_values[settings.upscaling_sharpness] );
+            wine_nx_aspect_configure( settings.aspect_stretch );
 #ifdef WINE_NX_LSFG
             wine_nx_lsfg_configure( settings.lsfg_enabled, settings.lsfg_performance, settings.lsfg_flow );
 #endif
@@ -4234,6 +5028,77 @@ int main( int argc, char **argv )
                           settings.vsync ? "on" : "off" );
             }
 #endif
+            wine_nx_fit_stretch43 = settings.aspect_stretch;
+            /* Resolution: the screen the program starts with. The panel
+             * (the default) is left to the built-in default above. */
+            if (settings.resolution)
+                wine_nx_desktop_start_size( launcher_resolution_sizes[settings.resolution][0],
+                                            launcher_resolution_sizes[settings.resolution][1] );
+            /* The dgVoodoo2 wrapper reads dgVoodoo.conf from beside its own
+             * DLLs, that is, the program's folder. The Voodoo settings write
+             * it here before every start; Off leaves the folder alone, so a
+             * conf of the user's own survives. */
+            if (settings.voodoo)
+            {
+                struct launcher_kv conf;
+                char voodoo_conf[520], game_ddraw[520], *slash;
+                int have_wrappers;
+
+                snprintf( game_ddraw, sizeof(game_ddraw), "%s", target );
+                if ((slash = strrchr( game_ddraw, '/' )))
+                    strcpy( slash + 1, "ddraw.dll" );
+                have_wrappers = voodoo_drop_directories() || (slash && !access( game_ddraw, F_OK ));
+                if (have_wrappers) voodoo_system_ddraw( 1 );
+                if ((conf.size = launcher_voodoo_config( &settings, conf.text, sizeof(conf.text) )))
+                {
+                    snprintf( voodoo_conf, sizeof(voodoo_conf), "%s", target );
+                    if ((slash = strrchr( voodoo_conf, '/' )) &&
+                        (size_t)(slash + 1 - voodoo_conf) + sizeof("dgVoodoo.conf") <= sizeof(voodoo_conf))
+                    {
+                        strcpy( slash + 1, "dgVoodoo.conf" );
+                        if (launcher_kv_save( &conf, voodoo_conf ))
+                            log_line( "[VOODOO] %s written, scaling %s, API %s", voodoo_conf,
+                                      launcher_voodoo_scaling_values[settings.voodoo_scaling],
+                                      launcher_voodoo_api_values[settings.voodoo_api] );
+                        else
+                            log_line( "[VOODOO] %s could not be written", voodoo_conf );
+                    }
+                    /* The wrapper reads its conf from beside its own DLLs
+                     * before the program's folder: when the wrappers come
+                     * from the drop folder at C:\dgVoodoo, the same conf goes
+                     * there too, so the settings below always reach it. */
+                    if (voodoo_drop_directories())
+                    {
+                        int n;
+
+                        for (n = 0; n < runtime_voodoo_dir_count; n++)
+                        {
+                            char host[300], name[80];
+                            int m;
+
+                            m = 0;
+                            while (runtime_voodoo_dirs[n][m] && m + 1 < (int)sizeof(name))
+                            {
+                                name[m] = runtime_voodoo_dirs[n][m] == '\\' ? '/' : runtime_voodoo_dirs[n][m];
+                                m++;
+                            }
+                            name[m] = 0;
+                            snprintf( host, sizeof(host), "%s/%s/dgVoodoo.conf", WINE_DRIVE_C, name );
+                            if (launcher_kv_save( &conf, host ))
+                                log_line( "[VOODOO] %s written (the wrapper reads it there first)", host );
+                            else
+                                log_line( "[VOODOO] %s could not be written", host );
+                        }
+                        log_line( "[VOODOO] wrapper DLLs from C:\\%s on the program's DLL path",
+                                  runtime_voodoo_dirs[0] );
+                    }
+                    else
+                        log_line( "[VOODOO] no wrappers at C:\\dgVoodoo: drop the dgVoodoo2 folder there, "
+                                  "or leave its MS\\x86 DLLs beside the program" );
+                }
+            }
+            else
+                voodoo_system_ddraw( 0 );
             log_line( "[SETTINGS] %s: verbose %s, profiler %s, windows %s, Direct3D %s", settings_path,
                       settings.verbose < 0 ? "global" : settings.verbose ? "on" : "off",
                       settings.profile < 0 ? "global" : settings.profile ? "on" : "off",
@@ -4264,7 +5129,8 @@ int main( int argc, char **argv )
     horizon_server_profile_enabled = runtime_profile;
     open_game_log( target );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
-    log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
+    log_line( "[BUILD] %s (address space %d bits)", WINE_NX_RUNTIME_BUILD, runtime_address_space_bits() );
+    log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     runtime_boost_thread_limit();
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
@@ -4287,10 +5153,10 @@ int main( int argc, char **argv )
     if (runtime_fex)
     {
 #ifdef WINE_NX_FEX
-        const char *cpu_module = target_machine == IMAGE_FILE_MACHINE_AMD64 ?
-                                 WINE_SYSTEM_DIR "/libarm64ecfex.dll" :
-                                 WINE_SYSTEM_DIR "/libwow64fex.dll";
+        char cpu_module[300];
 
+        snprintf( cpu_module, sizeof(cpu_module), "%s/%s", WINE_SYSTEM_DIR,
+                  runtime_fex_cpu_module( target_machine == IMAGE_FILE_MACHINE_AMD64 ) );
         if ((target_machine != IMAGE_FILE_MACHINE_AMD64 && target_machine != IMAGE_FILE_MACHINE_I386) ||
             access( cpu_module, R_OK ))
         {
@@ -4308,8 +5174,9 @@ int main( int argc, char **argv )
         return return_to_launcher();
 #endif
     }
-    log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
-                         runtime_fex ? "FEX-2609" : "Box64" );
+    if (target_machine == IMAGE_FILE_MACHINE_ARM64) log_line( "[CPU] Native ARM64" );
+    else if (runtime_fex) log_line( "[CPU] FEX (%s)", runtime_fex_cpu_module( target_machine == IMAGE_FILE_MACHINE_AMD64 ) );
+    else log_line( "[CPU] Box64" );
 #ifdef WINE_NX_AMD64
     if (target_machine == IMAGE_FILE_MACHINE_AMD64)
     {
@@ -4359,8 +5226,14 @@ int main( int argc, char **argv )
     {
         extern void wine_nx_profile_start( void );
         wine_nx_profile_start();
+        log_line( "[INIT] profiler sampler started" );
     }
-    server_init_process( virtual_alloc_first_thread_data() );
+    {
+        void *first_data = virtual_alloc_first_thread_data();
+
+        log_line( "[INIT] first thread data %p", first_data );
+        server_init_process( first_data );
+    }
     log_line( "[INIT] server process initialized" );
 
     wine_nx_runtime_environment_init();

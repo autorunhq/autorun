@@ -78,12 +78,15 @@ struct compositor_gl_texture
 };
 
 /* One window on the screen: its pixels from (src_x, src_y), drawn at the
- * screen rectangle x, y, width, height, which may reach past the edges. */
+ * screen rectangle x, y, width, height, which may reach past the edges.
+ * src_width/src_height are the sampled texels (0: the drawn size), so a
+ * desktop-sized window can be drawn scaled into the panel. */
 struct compositor_gl_quad
 {
     const struct compositor_gl_texture *texture;
     int x, y, width, height;
     int src_x, src_y;
+    int src_width, src_height;
 };
 
 struct compositor_gl

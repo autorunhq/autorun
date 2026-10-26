@@ -717,8 +717,13 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
 
         TRACE("Rendering the software cursor.\n");
 
-        if (desc->windowed)
-            MapWindowPoints(NULL, swapchain->win_handle, (POINT *)&dst_rect, 2);
+        /* Map screen coordinates to client coordinates unconditionally: a
+         * "fullscreen" device whose window does not start at the desktop
+         * origin (a modeless 800x600 window on a larger virtual screen) still
+         * needs the window's origin taken off, or the cursor is drawn an
+         * entire window-origin away from where the program put it.  For a
+         * true fullscreen window at the origin this is a no-op. */
+        MapWindowPoints(NULL, swapchain->win_handle, (POINT *)&dst_rect, 2);
         if (wined3d_clip_blit(&clip_rect, &dst_rect, &src_rect))
             wined3d_device_context_blt(&cs->c, back_buffer, 0, &dst_rect, cursor_texture, 0,
                     &src_rect, WINED3D_BLT_ALPHA_TEST, NULL, WINED3D_TEXF_POINT);

@@ -9,7 +9,10 @@ Autorun ships no Windows modules; horizon-dlls does, laid out as on the card
 first and then there, which is how the two meet on a card."""
 from pathlib import Path
 import argparse
+import hashlib
 import json
+import os
+import platform
 import re
 import subprocess
 
@@ -19,7 +22,21 @@ parser.add_argument("stage", type=Path)
 parser.add_argument("--dlls", type=Path, default=root / "horizon-dlls/switch/wine")
 args = parser.parse_args()
 stage, dlls = args.stage.resolve(), args.dlls.resolve()
-readobj = root / "horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin/llvm-readobj"
+# The toolchain build.sh fetches: its release name is per-platform, and the
+# build exports WINE_NX_LLVM_MINGW with the one it chose. Anything already
+# fetched will do as a last resort.
+llvm_version = "20260505"
+machine = "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
+name = ("llvm-mingw-%s-ucrt-macos-universal" % llvm_version if platform.system() == "Darwin"
+        else "llvm-mingw-%s-ucrt-ubuntu-22.04-%s" % (llvm_version, machine))
+toolchain = (Path(os.environ["WINE_NX_LLVM_MINGW"]) / "bin" if os.environ.get("WINE_NX_LLVM_MINGW")
+             else root / "horizon-wine/toolchains" / name / "bin")
+if not (toolchain / "llvm-readobj").is_file():
+    toolchain = next((p / "bin" for p in sorted((root / "horizon-wine/toolchains").glob("llvm-mingw-*"))
+                      if (p / "bin" / "llvm-readobj").is_file()), toolchain)
+assert (toolchain / "llvm-readobj").is_file(), \
+    f"No llvm-mingw toolchain in {root / 'horizon-wine/toolchains'}; run build.sh, or set WINE_NX_LLVM_MINGW."
+readobj = toolchain / "llvm-readobj"
 
 def inspect(path, option):
     return subprocess.check_output([str(readobj), option, str(path)], text=True)
@@ -33,8 +50,13 @@ assert (dlls / "horizon-dlls/manifest.json").is_file(), f"{dlls} is not the DLL 
 for folder in ("drive_c/windows/system32", "drive_c/windows/syswow64", "drive_c/dxvk", "drive_c/dxvk64",
                "drive_c/vkd3d64"):
     if (stage / folder).is_dir():
+        # One exception: the tuned FEX variants, which are the FEX tree's own
+        # build and are fetched from its fex-opt release (horizon-wine/fex/
+        # variants-build.md). They have no DLL repository release of their own.
+        variant = re.compile(r"lib(arm64ec|wow64)fex-.+\.dll$")
         own = [p.name for p in (stage / folder).iterdir()
-               if p.suffix.lower() in (".dll", ".drv", ".acm", ".ax", ".ocx", ".sys", ".cpl", ".tlb")]
+               if p.suffix.lower() in (".dll", ".drv", ".acm", ".ax", ".ocx", ".sys", ".cpl", ".tlb")
+               and not variant.match(p.name)]
         assert not own, f"{folder} in the package holds modules the DLL repository provides: {own[:8]}"
 
 wow64 = card("drive_c/windows/system32/wow64.dll")
@@ -82,10 +104,21 @@ if (stage / "target.txt").exists():
     assert target.startswith("sdmc:/switch/wine/drive_c/") and (stage / target[len("sdmc:/switch/wine/"):]).is_file(), \
         f"target.txt names {target}, which the package does not hold"
 assert not (stage / "args.txt").exists(), "args.txt would apply to whatever program it names"
-# The game fixes the launcher knows of offline; the fixes themselves are downloaded.
+# The game fixes the launcher knows of offline; the fixes themselves are
+# downloaded, except any whose files the archive also holds under game-fixes/,
+# which then apply with no network (the packer's game-fixes-extra/).
 fixes = json.loads((stage / "game-fixes/bundled.json").read_text())
 assert fixes["schema"] == 1 and fixes["serial"] >= 1 and fixes["fixes"], "game-fixes/bundled.json is not an index"
 assert not (stage / "game-fixes/index.json").exists(), "index.json is the card's download; the archive ships bundled.json"
+for fix in fixes["fixes"]:
+    folder = stage / "game-fixes" / fix["id"]
+    if not folder.is_dir():
+        continue
+    for file in fix["files"]:
+        held = folder / file["name"]
+        assert held.is_file(), f"{held} is named in the index but not in the archive"
+        assert held.stat().st_size == file["size"], f"{held} is not the size the index says"
+        assert hashlib.sha256(held.read_bytes()).hexdigest() == file["sha256"], f"{held} is not the file the index says"
 
 # One settings file, where a dozen loose toggles were, and the keys beside it.
 settings = json.loads((stage / "config/settings.json").read_text())

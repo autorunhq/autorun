@@ -80,7 +80,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     "$horizon_wine/tests/launcher_host.c" "$horizon_wine/source/launcher.c" "$horizon_wine/source/launcher_catalog.c" "$horizon_wine/source/launcher_ui.c" "$horizon_wine/source/launcher_audio.c" \
     "$horizon_wine/source/game_settings.c" "$horizon_wine/source/launcher_game_settings.c" \
     "$horizon_wine/source/input_profile.c" "$horizon_wine/source/launcher_input.c" \
-    "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_dxvk.c" "$horizon_wine/source/dxvk_options.c" \
+    "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_dxvk.c" "$horizon_wine/source/launcher_voodoo.c" "$horizon_wine/source/dxvk_options.c" \
     "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
     "$horizon_wine/source/launcher_setup.c" "$horizon_wine/source/setup_boot.c" \
     "$horizon_wine/source/steamgriddb.c" "$horizon_wine/source/launcher_artwork.c" \
@@ -91,11 +91,23 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 ln -s /opt/homebrew/lib/libSDL3.0.dylib "$build/libSDL3.dylib"
 
 # The floating keyboard: what its buttons and taps send, and its picture.
+# The controls overlay draws through it, so it is linked along with the input
+# profiles its changes are kept in.
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
     "$horizon_wine/tests/osk.c" "$horizon_wine/source/osk.c" \
-    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -o "$build/osk"
+    "$horizon_wine/source/controls_overlay.c" "$horizon_wine/source/input_profile.c" \
+    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lm -o "$build/osk"
 "$build/osk" "$font" "$shots"
+
+# The controls overlay over a running program: its rows, the grid and capture
+# behind them, and what it writes to the program's own controls.
+clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
+    "$horizon_wine/tests/controls_overlay.c" "$horizon_wine/source/controls_overlay.c" \
+    "$horizon_wine/source/input_profile.c" \
+    $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lm -o "$build/controls_overlay"
+"$build/controls_overlay" "$font" "$shots"
 
 card="$build/card/sdmc:"
 mkdir -p "$card/switch/wine/drive_c/openttd" "$card/games/deep/er/still"

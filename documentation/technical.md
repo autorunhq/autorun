@@ -74,6 +74,12 @@ runtime; the full package now ships the Mesa 26 one.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
+  Mouse-driven games get a recommended layout when they are recognised
+  (`source/games/controls.h`): Septerra Core and Harbinger play with the right
+  stick moving the mouse, ZL clicking and the right stick's click right-clicking,
+  with the keys each game reads beside them. The layout sits between the global
+  controls and the player's own per-game changes, so clearing a row in the
+  editor brings it back.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
   that sends virtual keys one at a time, with scan codes, through the display
   driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text field
@@ -82,6 +88,13 @@ runtime; the full package now ships the Mesa 26 one.
   the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
   into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
   the compositor's top layer; the controller is its while it is up.
+- **Remapping while a program runs.** Minus and the left stick click open the
+  controls overlay over the game (`source/controls_overlay.c`): the same rows
+  the launcher's controls editor has, each opened into the key or mouse action
+  it should make -- picked from a grid in keyboard/mouse mode, captured from
+  the controller in controller mode. Every change is written to the program's
+  own controls at once, so it can be tried the moment the overlay closes (B).
+  X clears a row, Y puts the game's layout back under it.
 - **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
   launch the NRO through a forwarder made with "32-bit, no alias", which the
   launcher can install itself and which also raises the memory limit to 2 GiB.
@@ -139,8 +152,10 @@ the first time a newer build starts.
 | `hand-the-process-back-anyway` | false | Return through the Homebrew loader on exit (`loader-anyway.txt`) |
 | `vulkan-probe` | false | Vulkan self-test at startup (`vulkan-probe.txt`) |
 
-The controls every program uses are in `config/keys.txt`. A program's own
-files sit next to its executable, named after it:
+The controls every program uses are in `config/keys.txt`. A game Autorun
+recognises gets its recommended layout over them (`source/games/controls.h`),
+and the program's own controls over that. A program's own files sit next to
+its executable, named after it:
 
 | File | Content |
 |---|---|
@@ -198,8 +213,9 @@ Requirements:
   tests. It is devkitA64 with a newer libnx, mesa-switch (Mesa 26: OpenGL and
   NVK Vulkan), LSFG-VK's Horizon port and libusbhsfs with UASP in portlibs,
   each from a pinned revision.
-- LLVM-MinGW 20260505 in `horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal`,
-  and bison (Homebrew's), for Wine's PE modules.
+- LLVM-MinGW 20260505 in `horizon-wine/toolchains/`, fetched as the platform's
+  release (`llvm-mingw-20260505-ucrt-macos-universal` on a Mac), and bison
+  (Homebrew's), for Wine's PE modules.
 
 Autorun builds the runtime; the Windows modules it runs are the DLL
 repository's, [autorun-horizon-dlls](https://github.com/autorunhq/autorun-horizon-dlls),

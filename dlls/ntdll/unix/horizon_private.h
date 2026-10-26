@@ -24,6 +24,7 @@ extern ssize_t horizon_read_pipe( int fd, void *data, size_t size, unsigned int 
 extern unsigned int horizon_set_process_machine( unsigned short machine );
 extern ULONG_PTR horizon_get_system_affinity_mask(void);
 extern unsigned int horizon_query_process_affinity( unsigned int handle, ULONG_PTR *mask );
+extern int horizon_page_is_mapped_rw( void *addr, size_t size );
 extern ULONG_PTR horizon_get_current_thread_affinity(void);
 extern unsigned int horizon_get_processor_count(void);
 extern unsigned int horizon_registry_make_session_key( const char *path );

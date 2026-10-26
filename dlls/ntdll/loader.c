@@ -4454,14 +4454,17 @@ NTSTATUS wine_nx_loader_bootstrap( const UNICODE_STRING *main_nt_name )
 }
 
 /* Load only native modules here. The x86 ntdll loader owns guest imports/TLS. */
-NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize, BOOL fex )
+NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize, const char *cpu_module )
 {
-    const WCHAR *names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll",
-                            fex ? L"libwow64fex.dll" : L"winebox64.dll" };
+    static WCHAR cpu_name[64];
+    const WCHAR *names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll", cpu_name };
     WINE_MODREF *loaded[ARRAY_SIZE(names)];
     NTSTATUS status = STATUS_SUCCESS;
     const WCHAR **cpu_dll;
     unsigned int i;
+
+    for (i = 0; cpu_module[i] && i + 1 < ARRAY_SIZE(cpu_name); i++) cpu_name[i] = cpu_module[i];
+    cpu_name[i] = 0;
     if (!wine_nx_loader_ready || !NtCurrentTeb()->WowTebOffset) return STATUS_INVALID_PARAMETER;
     RtlEnterCriticalSection( &loader_section );
     for (i = 0; i < ARRAY_SIZE(names); i++)
@@ -4500,7 +4503,7 @@ NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize,
         if (!status)
         {
             *cpu_dll = names[3];
-            wine_nx_trace( "[WOW64] selected %s", fex ? "libwow64fex.dll" : "winebox64.dll" );
+            wine_nx_trace( "[WOW64] selected %s", cpu_module );
         }
     }
     RtlLeaveCriticalSection( &loader_section );

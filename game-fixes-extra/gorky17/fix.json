@@ -1,0 +1,24 @@
+{
+  "title": "Gorky 17",
+  "version": 1,
+  "required": true,
+  "summary": "Writes the registry keys the game's installer writes -- where the game is installed -- without which it says \"Game not installed. Please run install program.\" Wherever the game sits on the card, Gorky 17 and Odium start as if freshly installed.",
+  "match": {
+    "exe": [
+      "gorky17.exe",
+      "odium.exe"
+    ]
+  },
+  "registry": [
+    {
+      "key": "HKLM\\Software\\Metropolis\\G17",
+      "name": "src",
+      "string": "{game}"
+    },
+    {
+      "key": "HKLM\\Software\\Metropolis\\G17",
+      "name": "dst",
+      "string": "{game}"
+    }
+  ]
+}

@@ -4011,15 +4011,140 @@ LRESULT send_internal_message_timeout( DWORD dest_pid, DWORD dest_tid,
     return ret;
 }
 
+/* The messages one mouse input becomes (server/queue.c's queue_mouse_message),
+ * for the low-level hook chain to see each of them. The rest of the flags are
+ * not messages and always go on to the server. */
+#define LL_MOUSE_MSG_FLAGS (MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP | \
+                            MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEDOWN | \
+                            MOUSEEVENTF_MIDDLEUP | MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP | \
+                            MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL)
+
+static const struct { DWORD flag; UINT msg; } ll_mouse_messages[] =
+{
+    { MOUSEEVENTF_MOVE, WM_MOUSEMOVE },
+    { MOUSEEVENTF_LEFTDOWN, WM_LBUTTONDOWN },
+    { MOUSEEVENTF_LEFTUP, WM_LBUTTONUP },
+    { MOUSEEVENTF_RIGHTDOWN, WM_RBUTTONDOWN },
+    { MOUSEEVENTF_RIGHTUP, WM_RBUTTONUP },
+    { MOUSEEVENTF_MIDDLEDOWN, WM_MBUTTONDOWN },
+    { MOUSEEVENTF_MIDDLEUP, WM_MBUTTONUP },
+    { MOUSEEVENTF_XDOWN, WM_XBUTTONDOWN },
+    { MOUSEEVENTF_XUP, WM_XBUTTONUP },
+    { MOUSEEVENTF_WHEEL, WM_MOUSEWHEEL },
+    { MOUSEEVENTF_HWHEEL, WM_MOUSEHWHEEL },
+};
+
+/* Where the message leaves the cursor, measured from where it is now and
+ * without the screen's edges: a hook reads the movement that way (dinput
+ * subtracts its own GetCursorPos()), as the raw input payload does. */
+static POINT ll_hook_mouse_point( const union hw_input *input )
+{
+    struct object_lock lock = OBJECT_LOCK_INIT;
+    const desktop_shm_t *desktop_shm;
+    NTSTATUS status;
+    POINT pt = { 0, 0 };
+
+    while ((status = get_shared_desktop( &lock, &desktop_shm )) == STATUS_PENDING)
+    {
+        if (input->mouse.flags & MOUSEEVENTF_ABSOLUTE)
+        {
+            pt.x = input->mouse.x;
+            pt.y = input->mouse.y;
+        }
+        else
+        {
+            pt.x = desktop_shm->cursor.x + input->mouse.x;
+            pt.y = desktop_shm->cursor.y + input->mouse.y;
+        }
+    }
+    /* The shared cursor is in the screen's own coordinates; a hook consumer
+     * like dinput subtracts GetCursorPos(), which maps those through the
+     * monitor's raw<->virt transform first.  Map the point the same way, or
+     * the difference it computes is not the mouse motion at all but the map
+     * of the whole screen, and the program's pointer runs away. */
+    {
+        RECT r = { pt.x, pt.y, pt.x, pt.y };
+
+        r = map_rect_raw_to_virt( r, get_thread_dpi() );
+        pt.x = r.left;
+        pt.y = r.top;
+    }
+    return pt;
+}
+
+/* Run WH_MOUSE_LL over the messages one input becomes; the flags of the ones
+ * the chain swallows go, the rest go to the server. */
+static DWORD ll_hook_mouse_input( const union hw_input *input, BOOL injected )
+{
+    static unsigned int hooked_logged, hooked_last;
+    DWORD keep = input->mouse.flags & ~LL_MOUSE_MSG_FLAGS;
+    POINT pt = ll_hook_mouse_point( input );
+    unsigned int i;
+
+    /* What a hook consumer (dinput) subtracts from this point is its own
+     * GetCursorPos(); when the two ever disagree the program sees a mouse
+     * motion that never happened. Logged plainly at first, then sparingly. */
+    if ((input->mouse.flags & MOUSEEVENTF_MOVE) &&
+        (hooked_logged < 40 || NtGetTickCount() - hooked_last >= 2000))
+    {
+        POINT now;
+
+        NtUserGetCursorPos( &now );
+        if (now.x != pt.x || now.y != pt.y || hooked_logged < 4)
+        {
+            char line[128];
+
+            snprintf( line, sizeof(line), "[HOOK] mouse hook pt %d,%d over cursor %d,%d (sent %d,%d)",
+                      pt.x, pt.y, now.x, now.y, input->mouse.x, input->mouse.y );
+            if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+        }
+        hooked_logged++;
+        hooked_last = NtGetTickCount();
+    }
+
+    for (i = 0; i < ARRAY_SIZE(ll_mouse_messages); i++)
+    {
+        MSLLHOOKSTRUCT hook;
+
+        if (!(input->mouse.flags & ll_mouse_messages[i].flag)) continue;
+        hook.pt          = pt;
+        hook.mouseData   = (DWORD_PTR)input->mouse.data << 16;
+        hook.flags       = injected ? LLMHF_INJECTED : 0;
+        hook.time        = input->mouse.time ? input->mouse.time : NtGetTickCount();
+        hook.dwExtraInfo = input->mouse.info;
+        if (!call_hooks( WH_MOUSE_LL, HC_ACTION, ll_mouse_messages[i].msg,
+                         (LPARAM)&hook, sizeof(hook) ))
+            keep |= ll_mouse_messages[i].flag;
+    }
+    return keep;
+}
+
+/* And WH_KEYBOARD_LL over one key event; nonzero from the chain swallows it. */
+static BOOL ll_hook_keyboard_input( const union hw_input *input, BOOL injected )
+{
+    KBDLLHOOKSTRUCT hook;
+
+    hook.vkCode      = input->kbd.vkey;
+    hook.scanCode    = input->kbd.scan & 0xff;
+    hook.flags       = (input->kbd.flags & KEYEVENTF_EXTENDEDKEY ? LLKHF_EXTENDED : 0) |
+                       (input->kbd.flags & KEYEVENTF_KEYUP ? LLKHF_UP : 0) |
+                       (injected ? LLKHF_INJECTED : 0);
+    hook.time        = input->kbd.time ? input->kbd.time : NtGetTickCount();
+    hook.dwExtraInfo = input->kbd.info;
+    return call_hooks( WH_KEYBOARD_LL, HC_ACTION,
+                       (input->kbd.flags & KEYEVENTF_KEYUP) ? WM_KEYUP : WM_KEYDOWN,
+                       (LPARAM)&hook, sizeof(hook) ) != 0;
+}
+
 /***********************************************************************
  *		server_send_hardware_message
  */
 NTSTATUS server_send_hardware_message( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam )
 {
     struct send_message_info info;
-    int prev_x, prev_y, new_x, new_y;
+    int prev_x = 0, prev_y = 0, new_x = 0, new_y = 0;
     NTSTATUS ret;
-    BOOL wait;
+    BOOL wait = FALSE, swallow = FALSE;
 
     info.type     = MSG_HARDWARE;
     info.dest_tid = 0;
@@ -4099,12 +4224,31 @@ NTSTATUS server_send_hardware_message( HWND hwnd, UINT flags, const INPUT *input
             }
             break;
         }
-        ret = wine_server_call( req );
-        wait = reply->wait;
-        prev_x = reply->prev_x;
-        prev_y = reply->prev_y;
-        new_x  = reply->new_x;
-        new_y  = reply->new_y;
+        /* The low-level hooks see the input before anything is queued, as in
+         * server/queue.c's send_hook_ll_message: DirectInput reads the mouse
+         * and keyboard through WH_MOUSE_LL and WH_KEYBOARD_LL, and an event
+         * the chain swallows never reaches a window. */
+        if (req->input.type == INPUT_MOUSE && is_hooked( WH_MOUSE_LL ))
+        {
+            DWORD keep = ll_hook_mouse_input( &req->input, flags & SEND_HWMSG_INJECTED );
+
+            if (keep) req->input.mouse.flags = keep;
+            else swallow = TRUE;
+        }
+        else if (req->input.type == INPUT_KEYBOARD && is_hooked( WH_KEYBOARD_LL ) &&
+                 ll_hook_keyboard_input( &req->input, flags & SEND_HWMSG_INJECTED ))
+            swallow = TRUE;
+
+        if (!swallow)
+        {
+            ret = wine_server_call( req );
+            wait = reply->wait;
+            prev_x = reply->prev_x;
+            prev_y = reply->prev_y;
+            new_x  = reply->new_x;
+            new_y  = reply->new_y;
+        }
+        else ret = STATUS_SUCCESS;
     }
     SERVER_END_REQ;
 

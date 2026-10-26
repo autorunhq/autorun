@@ -1,0 +1,177 @@
+# The tuned FEX CPU modules beside the pinned ones, so the two can be compared
+# on the Switch (horizon-wine/fex/variants-build.md). The FEX tree owns its
+# build: berlint-hub/FEX publishes the modules as the fex-opt release, and this
+# workflow takes that release and packs it as the SD overlay. While no such
+# release exists, it builds the same modules from the same sources itself.
+# Unpack the artifact's switch/ over the SD card and the variant is live; delete
+# switch/wine/fex-variant.txt to go back to the pinned modules.
+name: FEX variant
+
+on:
+  workflow_dispatch:
+  # The dispatch button only sees workflows on the default branch; a change to
+  # the recipe or this file on a work branch runs it too.
+  push:
+    branches: [ "arena/**" ]
+    paths:
+      - "horizon-wine/fex/dlls-fex-variants.patch"
+      - "horizon-wine/fex/horizon.patch"
+      - ".github/workflows/fex-variant.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fex-opt:
+    name: Tuned FEX modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # The FEX tree builds its own: its fex-opt release is the modules, with
+      # their checksums. Taken first; the build below is the fallback that
+      # makes them until one is published.
+      - name: Take what the FEX tree publishes
+        id: fetch
+        shell: bash
+        run: |
+          mkdir -p fetched
+          if curl -fsSL --retry 2 -o fetched/fex-opt-modules.zip \
+               https://github.com/berlint-hub/FEX/releases/download/fex-opt/fex-opt-modules.zip \
+             && curl -fsSL --retry 2 -o fetched/SHA256SUMS \
+               https://github.com/berlint-hub/FEX/releases/download/fex-opt/SHA256SUMS; then
+            (cd fetched && sha256sum -c SHA256SUMS)
+            echo "source=release" >> "$GITHUB_OUTPUT"
+            echo "The FEX tree's release was taken." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "source=build" >> "$GITHUB_OUTPUT"
+            echo "No fex-opt release yet: built from source." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.fetch.outputs.source == 'build'
+
+      - name: Fetch the DLL repository
+        if: steps.fetch.outputs.source == 'build'
+        run: git submodule update --init horizon-dlls
+
+      # The variant recipe is the DLL repository's own patch, kept in
+      # horizon-wine/fex/ until it can land there.
+      - name: Apply the variant recipe
+        if: steps.fetch.outputs.source == 'build'
+        run: git -C horizon-dlls apply "$PWD/horizon-wine/fex/dlls-fex-variants.patch"
+
+      # The toolchain build.sh fetches, cached the way Build keeps it.
+      - name: Restore llvm-mingw
+        if: steps.fetch.outputs.source == 'build'
+        uses: actions/cache/restore@v4
+        with:
+          path: horizon-wine/toolchains/llvm-mingw-*
+          key: toolchains-fex-${{ hashFiles('horizon-wine/switch-dev.txt') }}
+          restore-keys: toolchains-fex-
+
+      - name: Fetch llvm-mingw
+        if: steps.fetch.outputs.source == 'build'
+        run: |
+          llvm_version=20260505
+          llvm_name="llvm-mingw-$llvm_version-ucrt-ubuntu-22.04-x86_64"
+          llvm="horizon-wine/toolchains/$llvm_name"
+          if [ ! -x "$llvm/bin/aarch64-w64-mingw32-clang" ]; then
+            mkdir -p horizon-wine/toolchains
+            curl -fL --retry 3 -o "horizon-wine/toolchains/$llvm_name.tar.xz" \
+              "https://github.com/mstorsjo/llvm-mingw/releases/download/$llvm_version/$llvm_name.tar.xz"
+            tar -xJf "horizon-wine/toolchains/$llvm_name.tar.xz" -C horizon-wine/toolchains
+            rm "horizon-wine/toolchains/$llvm_name.tar.xz"
+          fi
+          echo "WINE_NX_LLVM_MINGW=$PWD/$llvm" >> "$GITHUB_ENV"
+
+      - name: Save llvm-mingw
+        if: always() && steps.fetch.outputs.source == 'build'
+        uses: actions/cache/save@v4
+        with:
+          path: horizon-wine/toolchains/llvm-mingw-*
+          key: toolchains-fex-${{ hashFiles('horizon-wine/switch-dev.txt') }}-${{ github.run_id }}
+
+      # The same recipe build-dlls.py's fex-opt entry names, run here on its
+      # own; the build is tee'd so a failure can say why in annotations. The
+      # defaults of build-fex.sh are the pinned FEX and Autorun's Horizon
+      # patch, the same the stock modules take; the variant only tunes code
+      # generation for the Switch's Cortex-A57 and takes the -opt names.
+      - name: Build the tuned FEX
+        if: steps.fetch.outputs.source == 'build'
+        shell: bash
+        run: |
+          set -o pipefail
+          export AUTORUN="$PWD"
+          # The variant is a byte-twin of the stock modules for now: the
+          # Cortex-A57 tune (-mcpu=cortex-a57) is being bisected against a
+          # startup crash (STATUS_DLL_INIT_FAILED at the first guest init);
+          # with no TUNE input the build takes the stock flags.
+          export WINE_NX_FEX_SUFFIX=-opt
+          export WINE_NX_JOBS="$(nproc)"
+          if sh horizon-dlls/tools/build-fex.sh 2>&1 | tee fex-build.log; then
+            exit 0
+          fi
+          { grep -m2 -B1 -A8 "error" fex-build.log || tail -n 20 fex-build.log; } | \
+            tr '\n' '\v' | sed 's/%/%25/g; s/\v/%0A/g' | cut -c1-3400 | \
+            xargs -0 -I{} echo "::error::fex-build.log: {}"
+          exit 1
+
+      - name: Keep the build log
+        if: failure() && steps.fetch.outputs.source == 'build'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-build-log
+          path: fex-build.log
+          if-no-files-found: ignore
+
+      # The same overlay either way: the two modules and their manifest, with
+      # the variant file that turns them on and a note on turning them off.
+      - name: Package the SD overlay
+        shell: bash
+        run: |
+          stage=overlay/switch/wine
+          mkdir -p "$stage/drive_c/windows/system32"
+          if [ "${{ steps.fetch.outputs.source }}" = release ]; then
+            python3 -c "import zipfile; zipfile.ZipFile('fetched/fex-opt-modules.zip').extractall('unpacked')"
+            cp -r unpacked/switch/wine/. "$stage/"
+          else
+            payload=horizon-wine/toolchains/build-fex-2609-opt-horizon/payload
+            cp "$payload/libwow64fex-opt.dll" "$payload/libarm64ecfex-opt.dll" \
+              "$stage/drive_c/windows/system32/"
+            cp "$payload/fex-manifest.json" "$stage/fex-opt-manifest.json"
+          fi
+          printf 'opt\n' > "$stage/fex-variant.txt"
+          cat > "$stage/README-fex-opt.txt" <<'EOF'
+          Vylepšený FEX (Tegra X1) pro A/B porovnání s původním.
+
+          Rozbal překryv switch/ na SD kartu (na stejné místo jako archiv
+          autorun). Překladač se vybírá v Game Settings → Emulation → CPU
+          translator: Box64, FEX (původní), FEX optimized (vylepšený).
+          fex-variant.txt je výchozí pro hry bez vlastního výběru (obsah
+          "opt" = vylepšený). V logu poznáš, co běží:
+              [CPU] FEX (libwow64fex-opt.dll)
+          EOF
+          ls -la "$stage/drive_c/windows/system32"
+
+      - name: Upload the SD overlay
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-opt
+          path: overlay/
+          if-no-files-found: error
+
+      # The contract the builds pull: the same modules as fex-opt-modules.zip
+      # (laid out switch/wine/) and their checksums, in the fex-opt release.
+      # This is the fallback publisher; the FEX tree's own release takes
+      # precedence over it wherever it is looked for.
+      - name: Publish the fex-opt release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd overlay && zip -qr ../fex-opt-modules.zip switch)
+          sha256sum fex-opt-modules.zip > SHA256SUMS
+          gh release create fex-opt fex-opt-modules.zip SHA256SUMS \
+            --title "Tuned Horizon FEX modules (fallback build)" \
+            --notes "libwow64fex-opt.dll and libarm64ecfex-opt.dll for Autorun's A/B switch (sdmc:/switch/wine/fex-variant.txt = opt). Built here while the FEX tree publishes none; berlint-hub/FEX's fex-opt release takes precedence." \
+            --latest=false 2>/dev/null || \
+            gh release upload fex-opt fex-opt-modules.zip SHA256SUMS --clobber

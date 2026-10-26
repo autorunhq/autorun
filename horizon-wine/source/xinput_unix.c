@@ -14,6 +14,7 @@
 #include "input_profile.h"
 
 extern struct input_profile wine_nx_input_profile;
+void wine_nx_input_profile_copy( struct input_profile *profile );
 extern uint64_t wine_nx_input_swallowed;
 
 _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX_PAD_X == HidNpadButton_X &&
@@ -26,8 +27,9 @@ _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX
                 "nx_pad.h button bits match libnx" );
 
 static pthread_mutex_t pad_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* The floating keyboard (osk.c). */
+/* The floating keyboard (osk.c) and the controls overlay (controls_overlay.c). */
 int wine_nx_osk_visible( void );
+int wine_nx_controls_overlay_visible( void );
 
 static PadState pad;
 static int pad_ready;
@@ -38,9 +40,11 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
 {
     struct nx_xinput_state_params *params = args;
     XINPUT_GAMEPAD gamepad;
+    struct input_profile profile;
 
     params->connected = 0;
-    if (params->index || wine_nx_input_profile.mode == INPUT_KEYBOARD_MOUSE) return STATUS_SUCCESS;
+    wine_nx_input_profile_copy( &profile );
+    if (params->index || profile.mode == INPUT_KEYBOARD_MOUSE) return STATUS_SUCCESS;
     pthread_mutex_lock( &pad_mutex );
     if (!pad_ready)
     {
@@ -55,13 +59,18 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
 
         struct input_pad raw = { padGetButtons( &pad ), { left.x, left.y, right.x, right.y } }, mapped;
         const u64 keyboard = HidNpadButton_Minus | HidNpadButton_StickR;
+        /* The controls overlay's chord (controls_overlay.c) is the runtime's
+         * own, the keyboard's is: neither is the game's. */
+        const u64 remap = HidNpadButton_Minus | HidNpadButton_StickL;
 
         raw.buttons &= ~__atomic_load_n( &wine_nx_input_swallowed, __ATOMIC_RELAXED );
         if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;
-        input_map_pad( &wine_nx_input_profile, &raw, &mapped );
+        if ((raw.buttons & remap) == remap) raw.buttons &= ~remap;
+        input_map_pad( &profile, &raw, &mapped );
         nx_xinput_map( mapped.buttons, mapped.axis[0], mapped.axis[1], mapped.axis[2], mapped.axis[3], &gamepad );
-        /* The floating keyboard has the controller while it is up (osk.c). */
-        if (wine_nx_osk_visible())
+        /* The floating keyboard, and the controls overlay over it, have the
+         * controller while they are up (osk.c, controls_overlay.c). */
+        if (wine_nx_osk_visible() || wine_nx_controls_overlay_visible())
             memset( &gamepad, 0, sizeof(gamepad) );
         if (memcmp( &gamepad, &last_gamepad, sizeof(gamepad) ))
         {

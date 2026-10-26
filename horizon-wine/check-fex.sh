@@ -7,6 +7,7 @@ host_cxx="${WINE_NX_HOST_CXX:-/usr/bin/clang++}"
 test "$(uname -s)" = Linux && test "$(uname -m)" = aarch64
 build="$(mktemp -d /tmp/wine-nx-fex-tests.XXXXXX)"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
+CC="$host_cc" python3 "$horizon_wine/tests/check_fex_unixlib.py"
 "$host_cc" -g -Wall -Wextra -Werror -pthread -fsanitize=address,undefined \
     "$horizon_wine/source/fex_jit.c" "$horizon_wine/tests/fex_jit.c" -o "$build/jit"
 "$build/jit"

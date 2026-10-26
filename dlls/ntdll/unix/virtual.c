@@ -102,6 +102,7 @@
 #include "wine/unixlib.h"
 #include "unix_private.h"
 #include "horizon_private.h"
+#include "horizon_unixlib_names.h"
 #include "wine/debug.h"
 
 #ifdef __SWITCH__
@@ -959,10 +960,6 @@ static const struct
     NTSTATUS   (*init)(void);
 } wine_nx_static_unix_libs[] =
 {
-#ifdef WINE_NX_FEX
-    { "libarm64ecfex.dll", wine_nx_fex_unix_funcs },
-    { "libwow64fex.dll", wine_nx_fex_unix_funcs },
-#endif
 #ifdef WINE_NX_BOX64_INTERPRETER
     { "winebox64.dll", wine_nx_winebox64_unix_funcs },
 #endif
@@ -987,6 +984,23 @@ static const struct
     { "winevulkan.dll", wine_nx_winevulkan_unix_funcs },
 #endif
 };
+
+#ifdef WINE_NX_FEX
+/* FEX's CPU modules are matched by their stem, without the extension: FEX asks
+ * for its unixlib by that stem alone (FEXUnixLib::Init, before it falls back to
+ * its own module base), and a variant build sits beside the stock one as
+ * libwow64fex-<variant>.dll (fex-variant.txt, a game's CPU translator). The
+ * stem, "<stem>.dll" and "<stem>-<variant>.dll" all pair. */
+static const struct
+{
+    const char  *stem;
+    const void  *funcs;
+} wine_nx_variant_unix_libs[] =
+{
+    { "libarm64ecfex", wine_nx_fex_unix_funcs },
+    { "libwow64fex", wine_nx_fex_unix_funcs },
+};
+#endif
 
 /* Tables for 32-bit DLLs under WoW64 (see ws2_32_unix_stub.c). Those modules
  * are in the 32-bit loader list only, so they are matched by the DLL name in
@@ -1148,10 +1162,23 @@ static BOOL wine_nx_unix_name_equal( const UNICODE_STRING *name, const char *exp
     return TRUE;
 }
 
+/* The Horizon CRT reports only STATUS_DLL_INIT_FAILED if neither FEX unixlib
+ * lookup method succeeds. Name the missing mapping here. */
+static void wine_nx_report_unpaired_unix_lib( const UNICODE_STRING *name )
+{
+    char text[WINE_NX_UNIXLIB_NAME_MAX];
+
+    if (!name || !name->Buffer ||
+        !wine_nx_unixlib_name_is_fex( name->Buffer, name->Length / sizeof(WCHAR) )) return;
+    wine_nx_unixlib_name_format( name->Buffer, name->Length / sizeof(WCHAR), text, sizeof(text) );
+    ERR( "no static unixlib entry for %s\n", text );
+}
+
 static NTSTATUS wine_nx_load_static_unix_lib( const UNICODE_STRING *name, BOOL wow, UINT64 res[2] )
 {
     unsigned int i;
 
+    if (!name || !name->Buffer || name->Length % sizeof(WCHAR)) return STATUS_DLL_NOT_FOUND;
     if (wow)
     {
         for (i = 0; i < ARRAY_SIZE(wine_nx_static_wow64_unix_libs); i++)
@@ -1173,7 +1200,18 @@ static NTSTATUS wine_nx_load_static_unix_lib( const UNICODE_STRING *name, BOOL w
             res[1] = (UINT_PTR)wine_nx_static_unix_libs[i].funcs;
             return STATUS_SUCCESS;
         }
+#ifdef WINE_NX_FEX
+        for (i = 0; i < ARRAY_SIZE(wine_nx_variant_unix_libs); i++)
+        {
+            if (!wine_nx_unixlib_name_matches( name->Buffer, name->Length / sizeof(WCHAR),
+                                               wine_nx_variant_unix_libs[i].stem, TRUE )) continue;
+            res[0] = (UINT_PTR)&wine_nx_variant_unix_libs[i];
+            res[1] = (UINT_PTR)wine_nx_variant_unix_libs[i].funcs;
+            return STATUS_SUCCESS;
+        }
+#endif
     }
+    wine_nx_report_unpaired_unix_lib( name );
     return STATUS_DLL_NOT_FOUND;
 }
 
@@ -1185,6 +1223,10 @@ static NTSTATUS wine_nx_unload_static_unix_lib( unixlib_module_t module )
         if (module == (UINT_PTR)&wine_nx_static_unix_libs[i]) return STATUS_SUCCESS;
     for (i = 0; i < ARRAY_SIZE(wine_nx_static_wow64_unix_libs); i++)
         if (module == (UINT_PTR)&wine_nx_static_wow64_unix_libs[i]) return STATUS_SUCCESS;
+#ifdef WINE_NX_FEX
+    for (i = 0; i < ARRAY_SIZE(wine_nx_variant_unix_libs); i++)
+        if (module == (UINT_PTR)&wine_nx_variant_unix_libs[i]) return STATUS_SUCCESS;
+#endif
     return STATUS_INVALID_HANDLE;
 }
 
@@ -2823,7 +2865,29 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         if (limit_low && base < (void *)limit_low) return STATUS_CONFLICTING_ADDRESSES;
         if (limit_high && is_beyond_limit( base, size, (void *)limit_high )) return STATUS_CONFLICTING_ADDRESSES;
         if (is_beyond_limit( base, size, host_addr_space_limit )) return STATUS_CONFLICTING_ADDRESSES;
-        if ((status = map_fixed_area( base, size, unix_prot ))) return status;
+        if ((status = map_fixed_area( base, size, unix_prot )))
+        {
+#ifdef __SWITCH__
+            /* KUSER_SHARED_DATA has to sit at 0x7ffe0000, where on a 32-bit
+             * address space the kernel heap region already holds a page (the
+             * runtime's whole memory budget lives in that region, and the
+             * loader's lent pages keep the heap from being shrunk away from
+             * this one). The pool is kept from handing the page out, so it is
+             * ours and idle: the shared data takes it where it stands. */
+            if (status == STATUS_CONFLICTING_ADDRESSES && base == (void *)user_shared_data &&
+                size == page_size && horizon_page_is_mapped_rw( base, size ))
+            {
+                extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+
+                memset( base, 0, size );
+                if (&wine_nx_runtime_trace)
+                    wine_nx_runtime_trace( "[INIT] the shared data page adopted where the heap already holds it" );
+                ptr = base;
+                goto done;
+            }
+#endif
+            return status;
+        }
         if (is_beyond_limit( base, size, working_set_limit )) working_set_limit = address_space_limit;
         ptr = base;
     }
@@ -5001,6 +5065,22 @@ static void set_large_address_space(void)
 }
 
 
+/* Where a native-only mapping is put. Above 4 GB when the address space has
+ * any, out of the way of the guest's range below it; the 32-bit forwarder's
+ * address space ends at 4 GB, where nothing is above, and native mappings
+ * belong in the window horizon_reserve_guest_address_space left at the top of
+ * the stack region for thread stacks, code memory and this. */
+static void native_only_limits( ULONG_PTR *low, ULONG_PTR *high )
+{
+    *low = (ULONG_PTR)limit_4g;
+    *high = 0;
+    if (horizon_native_window_start && (ULONG_PTR)horizon_native_window_end <= (ULONG_PTR)limit_4g)
+    {
+        *low = (ULONG_PTR)horizon_native_window_start;
+        *high = (ULONG_PTR)horizon_native_window_end;
+    }
+}
+
 /***********************************************************************
  *           virtual_alloc_first_thread_data
  */
@@ -5010,6 +5090,7 @@ struct thread_data *virtual_alloc_first_thread_data(void)
     struct thread_data *thread_data;
     struct file_view *view;
     SIZE_T size = signal_stack_mask + 1;
+    ULONG_PTR native_low, native_high;
 #ifndef __SWITCH__
     size += kernel_stack_size;
 #endif
@@ -5023,14 +5104,40 @@ struct thread_data *virtual_alloc_first_thread_data(void)
     if (status)
     {
         ERR( "wine: failed to map the shared user data: %08x\n", status );
+#ifdef __SWITCH__
+        {
+            char msg[160];
+
+            if (&wine_nx_runtime_trace)
+            {
+                snprintf( msg, sizeof(msg), "[FAIL] map shared user data %p status=%08x",
+                          user_shared_data, status );
+                wine_nx_runtime_trace( msg );
+            }
+        }
+#endif
         exit(1);
     }
 
+    native_only_limits( &native_low, &native_high );
     status = map_view( &view, NULL, size, MEM_TOP_DOWN,
-                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, native_low, native_high, 0 );
     if (status)
     {
         ERR( "wine: failed to allocate initial thread data: %08x\n", status );
+#ifdef __SWITCH__
+        {
+            char msg[176];
+
+            if (&wine_nx_runtime_trace)
+            {
+                snprintf( msg, sizeof(msg),
+                          "[FAIL] map first thread data size=%#lx limits=%p-%p status=%08x",
+                          (unsigned long)size, (void *)native_low, (void *)native_high );
+                wine_nx_runtime_trace( msg );
+            }
+        }
+#endif
         exit(1);
     }
 #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
@@ -5172,12 +5279,14 @@ struct thread_data *virtual_alloc_thread_data(void)
     struct file_view *view;
     struct thread_data *data = NULL;
     SIZE_T size = signal_stack_mask + 1;
+    ULONG_PTR native_low, native_high;
 #ifndef __SWITCH__
     size += kernel_stack_size;
 #endif
 
+    native_only_limits( &native_low, &native_high );
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
-    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, native_low, native_high, 0 );
     if (!status)
     {
 #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)

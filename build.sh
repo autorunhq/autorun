@@ -71,7 +71,10 @@ docker pull -q "$image" >/dev/null
 # against devkitPro's released libnx, which the image keeps apart.
 if [ ! -f "$hw/toolchains/boot-payloads/bundle/setup_boot_manifest.h" ]; then
     step "Building the boot payloads (Atmosphere and Horizon-OC), once"
+    # git in the image must trust the mounted tree: bind mounts keep the host's
+    # UIDs, and the container runs as root.
     docker run --rm -v "$root:/work" -w /work -e WINE_NX_JOBS="$jobs" \
+        -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
         -e DEVKITPRO=/opt/devkitpro-release "$image" sh horizon-wine/build-boot-bundle.sh
 fi
 
@@ -97,8 +100,15 @@ if [ "$dlls" = 1 ]; then
 fi
 
 step "Packaging"
-if [ "$x86" = 1 ]; then
-    python3 "$hw/tools/package-autorun.py" --x86
+# The tuned FEX modules a fetch left in fex/opt-modules (the fex-opt release)
+# are staged with the package; without them the pinned modules stand alone.
+if [ -d "$hw/fex/opt-modules/switch/wine" ]; then
+    set -- --extra "$hw/fex/opt-modules/switch/wine"
 else
-    python3 "$hw/tools/package-autorun.py"
+    set --
+fi
+if [ "$x86" = 1 ]; then
+    python3 "$hw/tools/package-autorun.py" --x86 "$@"
+else
+    python3 "$hw/tools/package-autorun.py" "$@"
 fi

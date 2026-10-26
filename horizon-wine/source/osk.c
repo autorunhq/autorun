@@ -19,6 +19,7 @@
 #include <SDL_ttf.h>
 
 #include "osk.h"
+#include "controls_overlay.h"
 
 enum { KEY_CHAR, KEY_ACTION, KEY_SHIFT, KEY_CAPS, KEY_CLOSE, KEY_ARROW };
 
@@ -569,6 +570,11 @@ int wine_nx_osk_frame( int screen_width, int screen_height, struct wine_nx_osk_f
 {
     struct geometry g;
 
+    /* The controls overlay (controls_overlay.c) draws through these calls too:
+     * whichever overlay is up is what the presenters put on the screen. Its
+     * own lock is taken before this one ever is, the other way round from
+     * wine_nx_controls_overlay_show, which hides this keyboard first. */
+    if (wine_nx_controls_overlay_frame( screen_width, screen_height, frame )) return 1;
     pthread_mutex_lock( &osk_lock );
     if (!visible)
     {
@@ -591,6 +597,7 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
     unsigned int copied = 0;
     int x, y;
 
+    if ((copied = wine_nx_controls_overlay_copy( screen_width, screen_height, pixels, stride, rgba ))) return copied;
     pthread_mutex_lock( &osk_lock );
     if (visible)
     {

@@ -56,6 +56,8 @@ static pthread_mutex_t present_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 #ifdef __SWITCH__
 #include "../../horizon-wine/source/osk.h"
+#include "../../horizon-wine/source/screen_fit.h"
+#include "../../horizon-wine/source/graphics_config.h"
 #endif
 
 /* The Upscaling setting a scaled swapchain is made with: 0 bilinear, 1 FSR 1.0
@@ -90,6 +92,23 @@ void wine_nx_upscaling_configure( int mode, float sharpness )
     nx_upscaling_mode = mode;
     nx_upscaling_sharpness = sharpness;
 }
+
+#ifdef __SWITCH__
+/* The per-game Aspect setting (horizon-wine's wine_nx_aspect_configure):
+ * 1 presents the central 4:3 of the picture stretched over the whole
+ * screen. Input maps through the same rectangle. */
+static int nx_stretch43;
+
+void wine_nx_aspect_configure( int stretch43 )
+{
+    nx_stretch43 = !!stretch43;
+}
+
+extern void wine_nx_present_fit( int src_w, int src_h, int src_x, int src_y,
+                                 int *dst_x, int *dst_y, int *dst_w, int *dst_h ) __attribute__((weak));
+extern int wine_nx_screenshot_requested( void ) __attribute__((weak));
+extern int wine_nx_screenshot_take( const void *pixels, int width, int height, int stride_px, int format ) __attribute__((weak));
+#endif
 
 static void nx_pace_present( uint64_t *previous )
 {
@@ -2125,8 +2144,8 @@ static void win32u_vkDestroySurfaceKHR( VkInstance client_instance, VkSurfaceKHR
     instance->p_vkDestroySurfaceKHR( instance->host.instance, surface->obj.host.surface, NULL /* allocator */ );
 #if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
     {
-        extern void wine_nx_gl_release_window(void);
-        wine_nx_gl_release_window();
+        extern void wine_nx_vulkan_release_window(void);
+        wine_nx_vulkan_release_window();
     }
 #endif
     use_window_client_surface( surface->client, FALSE );
@@ -2709,7 +2728,11 @@ static VkResult init_blit_images( struct vulkan_device *device, struct swapchain
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = hack->swapchain_image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+#ifdef __SWITCH__
+        viewInfo.format = swapchain->nx_format;
+#else
         viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
         viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         viewInfo.subresourceRange.baseMipLevel = 0;
         viewInfo.subresourceRange.levelCount = 1;
@@ -3021,6 +3044,31 @@ static BOOL nx_scaled_host_extent( const VkSurfaceCapabilitiesKHR *capabilities,
     *host_extent = *screen;
     return TRUE;
 }
+
+/* The host swapchain format for the scaled path: B8G8R8A8, the one the blit's
+ * views are built for, when the surface has it; the program's own otherwise;
+ * the first one the surface offers as a last resort. */
+static VkFormat nx_host_swapchain_format( const struct vulkan_instance *instance,
+                                          const struct vulkan_physical_device *physical_device,
+                                          VkSurfaceKHR host_surface, VkFormat client_format )
+{
+    VkSurfaceFormatKHR formats[16];
+    uint32_t count = sizeof(formats) / sizeof(formats[0]), i;
+
+    if (instance->p_vkGetPhysicalDeviceSurfaceFormatsKHR( physical_device->host.physical_device,
+                                                          host_surface, &count, formats ) || !count)
+        return client_format;
+    for (i = 0; i < count; i++)
+        if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) return formats[i].format;
+    for (i = 0; i < count; i++)
+        if (formats[i].format == client_format) return formats[i].format;
+    return formats[0].format;
+}
+#endif
+
+#ifndef __SWITCH__
+/* [NXVK] lines belong to the Switch build's runtime log. */
+static void nx_vk_trace( const char *format, ... ) { (void)format; }
 #endif
 
 static BOOL swapchain_fshack_changed( struct swapchain *swapchain, struct surface *surface )
@@ -3089,13 +3137,20 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
     {
         swapchain->fshack_dpi = 1;
         create_info_host.imageExtent = swapchain->host_extents;
-        create_info_host.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
-        /* Transfer source for the [NXVK] read-back of the scaled frame. */
-        create_info_host.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        nx_vk_trace( "[NXVK] swapchain %ux%u format %d scaled into %ux%u screen buffers (%s)",
+        create_info_host.imageFormat = nx_host_swapchain_format( instance, physical_device,
+                                                                 surface->obj.host.surface,
+                                                                 VK_FORMAT_B8G8R8A8_UNORM );
+        /* Storage for the blit that scales the program's frames into the
+         * screen buffers, transfer source for their read-back, and color
+         * attachment because some swapchains (NVK's) refuse to be made
+         * without it, even though nothing colors into them here. */
+        create_info_host.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        nx_vk_trace( "[NXVK] swapchain %ux%u format %d scaled into %ux%u screen buffers (%s; host format %d, usage %#x)",
                      create_info->imageExtent.width, create_info->imageExtent.height, create_info->imageFormat,
                      swapchain->host_extents.width, swapchain->host_extents.height,
-                     create_info->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo" );
+                     create_info->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo",
+                     create_info_host.imageFormat, create_info_host.imageUsage );
     }
     else
 #endif
@@ -3169,8 +3224,24 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
 #endif
     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
     {
-        free( swapchain );
-        return res;
+        nx_vk_trace( "[NXVK] swapchain create failed: res %d, %ux%u format %d usage %#x mode %d images %u (usage caps %#x)",
+                     res, create_info_host.imageExtent.width, create_info_host.imageExtent.height,
+                     create_info_host.imageFormat, create_info_host.imageUsage, create_info_host.presentMode,
+                     create_info_host.minImageCount, capabilities.supportedUsageFlags );
+        if (swapchain->fshack_dpi && create_info_host.imageFormat != create_info->imageFormat)
+        {
+            /* The surface prefers the program's format over B8G8R8A8: the blit
+             * goes by swapchain->nx_format, so it can follow. */
+            create_info_host.imageFormat = swapchain->nx_format = create_info->imageFormat;
+            res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain );
+        }
+        if (res)
+        {
+            nx_vk_trace( "[NXVK] giving up on the swapchain: res %d", res );
+            free( swapchain );
+            return res;
+        }
+        nx_vk_trace( "[NXVK] the program's own format was accepted" );
     }
 
     vulkan_object_init( &swapchain->obj.obj, host_swapchain );
@@ -3182,11 +3253,13 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
     {
         /* EASU is made for enlarging; a game drawing more than the screen
          * holds is scaled down by the blit as before. */
-        swapchain->fsr = nx_upscaling_mode == 1 && swapchain->host_extents.width >= swapchain->extents.width &&
+        swapchain->fsr = nx_upscaling_mode == 1 && !nx_stretch43 &&
+                         swapchain->host_extents.width >= swapchain->extents.width &&
                          swapchain->host_extents.height >= swapchain->extents.height;
         if ((res = init_fs_hack_images( device, swapchain, create_info )))
         {
             ERR( "creating fs hack images failed: %d\n", res );
+            nx_vk_trace( "[NXVK] the scaled frames' images failed: res %d", res );
             device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
             free( swapchain );
             return res;
@@ -3195,6 +3268,7 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
         if ((res = init_blit_images( device, swapchain )))
         {
             ERR( "creating blit images failed: %d\n", res );
+            nx_vk_trace( "[NXVK] the scaling blit's images failed: res %d", res );
             device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
             free( swapchain );
             return res;
@@ -3485,36 +3559,56 @@ static VkResult record_compute_cmd( struct vulkan_device *device, struct swapcha
 
 #ifdef __SWITCH__
     {
-        /* Keep the aspect ratio: the image is centred, and the sampler's black
-         * border fills the bars. texcoord = (id + 0.5 - offset) / extents.
-         * Integer scaling takes the largest whole multiple that fits, and FSR
-         * a rectangle of whole pixels, both on whole-pixel bars. */
-        float scale = min( (float)swapchain->host_extents.width / swapchain->extents.width,
-                           (float)swapchain->host_extents.height / swapchain->extents.height );
-        float width, height;
-
-        if (!swapchain->fsr && fs_hack_is_integer() && scale >= 1.0f) scale = floorf( scale );
-        width = swapchain->extents.width * scale;
-        height = swapchain->extents.height * scale;
-        if (swapchain->fsr || fs_hack_is_integer())
+        /* texcoord = (id + 0.5 - offset) / extents: the shader samples the
+         * picture with normalized coordinates, so offset and extents say which
+         * rectangle of the picture lands where on the screen. */
+        if (nx_stretch43)
         {
-            width = min( floorf( width + 0.5f ), swapchain->host_extents.width );
-            height = min( floorf( height + 0.5f ), swapchain->host_extents.height );
-            constants.offset[0] = floorf( (swapchain->host_extents.width - width) / 2 );
-            constants.offset[1] = floorf( (swapchain->host_extents.height - height) / 2 );
+            /* The widescreen hack: the central 4:3 of the picture is stretched
+             * over the whole screen, so its bars stay out of the picture. */
+            int crop_w = swapchain->extents.width, crop_h = swapchain->extents.height;
+
+            screen_crop_4_3( &crop_w, &crop_h );
+            constants.extents[0] = (float)swapchain->host_extents.width * swapchain->extents.width / crop_w;
+            constants.extents[1] = (float)swapchain->host_extents.height * swapchain->extents.height / crop_h;
+            constants.offset[0] = -(float)swapchain->host_extents.width *
+                                  (swapchain->extents.width - crop_w) / (2.0f * crop_w) - 0.5f;
+            constants.offset[1] = -(float)swapchain->host_extents.height *
+                                  (swapchain->extents.height - crop_h) / (2.0f * crop_h) - 0.5f;
         }
         else
         {
-            constants.offset[0] = (swapchain->host_extents.width - width) / 2;
-            constants.offset[1] = (swapchain->host_extents.height - height) / 2;
+            /* Keep the aspect ratio: the image is centred, and the sampler's
+             * black border fills the bars. Integer scaling takes the largest
+             * whole multiple that fits, and FSR a rectangle of whole pixels,
+             * both on whole-pixel bars. */
+            float scale = min( (float)swapchain->host_extents.width / swapchain->extents.width,
+                               (float)swapchain->host_extents.height / swapchain->extents.height );
+            float width, height;
+
+            if (!swapchain->fsr && fs_hack_is_integer() && scale >= 1.0f) scale = floorf( scale );
+            width = swapchain->extents.width * scale;
+            height = swapchain->extents.height * scale;
+            if (swapchain->fsr || fs_hack_is_integer())
+            {
+                width = min( floorf( width + 0.5f ), swapchain->host_extents.width );
+                height = min( floorf( height + 0.5f ), swapchain->host_extents.height );
+                constants.offset[0] = floorf( (swapchain->host_extents.width - width) / 2 );
+                constants.offset[1] = floorf( (swapchain->host_extents.height - height) / 2 );
+            }
+            else
+            {
+                constants.offset[0] = (swapchain->host_extents.width - width) / 2;
+                constants.offset[1] = (swapchain->host_extents.height - height) / 2;
+            }
+            if (!swapchain->fsr)
+            {
+                constants.offset[0] -= 0.5f;
+                constants.offset[1] -= 0.5f;
+            }
+            constants.extents[0] = width;
+            constants.extents[1] = height;
         }
-        if (!swapchain->fsr)
-        {
-            constants.offset[0] -= 0.5f;
-            constants.offset[1] -= 0.5f;
-        }
-        constants.extents[0] = width;
-        constants.extents[1] = height;
     }
 #else
     if (swapchain->fsr)
@@ -3653,7 +3747,9 @@ static void nx_submit_scaled( struct vulkan_queue *queue, VkSubmitInfo *submit_i
     VkResult res;
     void *map;
 
-    if (presents != 30 && presents != 90 && presents % 1800)
+    /* The screenshot's shutter (Minus+R) asks for the readback out of turn. */
+    if (presents != 30 && presents != 90 && presents % 1800 &&
+        !(&wine_nx_screenshot_requested && wine_nx_screenshot_requested()))
     {
         device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, VK_NULL_HANDLE );
         return;
@@ -3730,6 +3826,8 @@ static void nx_submit_scaled( struct vulkan_queue *queue, VkSubmitInfo *submit_i
                  (int)presents, extent.width, extent.height,
                  (unsigned int)(pixels[extent.height / 2 * extent.width + extent.width / 2] & 0xffffff),
                  (unsigned int)(pixels[extent.height / 2 * extent.width + 4] & 0xffffff), lit, samples, white );
+    if (&wine_nx_screenshot_take)
+        wine_nx_screenshot_take( pixels, extent.width, extent.height, extent.width * 4, WINE_NX_SHOT_BGRA8 );
     device->p_vkUnmapMemory( device->host.device, memory );
     goto done;
 
@@ -4037,6 +4135,13 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
         struct swapchain *swapchain = swapchain_from_handle( client_swapchains[i] );
         struct surface *surface = swapchain->surface;
         client_surface_update( surface->client );
+#ifdef __SWITCH__
+        /* Input maps through the very transform the scaled present shows. */
+        if (&wine_nx_present_fit && surface->client)
+            wine_nx_present_fit( swapchain->extents.width, swapchain->extents.height,
+                                 surface->client->virtual_rect.left, surface->client->virtual_rect.top,
+                                 NULL, NULL, NULL, NULL );
+#endif
     }
 
     if (blit_count)

@@ -2,6 +2,7 @@
 #include "launcher_input.h"
 #include "launcher_image.h"
 #include "launcher_icons.h"
+#include "games/controls.h"
 
 extern const unsigned char wine_nx_joycons[];
 extern const size_t wine_nx_joycons_size;
@@ -590,13 +591,19 @@ void launcher_input_edit( struct ui *ui, struct ui_list *list, int row, enum ui_
         count = option_count(row) + offset;
         if (program)
         {
-            struct input_profile global;
+            struct input_profile base;
             struct launcher_kv global_kv;
             char global_path[768];
-            if (!input_profile_global(root, keyboard_auto, &global, &global_kv, global_path, sizeof(global_path)))
+            const struct game_controls *game = game_controls_find( program );
+            if (!input_profile_global(root, keyboard_auto, &base, &global_kv, global_path, sizeof(global_path)))
             { ui_message(ui, "Controls", "The global controls could not be read."); return; }
-            option_label(row, option_value(row, &global), value, sizeof(value));
-            snprintf(choices[0].label, sizeof(choices[0].label), "Global (%s)", value);
+            /* What choosing this row's first entry falls back to: the game's
+             * recommended layout over the global controls, or just the global
+             * controls for a game without one. */
+            game_controls_apply( &base, game );
+            option_label(row, option_value(row, &base), value, sizeof(value));
+            snprintf(choices[0].label, sizeof(choices[0].label), "%s (%s)",
+                     game ? "Game default" : "Global", value);
         }
         for (int i = offset; i < count; i++)
         {

@@ -54,7 +54,7 @@ if args.vulkan != bool(cache.get('WINE_NX_MESA_SWITCH_DIR')):
 nro = build / 'wine-nx-runtime.nro'
 if not nro.is_file() or nro.read_bytes()[16:20] != b'NRO0':
     parser.error('Missing or invalid wine-nx-runtime.nro')
-if args.fex and b'FEX-2609' not in nro.read_bytes():
+if args.fex and b'libwow64fex' not in nro.read_bytes():
     parser.error('The NRO has no FEX launch support; rebuild it first')
 if args.vkd3d and b'[VKD3D] payload' not in nro.read_bytes():
     parser.error('The NRO has no VKD3D launch support; rebuild it first')

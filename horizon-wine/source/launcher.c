@@ -50,6 +50,7 @@
 #include "setup_boot.h"
 #include "launcher_graphics.h"
 #include "launcher_dxvk.h"
+#include "launcher_voodoo.h"
 #include "launcher_game_settings.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
@@ -357,6 +358,23 @@ static void runtime_file( const struct launcher *l, const char *name, char *out,
     snprintf( out, size, "%s/%s", l->options->runtime_dir, name );
 }
 
+/* The CPU translator a program without its own choice runs. fex-variant.txt at
+ * the runtime root names the tuned FEX modules when it has any content, and
+ * says which of the two FEX entries its games fall back to. */
+static int cpu_default_index( const struct launcher *l )
+{
+    char path[520], line[64] = {0};
+    FILE *file;
+
+    runtime_file( l, "fex-variant.txt", path, sizeof(path) );
+    if ((file = fopen( path, "r" )))
+    {
+        if (!fgets( line, sizeof(line), file )) line[0] = 0;
+        fclose( file );
+    }
+    return line[0] && line[0] != '\n' && line[0] != '\r' ? 2 : 1;
+}
+
 /* Nonzero when the line reached the card, which the handoff in start_program
  * has to know before it gives the console away. */
 static int write_line( const char *path, const char *text )
@@ -443,7 +461,9 @@ static void load_program_settings( struct launcher *l, struct program *p )
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
     p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
-    p->settings.fex = p->settings.four_cores = 1;
+    p->settings.four_cores = 1;
+    /* -1: no CPU translator choice of its own; fex-variant.txt decides. */
+    p->settings.fex = -1;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
     {
@@ -1757,7 +1777,8 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_ASPECT, ROW_RESOLUTION, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_VOODOO,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
@@ -1815,7 +1836,7 @@ static int confirm_forwarder( struct launcher *l )
     return ui_confirm( ui, "Install forwarder", message, "Install" );
 }
 
-static void make_forwarder( struct launcher *l )
+static void make_forwarder( struct launcher *l, unsigned int address_space )
 {
     struct ui *ui = &l->ui;
     const char *step = NULL;
@@ -1833,7 +1854,7 @@ static void make_forwarder( struct launcher *l )
     ui_text_centered( ui, ui->large, ui->width / 2, ui->height / 2 - 30, "Installing...", ui->value );
     ui_present( ui );
 
-    rc = l->options->install_forwarder( &step );
+    rc = l->options->install_forwarder( address_space, &step );
     ui_start_screen( ui );
     if (rc)
     {
@@ -1982,8 +2003,16 @@ static int next_state( int state, int direction )
 
 static int address_space_fits( struct launcher *l, struct program *p )
 {
-    return l->options->address_space_bits == 39 &&
-           (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
+    int bits = l->options->address_space_bits;
+
+    /* A fixed-address image is linked for one address in the low 4 GB: a
+     * 32-bit address space has every mapping there, the 39-bit one reaches
+     * those addresses through the low window the Atmosphere patch opens.
+     * Anything else runs wherever it is put, but a 32-bit address space
+     * cannot host a 64-bit program. */
+    if (launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW)
+        return bits == 32 || (bits == 39 && l->options->low_window);
+    return bits != 32 || p->machine != 0x8664;
 }
 
 static int prepare_program_graphics( struct launcher *l, struct program *p )
@@ -2016,9 +2045,13 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     }
     if (!address_space_fits( l, p ))
     {
-        ui_message( ui, "Address space unavailable", l->options->address_space_bits != 39
-                    ? "Start Autorun from its 39-bit forwarder. You can install it in Settings > System."
-                    : "This game requires the Atmosphere low-address patch. Restart with the patched loader and Mesosphere." );
+        ui_message( ui, "Address space unavailable",
+                    l->options->address_space_bits == 32
+                    ? "64-bit programs need the 39-bit forwarder. You can install it in Settings > System."
+                    : l->options->address_space_bits == 39
+                    ? "This game needs low memory. Install the Atmosphere low-address patch (Quick setup), "
+                      "or start Autorun from the 32-bit forwarder in Settings > System."
+                    : "Start Autorun from its 39-bit forwarder. You can install it in Settings > System." );
         return 0;
     }
     /* Autorun ships no Windows DLLs: a card without them is offered them here. */
@@ -2457,10 +2490,15 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 #ifdef WINE_NX_FEX
         if (x86 || x64)
         {
-            ADD_ROW( ROW_CPU, SECTION_EMULATION, "CPU translator", "Translator used to run this program." );
+            static const char *const cpu_names[] = { "Box64", "FEX", "FEX optimized" };
+            int cpu = p->settings.fex < 0 ? cpu_default_index( l ) : p->settings.fex;
+
+            ADD_ROW( ROW_CPU, SECTION_EMULATION, "CPU translator",
+                     "Translator used to run this program: Box64, the stock FEX modules, or the "
+                     "tuned FEX build. Left alone, fex-variant.txt decides." );
             row->kind = UI_ROW_DROPDOWN;
-            row->choices = 2;
-            snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
+            row->choices = 3;
+            snprintf( row->value, sizeof(row->value), "%s", cpu_names[cpu] );
         }
 #endif
         ADD_ROW( ROW_FOUR_CORES, SECTION_EMULATION, "4-core support",
@@ -2505,6 +2543,26 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         snprintf( row->value, sizeof(row->value), "%s",
                   state_text( p->settings.framebuffer, l->options->framebuffer, "Framebuffer", "Compositor",
                               buffer, sizeof(buffer) ) );
+
+        ADD_ROW( ROW_ASPECT, SECTION_GRAPHICS, "Aspect",
+                 "Fit keeps the program's own proportions, with bars at the sides when it is 4:3. "
+                 "Stretch 4:3 fills the screen: the central 4:3 of the picture is stretched "
+                 "widescreen, like a classic console TV look." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.aspect_stretch ? "Stretch 4:3" : "Fit" );
+
+        ADD_ROW( ROW_RESOLUTION, SECTION_GRAPHICS, "Resolution",
+                 "The screen a game starts with. 1280x720 is the panel itself, the fewest pixels to draw. "
+                 "A game that asks for a display mode of its own still gets it, and whatever it draws "
+                 "is scaled onto the panel." );
+        row->kind = UI_ROW_DROPDOWN;
+        row->choices = LAUNCHER_RESOLUTION_COUNT;
+        snprintf( row->value, sizeof(row->value), "%s", launcher_resolution_labels[p->settings.resolution] );
+
+        ADD_ROW( ROW_VOODOO, SECTION_GRAPHICS, "Voodoo (dgVoodoo)",
+                 "Settings for the dgVoodoo2 wrapper, whose DLLs are copied into the game folder by hand. "
+                 "On writes dgVoodoo.conf beside the program before every start; Off leaves the folder alone." );
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.voodoo ? "On" : "Off" );
 
         if (l->options->vulkan && (x86 || x64))
         {
@@ -2791,6 +2849,38 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             ui_toast( ui, line[0] ? "Arguments saved" : "Arguments removed", 1500 );
             break;
 
+        case ROW_ASPECT:
+            if (action == UI_ACTION_RESET) p->settings.aspect_stretch = 0;
+            else if (action == UI_ACTION_CHOOSE) p->settings.aspect_stretch = !p->settings.aspect_stretch;
+            else p->settings.aspect_stretch = action == UI_ACTION_RIGHT;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_RESOLUTION:
+        {
+            struct ui_row items[LAUNCHER_RESOLUTION_COUNT] = {0};
+            int selected, i;
+
+            if (action == UI_ACTION_RESET) p->settings.resolution = 0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                for (i = 0; i < LAUNCHER_RESOLUTION_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s", launcher_resolution_labels[i] );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_RESOLUTION_COUNT, p->settings.resolution );
+                if (selected < 0) break;
+                p->settings.resolution = selected;
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+        }
+
+        case ROW_VOODOO:
+            if (action != UI_ACTION_CHOOSE) break;
+            launcher_voodoo_options( ui, l->options->runtime_dir, p->path, p->title );
+            load_program_settings( l, p );
+            break;
+
         case ROW_VERBOSE:
         case ROW_PROFILE:
         case ROW_WINDOWS:
@@ -2839,24 +2929,34 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 #ifdef WINE_NX_FEX
         case ROW_CPU:
         {
-            struct ui_row items[2] = {0};
+            struct ui_row items[3] = {0};
             int selected;
 
-            if (action == UI_ACTION_RESET) selected = 1;
+            if (action == UI_ACTION_RESET) selected = -1;
             else if (action == UI_ACTION_CHOOSE)
             {
                 snprintf( items[0].label, sizeof(items[0].label), "Box64" );
                 snprintf( items[1].label, sizeof(items[1].label), "FEX" );
-                selected = ui_settings_dropdown( ui, &list, items, 2, p->settings.fex );
+                snprintf( items[2].label, sizeof(items[2].label), "FEX optimized" );
+                selected = ui_settings_dropdown( ui, &list, items, 3,
+                                                 p->settings.fex < 0 ? cpu_default_index( l ) : p->settings.fex );
                 if (selected < 0) break;
             }
             else break;
-            runtime_file( l, x64 ? "drive_c/windows/system32/libarm64ecfex.dll" :
-                                  "drive_c/windows/system32/libwow64fex.dll", path, sizeof(path) );
-            if (selected && !file_exists( path ))
+            if (selected > 0)
             {
-                ui_message( ui, "FEX", "Install the FEX runtime package first." );
-                break;
+                const char *module = x64 ? (selected == 2 ? "drive_c/windows/system32/libarm64ecfex-opt.dll" :
+                                                           "drive_c/windows/system32/libarm64ecfex.dll") :
+                                           (selected == 2 ? "drive_c/windows/system32/libwow64fex-opt.dll" :
+                                                           "drive_c/windows/system32/libwow64fex.dll");
+                runtime_file( l, module, path, sizeof(path) );
+                if (!file_exists( path ))
+                {
+                    ui_message( ui, selected == 2 ? "FEX optimized" : "FEX",
+                                selected == 2 ? "Install the tuned FEX modules first." :
+                                                "Install the FEX runtime package first." );
+                    break;
+                }
             }
             p->settings.fex = selected;
             save_program_settings( l, p );
@@ -3083,7 +3183,7 @@ enum settings_row
 {
     SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
-    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
+    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN, SET_MAKE_32,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE,
 #endif
@@ -3292,6 +3392,7 @@ static void settings_menu( struct launcher *l )
             [SET_UPDATE] = SET_SECTION_SYSTEM,
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
+            [SET_MAKE_32] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
             [SET_SWAP_SIZE] = SET_SECTION_SYSTEM,
 #endif
@@ -3379,9 +3480,18 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_MAKE_MAIN].value, sizeof(rows[0].value), "%s",
                   l->options->install_forwarder ? "Autorun" : "Unavailable" );
         rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games also "
-                                   "require the Atmosphere low-address patch. Use emuMMC only.";
+                                   "require the Atmosphere low-address patch, or the 32-bit forwarder below. "
+                                   "Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
+        snprintf( rows[SET_MAKE_32].label, sizeof(rows[0].label), "Make a 32-bit Autorun forwarder" );
+        snprintf( rows[SET_MAKE_32].value, sizeof(rows[0].value), "%s",
+                  l->options->install_forwarder ? "Autorun (32-bit)" : "Unavailable" );
+        rows[SET_MAKE_32].help = "Installs a forwarder whose 32-bit address space has every mapping in the "
+                                 "low 4 GB: fixed-address Win32 games run through it without the Atmosphere "
+                                 "low-address patch. 64-bit games need the 39-bit forwarder. Use emuMMC only.";
+        rows[SET_MAKE_32].adjustable = 0;
+        rows[SET_MAKE_32].disabled = !l->options->install_forwarder;
 #ifdef WINE_NX_SWAP_POC
         {
             int size = launcher_kv_get_int( &l->look, "swap-mb", 0 );
@@ -3453,7 +3563,10 @@ static void settings_menu( struct launcher *l )
             ui_start_screen( ui );
             break;
         case SET_MAKE_MAIN:
-            if (action == UI_ACTION_CHOOSE) make_forwarder( l );
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 3 );
+            break;
+        case SET_MAKE_32:
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 2 );
             break;
 
 #ifdef WINE_NX_SWAP_POC

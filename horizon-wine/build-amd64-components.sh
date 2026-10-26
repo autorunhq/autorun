@@ -51,7 +51,11 @@ sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # The switch-dev image (switch-dev.txt) has libnx, mesa-switch, LSFG-VK and
 # libusbhsfs in portlibs. WINE_NX_MESA_SWITCH_DIR links another mesa-switch.
+# git in the image must trust the mounted tree: bind mounts keep the host's
+# UIDs, and the container runs as root.
 docker run --rm --network none -v "$root:/work" -w /work \
+    -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+    -e GIT_CONFIG_KEY_1=safe.directory -e GIT_CONFIG_VALUE_1='/work/horizon-wine/vendor/box64' \
     -e NX_PE="/work/${pe#"$root/"}" -e NX_BUILD="/work/${build#"$root/"}" \
     -e NX_JOBS="$jobs" -e NX_DYNAREC="${WINE_NX_BOX64_DYNAREC:-ON}" \
     -e WINE_NX_JOBS="$jobs" \

@@ -5013,6 +5013,13 @@ static BOOL show_window( HWND hwnd, INT cmd )
         nx_window_trace( "[NXWIN] thread %04x shows hwnd %p with %d (style %#x, visible %d%s)",
                          (int)GetCurrentThreadId(), hwnd, cmd, (int)style, was_visible,
                          is_iconic( hwnd ) ? ", minimized" : "" );
+        {
+            RECT shown;
+
+            get_window_rect( hwnd, &shown, get_thread_dpi() );
+            nx_window_trace( "[NXWIN] hwnd %p is %dx%d at %d,%d", hwnd,
+                             shown.right - shown.left, shown.bottom - shown.top, shown.left, shown.top );
+        }
         nx_trace_window_words( hwnd );
     }
     if (nx_fullscreen && (cmd == SW_SHOW || cmd == SW_SHOWNORMAL || cmd == SW_SHOWDEFAULT))

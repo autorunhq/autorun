@@ -19,6 +19,7 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <setjmp.h>
 
 #include "ntstatus.h"
@@ -998,6 +999,14 @@ static NTSTATUS create_cross_process_work_list( WOW64INFO *wow64info )
 /**********************************************************************
  *           process_init
  */
+/* Startup breadcrumbs on stderr, where the runtime keeps them (logs/std*.txt):
+ * a failing CPU module init otherwise dies without a trace. */
+static void wow64_diag( const char *step, ULONG_PTR value )
+{
+    fprintf( stderr, "[WOW64-DIAG] %s %08lx\n", step, (unsigned long)value );
+    fflush( stderr );
+}
+
 static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **context )
 {
     PEB32 *peb32;
@@ -1026,7 +1035,12 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     GET_PTR( LdrSystemDllInitBlock );
 
     module = load_64bit_module( get_cpu_dll_name() );
+    wow64_diag( "cpu module", (ULONG_PTR)module );
     GET_PTR( BTCpuGetBopCode );
+    wow64_diag( "BTCpuGetBopCode", (ULONG_PTR)pBTCpuGetBopCode );
+    wow64_diag( "BTCpuProcessInit", (ULONG_PTR)pBTCpuProcessInit );
+    wow64_diag( "BTCpuThreadInit", (ULONG_PTR)pBTCpuThreadInit );
+    wow64_diag( "BTCpuSimulate", (ULONG_PTR)pBTCpuSimulate );
     GET_PTR( BTCpuGetContext );
     GET_PTR( BTCpuIsProcessorFeaturePresent );
     GET_PTR( BTCpuProcessInit );
@@ -1053,7 +1067,9 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     GET_PTR( sdwhwin32 );
     syscall_tables[1] = *psdwhwin32;
 
+    wow64_diag( "BTCpuProcessInit call", 0 );
     pBTCpuProcessInit();
+    wow64_diag( "BTCpuProcessInit returned", 0 );
 
     module = (HMODULE)(ULONG_PTR)pLdrSystemDllInitBlock->ntdll_handle;
     init_image_mapping( module );
@@ -1089,7 +1105,9 @@ static NTSTATUS thread_init(void)
 
     NtCurrentTeb32()->WOW32Reserved = PtrToUlong( pBTCpuGetBopCode() );
     NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = wow64info;
+    wow64_diag( "BTCpuThreadInit call", 0 );
     if (pBTCpuThreadInit) pBTCpuThreadInit();
+    wow64_diag( "BTCpuThreadInit returned", 0 );
 
     /* update initial context to jump to 32-bit LdrInitializeThunk (cf. 32-bit call_init_thunk) */
     switch (current_machine)
@@ -1099,8 +1117,17 @@ static NTSTATUS thread_init(void)
             I386_CONTEXT *ctx_ptr, ctx = { CONTEXT_I386_FULL };
             ULONG *stack;
 
-            if ((status = pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
-            if (ctx.Esp < sizeof(*ctx_ptr) + 5 * sizeof(*stack)) return STATUS_BAD_INITIAL_STACK;
+            if ((status = pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx )))
+            {
+                wow64_diag( "BTCpuGetContext failed", status );
+                return status;
+            }
+            wow64_diag( "BTCpuGetContext esp", ctx.Esp );
+            if (ctx.Esp < sizeof(*ctx_ptr) + 5 * sizeof(*stack))
+            {
+                wow64_diag( "bad initial stack", ctx.Esp );
+                return STATUS_BAD_INITIAL_STACK;
+            }
             ctx_ptr = (I386_CONTEXT *)ULongToPtr( ctx.Esp ) - 1;
             *ctx_ptr = ctx;
             stack = (ULONG *)ctx_ptr;
@@ -1111,7 +1138,12 @@ static NTSTATUS thread_init(void)
             *(--stack) = 0xdeadbabe;
             ctx.Esp = PtrToUlong( stack );
             ctx.Eip = pLdrSystemDllInitBlock->pLdrInitializeThunk;
-            if ((status = pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx ))) return status;
+            if ((status = pBTCpuSetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx )))
+            {
+                wow64_diag( "BTCpuSetContext failed", status );
+                return status;
+            }
+            wow64_diag( "BTCpuSetContext done", ctx.Eip );
         }
         break;
 
@@ -1524,11 +1556,14 @@ void WINAPI Wow64LdrpInitialize( CONTEXT *context )
     NTSTATUS status;
 
     RtlRunOnceExecuteOnce( &init_done, process_init, NULL, NULL );
+    wow64_diag( "process_init done", 0 );
     if ((status = thread_init()))
     {
+        wow64_diag( "thread_init failed", status );
         ERR( "CPU thread initialization failed, status %#lx\n", status );
         RtlRaiseStatus( status );
     }
+    wow64_diag( "cpu_simulate", 0 );
     cpu_simulate();
 }
 

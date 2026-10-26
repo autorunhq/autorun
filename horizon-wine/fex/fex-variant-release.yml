@@ -1,0 +1,90 @@
+# The tuned Horizon FEX modules, published as the fex-opt release that
+# Autorun's FEX variant workflow (and anything else) downloads instead of
+# building FEX itself.
+#
+# To start publishing: copy this file to .github/workflows/ on the branch that
+# publishes. It builds the recipe build-dlls.py's fex-opt entry names: the
+# pinned FEX release with Autorun's Horizon patch, compiled for the Switch's
+# Cortex-A57 (WINE_NX_FEX_TUNE_TEGRA_X1). The tree this runs on does not
+# supply the source yet: a tree whose own Horizon layer is complete
+# (berlint-hub/FEX's arena/799d045b-fex still runs on fallback stubs -- no
+# W^X JIT alias and no I-cache flush, which faults on hardware) can become
+# the source by setting WINE_NX_FEX_DIR to its checkout (this one is
+# $GITHUB_WORKSPACE), WINE_NX_FEX_REVISION to the commit, and
+# WINE_NX_FEX_VERSION to its version; horizon-wine/fex/tegra-x1-fixes.patch
+# lists what that port was missing to compile, and the Horizon layer it still
+# owes is described in horizon-wine/fex/variants-build.md.
+name: FEX Horizon modules
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "arena/**" ]
+
+permissions:
+  contents: write
+
+jobs:
+  modules:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # Autorun holds the CPU ABI headers the modules are built and validated
+      # against, and the DLL repository's tools hold the recipe.
+      - name: Fetch Autorun and the DLL tools
+        run: |
+          git clone --depth 1 -b arena/6fd3131b-autorun \
+            https://github.com/berlint-hub/autorun.git "$RUNNER_TEMP/autorun"
+          git clone --depth 1 \
+            https://github.com/autorunhq/autorun-horizon-dlls.git "$RUNNER_TEMP/dlls"
+          git -C "$RUNNER_TEMP/dlls" apply \
+            "$RUNNER_TEMP/autorun/horizon-wine/fex/dlls-fex-variants.patch"
+
+      - name: Fetch llvm-mingw
+        run: |
+          llvm_version=20260505
+          llvm_name="llvm-mingw-$llvm_version-ucrt-ubuntu-22.04-x86_64"
+          llvm="$RUNNER_TEMP/$llvm_name"
+          curl -fL --retry 3 -o "$llvm.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$llvm_version/$llvm_name.tar.xz"
+          tar -xJf "$llvm.tar.xz" -C "$RUNNER_TEMP"
+          echo "WINE_NX_LLVM_MINGW=$llvm" >> "$GITHUB_ENV"
+
+      - name: Build the modules
+        shell: bash
+        run: |
+          set -o pipefail
+          export AUTORUN="$RUNNER_TEMP/autorun"
+          export WINE_NX_FEX_TUNE_TEGRA_X1=ON
+          export WINE_NX_FEX_SUFFIX=-opt
+          export WINE_NX_JOBS="$(nproc)"
+          if sh "$RUNNER_TEMP/dlls/tools/build-fex.sh" 2>&1 | tee fex-build.log; then
+            exit 0
+          fi
+          { grep -m2 -B1 -A8 "error" fex-build.log || tail -n 20 fex-build.log; } | \
+            tr '\n' '\v' | sed 's/%/%25/g; s/\v/%0A/g' | cut -c1-3400 | \
+            xargs -0 -I{} echo "::error::fex-build.log: {}"
+          exit 1
+
+      # The contract: fex-opt-modules.zip lays out switch/wine/ as on the card
+      # (the two modules and fex-opt-manifest.json), and SHA256SUMS covers it.
+      - name: Publish the fex-opt release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          payload="$RUNNER_TEMP/autorun/horizon-wine/toolchains/build-fex-2609-opt-horizon/payload"
+          stage=overlay/switch/wine
+          mkdir -p "$stage/drive_c/windows/system32"
+          cp "$payload/libwow64fex-opt.dll" "$payload/libarm64ecfex-opt.dll" \
+            "$stage/drive_c/windows/system32/"
+          cp "$payload/fex-manifest.json" "$stage/fex-opt-manifest.json"
+          (cd overlay && zip -qr ../fex-opt-modules.zip switch)
+          sha256sum fex-opt-modules.zip > SHA256SUMS
+          gh release create fex-opt fex-opt-modules.zip SHA256SUMS \
+            --title "Tuned Horizon FEX modules" \
+            --notes "libwow64fex-opt.dll and libarm64ecfex-opt.dll, built with the Tegra X1 tuning, for Autorun's A/B switch (sdmc:/switch/wine/fex-variant.txt = opt)." \
+            --latest=false || \
+            gh release upload fex-opt fex-opt-modules.zip SHA256SUMS --clobber

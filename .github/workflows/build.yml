@@ -1,0 +1,189 @@
+# Build Autorun and run its host tests, the way build.sh and
+# horizon-wine/tests/check-launcher-host.sh do on a machine. The runtime is
+# built in the switch-dev image build.sh names, and what it produces is the SD
+# card archive, uploaded here as the artifact.
+name: Build
+
+on:
+  push:
+    branches: [ "arena/**" ]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev libpng-dev fonts-dejavu-core
+
+      - name: Input profiles
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Werror -O1 -g \
+            horizon-wine/tests/input_profile.c horizon-wine/source/input_profile.c \
+            -lm -o input_profile
+          ./input_profile
+
+      - name: Screen fit
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Werror -O1 -g \
+            -I horizon-wine/source \
+            horizon-wine/tests/screen_fit.c -o screen_fit
+          ./screen_fit
+
+      - name: Log flood fold
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Werror -O1 -g \
+            -I horizon-wine/source \
+            horizon-wine/tests/log_repeat.c -o log_repeat
+          ./log_repeat
+
+      - name: DirectInput input (raw payload and low-level hooks)
+        run: |
+          python3 horizon-wine/tests/check_raw_mouse.py
+          python3 horizon-wine/tests/check_ll_hooks.py
+
+      - name: Floating keyboard and controls overlay
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Werror -O1 -g $(sdl2-config --cflags) \
+            -I horizon-wine/source \
+            horizon-wine/tests/osk.c horizon-wine/source/osk.c \
+            horizon-wine/source/controls_overlay.c horizon-wine/source/input_profile.c \
+            $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o osk
+          mkdir -p "$PWD/shots"
+          ./osk /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$PWD/shots"
+          cc -std=gnu11 -Wall -Wextra -Werror -O1 -g $(sdl2-config --cflags) \
+            -I horizon-wine/source \
+            horizon-wine/tests/controls_overlay.c horizon-wine/source/controls_overlay.c \
+            horizon-wine/source/input_profile.c \
+            $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o controls_overlay
+          ./controls_overlay /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$PWD/shots"
+
+      - name: Upload the overlay's pictures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-shots
+          path: shots/
+          if-no-files-found: ignore
+
+  build:
+    name: Build the runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true   # horizon-dlls is checked against, game-fixes is packed in
+
+      # switch-dev and the runtime's build trees are large: give Docker the big
+      # scratch disk and drop the tools this build does not use.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
+            /opt/microsoft /usr/local/graalvm /usr/local/.ghcup
+          sudo docker image prune -af
+          sudo systemctl stop docker docker.socket
+          sudo mkdir -p /mnt/docker
+          sudo rsync -a /var/lib/docker/ /mnt/docker/
+          echo '{"data-root":"/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          df -h / /mnt
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bison flex
+
+      # The llvm-mingw toolchain and the boot payloads build.sh makes once are
+      # the slowest part to fetch or make again; the switch-dev image names what
+      # they were built against, and the boot payload's own sources say when it
+      # is time to build them again. Only what the build reuses is kept: the
+      # payload build's own checkouts are dropped, so a restored cache never
+      # lands git on files another user made. Saved even when the build fails.
+      - name: Restore toolchains and boot payloads
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            horizon-wine/toolchains/llvm-mingw-*
+            horizon-wine/toolchains/boot-payloads/bundle
+          key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt', 'horizon-wine/build-boot-bundle.sh', 'horizon-wine/mesosphere/**') }}
+          restore-keys: toolchains-
+
+      # The tuned FEX modules, from whichever fex-opt release exists: the FEX
+      # tree's own first, this repository's fallback build second. They are
+      # staged into the package with the variant file that turns them on; a
+      # build reached without a release ships the pinned modules alone.
+      - name: Fetch the tuned FEX
+        shell: bash
+        run: |
+          mkdir -p horizon-wine/fex/opt-modules
+          for owner in berlint-hub/FEX berlint-hub/autorun; do
+            if curl -fsSL --retry 2 -o "$RUNNER_TEMP/fex-opt-modules.zip" \
+                 "https://github.com/$owner/releases/download/fex-opt/fex-opt-modules.zip" \
+               && curl -fsSL --retry 2 -o "$RUNNER_TEMP/SHA256SUMS" \
+                 "https://github.com/$owner/releases/download/fex-opt/SHA256SUMS"; then
+              (cd "$RUNNER_TEMP" && sha256sum -c SHA256SUMS)
+              python3 -c "import zipfile; zipfile.ZipFile(r'$RUNNER_TEMP/fex-opt-modules.zip').extractall('horizon-wine/fex/opt-modules')"
+              printf 'opt\n' > horizon-wine/fex/opt-modules/switch/wine/fex-variant.txt
+              echo "Tuned FEX taken from $owner:" \
+                "$(ls horizon-wine/fex/opt-modules/switch/wine/drive_c/windows/system32)" \
+                >> "$GITHUB_STEP_SUMMARY"
+              break
+            fi
+          done
+
+      # build.sh tees to build.log so a failure can say why in annotations,
+      # which the job's checks carry even when the log archive is out of reach.
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          if sh build.sh --jobs "$(nproc)" 2>&1 | tee build.log; then
+            exit 0
+          fi
+          tail -n 12 build.log | tr '\n' '\v' | sed 's/%/%25/g; s/\v/%0A/g' | cut -c1-3400 | \
+            xargs -0 -I{} echo "::error::build.log tail: {}"
+          df -h | tr '\n' ';' | sed 's/%/%25/g' | xargs -0 -I{} echo "::notice::disk: {}"
+          sudo docker images | tr '\n' ';' | sed 's/%/%25/g' | cut -c1-1500 | xargs -0 -I{} echo "::notice::images: {}"
+          exit 1
+
+      # The three NCAs a forwarder is made of, built and taken apart again: the
+      # loader's NPDM comes out of the build dir just made, since it is what the
+      # address space is patched into.
+      - name: Check the forwarder NCAs
+        run: |
+          npdm=""
+          for dir in horizon-wine/build-switch-wow64-mesa-switch horizon-wine/build-switch-amd64; do
+            [ -f "$dir/hbl-main.npdm" ] && { npdm="$dir/hbl-main.npdm"; break; }
+          done
+          test -n "$npdm"
+          mkdir -p "$RUNNER_TEMP/switch-shim" "$RUNNER_TEMP/ncas"
+          cp horizon-wine/tests/switch_shim.h "$RUNNER_TEMP/switch-shim/switch.h"
+          cc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-format-truncation -O1 -g \
+            -I horizon-wine/tests -I "$RUNNER_TEMP/switch-shim" \
+            horizon-wine/tests/forwarder_build.c -o "$RUNNER_TEMP/forwarder_build"
+          "$RUNNER_TEMP/forwarder_build" "$npdm" horizon-wine/assets/autorun.jpg "$RUNNER_TEMP/ncas"
+
+      - name: Save toolchains and boot payloads
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            horizon-wine/toolchains/llvm-mingw-*
+            horizon-wine/toolchains/boot-payloads/bundle
+          key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt', 'horizon-wine/build-boot-bundle.sh', 'horizon-wine/mesosphere/**') }}-${{ github.run_id }}
+
+      - name: Upload the SD card archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun
+          path: horizon-wine/build-autorun/autorun-*.zip
+          if-no-files-found: error

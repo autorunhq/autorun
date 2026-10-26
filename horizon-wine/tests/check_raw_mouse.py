@@ -45,6 +45,9 @@ assert send.rindex('if (legacy)', 0, cursor) > send.index('mouse->x - horizon_po
 message = function(horizon, 'static int horizon_server_handle_get_message(')
 assert 'HORIZON_RIM_TYPEMOUSE' in message and 'queued->raw_m' in message
 
+buttons = function(horizon, 'horizon_mouse_button_events[]')
+assert 'HORIZON_WM_MBUTTONDOWN' in buttons and 'HORIZON_WM_MBUTTONUP' in buttons
+
 fixture = r'''
 #include <assert.h>
 #include <stddef.h>
@@ -101,6 +104,12 @@ int main( void )
     assert( raw.last_x == -1 && raw.last_y == 2 );
     assert( raw.button_flags == HORIZON_RI_MOUSE_RIGHT_DOWN );
     assert( raw.extra_information == 0x1234 );
+
+    /* The middle button, which the presets bind to a third mouse button. */
+    horizon_raw_mouse_event( HORIZON_MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, &raw );
+    assert( raw.button_flags == HORIZON_RI_MOUSE_MIDDLE_DOWN );
+    horizon_raw_mouse_event( HORIZON_MOUSEEVENTF_MIDDLEUP, 0, 0, 0, &raw );
+    assert( raw.button_flags == HORIZON_RI_MOUSE_MIDDLE_UP );
 
     printf( "raw mouse: the movement asked for, the buttons that changed, and the SDK's layout\n" );
     return 0;

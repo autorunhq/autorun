@@ -197,6 +197,25 @@ static void fatal_perror( const char *err, ... ) __attribute__((noreturn, format
 static void server_connect_error( const char *serverdir ) __attribute__((noreturn));
 #endif
 
+#ifdef __SWITCH__
+extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+
+/* stderr is not the runtime log: without this a start-up death only ever
+ * showed as the last line the log managed to flush. */
+static void fatal_trace( const char *err, va_list args ) __attribute__((format(printf,1,0)));
+static void fatal_trace( const char *err, va_list args )
+{
+    char msg[256];
+
+    if (!&wine_nx_runtime_trace) return;
+    memcpy( msg, "[FAIL] ", 7 );
+    vsnprintf( msg + 7, sizeof(msg) - 7, err, args );
+    wine_nx_runtime_trace( msg );
+}
+#else
+static void fatal_trace( const char *err, va_list args ) { (void)err; (void)args; }
+#endif
+
 /* die on a fatal error; use only during initialization */
 static void fatal_error( const char *err, ... )
 {
@@ -205,6 +224,9 @@ static void fatal_error( const char *err, ... )
     va_start( args, err );
     fprintf( stderr, "wine: " );
     vfprintf( stderr, err, args );
+    va_end( args );
+    va_start( args, err );
+    fatal_trace( err, args );
     va_end( args );
     exit(1);
 }
@@ -218,6 +240,9 @@ static void fatal_perror( const char *err, ... )
     fprintf( stderr, "wine: " );
     vfprintf( stderr, err, args );
     perror( " " );
+    va_end( args );
+    va_start( args, err );
+    fatal_trace( err, args );
     va_end( args );
     exit(1);
 }

@@ -11,6 +11,11 @@ flags="-std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-f
 "$build/std_stream_lines"
 "${CC:-clang}" $flags -I"$root/include" "$root/horizon-wine/tests/horizon_file_access.c" -o "$build/file_access"
 "$build/file_access"
+# The static unixlib table pairs FEX's CPU modules, including a variant build's
+# libwow64fex-opt.dll; a miss leaves the module with no unixlib.
+"${CC:-clang}" $flags "$root/horizon-wine/tests/horizon_unixlib_names.c" -o "$build/unixlib_names"
+"$build/unixlib_names"
+CC="${CC:-clang}" python3 "$root/horizon-wine/tests/check_fex_unixlib.py"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/pointer_cursor.c" -o "$build/pointer_cursor"
 "$build/pointer_cursor"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/horizon_message_queue.c" -o "$build/message_queue"
