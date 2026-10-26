@@ -102,6 +102,7 @@
 #include "wine/unixlib.h"
 #include "unix_private.h"
 #include "horizon_private.h"
+#include "horizon_unixlib_names.h"
 #include "wine/debug.h"
 
 #ifdef __SWITCH__
@@ -959,10 +960,6 @@ static const struct
     NTSTATUS   (*init)(void);
 } wine_nx_static_unix_libs[] =
 {
-#ifdef WINE_NX_FEX
-    { "libarm64ecfex.dll", wine_nx_fex_unix_funcs },
-    { "libwow64fex.dll", wine_nx_fex_unix_funcs },
-#endif
 #ifdef WINE_NX_BOX64_INTERPRETER
     { "winebox64.dll", wine_nx_winebox64_unix_funcs },
 #endif
@@ -987,6 +984,23 @@ static const struct
     { "winevulkan.dll", wine_nx_winevulkan_unix_funcs },
 #endif
 };
+
+#ifdef WINE_NX_FEX
+/* FEX's CPU modules are matched by their stem, without the extension: FEX asks
+ * for its unixlib by that stem alone (FEXUnixLib::Init, before it falls back to
+ * its own module base), and a variant build sits beside the stock one as
+ * libwow64fex-<variant>.dll (fex-variant.txt, a game's CPU translator). The
+ * stem, "<stem>.dll" and "<stem>-<variant>.dll" all pair. */
+static const struct
+{
+    const char  *stem;
+    const void  *funcs;
+} wine_nx_variant_unix_libs[] =
+{
+    { "libarm64ecfex", wine_nx_fex_unix_funcs },
+    { "libwow64fex", wine_nx_fex_unix_funcs },
+};
+#endif
 
 /* Tables for 32-bit DLLs under WoW64 (see ws2_32_unix_stub.c). Those modules
  * are in the 32-bit loader list only, so they are matched by the DLL name in
@@ -1148,10 +1162,23 @@ static BOOL wine_nx_unix_name_equal( const UNICODE_STRING *name, const char *exp
     return TRUE;
 }
 
+/* The Horizon CRT reports only STATUS_DLL_INIT_FAILED if neither FEX unixlib
+ * lookup method succeeds. Name the missing mapping here. */
+static void wine_nx_report_unpaired_unix_lib( const UNICODE_STRING *name )
+{
+    char text[WINE_NX_UNIXLIB_NAME_MAX];
+
+    if (!name || !name->Buffer ||
+        !wine_nx_unixlib_name_is_fex( name->Buffer, name->Length / sizeof(WCHAR) )) return;
+    wine_nx_unixlib_name_format( name->Buffer, name->Length / sizeof(WCHAR), text, sizeof(text) );
+    ERR( "no static unixlib entry for %s\n", text );
+}
+
 static NTSTATUS wine_nx_load_static_unix_lib( const UNICODE_STRING *name, BOOL wow, UINT64 res[2] )
 {
     unsigned int i;
 
+    if (!name || !name->Buffer || name->Length % sizeof(WCHAR)) return STATUS_DLL_NOT_FOUND;
     if (wow)
     {
         for (i = 0; i < ARRAY_SIZE(wine_nx_static_wow64_unix_libs); i++)
@@ -1173,7 +1200,18 @@ static NTSTATUS wine_nx_load_static_unix_lib( const UNICODE_STRING *name, BOOL w
             res[1] = (UINT_PTR)wine_nx_static_unix_libs[i].funcs;
             return STATUS_SUCCESS;
         }
+#ifdef WINE_NX_FEX
+        for (i = 0; i < ARRAY_SIZE(wine_nx_variant_unix_libs); i++)
+        {
+            if (!wine_nx_unixlib_name_matches( name->Buffer, name->Length / sizeof(WCHAR),
+                                               wine_nx_variant_unix_libs[i].stem, TRUE )) continue;
+            res[0] = (UINT_PTR)&wine_nx_variant_unix_libs[i];
+            res[1] = (UINT_PTR)wine_nx_variant_unix_libs[i].funcs;
+            return STATUS_SUCCESS;
+        }
+#endif
     }
+    wine_nx_report_unpaired_unix_lib( name );
     return STATUS_DLL_NOT_FOUND;
 }
 
@@ -1185,6 +1223,10 @@ static NTSTATUS wine_nx_unload_static_unix_lib( unixlib_module_t module )
         if (module == (UINT_PTR)&wine_nx_static_unix_libs[i]) return STATUS_SUCCESS;
     for (i = 0; i < ARRAY_SIZE(wine_nx_static_wow64_unix_libs); i++)
         if (module == (UINT_PTR)&wine_nx_static_wow64_unix_libs[i]) return STATUS_SUCCESS;
+#ifdef WINE_NX_FEX
+    for (i = 0; i < ARRAY_SIZE(wine_nx_variant_unix_libs); i++)
+        if (module == (UINT_PTR)&wine_nx_variant_unix_libs[i]) return STATUS_SUCCESS;
+#endif
     return STATUS_INVALID_HANDLE;
 }
 

@@ -1,0 +1,31 @@
+From eb6cbb0a7b1084e49127dc9f810f22218b7230b9 Mon Sep 17 00:00:00 2001
+From: arena-agent <297053741+arena-agent@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 12:16:59 +0000
+Subject: [PATCH] CMake: do not append crc twice to the Tegra X1 arch
+
+FEX_TUNE_TEGRA_X1 sets TUNE_ARCH to armv8-a+crc and the arm64 path then
+appended +crc again, so the flag became -march=armv8-a+crc+crc, which the
+compiler rejects. Configuring with the tuning enabled failed before any
+file was built.
+---
+ CMakeLists.txt | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9210640..90fa4b3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -520,7 +520,9 @@ endif()
+ set(FEX_TUNE_COMPILE_FLAGS)
+ if (NOT TUNE_ARCH STREQUAL "generic")
+   set(TUNE_ARCH_STRING "${TUNE_ARCH}")
+-  if(ARCHITECTURE_arm64)
++  # The Tegra X1 profile already names its extensions, and a duplicate +crc is
++  # rejected by the compiler.
++  if(ARCHITECTURE_arm64 AND NOT TUNE_ARCH_STRING MATCHES "\\+crc")
+     set(TUNE_ARCH_STRING "${TUNE_ARCH}+crc")
+   endif()
+   check_cxx_compiler_flag("-march=${TUNE_ARCH_STRING}" COMPILER_SUPPORTS_ARCH_TYPE)
+-- 
+2.39.5
+
