@@ -72,8 +72,8 @@ jobs:
           path: build-amd64.log
           retention-days: 7
 
-      - name: Build changed DLLs from horizon-dlls (optional, non-fatal)
-        run: python3 horizon-dlls/tools/build-dlls.py || echo "DLL build failed or skipped — DLLs are downloaded separately on the card"
+      - name: Build changed DLLs from horizon-dlls (skipped — downloaded separately)
+        run: echo "Skipping DLL build — Windows DLLs are downloaded separately from autorunhq/autorun-horizon-dlls"
 
       - name: Package Autorun zip
         run: python3 horizon-wine/tools/package-autorun.py 2>&1 | tee package-autorun.log
