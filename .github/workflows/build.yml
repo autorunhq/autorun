@@ -81,8 +81,11 @@ jobs:
       - name: Show build-autorun contents
         run: find horizon-wine/build-autorun -type f 2>/dev/null | head -50 || echo "No build-autorun dir"
 
-      - name: Find all zip files in workspace
-        run: find . -name "*.zip" -type f 2>/dev/null || echo "No zip files found"
+      - name: Find all files in workspace (top 100)
+        run: find . -type f -not -path './.git/*' -not -path './node_modules/*' 2>/dev/null | head -100
+
+      - name: Find all zip files anywhere
+        run: find / -name "*.zip" -type f 2>/dev/null | head -20 || echo "No zip files found anywhere"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
