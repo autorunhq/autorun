@@ -1,0 +1,96 @@
+name: Build Autorun for Switch
+
+on:
+  push:
+    branches:
+      - arena/b616afce-autorun
+      - '**'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex python3 make curl git \
+            libgnutls28-dev libpng-dev libjpeg-dev libxml2-dev libfreetype6-dev \
+            libfontconfig1-dev libdbus-1-dev libudev-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev libvulkan-dev libsdl2-dev
+
+      - name: Download llvm-mingw
+        run: |
+          set -e
+          llvm_version=20260505
+          llvm_name="llvm-mingw-${llvm_version}-ucrt-ubuntu-22.04-x86_64"
+          llvm="$PWD/horizon-wine/toolchains/$llvm_name"
+          if [ ! -x "$llvm/bin/aarch64-w64-mingw32-clang" ]; then
+            mkdir -p horizon-wine/toolchains
+            archive="/tmp/$llvm_name.tar.xz"
+            curl -fL --retry 3 --connect-timeout 30 --insecure \
+              -o "$archive" \
+              "https://github.com/mstorsjo/llvm-mingw/releases/download/$llvm_version/$llvm_name.tar.xz"
+            tar -xJf "$archive" -C horizon-wine/toolchains
+            rm -f "$archive"
+          fi
+          echo "WINE_NX_LLVM_MINGW=$llvm" >> "$GITHUB_ENV"
+
+      - name: Pull the switch-dev build image
+        run: docker pull -q ghcr.io/autorunhq/switch-dev:2026.10.01
+
+      - name: Build boot payloads (Atmosphere 1.12.1 + Horizon-OC, once)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e DEVKITPRO=/opt/devkitpro-release \
+            ghcr.io/autorunhq/switch-dev:2026.10.01 \
+            sh horizon-wine/build-boot-bundle.sh
+
+      - name: Build AMD64 runtime (Wine tree, FEX, DXVK, VKD3D-Proton)
+        env:
+          WINE_NX_FEX: 1
+          WINE_NX_DXVK: 1
+          WINE_NX_VKD3D: 1
+        run: bash -x horizon-wine/build-amd64-components.sh 2>&1 | tee build-amd64.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-amd64-log
+          path: build-amd64.log
+          retention-days: 7
+
+      - name: Build changed DLLs from horizon-dlls (skipped — downloaded separately)
+        run: echo "Skipping DLL build — Windows DLLs are downloaded separately from autorunhq/autorun-horizon-dlls"
+
+      - name: Package Autorun zip
+        run: python3 horizon-wine/tools/package-autorun.py 2>&1 | tee package-autorun.log
+
+      - name: Show build-autorun contents
+        run: find horizon-wine/build-autorun -type f 2>/dev/null | head -50 || echo "No build-autorun dir"
+
+      - name: Find all files in workspace (top 100)
+        run: find . -type f -not -path './.git/*' -not -path './node_modules/*' 2>/dev/null | head -100
+
+      - name: Find all zip files anywhere
+        run: find / -name "*.zip" -type f 2>/dev/null | head -20 || echo "No zip files found anywhere"
+
+      - name: Upload build artifact (entire build-autorun dir)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-switch-build
+          path: horizon-wine/build-autorun/
+          retention-days: 7
+          if-no-files-found: warn
