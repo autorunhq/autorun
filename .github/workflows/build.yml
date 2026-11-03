@@ -87,12 +87,10 @@ jobs:
       - name: Find all zip files anywhere
         run: find / -name "*.zip" -type f 2>/dev/null | head -20 || echo "No zip files found anywhere"
 
-      - name: Upload build artifact
+      - name: Upload build artifact (entire build-autorun dir)
         uses: actions/upload-artifact@v4
         with:
           name: autorun-switch-build
-          path: |
-            horizon-wine/build-autorun/autorun-*.zip
-            **/autorun-*.zip
+          path: horizon-wine/build-autorun/
           retention-days: 7
           if-no-files-found: warn
