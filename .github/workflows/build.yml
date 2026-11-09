@@ -1,0 +1,94 @@
+name: build
+
+# The card archive Autorun ships (horizon-wine/build-autorun/autorun-NNN.zip),
+# built the way build.sh builds it: in the switch-dev image named in
+# horizon-wine/switch-dev.txt. Beside it, the floating keyboard's host test,
+# which needs SDL2 and no toolchain at all, so it says at once whether the
+# keyboard still does what it should.
+#
+# Run it from the Actions tab, or push to a branch. Notes:
+# - The first run downloads llvm-mingw and builds the boot payloads
+#   (Atmosphere and Horizon-OC) once, unless the toolchain cache has them.
+# - The Windows DLLs are not built here: a card downloads them from the DLL
+#   repository, and the package is checked against its manifest.
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+      - main
+  workflow_dispatch:
+    inputs:
+      x86:
+        description: 'Build the x86-only runtime (Box64, no FEX) instead of the AMD64 one'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  keyboard:
+    name: floating keyboard (host test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SDL2, libpng and a font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev libpng-dev fonts-dejavu-core
+
+      - name: Build the keyboard and run its test
+        run: |
+          cc -std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -I horizon-wine/source $(sdl2-config --cflags) \
+            horizon-wine/tests/osk.c horizon-wine/source/osk.c \
+            $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o "$RUNNER_TEMP/osk"
+          "$RUNNER_TEMP/osk" /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$RUNNER_TEMP/shots"
+
+  runtime:
+    name: card archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Toolchains and boot payloads
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/toolchains
+          key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt') }}
+
+      - name: Build
+        env:
+          X86: ${{ inputs.x86 }}
+        run: |
+          if [ "$X86" = "true" ]; then
+            sh build.sh --x86 --jobs "$(nproc)"
+          else
+            sh build.sh --jobs "$(nproc)"
+          fi
+
+      - name: What was built
+        run: |
+          ls -l horizon-wine/build-autorun/
+          sha256sum horizon-wine/build-autorun/autorun-*.zip
+
+      - name: Upload the card archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-card-${{ github.sha }}
+          path: horizon-wine/build-autorun/autorun-*.zip
+          if-no-files-found: error
+          retention-days: 30
