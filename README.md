@@ -250,7 +250,7 @@ sh build.sh
 builds Autorun in the [switch-dev](https://github.com/autorunhq/switch-dev)
 Docker image and writes the SD card archive to
 `horizon-wine/build-autorun/autorun-NNN.zip`. It needs Docker, git, Python 3
-and, on a Mac, Homebrew's bison. `sh build.sh --help` lists the options. How
+and bison. `sh build.sh --help` lists the options. How
 Autorun works, its tests and its file layout are in
 [documentation/technical.md](documentation/technical.md).
 

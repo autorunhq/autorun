@@ -6,9 +6,13 @@ name: build
 # which needs SDL2 and no toolchain at all, so it says at once whether the
 # keyboard still does what it should.
 #
-# Run it from the Actions tab, or push to a branch. Notes:
+# Run it from the Actions tab, or push to a branch. The build is Linux only:
+# build.sh has no toolchain download for other machines, and this is where the
+# card archive is made. Notes:
 # - The first run downloads llvm-mingw and builds the boot payloads
 #   (Atmosphere and Horizon-OC) once, unless the toolchain cache has them.
+# - Wine's PE tree is kept between runs, so a run rebuilds only what a commit
+#   moved rather than twelve minutes of the same objects.
 # - The Windows DLLs are not built here: a card downloads them from the DLL
 #   repository, and the package is checked against its manifest.
 
@@ -78,6 +82,16 @@ jobs:
           path: horizon-wine/toolchains
           key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt') }}
 
+      - name: Wine's PE tree
+        # Most of the build's time is here, and most of it does not change
+        # between commits: the key is the commit, so nothing ever hits exactly,
+        # and the newest tree is restored, which ninja then brings up to date.
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/build-wine-amd64-pe
+          key: wine-pe-${{ github.sha }}
+          restore-keys: wine-pe-
+
       - name: Build
         env:
           X86: ${{ inputs.x86 }}
@@ -87,6 +101,12 @@ jobs:
           else
             sh build.sh --jobs "$(nproc)"
           fi
+
+      - name: Hand the tree back to the runner
+        # The switch-dev container writes as root, so what it wrote is not the
+        # runner's until it is given back: the steps after this one read and
+        # write that tree, and the PE cache saves it as the runner.
+        run: sudo chown -R "$(id -u):$(id -g)" horizon-wine/toolchains horizon-wine/build-* || true
 
       - name: What was built
         run: |

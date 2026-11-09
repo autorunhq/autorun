@@ -207,8 +207,13 @@ Requirements:
   tests. It is devkitA64 with a newer libnx, mesa-switch (Mesa 26: OpenGL and
   NVK Vulkan), LSFG-VK's Horizon port and libusbhsfs with UASP in portlibs,
   each from a pinned revision.
-- LLVM-MinGW 20260505 in `horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal`,
-  and bison (Homebrew's), for Wine's PE modules.
+- LLVM-MinGW 20260505 in `horizon-wine/toolchains/`, which `build.sh` fetches
+  for the machine it runs on (`llvm-mingw-20260505-ucrt-ubuntu-22.04-x86_64` on
+  the GitHub runner), and bison, for Wine's PE modules.
+
+The build runs on Linux: `.github/workflows/build.yml` runs `build.sh` on an
+ubuntu-24.04 runner and keeps the card archive as the run's artifact. There is
+no llvm-mingw download for other machines, so nothing else builds it.
 
 Autorun builds the runtime; the Windows modules it runs are the DLL
 repository's, [autorun-horizon-dlls](https://github.com/autorunhq/autorun-horizon-dlls),
@@ -223,7 +228,7 @@ the part of Windows each file belongs to. No Autorun package carries any of it.
 ```sh
 docker run --rm -v "$PWD:/work" -w /work -e DEVKITPRO=/opt/devkitpro-release "$(cat horizon-wine/switch-dev.txt)" \
     sh horizon-wine/build-boot-bundle.sh         # Atmosphere 1.11.2 and HOC boot payloads, once
-WINE_NX_LLVM_MINGW="$PWD/horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal" \
+WINE_NX_LLVM_MINGW="$PWD/horizon-wine/toolchains/llvm-mingw-20260505-ucrt-ubuntu-22.04-x86_64" \
 WINE_NX_FEX=1 WINE_NX_DXVK=1 WINE_NX_VKD3D=1 \
     sh horizon-wine/build-amd64-components.sh    # the AMD64 NRO, and the build-wine-amd64-pe tree
 horizon-dlls/tools/build-dlls.py                  # the DLL repository: what changed since its manifest
