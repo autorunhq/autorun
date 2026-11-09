@@ -83,20 +83,60 @@ static pthread_t wine_nx_input_thread_id;
 static void nxdrv_trace( const char *fmt, int a, int b, int c, int d );
 static void nxdrv_trace_hot( const char *fmt, int a, int b, int c, int d );
 
+/* What the log is told whether or not verbose tracing is on: a few lines about
+ * where the input goes, not the stream of every event. */
+static void nxdrv_say( const char *text )
+{
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( text );
+}
+
+/* Said from the threads of this driver only, and only for the reasons below. */
+static volatile unsigned int wine_nx_input_pumps;   /* calls to ProcessEvents */
+
 /* Moves the drawn cursor while the program is too busy to pump messages, such
  * as OpenTTD loading its sprites. This thread has no TEB, so it must not call
  * into Wine: the first server call dereferences a NULL TEB. It only polls the
  * controller and presents; ProcessEvents sends the input from a Wine thread. */
 static void *wine_nx_input_thread( void *arg )
 {
+    unsigned int pumps = __atomic_load_n( &wine_nx_input_pumps, __ATOMIC_RELAXED );
+    unsigned int waited = 0;
+    int paused = 0;
+
     (void)arg;
     while (!__atomic_load_n( &wine_nx_input_thread_quit, __ATOMIC_ACQUIRE ))
     {
-        unsigned int buttons;
+        unsigned int buttons = 0, now;
         int x, y;
 
         wine_nx_pointer_poll( &x, &y, &buttons );
         wine_nx_fb_present();
+        /* Nothing is delivered to a program that is not taking its messages:
+         * it waits in the queue, or the server drops it. Say so when five
+         * seconds pass without a call to ProcessEvents, with the pad as it is
+         * at the time, so a film that cannot be skipped says whether the pad
+         * was even seen, and say when the program takes messages again. This
+         * thread has no TEB: only the runtime's own log may be written here. */
+        now = __atomic_load_n( &wine_nx_input_pumps, __ATOMIC_RELAXED );
+        if (now != pumps)
+        {
+            if (paused) nxdrv_say( "[NXINPUT] the program pumps its messages again" );
+            pumps = now;
+            waited = 0;
+            paused = 0;
+        }
+        else if (++waited >= 300)
+        {
+            waited = 0;
+            if (!paused)
+            {
+                char line[96];
+
+                paused = 1;
+                snprintf( line, sizeof(line), "[NXINPUT] no messages pumped for 5 s, pad %x", buttons );
+                nxdrv_say( line );
+            }
+        }
         usleep( 16000 );
     }
     __atomic_store_n( &wine_nx_input_thread_ended, 1, __ATOMIC_RELEASE );
@@ -608,6 +648,34 @@ static void wine_nx_pointer_flags( unsigned int last, unsigned int held, unsigne
     }
 }
 
+/* A key goes to the focus window of the foreground thread's input, and to its
+ * active window when it has no focus; with neither, the server drops it and
+ * only the key state is left for a program that asks (server/queue.c,
+ * queue_hardware_message). A program showing a film before its first dialog
+ * can be in that state, so say where a key would go, once a second while keys
+ * are being sent: it tells a key the program ignored from one that never
+ * arrived. Both windows are named, the foreground thread's and this thread's,
+ * because a key sent to no window in particular takes the first. */
+static void nxdrv_trace_key_target(void)
+{
+    static DWORD last;
+    GUITHREADINFO foreground = { .cbSize = sizeof(foreground) };
+    GUITHREADINFO mine = { .cbSize = sizeof(mine) };
+    char line[176];
+    DWORD now = NtGetTickCount();
+
+    if (!&wine_nx_runtime_trace) return;
+    if (last && now - last < 1000) return;
+    last = now;
+    if (!NtUserGetGUIThreadInfo( 0, &foreground )) memset( &foreground, 0, sizeof(foreground) );
+    if (!NtUserGetGUIThreadInfo( GetCurrentThreadId(), &mine )) memset( &mine, 0, sizeof(mine) );
+    snprintf( line, sizeof(line), "[NXINPUT] keys: foreground %x focus %x active %x, ours focus %x active %x",
+              (int)(ULONG_PTR)NtUserGetForegroundWindow(), (int)(ULONG_PTR)foreground.hwndFocus,
+              (int)(ULONG_PTR)foreground.hwndActive, (int)(ULONG_PTR)mine.hwndFocus,
+              (int)(ULONG_PTR)mine.hwndActive );
+    nxdrv_say( line );
+}
+
 static void wine_nx_send_key( const struct input_key_event *event )
 {
     INPUT input = {0};
@@ -619,6 +687,7 @@ static void wine_nx_send_key( const struct input_key_event *event )
     input.ki.wScan = scan & 0xff;
     if ((scan & 0xff00) == 0xe000 || event->code == INPUT_NUMPAD_ENTER) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    nxdrv_trace_key_target();
 }
 
 static void wine_nx_send_extra_mouse( unsigned int last, unsigned int held, unsigned int pressed,
@@ -721,6 +790,7 @@ static void wine_nx_send_vk( HKL layout, BYTE vk, BOOL up )
     input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
     if ((scan & 0xff00) == 0xe000) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    nxdrv_trace_key_target();
 }
 
 /* The floating keyboard (horizon-wine/source/osk.c) queues the keys pressed
@@ -806,6 +876,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 
     (void)mask;
     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
+    __atomic_add_fetch( &wine_nx_input_pumps, 1, __ATOMIC_RELAXED );
     wine_nx_fb_present();
     /* Poll here too, then deliver everything the polls saw since the last
      * call, including those of the background thread. */
