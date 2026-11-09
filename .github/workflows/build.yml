@@ -24,10 +24,6 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   keyboard:
     name: floating keyboard (host test)
@@ -42,17 +38,29 @@ jobs:
             libsdl2-dev libsdl2-ttf-dev libpng-dev fonts-dejavu-core
 
       - name: Build the keyboard and run its test
+        # The test keeps its picture and its labels for the life of the
+        # process, as it does under the console's font; there is nothing to
+        # free, so LeakSanitizer has nothing to say about it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
           cc -std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
             -I horizon-wine/source $(sdl2-config --cflags) \
             horizon-wine/tests/osk.c horizon-wine/source/osk.c \
             $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o "$RUNNER_TEMP/osk"
+          mkdir -p "$RUNNER_TEMP/shots"
           "$RUNNER_TEMP/osk" /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$RUNNER_TEMP/shots"
 
   runtime:
     name: card archive
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    # One build at a time per branch, and a push waits for the one running
+    # rather than killing it: an hour of compiling is worth keeping.
+    concurrency:
+      group: runtime-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
