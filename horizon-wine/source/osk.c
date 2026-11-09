@@ -862,7 +862,7 @@ static void draw_map( int screen_w, int screen_h )
         text_at( 0, size, map_names[i], left, cy, -1, DIM );
         text_at( 0, size, map_values[i], left + g.column_width - (int)g.pad, cy, 1, TEXT );
     }
-    text_at( 1, small, "- + A closes   - + right stick click: the keyboard   + and - held: close the program",
+    text_at( 1, small, "- + A closes   - + B: the keyboard   + and - held: close the program",
              picture_w / 2, picture_h - (int)(g.pad / 2 + g.hint / 2), 0, DIM );
 }
 

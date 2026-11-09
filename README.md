@@ -196,7 +196,7 @@ XInput or DirectInput.
 
 **Hold + and − together for a second** to close a game.
 
-**Minus + right stick click** opens the on-screen keyboard over the game (it
+**Minus + B** opens the on-screen keyboard over the game (it
 also opens by itself when a text field is selected; **Settings -> On-screen
 keyboard** turns that off). It works as a keyboard does, keys held while they
 are held:

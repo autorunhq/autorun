@@ -140,10 +140,10 @@ int main( int argc, char **argv )
     assert( !wine_nx_osk_frame( 1280, 720, &frame ) );
     expect( "" );
 
-    /* Opened with Minus and the right stick held: those do nothing until let
-     * go, so opening it does not close it again. */
-    wine_nx_osk_show( 1, OSK_MINUS | OSK_STICKR );
-    step( OSK_MINUS | OSK_STICKR );
+    /* Opened with Minus and B held: those do nothing until let go, so opening
+     * it does not close it again. */
+    wine_nx_osk_show( 1, OSK_MINUS | OSK_B );
+    step( OSK_MINUS | OSK_B );
     step( OSK_MINUS );
     step( 0 );
     assert( wine_nx_osk_visible() );

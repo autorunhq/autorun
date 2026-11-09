@@ -54,7 +54,7 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
         HidAnalogStickState left = padGetStickPos( &pad, 0 ), right = padGetStickPos( &pad, 1 );
 
         struct input_pad raw = { padGetButtons( &pad ), { left.x, left.y, right.x, right.y } }, mapped;
-        const u64 keyboard = HidNpadButton_Minus | HidNpadButton_StickR;
+        const u64 keyboard = HidNpadButton_Minus | HidNpadButton_B;
 
         raw.buttons &= ~__atomic_load_n( &wine_nx_input_swallowed, __ATOMIC_RELAXED );
         if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;

@@ -82,7 +82,7 @@ runtime; the full package now ships the Mesa 26 one.
   controller mode and the keys and mouse actions in the keyboard mode.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
   that sends what a physical keyboard sends, with scan codes, through the
-  display driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text
+  display driver (Minus + B, or `NtUserShowSoftwareKeyboard` / a text
   field taking focus). A key is down while it is held, by a finger or by the
   button that presses it, so Shift can be held with one finger while another
   types and two fingers hold two keys; the runtime hands it every finger that

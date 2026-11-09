@@ -978,7 +978,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         }
     }
     {
-        const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
+        const u64 osk = HidNpadButton_Minus | HidNpadButton_B;
         unsigned int bits = osk_buttons( held );
         if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible())
             wine_nx_osk_show( 1, bits );

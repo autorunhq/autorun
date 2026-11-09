@@ -103,7 +103,7 @@ int main(void)
         wine_nx_input_profile.mode = INPUT_CONTROLLER;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && state.state.Gamepad.wButtons);
-        mock_buttons = NX_PAD_MINUS | NX_PAD_STICKR;
+        mock_buttons = NX_PAD_MINUS | NX_PAD_B;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(!state.state.Gamepad.wButtons);
         state.index = 1;
