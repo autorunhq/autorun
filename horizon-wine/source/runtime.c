@@ -830,6 +830,49 @@ static unsigned int osk_buttons( u64 held )
  * take the A that clicked the field for a key. */
 static unsigned int osk_last_held;
 
+/* The controls panel (osk.c): what the controller sends, over the program,
+ * which - and A together put up and take down. Its rows are what the profile
+ * in effect says -- the program's controller in the controller mode, the keys
+ * and mouse actions in the keyboard mode -- so a game whose mapping was
+ * remapped says what it now sends. */
+static int controls_open;
+static u64 controls_before;
+static struct wine_nx_osk_map_row controls_rows[INPUT_SOURCE_COUNT];
+static char controls_names[INPUT_SOURCE_COUNT][28], controls_values[INPUT_SOURCE_COUNT][48];
+
+static void controls_panel_build( const char **title, int *count )
+{
+    const struct input_profile *profile = &wine_nx_input_profile;
+    int controller = profile->mode == INPUT_CONTROLLER, n = 0;
+    unsigned int i;
+
+    for (i = 0; i < INPUT_SOURCE_COUNT && n < INPUT_SOURCE_COUNT; i++)
+    {
+        const struct input_binding *binding = controller ? &profile->pad[i] : &profile->keys[i];
+
+        if (!binding->count) continue;   /* what the profile leaves alone sends nothing */
+        snprintf( controls_names[n], sizeof(controls_names[0]), "%s", input_sources[i].label );
+        input_binding_label( binding, controller, controls_values[n], sizeof(controls_values[0]) );
+        controls_rows[n].name = controls_names[n];
+        controls_rows[n].value = controls_values[n];
+        n++;
+    }
+    *title = controller ? "Controls: the controller, as the program sees it"
+                        : "Controls: the keyboard and mouse it gets";
+    *count = n;
+}
+
+static void controls_panel( int show )
+{
+    const char *title;
+    int count = 0;
+
+    if (show) controls_panel_build( &title, &count );
+    wine_nx_osk_map_show( show, show ? title : NULL, controls_rows, count );
+    controls_open = show;
+    log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
+}
+
 uint64_t wine_nx_osk_clock( void )
 {
     return armTicksToNs( armGetSystemTick() );
@@ -858,7 +901,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     struct input_output output = {0};
     const struct input_profile *profile = &wine_nx_input_profile;
     u64 now, held, all_held, elapsed;
-    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
+    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate, controls_were_open = 0;
     static int osk_combo;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
@@ -882,6 +925,21 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     {
         HidAnalogStickState left = padGetStickPos( &wine_nx_pad, 0 ), right = padGetStickPos( &wine_nx_pad, 1 );
         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
+    }
+    {
+        /* - and A together: the controls panel up, and the same again down. The
+         * keyboard is not up (it has - of its own), and a button held when the
+         * panel opened is not a second press. */
+        const u64 controls = HidNpadButton_Minus | HidNpadButton_A;
+
+        controls_were_open = controls_open;
+        if (!wine_nx_osk_visible() && (held & controls) == controls &&
+            (controls_before & controls) != controls)
+            controls_panel( !controls_open );
+        else if (controls_open && wine_nx_osk_visible())
+            controls_panel( 0 );
+        controls_were_open |= controls_open;
+        controls_before = held;
     }
     {
         const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
@@ -908,6 +966,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             swallowed = held;
         }
         else swallowed &= held;
+        /* And the panel has the controller while it is up, so reading it does
+         * not click or type under it -- nor does taking it down. */
+        if (controls_were_open && !wine_nx_osk_visible()) swallowed = held;
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
@@ -918,9 +979,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             wine_nx_compositor_redraw();
         }
     }
-    emulate = !keyboard && profile->mode == INPUT_KEYBOARD_MOUSE;
+    emulate = !keyboard && !controls_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
-    if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    if (!on_keyboard && !controls_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );

@@ -377,7 +377,43 @@ int main( int argc, char **argv )
     assert( !wine_nx_osk_visible() );
     expect( "" );
 
+    /* The controls panel: what the controller sends, over the program. It is
+     * drawn where it says, at either size, and the keyboard takes the screen
+     * from it: they are never up at once. */
+    {
+        static const struct wine_nx_osk_map_row rows[] =
+        {
+            { "A", "Left click" }, { "B", "Right click" }, { "ZR", "Left click" },
+            { "D-pad up", "Arrow up" }, { "Left stick up", "W" }, { "Right stick up", "Mouse up" },
+        };
+        struct wine_nx_osk_frame panel;
+
+        wine_nx_osk_map_show( 1, "Controls: the keyboard and mouse it gets", rows, 6 );
+        assert( wine_nx_osk_map_visible() && !wine_nx_osk_visible() );
+        assert( wine_nx_osk_frame( 1280, 720, &panel ) );
+        assert( panel.width > 0 && panel.height > 0 && panel.x >= 0 && panel.y >= 0 );
+        assert( panel.x + panel.width <= 1280 && panel.y + panel.height <= 720 );
+        save( dir, "controls-720.png", 1280, 720 );
+        assert( wine_nx_osk_frame( 1920, 1080, &panel ) );
+        assert( panel.x + panel.width <= 1920 && panel.y + panel.height <= 1080 );
+        save( dir, "controls-1080.png", 1920, 1080 );
+
+        /* The keyboard takes the screen from it, and gives it back. */
+        wine_nx_osk_show( 1, 0 );
+        assert( wine_nx_osk_visible() && !wine_nx_osk_map_visible() );
+        assert( wine_nx_osk_frame( 1280, 720, &panel ) && panel.width == 984 );
+        wine_nx_osk_show( 0, 0 );
+
+        before = wine_nx_osk_generation();
+        wine_nx_osk_map_show( 0, NULL, NULL, 0 );
+        assert( !wine_nx_osk_map_visible() && wine_nx_osk_generation() != before );
+        assert( !wine_nx_osk_frame( 1280, 720, &panel ) );
+        wine_nx_osk_reset();
+        assert( !wine_nx_osk_map_visible() && !wine_nx_osk_visible() );
+    }
+
     printf( "osk: keys held and let go, function keys, two keys at once, Shift held and "
-            "sticky, Caps, repeats, closing, placement and the picture at 720p and 1080p\n" );
+            "sticky, Caps, repeats, closing, placement, the picture at 720p and 1080p, "
+            "and the controls panel\n" );
     return 0;
 }

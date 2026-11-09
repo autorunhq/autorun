@@ -16,7 +16,9 @@
  * Enter when Enter is pressed.
  *
  * Its picture is drawn here, in software, with SDL_ttf over the font
- * wine_nx_osk_font gives, and only when something on it changed.
+ * wine_nx_osk_font gives, and only when something on it changed. The controls
+ * panel (wine_nx_osk_map_show) is the same picture made of the same pieces: a
+ * list of what the controller sends, which the runtime fills in.
  */
 #include <math.h>
 #include <pthread.h>
@@ -144,10 +146,22 @@ static unsigned char cell_down[ROWS][ROW_CELLS];   /* cells the system has down 
 static unsigned char cell_repeat[ROWS][ROW_CELLS];
 static uint64_t cell_down_at[ROWS][ROW_CELLS], cell_repeat_at[ROWS][ROW_CELLS];
 
-/* The picture last drawn, for which screen and which generation. */
+/* The picture last drawn, for which screen and which generation: of the
+ * keyboard or of the controls panel. */
 static uint32_t *picture;
 static int picture_screen_w, picture_screen_h, picture_w, picture_h;
 static unsigned int picture_generation;
+static int picture_map;
+
+/* The controls panel: up or not, and its rows, copied in so the caller's
+ * strings need not outlive wine_nx_osk_map_show. */
+#define MAP_ROWS_MAX  24
+#define MAP_NAME_MAX  28
+#define MAP_VALUE_MAX 56
+#define MAP_TITLE_MAX 64
+static int map_visible, map_count;
+static char map_title[MAP_TITLE_MAX];
+static char map_names[MAP_ROWS_MAX][MAP_NAME_MAX], map_values[MAP_ROWS_MAX][MAP_VALUE_MAX];
 
 static int row_length( int row )
 {
@@ -430,9 +444,46 @@ unsigned int wine_nx_osk_generation( void )
     return __atomic_load_n( &generation, __ATOMIC_RELAXED );
 }
 
+void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count )
+{
+    int i;
+
+    pthread_mutex_lock( &osk_lock );
+    if (show)
+    {
+        if (count < 0) count = 0;
+        if (count > MAP_ROWS_MAX) count = MAP_ROWS_MAX;
+        snprintf( map_title, sizeof(map_title), "%s", title ? title : "" );
+        for (i = 0; i < count; i++)
+        {
+            snprintf( map_names[i], sizeof(map_names[0]), "%s", rows[i].name ? rows[i].name : "" );
+            snprintf( map_values[i], sizeof(map_values[0]), "%s", rows[i].value ? rows[i].value : "" );
+        }
+        map_count = count;
+    }
+    if (map_visible != !!show)
+    {
+        map_visible = !!show;
+        generation++;
+    }
+    pthread_mutex_unlock( &osk_lock );
+}
+
+int wine_nx_osk_map_visible( void )
+{
+    return __atomic_load_n( &map_visible, __ATOMIC_RELAXED );
+}
+
 void wine_nx_osk_show( int show, unsigned int held )
 {
     pthread_mutex_lock( &osk_lock );
+    /* One of them at a time: the keyboard is what is worked with, the panel
+     * what is read. */
+    if (show && map_visible)
+    {
+        map_visible = 0;
+        generation++;
+    }
     if (visible != !!show)
     {
         if (!show) release_all();
@@ -589,7 +640,7 @@ int wine_nx_osk_next_key( uint64_t now_ns, unsigned short *vk, int *up )
 
 static TTF_Font *fonts[2];
 static int font_sizes[2], font_failed;
-static struct { char text[16]; int size; SDL_Surface *surface; } labels[192];
+static struct { char text[56]; int size; SDL_Surface *surface; } labels[256];
 static int label_count;
 
 static TTF_Font *font_at( int which, int size )
@@ -659,23 +710,31 @@ static void fill_rounded( int x0, int y0, int w, int h, int radius, uint32_t col
         }
 }
 
-static void text_centered( int which, int size, const char *text, int cx, int cy, uint32_t color )
+/* Text at x -- its left edge, its middle or its right edge, by align -- and
+ * centred on cy, in the picture. */
+static void text_at( int which, int size, const char *text, int x, int cy, int align, uint32_t color )
 {
     SDL_Surface *s = label_surface( which, size, text );
-    int x, y, x0, y0;
+    int dx, dy, px, py;
 
     if (!s) return;
-    x0 = cx - s->w / 2;
-    y0 = cy - s->h / 2;
-    for (y = 0; y < s->h; y++)
-        for (x = 0; x < s->w; x++)
+    dx = x - (align < 0 ? 0 : align > 0 ? s->w : s->w / 2);
+    dy = cy - s->h / 2;
+    for (py = 0; py < s->h; py++)
+        for (px = 0; px < s->w; px++)
         {
-            uint32_t p = ((uint32_t *)((uint8_t *)s->pixels + y * s->pitch))[x];
-            int px = x0 + x, py = y0 + y;
+            uint32_t p = ((uint32_t *)((uint8_t *)s->pixels + py * s->pitch))[px];
+            int to_x = dx + px, to_y = dy + py;
 
-            if ((p >> 24) && px >= 0 && py >= 0 && px < picture_w && py < picture_h)
-                picture[py * picture_w + px] = blend( picture[py * picture_w + px], color, p >> 24 );
+            if ((p >> 24) && to_x >= 0 && to_y >= 0 && to_x < picture_w && to_y < picture_h)
+                picture[to_y * picture_w + to_x] =
+                    blend( picture[to_y * picture_w + to_x], color, p >> 24 );
         }
+}
+
+static void text_centered( int which, int size, const char *text, int cx, int cy, uint32_t color )
+{
+    text_at( which, size, text, cx, cy, 0, color );
 }
 
 /* A triangle pointing the way an arrow key moves, filled with its edges soft. */
@@ -739,10 +798,80 @@ static void draw( int screen_w, int screen_h )
         }
 }
 
-/* Draws the picture for that screen if what is there is not it. */
+/* Where the controls panel goes on a screen that size: two columns of rows, a
+ * title and the line that says what closes it, everything scaling with 720. */
+struct map_geometry
+{
+    float s, pad, row_h, hint;
+    int width, height, x, y, columns, rows_per_column, column_width;
+};
+
+static void map_layout( int screen_w, int screen_h, struct map_geometry *g )
+{
+    float s = screen_h / 720.0f;
+    int title_h, margin;
+
+    if (screen_w * 720 < screen_h * 1000) s = screen_w / 1000.0f;
+    g->s = s;
+    g->pad = floorf( 18 * s );
+    g->row_h = floorf( 32 * s );
+    g->hint = floorf( 26 * s );
+    title_h = (int)(g->row_h * 1.4f);
+    margin = screen_w / 20;
+    g->columns = map_count > 12 ? 2 : 1;
+    g->rows_per_column = (map_count + g->columns - 1) / g->columns;
+    if (g->rows_per_column < 1) g->rows_per_column = 1;
+    g->width = (int)(g->columns * 470 * s) + (int)(2 * g->pad);
+    if (g->width > screen_w - 2 * margin) g->width = screen_w - 2 * margin;
+    g->column_width = (g->width - (int)(2 * g->pad)) / g->columns;
+    g->height = (int)(title_h + g->rows_per_column * g->row_h + g->hint + 2 * g->pad);
+    if (g->height > screen_h) g->height = screen_h;
+    g->x = (screen_w - g->width) / 2;
+    g->y = (int)g->pad;
+    if (g->y < 0) g->y = 0;
+}
+
+static void draw_map( int screen_w, int screen_h )
+{
+    struct map_geometry g;
+    int i, x, y, size, small, title;
+
+    map_layout( screen_w, screen_h, &g );
+    if (picture_w != g.width || picture_h != g.height || !picture)
+    {
+        free( picture );
+        picture_w = g.width;
+        picture_h = g.height;
+        picture = malloc( (size_t)picture_w * picture_h * 4 );
+    }
+    if (!picture) return;
+    for (x = 0; x < picture_w * picture_h; x++) picture[x] = BORDER;
+    for (y = 1; y < picture_h - 1; y++)
+        for (x = 1; x < picture_w - 1; x++) picture[y * picture_w + x] = PANEL;
+
+    size = (int)(g.row_h * 0.52f);
+    small = (int)(g.hint * 0.55f);
+    title = (int)(g.row_h * 0.72f);
+    text_at( 1, title, map_title, (int)g.pad, (int)(g.pad + g.row_h * 0.75f), -1, TEXT );
+    for (i = 0; i < map_count; i++)
+    {
+        int column = i / g.rows_per_column, row = i % g.rows_per_column;
+        int left = (int)g.pad + column * g.column_width;
+        int cy = (int)(g.pad + g.row_h * 1.75f + row * g.row_h);
+
+        text_at( 0, size, map_names[i], left, cy, -1, DIM );
+        text_at( 0, size, map_values[i], left + g.column_width - (int)g.pad, cy, 1, TEXT );
+    }
+    text_at( 1, small, "- + A closes   - + right stick click: the keyboard   + and - held: close the program",
+             picture_w / 2, picture_h - (int)(g.pad / 2 + g.hint / 2), 0, DIM );
+}
+
+/* Draws the picture for that screen if what is there is not it: the keyboard,
+ * or the controls panel. */
 static void ensure_picture( int screen_w, int screen_h )
 {
-    if (picture && picture_generation == generation && picture_screen_w == screen_w && picture_screen_h == screen_h)
+    if (picture && picture_generation == generation && picture_map == map_visible &&
+        picture_screen_w == screen_w && picture_screen_h == screen_h)
         return;
     if (picture_screen_w != screen_w || picture_screen_h != screen_h)
     {
@@ -752,26 +881,40 @@ static void ensure_picture( int screen_w, int screen_h )
         picture_screen_w = screen_w;
         picture_screen_h = screen_h;
     }
-    draw( screen_w, screen_h );
+    if (map_visible) draw_map( screen_w, screen_h );
+    else draw( screen_w, screen_h );
+    picture_map = map_visible;
     picture_generation = generation;
 }
 
 int wine_nx_osk_frame( int screen_width, int screen_height, struct wine_nx_osk_frame *frame )
 {
     struct geometry g;
+    struct map_geometry map;
 
     pthread_mutex_lock( &osk_lock );
-    if (!visible)
+    if (!visible && !map_visible)
     {
         pthread_mutex_unlock( &osk_lock );
         return 0;
     }
     ensure_picture( screen_width, screen_height );
-    layout( screen_width, screen_height, at_top, &g );
-    frame->x = g.x;
-    frame->y = g.y;
-    frame->width = g.width;
-    frame->height = g.height;
+    if (map_visible)
+    {
+        map_layout( screen_width, screen_height, &map );
+        frame->x = map.x;
+        frame->y = map.y;
+        frame->width = map.width;
+        frame->height = map.height;
+    }
+    else
+    {
+        layout( screen_width, screen_height, at_top, &g );
+        frame->x = g.x;
+        frame->y = g.y;
+        frame->width = g.width;
+        frame->height = g.height;
+    }
     frame->generation = generation;
     pthread_mutex_unlock( &osk_lock );
     return 1;
@@ -783,7 +926,7 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
     int x, y;
 
     pthread_mutex_lock( &osk_lock );
-    if (visible)
+    if (visible || map_visible)
     {
         ensure_picture( screen_width, screen_height );
         for (y = 0; y < picture_h; y++)
@@ -805,7 +948,7 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
 void wine_nx_osk_reset( void )
 {
     pthread_mutex_lock( &osk_lock );
-    visible = at_top = 0;
+    visible = at_top = map_visible = map_count = 0;
     release_all();
     caps = 0;
     shift_keep = 0;

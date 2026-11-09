@@ -30,6 +30,18 @@ enum
     OSK_PLUS = 1 << 12, OSK_MINUS = 1 << 13, OSK_STICKL = 1 << 14, OSK_STICKR = 1 << 15,
 };
 
+/* The controls panel: what the controller sends, drawn over the program while
+ * it is up, in two columns of name and what it sends. The runtime builds the
+ * rows from the profile in effect -- what the program's controller sees, or the
+ * keys and mouse actions it gets -- and shows and hides it; the keyboard and
+ * the panel are never up at once. */
+struct wine_nx_osk_map_row
+{
+    const char *name, *value;
+};
+void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count );
+int wine_nx_osk_map_visible( void );
+
 /* The font the labels are drawn with, a TrueType file in memory that stays
  * there. The runtime gives it the console's shared font. */
 int wine_nx_osk_font( const void **data, size_t *size );
@@ -68,8 +80,9 @@ int wine_nx_osk_next_key( uint64_t now_ns, unsigned short *vk, int *up );
 /* That clock, in the runtime: the system tick in nanoseconds. */
 uint64_t wine_nx_osk_clock( void );
 
-/* Where the keyboard goes on a screen of that size, and a number that changes
- * whenever its picture does. Returns 0 while it is hidden. */
+/* Where the keyboard, or the controls panel, goes on a screen of that size, and
+ * a number that changes whenever its picture does. Returns 0 while both are
+ * hidden. */
 struct wine_nx_osk_frame
 {
     int x, y, width, height;
