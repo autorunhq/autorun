@@ -14,10 +14,9 @@ esac
 if [ -n "${WINE_NX_LLVM_MINGW:-}" ]; then
     export PATH="$WINE_NX_LLVM_MINGW/bin:$PATH"
 fi
-# Wine's configure wants a newer bison than macOS has.
 # build.sh has fetched llvm-mingw and put it in WINE_NX_LLVM_MINGW; bison and
-# the rest of Wine's PE-build requirements come with the machine (on the
-# GitHub runner, from apt).
+# the rest of Wine's PE-build requirements (bison 3.0 or newer) come with the
+# machine: on the GitHub runner, from the image.
 for tool in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang i686-w64-mingw32-clang x86_64-w64-mingw32-clang x86_64-w64-mingw32-windres llvm-readobj; do
     command -v "$tool" >/dev/null || { echo "Missing $tool; set WINE_NX_LLVM_MINGW." >&2; exit 1; }
 done
