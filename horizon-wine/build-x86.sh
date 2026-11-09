@@ -29,9 +29,10 @@ sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # when the host owns it.
 docker run --rm -v "$root:/work" -w /work -e GIT_CONFIG_COUNT=1 \
     -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
-    -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" \
+    -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" -e NX_BUILD_ID="${WINE_NX_BUILD_ID:-}" \
     "${WINE_NX_DEVKIT_IMAGE:-$(cat "$root/horizon-wine/switch-dev.txt")}" sh -ec '
     cmake -S horizon-wine -B horizon-wine/build-switch-wow64-mesa-switch -G Ninja \
+        -DWINE_NX_BUILD_ID="$NX_BUILD_ID" \
         -DCMAKE_TOOLCHAIN_FILE=/work/horizon-wine/cmake/switch-devkitA64.cmake \
         -DWINE_NX_PE_BUILD_DIR=/work/horizon-wine/build-wine-amd64-pe \
         -DWINE_NX_BOX64_DYNAREC=ON -DWINE_NX_USB_STORAGE=ON -DCMAKE_BUILD_TYPE=Release \

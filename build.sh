@@ -62,7 +62,12 @@ if [ ! -x "$llvm/bin/aarch64-w64-mingw32-clang" ]; then
     tar -xJf "$hw/toolchains/$llvm_name.tar.xz" -C "$hw/toolchains"
     rm "$hw/toolchains/$llvm_name.tar.xz"
 fi
-export WINE_NX_LLVM_MINGW="$llvm" WINE_NX_JOBS="$jobs"
+# What this build is: the commit, when the tree is one, so the log a card
+# leaves says which runtime is on it.
+if [ -z "${WINE_NX_BUILD_ID:-}" ] && [ -d "$root/.git" ]; then
+    WINE_NX_BUILD_ID="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)"
+fi
+export WINE_NX_LLVM_MINGW="$llvm" WINE_NX_JOBS="$jobs" WINE_NX_BUILD_ID="${WINE_NX_BUILD_ID:-}"
 
 step "Pulling $image"
 docker pull -q "$image" >/dev/null

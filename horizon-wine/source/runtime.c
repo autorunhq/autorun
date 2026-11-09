@@ -109,6 +109,10 @@ u32 __nx_exception_ignoredebug = 1;
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-258"
+/* The commit the build says it was made from (CMakeLists.txt, from build.sh). */
+#ifndef WINE_NX_BUILD_ID
+#define WINE_NX_BUILD_ID ""
+#endif
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
@@ -929,17 +933,49 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     {
         /* - and A together: the controls panel up, and the same again down. The
          * keyboard is not up (it has - of its own), and a button held when the
-         * panel opened is not a second press. */
+         * panel opened is not a second press. A fifth of a second of the two
+         * held does as well as the frame that saw them come down, so a slow
+         * frame cannot swallow the press. */
         const u64 controls = HidNpadButton_Minus | HidNpadButton_A;
+        static u64 controls_since;
+        static int controls_fired;
 
         controls_were_open = controls_open;
-        if (!wine_nx_osk_visible() && (held & controls) == controls &&
-            (controls_before & controls) != controls)
-            controls_panel( !controls_open );
-        else if (controls_open && wine_nx_osk_visible())
-            controls_panel( 0 );
+        if ((held & controls) != controls)
+        {
+            controls_since = 0;
+            controls_fired = 0;
+        }
+        else
+        {
+            if (!controls_since)
+            {
+                controls_since = now;
+                log_line( "[CONTROLS] - and A down" );
+            }
+            if (!controls_fired && !wine_nx_osk_visible() &&
+                ((controls_before & controls) != controls ||
+                 armTicksToNs( now - controls_since ) >= 200000000ull))
+            {
+                controls_fired = 1;
+                controls_panel( !controls_open );
+            }
+        }
+        if (controls_open && wine_nx_osk_visible()) controls_panel( 0 );
         controls_were_open |= controls_open;
         controls_before = held;
+    }
+    {
+        /* The keyboard opens and closes from a combination, from the program,
+         * and from its own Close key: the log says which happened, and when. */
+        static int osk_was_visible;
+        int up = wine_nx_osk_visible();
+
+        if (up != osk_was_visible)
+        {
+            osk_was_visible = up;
+            log_line( "[OSK] %s", up ? "up" : "down" );
+        }
     }
     {
         const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
@@ -3938,7 +3974,8 @@ int main( int argc, char **argv )
     /* First, before anything else: which build this is and which file it was
      * started from. Without it a log from an older NRO on the card reads just
      * like one from the new one. */
-    log_line( "[BUILD] %s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD, own_nro,
+    log_line( "[BUILD] %s%s%s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD,
+              WINE_NX_BUILD_ID[0] ? " made from " : "", WINE_NX_BUILD_ID, own_nro,
               runtime_address_space_bits() );
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );

@@ -744,7 +744,19 @@ static BOOL wine_nx_send_keyboard_keys( void )
     {
         if (!sent) layout = NtUserGetKeyboardLayout( 0 );
         wine_nx_send_vk( layout, vk, up );
+        if (&wine_nx_runtime_trace)
+        {
+            char line[48];
+            snprintf( line, sizeof(line), "[OSK] key %02x %s", vk, up ? "up" : "down" );
+            wine_nx_runtime_trace( line );
+        }
         sent = TRUE;
+        /* One key event per look at the program's messages: a key that went
+         * down is down while the program is told anything else, so a program
+         * that polls the keyboard once a frame -- a game skipping an intro
+         * with Escape -- sees it down, and a down and its up are never handed
+         * over in the same call. */
+        if (up) break;
     }
     return sent;
 }
