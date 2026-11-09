@@ -7,7 +7,14 @@
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 pe="$root/horizon-wine/build-wine-amd64-pe"
-export PATH="$root/horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin:/opt/homebrew/opt/bison/bin:$PATH"
+# The llvm-mingw build.sh fetched, whatever this machine's build of it is.
+llvm="${WINE_NX_LLVM_MINGW:-}"
+if [ -z "$llvm" ]; then
+    for dir in "$root"/horizon-wine/toolchains/llvm-mingw-*; do
+        [ -d "$dir" ] && { llvm="$dir"; break; }
+    done
+fi
+export PATH="${llvm:+$llvm/bin:}/opt/homebrew/opt/bison/bin:$PATH"
 if [ ! -f "$pe/Makefile" ]; then
     echo "No Wine tree in build-wine-amd64-pe; build-amd64-components.sh configures it." >&2
     exit 1
