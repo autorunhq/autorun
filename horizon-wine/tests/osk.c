@@ -394,6 +394,22 @@ int main( int argc, char **argv )
         assert( panel.width > 0 && panel.height > 0 && panel.x >= 0 && panel.y >= 0 );
         assert( panel.x + panel.width <= 1280 && panel.y + panel.height <= 720 );
         save( dir, "controls-720.png", 1280, 720 );
+        /* Text on it, not a flat panel: the rows and the title are drawn. */
+        {
+            uint32_t *pixels = malloc( (size_t)panel.width * panel.height * 4 ), seen[8] = {0};
+            unsigned int colours = 0;
+
+            assert( pixels && wine_nx_osk_copy( 1280, 720, pixels, panel.width * 4, 0 ) );
+            for (int i = 0; i < panel.width * panel.height && colours < 8; i++)
+            {
+                int known = 0;
+
+                for (unsigned int k = 0; k < colours; k++) if (seen[k] == pixels[i]) known = 1;
+                if (!known) seen[colours++] = pixels[i];
+            }
+            assert( colours >= 8 );
+            free( pixels );
+        }
         assert( wine_nx_osk_frame( 1920, 1080, &panel ) );
         assert( panel.x + panel.width <= 1920 && panel.y + panel.height <= 1080 );
         save( dir, "controls-1080.png", 1920, 1080 );
