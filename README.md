@@ -212,9 +212,9 @@ are held:
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-**Minus and A together** (or Minus and the right stick click) show what the
-controller sends, over the game: which button is the left click, which is
-Escape, what the sticks and the d-pad are set to. The same again takes it
+**Minus and A together** show what the controller sends, over the game: which
+button is the left click, which is Escape, what the sticks and the d-pad are
+set to. The same again takes it
 down, and while it is up the game gets no controller input. What it lists are the controls in effect, so a game with its
 own controls (its **Controls**, under **Y**) lists its own.
 

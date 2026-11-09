@@ -394,20 +394,25 @@ int main( int argc, char **argv )
         assert( panel.width > 0 && panel.height > 0 && panel.x >= 0 && panel.y >= 0 );
         assert( panel.x + panel.width <= 1280 && panel.y + panel.height <= 720 );
         save( dir, "controls-720.png", 1280, 720 );
-        /* Text on it, not a flat panel: the rows and the title are drawn. */
+        /* Text on it, not a flat panel: the title, the rows and the hint leave
+         * ink on the panel's own colour. Only where there is a font to draw
+         * them with, which is the font the run was given. */
         {
-            uint32_t *pixels = malloc( (size_t)panel.width * panel.height * 4 ), seen[8] = {0};
-            unsigned int colours = 0;
+            uint32_t *pixels = malloc( (size_t)panel.width * panel.height * 4 );
+            uint32_t panel_colour;
+            unsigned int ink = 0;
+            FILE *font = fopen( font_path, "rb" );
 
             assert( pixels && wine_nx_osk_copy( 1280, 720, pixels, panel.width * 4, 0 ) );
-            for (int i = 0; i < panel.width * panel.height && colours < 8; i++)
+            panel_colour = pixels[(panel.height - 3) * panel.width + 3];
+            for (int y = 1; y < panel.height - 1; y++)
+                for (int x = 1; x < panel.width - 1; x++)
+                    if (pixels[y * panel.width + x] != panel_colour) ink++;
+            if (font)
             {
-                int known = 0;
-
-                for (unsigned int k = 0; k < colours; k++) if (seen[k] == pixels[i]) known = 1;
-                if (!known) seen[colours++] = pixels[i];
+                fclose( font );
+                assert( ink > 1000 );
             }
-            assert( colours >= 8 );
             free( pixels );
         }
         assert( wine_nx_osk_frame( 1920, 1080, &panel ) );

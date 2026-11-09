@@ -931,16 +931,13 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
     }
     {
-        /* - and A together -- or - and a click of the right stick, which the
-         * hand finds on its own -- put the controls panel up, and the same
-         * again takes it down. The keyboard is not up (it has - of its own),
-         * and a button held when the panel opened is not a second press. A
-         * fifth of a second of the two held does as well as the frame that saw
-         * them come down, so a slow frame cannot swallow the press. */
+        /* - and A together: the controls panel up, and the same again down.
+         * The keyboard is not up (it has - of its own), and a button held when
+         * the panel opened is not a second press. A fifth of a second of the
+         * two held does as well as the frame that saw them come down, so a
+         * slow frame cannot swallow the press. */
         const u64 with_a = HidNpadButton_Minus | HidNpadButton_A;
-        const u64 with_r3 = HidNpadButton_Minus | HidNpadButton_StickR;
-        u64 controls = (held & with_a) == with_a ? with_a :
-                       (held & with_r3) == with_r3 ? with_r3 : 0;
+        u64 controls = (held & with_a) == with_a ? with_a : 0;
         static u64 controls_since;
         static int controls_fired;
 
@@ -955,9 +952,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             if (!controls_since)
             {
                 controls_since = now;
-                log_line( "[CONTROLS] %s down, pad %llx",
-                          controls == with_a ? "- and A" : "- and the right stick click",
-                          (unsigned long long)held );
+                log_line( "[CONTROLS] - and A down, pad %llx", (unsigned long long)held );
             }
             if (!controls_fired && !wine_nx_osk_visible() &&
                 ((controls_before & controls) != controls ||

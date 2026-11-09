@@ -19,8 +19,9 @@ int padIsConnected(PadState *pad) { (void)pad; return mock_connected; }
 HidAnalogStickState padGetStickPos(PadState *pad, int index) { (void)pad; return mock_sticks[index]; }
 u64 padGetButtons(PadState *pad) { (void)pad; return mock_buttons; }
 u64 armGetSystemTick(void) { return mock_tick; }
-static int mock_keyboard;
+static int mock_keyboard, mock_panel;
 int wine_nx_osk_visible( void ) { return mock_keyboard; }
+int wine_nx_osk_map_visible( void ) { return mock_panel; }
 
 int main(void)
 {
@@ -87,7 +88,13 @@ int main(void)
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && !state.state.Gamepad.wButtons && !state.state.Gamepad.bRightTrigger &&
                !state.state.Gamepad.sThumbLX);
+        /* And the controls panel likewise. */
         mock_keyboard = 0;
+        mock_panel = 1;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(state.connected && !state.state.Gamepad.wButtons && !state.state.Gamepad.bRightTrigger &&
+               !state.state.Gamepad.sThumbLX);
+        mock_panel = 0;
         wine_nx_xinput_unix_funcs[nx_xinput_set_state](&vibration);
         assert(vibration.connected);
         wine_nx_input_profile.pad[1] = (struct input_binding){{1, 3}, 2};

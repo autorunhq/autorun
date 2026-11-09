@@ -74,13 +74,15 @@ runtime; the full package now ships the Mesa 26 one.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
-- **Controls panel.** `-` and `A` together, or `-` and the right stick click,
-  put up what the controller sends, over the program: `source/osk.c` draws it
-  as a second view of its own surface, so the compositor and the three ways a
-  frame reaches the screen copy it the same way, and `source/runtime.c` builds
-  its rows from the profile in effect (`input_profile.c`), which is the
-  program's controller in the controller mode and the keys and mouse actions in
-  the keyboard mode.
+- **Controls panel.** `-` and `A` together put up what the controller sends,
+  over the program: `source/osk.c` draws it as a second view of its own
+  surface, so the compositor and the three ways a frame reaches the screen
+  copy it the same way -- each presenter asks the surface which view is up
+  (`wine_nx_osk_frame`, or both of `wine_nx_osk_visible` and
+  `wine_nx_osk_map_visible` in the OpenGL one), rather than asking for the
+  keyboard -- and `source/runtime.c` builds its rows from the profile in
+  effect (`input_profile.c`), which is the program's controller in the
+  controller mode and the keys and mouse actions in the keyboard mode.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
   that sends what a physical keyboard sends, with scan codes, through the
   display driver (Minus + B, or `NtUserShowSoftwareKeyboard` / a text

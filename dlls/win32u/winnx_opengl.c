@@ -184,10 +184,14 @@ extern unsigned long long horizon_interrupt_time(void);
 unsigned int wine_nx_gl_swaps;
 unsigned long long wine_nx_gl_swap_time;  /* 100 ns */
 
-/* The floating keyboard (horizon-wine/source/osk.c), put into the back
- * buffer just before it is shown: its picture in a texture of each context's
- * own, blitted from a framebuffer of its own onto the window's. Everything
- * the blit and the upload depend on is put back as the program left it. */
+/* The floating keyboard and the controls panel (horizon-wine/source/osk.c),
+ * put into the back buffer just before it is shown: the picture in a texture
+ * of each context's own, blitted from a framebuffer of its own onto the
+ * window's. One surface, two views, so this asks for the picture rather than
+ * for the keyboard: a program that draws through here is a program whose
+ * frames the compositor does not draw, and the panel has to arrive this way
+ * too. Everything the blit and the upload depend on is put back as the
+ * program left it. */
 struct nx_osk_gl
 {
     EGLContext context;
@@ -215,7 +219,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
     GLboolean scissor, srgb;
     unsigned int i;
 
-    if (!wine_nx_osk_visible()) return;
+    if (!wine_nx_osk_visible() && !wine_nx_osk_map_visible()) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
         !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
         !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
