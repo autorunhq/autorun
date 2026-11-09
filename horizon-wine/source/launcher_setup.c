@@ -171,7 +171,9 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                      "and access to all four CPU cores. The next steps enable low-address memory for Win32 games. "
                      "The 32-bit forwarder needs none of them: its whole address space is below 4 GiB, and "
                      "64-bit games do not start in it.");
-            notice = forwarder ? "Your Autorun forwarder is ready." : "This session was not started from the current Autorun forwarder.";
+            notice = forwarder ? "Your Autorun forwarder is ready." :
+                     options->own_forwarder ? "This is the 32-bit Autorun forwarder. 64-bit games need the 39-bit one." :
+                     "This session was not started from the current Autorun forwarder.";
             items[0] = forwarder ? "Continue" : "Install forwarder";
             notes[0] = forwarder ? "Set up the loader and kernel patches" : "Add Autorun to the HOME Menu";
             disabled[0] = !forwarder && !options->install_forwarder;
@@ -306,10 +308,26 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             case STEP_FORWARDER:
                 if (!forwarder)
                 {
+                    int space = selected ? 2 : 3;
+
                     job.forwarder = 1;
-                    job.forwarder_space = selected ? 2 : 3;
+                    job.forwarder_space = space;
                     if (!confirm_install(ui, options) || !run_job(ui, &job)) break;
                     forwarder = 1;
+                    /* The 32-bit forwarder is whole on its own: there is no
+                     * kernel patch for it, so the steps below -- the loader,
+                     * Mesosphere and the boot entry -- are for the 39-bit one
+                     * and its 64-bit games. */
+                    if (space == 2)
+                    {
+                        ui_message(ui, "Autorun 32-bit installed",
+                                   "Start it from the HOME Menu for a fixed-address Win32 game. "
+                                   "The boot changes the other steps make are for the 39-bit "
+                                   "forwarder, which 64-bit games need.");
+                        installed = 1;
+                        step = STEP_FINISH;
+                        break;
+                    }
                 }
                 step = STEP_DLLS;
                 break;
