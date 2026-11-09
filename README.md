@@ -218,6 +218,12 @@ set to. The same again takes it
 down, and while it is up the game gets no controller input. What it lists are the controls in effect, so a game with its
 own controls (its **Controls**, under **Y**) lists its own.
 
+**Minus and Y together** show what the program is doing, over it, and the same
+again takes it down: every thread the runtime is running, the core it is on and
+the share of a core it has taken, then the memory in use, what the card is
+reading and the frames drawn. It counts again every second while it is up, and
+the game gets no controller input meanwhile.
+
 The top row is F1 to F12, where a keyboard has them. A key held repeats, as
 it does on a keyboard, and keys held together are held together: a finger can
 hold Shift while another types, and two fingers can hold two keys at once. A

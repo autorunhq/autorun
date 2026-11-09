@@ -436,8 +436,50 @@ int main( int argc, char **argv )
         assert( !wine_nx_osk_map_visible() && !wine_nx_osk_visible() );
     }
 
+    /* The tasks panel: the same surface, the other view of it. It is drawn
+     * where the controls panel is, the keyboard takes the screen from it, and
+     * showing it again with new rows makes a new picture -- a panel that
+     * counts every second must not show what was there when it opened. */
+    {
+        static const struct wine_nx_osk_map_row rows[] =
+        {
+            { "41 game", "78.2% on core 0" }, { "42 game", "9.7% on core 1" },
+            { "12 server", "5.1% on core 2" }, { "Memory", "402 MB used, 210 MB free" },
+        };
+        static const struct wine_nx_osk_map_row fresher[] =
+        {
+            { "41 game", "12.4% on core 0" }, { "Memory", "404 MB used, 208 MB free" },
+        };
+
+        wine_nx_osk_tasks_show( 1, "Tasks: 3 threads, 0.9 cores, 58 fps", rows, 4 );
+        assert( wine_nx_osk_map_visible() && !wine_nx_osk_visible() );
+        assert( wine_nx_osk_frame( 1280, 720, &frame ) );
+        assert( frame.x >= 0 && frame.y >= 0 && frame.x + frame.width <= 1280 &&
+                frame.y + frame.height <= 720 );
+        save( dir, "tasks-720.png", 1280, 720 );
+
+        before = wine_nx_osk_generation();
+        wine_nx_osk_tasks_show( 1, "Tasks: 2 threads, 0.2 cores, 61 fps", fresher, 2 );
+        assert( wine_nx_osk_generation() != before );
+        assert( wine_nx_osk_frame( 1280, 720, &frame ) );
+        save( dir, "tasks-again-720.png", 1280, 720 );
+
+        /* The controls panel takes it, and the keyboard takes the screen from
+         * either. */
+        wine_nx_osk_map_show( 1, "Controls: the controller", rows, 4 );
+        assert( wine_nx_osk_map_visible() );
+        wine_nx_osk_show( 1, 0 );
+        assert( wine_nx_osk_visible() && !wine_nx_osk_map_visible() );
+        wine_nx_osk_show( 0, 0 );
+        wine_nx_osk_tasks_show( 1, "Tasks: 1 thread, 0.1 cores, 60 fps", fresher, 2 );
+        wine_nx_osk_tasks_show( 0, NULL, NULL, 0 );
+        assert( !wine_nx_osk_map_visible() );
+        assert( !wine_nx_osk_frame( 1280, 720, &frame ) );
+        wine_nx_osk_reset();
+    }
+
     printf( "osk: keys held and let go, function keys, two keys at once, Shift held and "
             "sticky, Caps, repeats, closing, placement, the picture at 720p and 1080p, "
-            "and the controls panel\n" );
+            "the controls panel and the tasks panel\n" );
     return 0;
 }

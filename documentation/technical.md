@@ -83,6 +83,14 @@ runtime; the full package now ships the Mesa 26 one.
   keyboard -- and `source/runtime.c` builds its rows from the profile in
   effect (`input_profile.c`), which is the program's controller in the
   controller mode and the keys and mouse actions in the keyboard mode.
+- **Tasks panel.** `-` and `Y` together show what the program is running:
+  every thread the runtime has registered, the core it is on and the share of
+  a core it took, then the memory, what the card is reading and the frames
+  drawn. The rows are the ones the `[THREADS]` line is made of
+  (`wine_nx_tasks_snapshot` in `source/thread_profile.c`), the runtime adds the
+  rest and builds them again every second the panel is up, and `source/osk.c`
+  draws them as the third view of its surface -- one picture, three views: the
+  keyboard, the controls and the tasks, never two at once.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
   that sends what a physical keyboard sends, with scan codes, through the
   display driver (Minus + B, or `NtUserShowSoftwareKeyboard` / a text

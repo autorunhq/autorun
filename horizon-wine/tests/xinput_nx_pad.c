@@ -110,7 +110,13 @@ int main(void)
         wine_nx_input_profile.mode = INPUT_CONTROLLER;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && state.state.Gamepad.wButtons);
+        /* The two combinations that show something over the program are not
+         * the program's to see: the keyboard on minus and B, the tasks on
+         * minus and Y. */
         mock_buttons = NX_PAD_MINUS | NX_PAD_B;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.state.Gamepad.wButtons);
+        mock_buttons = NX_PAD_MINUS | NX_PAD_Y;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(!state.state.Gamepad.wButtons);
         state.index = 1;
@@ -119,6 +125,6 @@ int main(void)
         assert(!state.connected);
     }
 
-    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer, layout and the floating keyboard passed" );
+    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer, layout, the floating keyboard and the tasks passed" );
     return 0;
 }

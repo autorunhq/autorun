@@ -43,6 +43,20 @@ void wine_nx_profile_start( void );
 void wine_nx_profile_stop( void );
 /* With each [PROGRESS] report: the [THREADS] line, and [PROF] when sampling. */
 void wine_nx_thread_report( void );
+/* The rows the [THREADS] line is made of, for the tasks panel the runtime
+ * draws over the program (osk.c): every registered thread, busiest first, the
+ * share of a core it took over the interval since the last call -- of this or
+ * of wine_nx_thread_report -- and the core it is on. total is their sum in
+ * thousandths of a core. Returns how many rows were filled. */
+struct wine_nx_task
+{
+    unsigned int tid;
+    char kind;               /* 'w' a Wine thread, 's' a server connection */
+    int core;
+    unsigned int permille;
+    char name[24];
+};
+unsigned int wine_nx_tasks_snapshot( struct wine_nx_task *tasks, unsigned int max, unsigned int *total );
 /* Interrupts every registered thread's wait but this one's, so each reaches its
  * next check; returns how many it interrupted. */
 unsigned int wine_nx_threads_wake( void );

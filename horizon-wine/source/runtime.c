@@ -841,6 +841,21 @@ static unsigned int osk_last_held;
  * remapped says what it now sends. */
 static int controls_open;
 static u64 controls_before;
+
+/* The tasks panel: what the program is running, over it. Another view of the
+ * keyboard's surface, like the controls panel, and worked the same way -- the
+ * program gets no controller while it is up. Its rows come from the same walk
+ * of the thread registry as the [THREADS] line (thread_profile.c), with the
+ * memory and the frames beside them, and they are built again every second it
+ * is up: a task manager that showed what was there when it opened would be a
+ * picture of the past. */
+#define TASKS_ROWS 24
+
+static int tasks_open;
+static u64 tasks_built, tasks_before;
+static char tasks_title[96];
+static struct wine_nx_osk_map_row tasks_rows[TASKS_ROWS];
+static char tasks_names[TASKS_ROWS][40], tasks_values[TASKS_ROWS][44];
 static struct wine_nx_osk_map_row controls_rows[INPUT_SOURCE_COUNT];
 static char controls_names[INPUT_SOURCE_COUNT][28], controls_values[INPUT_SOURCE_COUNT][48];
 
@@ -866,15 +881,105 @@ static void controls_panel_build( const char **title, int *count )
     *count = n;
 }
 
+static void tasks_panel( int show );
+
 static void controls_panel( int show )
 {
     const char *title;
     int count = 0;
 
-    if (show) controls_panel_build( &title, &count );
+    if (show)
+    {
+        /* One panel at a time: they are two views of one surface. */
+        if (tasks_open) tasks_panel( 0 );
+        controls_panel_build( &title, &count );
+    }
     wine_nx_osk_map_show( show, show ? title : NULL, controls_rows, count );
     controls_open = show;
     log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
+}
+
+static void tasks_panel_build( const char **title, int *count )
+{
+    static struct wine_nx_task tasks[TASKS_ROWS];
+    static u64 last_build;
+    static unsigned int last_frames, last_mb;
+    extern unsigned int wine_nx_gl_swaps __attribute__((weak));
+    extern unsigned int wine_nx_vk_presents __attribute__((weak));
+    extern unsigned long long wine_nx_sd_bytes __attribute__((weak));
+    extern unsigned int wine_nx_sd_cache_mb( void );
+    extern char *fake_heap_start, *fake_heap_end;
+    u64 now = armGetSystemTick();
+    struct mallinfo heap = mallinfo();
+    unsigned long long heap_size = (unsigned long long)(fake_heap_end - fake_heap_start);
+    unsigned long long heap_free = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
+    unsigned int frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
+                          (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
+                          wine_nx_compositor_frames_fast() +
+                          (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
+    unsigned int card = &wine_nx_sd_bytes ? (unsigned int)( __atomic_load_n( &wine_nx_sd_bytes, __ATOMIC_RELAXED ) >> 20 ) : 0;
+    unsigned int fps = 0, read = 0, total = 0, n, i;
+
+    if (last_build && now != last_build)
+    {
+        unsigned long long ns = armTicksToNs( now - last_build );
+
+        fps = (unsigned int)((unsigned long long)(frames - last_frames) * 1000000000ull / ns);
+        read = (unsigned int)((unsigned long long)(card - last_mb) * 1000000000ull / ns);
+    }
+    last_build = now;
+    last_frames = frames;
+    last_mb = card;
+
+    n = wine_nx_tasks_snapshot( tasks, TASKS_ROWS, &total );
+    snprintf( tasks_title, sizeof(tasks_title), "Tasks: %u threads, %u.%u cores, %u fps",
+              n, total / 1000, total % 1000 / 10, fps );
+    for (i = 0; i < n; i++)
+    {
+        snprintf( tasks_names[i], sizeof(tasks_names[0]), "%u %s", tasks[i].tid,
+                  tasks[i].name[0] ? tasks[i].name : (tasks[i].kind == 's' ? "server" : "thread") );
+        snprintf( tasks_values[i], sizeof(tasks_values[0]), "%u.%u%% on core %d",
+                  tasks[i].permille / 10, tasks[i].permille % 10, tasks[i].core );
+        tasks_rows[i].name = tasks_names[i];
+        tasks_rows[i].value = tasks_values[i];
+    }
+    /* The three that are not threads, where they fit. */
+    {
+        static const char *const extra[] = { "Memory", "Card", "Heap" };
+        char values[3][44];
+
+        snprintf( values[0], sizeof(values[0]), "%llu MB used, %llu MB free",
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20 );
+        snprintf( values[1], sizeof(values[1]), "%u MB/s, cache %u MB", read, wine_nx_sd_cache_mb() );
+        snprintf( values[2], sizeof(values[2]), "%llu MB arena", (unsigned long long)heap.arena >> 20 );
+        for (i = 0; i < 3 && n + i < TASKS_ROWS; i++)
+        {
+            snprintf( tasks_names[n + i], sizeof(tasks_names[0]), "%s", extra[i] );
+            snprintf( tasks_values[n + i], sizeof(tasks_values[0]), "%s", values[i] );
+            tasks_rows[n + i].name = tasks_names[n + i];
+            tasks_rows[n + i].value = tasks_values[n + i];
+        }
+        n += i;
+    }
+    *title = tasks_title;
+    *count = n;
+}
+
+static void tasks_panel( int show )
+{
+    const char *title = NULL;
+    int count = 0;
+
+    if (show)
+    {
+        if (controls_open) controls_panel( 0 );
+        tasks_panel_build( &title, &count );
+        tasks_built = armGetSystemTick();
+    }
+    wine_nx_osk_tasks_show( show, title, tasks_rows, count );
+    tasks_open = show;
+    if (show) log_line( "[TASKS] panel shown, %d rows", count );
+    else log_line( "[TASKS] panel hidden" );
 }
 
 uint64_t wine_nx_osk_clock( void )
@@ -905,7 +1010,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     struct input_output output = {0};
     const struct input_profile *profile = &wine_nx_input_profile;
     u64 now, held, all_held, elapsed;
-    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate, controls_were_open = 0;
+    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
+    int controls_were_open = 0, tasks_were_open = 0;
     static int osk_combo;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
@@ -967,6 +1073,49 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         controls_before = held;
     }
     {
+        /* - and Y together: the tasks panel up, and the same again down, on
+         * the same terms as the controls panel. While it is up its rows are
+         * built again every second, so it shows the program as it is. */
+        const u64 with_y = HidNpadButton_Minus | HidNpadButton_Y;
+        u64 tasks = (held & with_y) == with_y ? with_y : 0;
+        static u64 tasks_since;
+        static int tasks_fired;
+
+        tasks_were_open = tasks_open;
+        if (!tasks)
+        {
+            tasks_since = 0;
+            tasks_fired = 0;
+        }
+        else
+        {
+            if (!tasks_since)
+            {
+                tasks_since = now;
+                log_line( "[TASKS] - and Y down" );
+            }
+            if (!tasks_fired && !wine_nx_osk_visible() &&
+                ((tasks_before & tasks) != tasks ||
+                 armTicksToNs( now - tasks_since ) >= 200000000ull))
+            {
+                tasks_fired = 1;
+                tasks_panel( !tasks_open );
+            }
+        }
+        if (tasks_open && wine_nx_osk_visible()) tasks_panel( 0 );
+        tasks_were_open |= tasks_open;
+        tasks_before = held;
+        if (tasks_open && armTicksToNs( now - tasks_built ) >= 1000000000ull)
+        {
+            const char *title;
+            int count;
+
+            tasks_panel_build( &title, &count );
+            wine_nx_osk_tasks_show( 1, title, tasks_rows, count );
+            tasks_built = now;
+        }
+    }
+    {
         /* The keyboard opens and closes from a combination, from the program,
          * and from its own Close key: the log says which happened, and when. */
         static int osk_was_visible;
@@ -1005,7 +1154,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         else swallowed &= held;
         /* And the panel has the controller while it is up, so reading it does
          * not click or type under it -- nor does taking it down. */
-        if (controls_were_open && !wine_nx_osk_visible()) swallowed = held;
+        if ((controls_were_open || tasks_were_open) && !wine_nx_osk_visible()) swallowed = held;
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
@@ -1016,9 +1165,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             wine_nx_compositor_redraw();
         }
     }
-    emulate = !keyboard && !controls_open && profile->mode == INPUT_KEYBOARD_MOUSE;
+    emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
-    if (!on_keyboard && !controls_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );

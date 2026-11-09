@@ -859,16 +859,21 @@ static void server_report( void )
     wine_nx_runtime_trace( line );
 }
 
-void wine_nx_thread_report( void )
-{
-    static u64 last;
-    struct nx_prof_row rows[NX_PROF_MAX_THREADS], row;
-    u64 now = armGetSystemTick(), interval = last ? now - last : 0, mask;
-    unsigned int count = 0, total = 0, i, j;
-    char line[NX_PROF_LINE + 24];
-    int len;
+/* The tick the shares are measured from, and the rows themselves: filled under
+ * registry_mutex, which is held for the whole walk, so neither the [THREADS]
+ * line nor the tasks panel races the registry. */
+static u64 rows_last;
+static struct nx_prof_row rows_all[NX_PROF_MAX_THREADS];
 
-    last = now;
+static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, unsigned int *total )
+{
+    u64 now = armGetSystemTick(), interval = rows_last ? now - rows_last : 0, mask;
+    unsigned int count = 0, i, j;
+    struct nx_prof_row row;
+
+    rows_last = now;
+    *total = 0;
+    if (!interval) return 0;
     pthread_mutex_lock( &registry_mutex );
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
@@ -885,12 +890,46 @@ void wine_nx_thread_report( void )
         row.permille = nx_prof_permille( ticks, thread->last_ticks, interval );
         if (R_FAILED( svcGetThreadCoreMask( &row.core, &mask, thread->handle ) )) row.core = thread->core;
         thread->last_ticks = ticks;
-        for (j = count++; j > 0 && rows[j - 1].permille < row.permille; j--) rows[j] = rows[j - 1];
-        rows[j] = row;
-        total += row.permille;
+        for (j = count++; j > 0 && rows_all[j - 1].permille < row.permille; j--) rows_all[j] = rows_all[j - 1];
+        rows_all[j] = row;
+        *total += row.permille;
     }
+    if (count > max) count = max;
+    memcpy( rows, rows_all, count * sizeof(*rows) );
     pthread_mutex_unlock( &registry_mutex );
-    if (!interval) return;
+    return count;
+}
+
+unsigned int wine_nx_tasks_snapshot( struct wine_nx_task *tasks, unsigned int max, unsigned int *total )
+{
+    /* Twelve rows fill a panel that is one column, and two columns are 24: no
+     * caller needs more than this, and the panel is drawn from a thread whose
+     * stack is not the runtime's. */
+    struct nx_prof_row rows[24];
+    unsigned int count, i;
+
+    if (max > sizeof(rows) / sizeof(rows[0])) max = sizeof(rows) / sizeof(rows[0]);
+    count = collect_rows( rows, max, total );
+    for (i = 0; i < count; i++)
+    {
+        tasks[i].tid = rows[i].tid;
+        tasks[i].kind = rows[i].kind;
+        tasks[i].core = (int)rows[i].core;
+        tasks[i].permille = rows[i].permille;
+        snprintf( tasks[i].name, sizeof(tasks[i].name), "%s", rows[i].name );
+    }
+    return count;
+}
+
+void wine_nx_thread_report( void )
+{
+    struct nx_prof_row rows[NX_PROF_MAX_THREADS];
+    unsigned int count, total = 0, i;
+    char line[NX_PROF_LINE + 24];
+    int len;
+
+    count = collect_rows( rows, NX_PROF_MAX_THREADS, &total );
+    if (!count) return;
 
     /* tid, w (Wine) or s (server connection), @core, share of that core. */
     len = appendf( line, 0, "[THREADS] %u threads use %u.%02u cores:", count, total / 1000, total % 1000 / 10 );

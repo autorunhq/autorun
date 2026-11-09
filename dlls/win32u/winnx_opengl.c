@@ -187,7 +187,7 @@ unsigned long long wine_nx_gl_swap_time;  /* 100 ns */
 /* The floating keyboard and the controls panel (horizon-wine/source/osk.c),
  * put into the back buffer just before it is shown: the picture in a texture
  * of each context's own, blitted from a framebuffer of its own onto the
- * window's. One surface, two views, so this asks for the picture rather than
+ * window's. One surface, three views, so this asks for the picture rather than
  * for the keyboard: a program that draws through here is a program whose
  * frames the compositor does not draw, and the panel has to arrive this way
  * too. Everything the blit and the upload depend on is put back as the

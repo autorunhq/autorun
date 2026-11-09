@@ -160,6 +160,8 @@ static int picture_map;
 #define MAP_VALUE_MAX 56
 #define MAP_TITLE_MAX 64
 static int map_visible, map_count;
+/* Which of the two the surface is showing: the controls panel, or the tasks. */
+static int map_kind;
 static char map_title[MAP_TITLE_MAX];
 static char map_names[MAP_ROWS_MAX][MAP_NAME_MAX], map_values[MAP_ROWS_MAX][MAP_VALUE_MAX];
 
@@ -444,7 +446,12 @@ unsigned int wine_nx_osk_generation( void )
     return __atomic_load_n( &generation, __ATOMIC_RELAXED );
 }
 
-void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count )
+/* One surface, three views of it: the keyboard, what the controller sends, and
+ * what the program is running. The rows take their place whether or not the
+ * view is up, and the picture is made again for each showing: the tasks change
+ * while they are looked at, and a view showing what was there when it opened
+ * would be a picture of the past. */
+static void panel_show( int show, int kind, const char *title, const struct wine_nx_osk_map_row *rows, int count )
 {
     int i;
 
@@ -460,6 +467,8 @@ void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk
             snprintf( map_values[i], sizeof(map_values[0]), "%s", rows[i].value ? rows[i].value : "" );
         }
         map_count = count;
+        map_kind = kind;
+        generation++;
     }
     if (map_visible != !!show)
     {
@@ -467,6 +476,16 @@ void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk
         generation++;
     }
     pthread_mutex_unlock( &osk_lock );
+}
+
+void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count )
+{
+    panel_show( show, 0, title, rows, count );
+}
+
+void wine_nx_osk_tasks_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count )
+{
+    panel_show( show, 1, title, rows, count );
 }
 
 int wine_nx_osk_map_visible( void )
@@ -477,7 +496,7 @@ int wine_nx_osk_map_visible( void )
 void wine_nx_osk_show( int show, unsigned int held )
 {
     pthread_mutex_lock( &osk_lock );
-    /* One of them at a time: the keyboard is what is worked with, the panel
+    /* One of them at a time: the keyboard is what is worked with, the panels
      * what is read. */
     if (show && map_visible)
     {
@@ -862,7 +881,9 @@ static void draw_map( int screen_w, int screen_h )
         text_at( 0, size, map_names[i], left, cy, -1, DIM );
         text_at( 0, size, map_values[i], left + g.column_width - (int)g.pad, cy, 1, TEXT );
     }
-    text_at( 1, small, "- + A closes   - + B: the keyboard   + and - held: close the program",
+    text_at( 1, small, map_kind
+                        ? "- + Y closes   - + A: the controls   - + B: the keyboard   + and - held: close the program"
+                        : "- + A closes   - + B: the keyboard   - + Y: the tasks   + and - held: close the program",
              picture_w / 2, picture_h - (int)(g.pad / 2 + g.hint / 2), 0, DIM );
 }
 
@@ -948,7 +969,7 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
 void wine_nx_osk_reset( void )
 {
     pthread_mutex_lock( &osk_lock );
-    visible = at_top = map_visible = map_count = 0;
+    visible = at_top = map_visible = map_count = map_kind = 0;
     release_all();
     caps = 0;
     shift_keep = 0;

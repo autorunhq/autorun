@@ -40,6 +40,11 @@ struct wine_nx_osk_map_row
     const char *name, *value;
 };
 void wine_nx_osk_map_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count );
+/* The tasks panel: the same surface, another view of it -- what the program is
+ * running, with the core each thread is on and the share of a core it took.
+ * The runtime builds the rows and puts it up again while it is open, so what
+ * it shows is the program as it is rather than as it was. */
+void wine_nx_osk_tasks_show( int show, const char *title, const struct wine_nx_osk_map_row *rows, int count );
 int wine_nx_osk_map_visible( void );
 
 /* The font the labels are drawn with, a TrueType file in memory that stays
