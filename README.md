@@ -141,13 +141,18 @@ decoder that game movies and music play through. It runs by itself, once.
 
 | Button | What it does |
 |---|---|
-| **A** | Play the selected game |
+| D-pad, left stick | Move around; one move up from the top row is the header, where A picks the tab |
+| **A** | Play the selected game, or open what the header is on |
 | **Y** | The game's options |
 | **L / R** | Switch between Home (recently played) and the Library |
+| **ZL / ZR** | A page of the grid at a time, keeping the same place in it |
 | **−** | Settings (on Home), filter and sort (in the Library) |
 | **+** | Add a game, run a program once without adding it (a setup, a patch), or exit Autorun |
+| **B** | Back; on the grid it asks whether to close Autorun |
 
-The touchscreen works everywhere too.
+The touchscreen works everywhere too. In the controls screens, **A** changes a
+binding, **Y** puts one back to its default, **X** clears it and **B** leaves;
+**L** and **R** move eight bindings at a time.
 
 **A game's options (Y)**:
 - mark it as a favorite or hide it, change its title, give it command-line
