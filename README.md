@@ -108,9 +108,13 @@ the same way.
      [autorun-horizon-dlls](https://github.com/autorunhq/autorun-horizon-dlls);
    - installs the boot changes some games need: a Mesosphere build that lets a
      game run at low memory addresses, with the stock loader or
-     [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC)'s for overclocking.
+     [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC)'s for overclocking;
+   - offers a **32-bit forwarder** for the games that need one. It gives the
+     game one four-gigabyte address space from zero, with no aliases and none
+     of the boot changes, and it cannot start a 64-bit game.
 
-   **Settings -> System -> Quick setup** runs it again.
+   **Settings -> System -> Quick setup** runs it again, and **Settings ->
+   System -> Make a 32-bit forwarder** makes only that one.
 
 Without a network, download that repository (Code, Download ZIP) and unzip its
 `switch` folder to the root of the SD card too.

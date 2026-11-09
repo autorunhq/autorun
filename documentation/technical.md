@@ -108,11 +108,18 @@ runtime; the full package now ships the Mesa 26 one.
   the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
   into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
   the compositor's top layer; the controller is its while it is up.
-- **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
-  launch the NRO through a forwarder made with "32-bit, no alias", which the
-  launcher can install itself and which also raises the memory limit to 2 GiB.
-  AMD64 programs use the main 39-bit application forwarder. The same NRO
-  selects the execution path from the program's PE header.
+- **Memory.** Fixed-base games such as NFSU2 need an address space that is one
+  four-gigabyte region from zero, with no alias region above it: the "32-bit,
+  no alias" width the NPDM's address-space bits select. Autorun makes that
+  forwarder itself (`Settings -> System -> Make a 32-bit forwarder`, or the
+  second choice in Quick setup), and starts a PE32 image linked for a fixed
+  address from it without the Atmosphere patch; a 64-bit image is refused
+  there. The width is part of the title id (`forwarder_hash_space()`), so both
+  forwarders can be installed at once: the 39-bit one keeps the id
+  `0548EABB35576000` the low-window patch is written for, and the 32-bit one is
+  a second entry on the home menu. AMD64 programs use the 39-bit one, whose
+  patch places guest memory below 4 GiB. The same NRO selects the execution
+  path from the program's PE header.
   Wine reserves the program's low address space early, keeps its allocations
   clear of the memory Horizon hands to libnx, and leaves 32-bit programs'
   Vulkan memory in the driver's own mappings.
@@ -324,8 +331,9 @@ changes, and fails if the pinned text moves.
   the DirectShow and DMO DLLs, which lay out their own filter data. The
   program waits in `run-next.txt` and starts when the runtime starts again; the
   mark is `registry/components-1.done`, so a reset registry runs it again.
-- A 32-bit address space leaves a program about 2 GiB of addresses and caps the
-  whole process at 2 GiB of memory.
+- Under the 32-bit forwarder the program has one four-gigabyte region from
+  zero and nothing else: a fixed-address Win32 image starts in it, and a 64-bit
+  one does not.
 - AMD64 programs require the 39-bit application forwarder and remain
   experimental.
 - One program at a time; one controller.

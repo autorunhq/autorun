@@ -24,6 +24,7 @@ struct setup_job
     struct setup_boot_options boot;
     SDL_atomic_t done;
     int forwarder;
+    int forwarder_space;   /* 3 for the 39-bit forwarder, 2 for the 32-bit one */
     unsigned int forwarder_result;
     enum setup_boot_result boot_result;
     char detail[512];
@@ -35,7 +36,10 @@ static int setup_worker(void *opaque)
     if (job->forwarder)
     {
         const char *step = NULL;
-        job->forwarder_result = job->launcher->install_forwarder(&step);
+        if (job->forwarder_space == 2 && job->launcher->install_forwarder_32)
+            job->forwarder_result = job->launcher->install_forwarder_32(&step);
+        else
+            job->forwarder_result = job->launcher->install_forwarder(&step);
         if (job->forwarder_result)
             snprintf(job->detail, sizeof(job->detail), "Could not install while %s (0x%X).",
                      step ? step : "writing the forwarder", job->forwarder_result);
@@ -164,11 +168,22 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
         {
         case STEP_FORWARDER:
             snprintf(description, sizeof(description), "Start Autorun directly from the HOME Menu with a 39-bit address space "
-                     "and access to all four CPU cores. The next steps enable low-address memory for Win32 games.");
+                     "and access to all four CPU cores. The next steps enable low-address memory for Win32 games. "
+                     "The 32-bit forwarder needs none of them: its whole address space is below 4 GiB, and "
+                     "64-bit games do not start in it.");
             notice = forwarder ? "Your Autorun forwarder is ready." : "This session was not started from the current Autorun forwarder.";
             items[0] = forwarder ? "Continue" : "Install forwarder";
             notes[0] = forwarder ? "Set up the loader and kernel patches" : "Add Autorun to the HOME Menu";
             disabled[0] = !forwarder && !options->install_forwarder;
+            /* The second way in, which is the only one a fixed-address Win32
+             * game needs: the same forwarder with a 32-bit address space. */
+            if (!forwarder)
+            {
+                items[1] = "Install 32-bit forwarder";
+                notes[1] = "Fixed-address Win32 games, no kernel patch";
+                disabled[1] = !options->install_forwarder_32;
+                count = 2;
+            }
             break;
         case STEP_DLLS:
             snprintf(description, sizeof(description), "Games run on Windows DLLs that Autorun downloads from its DLL "
@@ -292,6 +307,7 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                 if (!forwarder)
                 {
                     job.forwarder = 1;
+                    job.forwarder_space = selected ? 2 : 3;
                     if (!confirm_install(ui, options) || !run_job(ui, &job)) break;
                     forwarder = 1;
                 }

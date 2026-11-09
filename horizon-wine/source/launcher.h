@@ -36,6 +36,9 @@ struct wine_nx_launcher_options
     int (*schedule_restart)(void);
     /* Install the 39-bit forwarder; returns 0 or the failing Result and step. */
     unsigned int (*install_forwarder)( const char **step );
+    /* And the 32-bit one, one four-gigabyte region without aliases, for a
+     * Win32 image linked for a fixed address. NULL when it cannot be made. */
+    unsigned int (*install_forwarder_32)( const char **step );
     unsigned int (*install_game_forwarder)( const struct wine_nx_forwarder *request, const char **step );
     const char *launch_error;
     /* The global settings on entry, as the user left them on return. The

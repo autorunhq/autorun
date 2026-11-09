@@ -287,7 +287,7 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
-static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
+static void check_exefs_npdm( const u8 *data, u64 tid, int relay, int space )
 {
     const struct nca_header *header = nca_of( data );
     u64 start = (u64)header->fs_table[0].media_start_offset * 0x200;
@@ -321,8 +321,8 @@ static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
         }
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
-    /* The three bits that decide where the program's address space begins. */
-    assert( ((meta->flags >> 1) & 7) == 3 );
+    /* The three bits that decide how wide the program's address space is. */
+    assert( ((meta->flags >> 1) & 7) == space );
     assert( meta->sys_resource_size == 16 * 1024 * 1024 );
     aci0 = (const struct npdm_aci0 *)((const u8 *)meta + meta->aci0_offset);
     acid = (const struct npdm_acid *)((const u8 *)meta + meta->acid_offset);
@@ -412,6 +412,46 @@ static void check_control( const u8 *data, size_t size, const char *name, const 
     (void)tid;
 }
 
+/* An NPDM laid out the way npdmtool lays one out: the META, the ACI0 and the
+ * ACID, each with a key area of the two capabilities the patcher looks for. The
+ * loader's own comes out of its build; this is what a machine without
+ * devkitPro runs the test with, and the address-space bits are what it checks. */
+static void write_fake_npdm( const char *path )
+{
+    struct npdm_meta meta = {0};
+    struct npdm_aci0 aci0 = {0};
+    struct npdm_acid acid = {0};
+    u32 kac[2] = { 0x030073f7, 0x0000ffff };
+    size_t total = sizeof(meta) + sizeof(aci0) + sizeof(kac) + sizeof(acid) + sizeof(kac);
+    u8 *data = calloc( 1, total ), *at = data;
+    FILE *file;
+
+    assert( data );
+    memcpy( &meta.magic, "META", 4 );
+    meta.main_thread_priority = 0x2c;
+    meta.sys_resource_size = meta.version = meta.main_thread_stack_size = 0x1000;
+    meta.aci0_offset = sizeof(meta);
+    meta.aci0_size = sizeof(aci0);
+    meta.acid_offset = meta.aci0_offset + sizeof(aci0) + sizeof(kac);
+    meta.acid_size = sizeof(acid);
+    memcpy( &aci0.magic, "ACI0", 4 );
+    aci0.kac_offset = sizeof(aci0);
+    aci0.kac_size = sizeof(kac);
+    memcpy( &acid.magic, "ACID", 4 );
+    acid.kac_offset = sizeof(acid);
+    acid.kac_size = sizeof(kac);
+
+    memcpy( at, &meta, sizeof(meta) ); at += sizeof(meta);
+    memcpy( at, &aci0, sizeof(aci0) ); at += sizeof(aci0);
+    memcpy( at, kac, sizeof(kac) );    at += sizeof(kac);
+    memcpy( at, &acid, sizeof(acid) ); at += sizeof(acid);
+    memcpy( at, kac, sizeof(kac) );
+    if (!(file = fopen( path, "wb" ))) { perror( path ); exit( 2 ); }
+    if (fwrite( data, 1, total, file ) != total) exit( 2 );
+    fclose( file );
+    free( data );
+}
+
 int main( int argc, char **argv )
 {
     static const char nro_path[] = "sdmc:/switch/wine/wine-nx-runtime.nro";
@@ -424,10 +464,16 @@ int main( int argc, char **argv )
 
     if (argc < 4)
     {
-        fprintf( stderr, "usage: %s NPDM ICON OUTDIR\n", argv[0] );
+        fprintf( stderr, "usage: %s NPDM|- ICON OUTDIR\n", argv[0] );
         return 2;
     }
-    wine_nx_hbl_npdm = load_file( argv[1], &wine_nx_hbl_npdm_size );
+    if (!strcmp( argv[1], "-" ))
+    {
+        snprintf( nro_file, sizeof(nro_file), "%s/fake.npdm", argv[3] );
+        write_fake_npdm( nro_file );
+        wine_nx_hbl_npdm = load_file( nro_file, &wine_nx_hbl_npdm_size );
+    }
+    else wine_nx_hbl_npdm = load_file( argv[1], &wine_nx_hbl_npdm_size );
     wine_nx_icon_any = load_file( argv[2], &wine_nx_icon_any_size );
     wine_nx_hbl_main_size = 4096;
     wine_nx_hbl_main = calloc( 1, wine_nx_hbl_main_size );
@@ -448,7 +494,7 @@ int main( int argc, char **argv )
     sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
     assert( wine_nx_forwarder_title_id( nro_path, NULL ) ==
             (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
-    forwarder_hash( nro_file, NULL, 0, plain_hash );
+    forwarder_hash_space( nro_file, NULL, 0, 3, plain_hash );
     plain_tid = 0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull);
     assert( tid != plain_tid );
 
@@ -473,7 +519,7 @@ int main( int argc, char **argv )
     control = read_nca( 2, &control_size );
     meta = read_nca( 3, &meta_size );
     check_program( program, program_size, nro_file );
-    check_exefs_npdm( program, tid, 0 );
+    check_exefs_npdm( program, tid, 0, 3 );
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     assert( nca_of( meta )->content_type == NCA_CONTENT_META );
     assert( nca_of( meta )->fs_header[0].fs_type == NCA_FS_PFS0 );
@@ -485,7 +531,7 @@ int main( int argc, char **argv )
 
     assert( !wine_nx_forwarder_install( &request, &step ) );
     program = read_nca( 4, &program_size );
-    check_exefs_npdm( program, tid, 0 );
+    check_exefs_npdm( program, tid, 0, 3 );
     free( program );
 
     request.game_id = 42;
@@ -496,7 +542,7 @@ int main( int argc, char **argv )
     assert( !wine_nx_forwarder_install( &request, &step ) );
     assert( deleted_completely_count == 1 && deleted_completely[0] == tid );
     program = read_nca( 1, &program_size );
-    check_exefs_npdm( program, tid, 1 );
+    check_exefs_npdm( program, tid, 1, 3 );
     {
         const struct nca_header *header = nca_of( program );
         const struct integrity_level *levels = header->fs_header[1].hash_data.integrity_meta_info.info_level_hash.levels;
@@ -522,7 +568,37 @@ int main( int argc, char **argv )
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     free( control );
 
+    /* The 32-bit one: the same NRO filed under a name that says so, so both
+     * forwarders can be on the console at once, the wide one still the one the
+     * Atmosphere patch is written for. */
+    {
+        u64 tid32 = wine_nx_forwarder_title_id_for( nro_file, NULL, 2 );
+        assert( tid32 != wine_nx_forwarder_title_id( nro_file, NULL ) );
+        assert( tid32 != tid && tid32 != plain_tid );
+        assert( wine_nx_forwarder_title_id_for( nro_file, NULL, 3 ) == wine_nx_forwarder_title_id( nro_file, NULL ) );
+        request.game_id = 0;
+        request.name = "Autorun 32-bit";
+        request.address_space = 2;
+        placeholders = registered = deleted_completely_count = deleted_after_write = 0;
+        assert( !wine_nx_forwarder_install( &request, &step ) );
+        assert( registered == 3 );
+        assert( deleted_entity == tid32 && !deleted_after_write );
+        assert( deleted_completely_count == 2 && deleted_completely[1] == tid32 );
+        program = read_nca( 1, &program_size );
+        check_exefs_npdm( program, tid32, 0, 2 );
+        free( program );
+        control = read_nca( 2, &control_size );
+        check_control( control, control_size, "Autorun 32-bit", "ticoverse.com", "autorun-nro-nacp", tid32 );
+        free( control );
+        /* An address space nobody has is refused rather than written. */
+        request.address_space = 1;
+        assert( wine_nx_forwarder_install( &request, &step ) );
+        request.address_space = 3;
+        request.name = "Autorun";
+    }
+
     puts( "forwarder: title ids, program exefs and romfs, the address space and ForceDebug in the NPDM, the "
-          "four-core permissions, control romfs and the NACP it inherits, and taking the old entry away before writing passed" );
+          "four-core permissions, control romfs and the NACP it inherits, the 32-bit address space, "
+          "and taking the old entry away before writing passed" );
     return 0;
 }

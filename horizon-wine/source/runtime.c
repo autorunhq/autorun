@@ -3961,25 +3961,42 @@ static void log_line_plain( const char *line )
     log_line( "%s", line );
 }
 
-static unsigned int launcher_install_forwarder( const char **step )
+static unsigned int launcher_install_forwarder_space( int address_space, const char **step )
 {
     struct wine_nx_forwarder request =
     {
         .nro_path = RUNTIME_DIR "/wine-nx-runtime.nro",
         .args = NULL,
-        .name = "Autorun",
+        .name = address_space == 2 ? "Autorun 32-bit" : "Autorun",
         .author = "ticoverse.com",
         .icon = wine_nx_icon_any,
         .icon_size = wine_nx_icon_any_size,
+        .address_space = address_space,
     };
     unsigned int rc;
 
     wine_nx_forwarder_report = log_line_plain;
     rc = wine_nx_forwarder_install( &request, step );
-    log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
-              wine_nx_forwarder_title_id( request.nro_path, NULL ), rc,
+    log_line( "[LAUNCHER] forwarder %016llx (%d-bit): rc=0x%x%s%s",
+              wine_nx_forwarder_title_id_for( request.nro_path, NULL, address_space ),
+              address_space == 2 ? 32 : 39, rc,
               rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
+}
+
+/* The 39-bit forwarder: what everything but a fixed-address Win32 image runs
+ * under, and the one the Atmosphere low-address patch is written for. */
+static unsigned int launcher_install_forwarder( const char **step )
+{
+    return launcher_install_forwarder_space( 3, step );
+}
+
+/* The 32-bit one, with no alias region: the program's whole address space is
+ * the four gigabytes from zero, so an image linked for one address has it,
+ * and no patch is needed for it. It cannot start a 64-bit image. */
+static unsigned int launcher_install_forwarder_32( const char **step )
+{
+    return launcher_install_forwarder_space( 2, step );
 }
 
 static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
@@ -4314,10 +4331,12 @@ int main( int argc, char **argv )
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
             .four_cores_available = wine_nx_four_cores_available(),
-            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ),
+            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ) ||
+                             runtime_title_id() == wine_nx_forwarder_title_id_for( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 2 ),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
+            .install_forwarder_32 = launcher_install_forwarder_32,
             .install_game_forwarder = launcher_install_game_forwarder,
             .launch_error = launch_error,
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
