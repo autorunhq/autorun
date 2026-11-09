@@ -398,12 +398,15 @@ int main( int argc, char **argv )
         assert( panel.x + panel.width <= 1920 && panel.y + panel.height <= 1080 );
         save( dir, "controls-1080.png", 1920, 1080 );
 
-        /* The keyboard takes the screen from it, and gives it back. */
+        /* The keyboard takes the screen from it. */
         wine_nx_osk_show( 1, 0 );
         assert( wine_nx_osk_visible() && !wine_nx_osk_map_visible() );
         assert( wine_nx_osk_frame( 1280, 720, &panel ) && panel.width == 984 );
         wine_nx_osk_show( 0, 0 );
+        assert( !wine_nx_osk_map_visible() );
 
+        /* Put up again and taken down, the picture goes with it. */
+        wine_nx_osk_map_show( 1, "Controls: the keyboard and mouse it gets", rows, 6 );
         before = wine_nx_osk_generation();
         wine_nx_osk_map_show( 0, NULL, NULL, 0 );
         assert( !wine_nx_osk_map_visible() && wine_nx_osk_generation() != before );
