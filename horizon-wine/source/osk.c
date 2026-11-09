@@ -1,8 +1,8 @@
 /* Copyright 2026 Wine-NX contributors. LGPL-2.1-or-later.
  *
- * The floating keyboard (osk.h): a US layout, five rows fifteen units wide,
- * the selection moved with the d-pad or the left stick, a key pressed with A
- * or a finger.
+ * The floating keyboard (osk.h): a US layout in fifteen units of width and six
+ * rows, F1 to F12 on top where a keyboard has them, with the selection moved
+ * with the d-pad or the left stick, a key pressed with A or a finger.
  *
  * It sends what a physical keyboard sends. A key is down while it is held --
  * by a finger, or by the button that presses it -- and goes up when that ends,
@@ -39,13 +39,23 @@ struct osk_key
     unsigned char kind;
 };
 
-#define ROWS 5
+#define ROWS 6
 #define ROW_UNITS 15
 
 /* A key that types a character, and one that does something else. */
 #define C( label, shifted, vk ) { label, shifted, vk, 4, KEY_CHAR }
 #define K( label, vk, quarters, kind ) { label, NULL, vk, quarters, kind }
 
+/* The function keys, above the rest as they are on a keyboard: twelve keys of
+ * five quarters fill the row exactly. */
+static const struct osk_key row_f[] =
+{
+    K( "F1", 0x70, 5, KEY_ACTION ), K( "F2", 0x71, 5, KEY_ACTION ), K( "F3", 0x72, 5, KEY_ACTION ),
+    K( "F4", 0x73, 5, KEY_ACTION ), K( "F5", 0x74, 5, KEY_ACTION ), K( "F6", 0x75, 5, KEY_ACTION ),
+    K( "F7", 0x76, 5, KEY_ACTION ), K( "F8", 0x77, 5, KEY_ACTION ), K( "F9", 0x78, 5, KEY_ACTION ),
+    K( "F10", 0x79, 5, KEY_ACTION ), K( "F11", 0x7a, 5, KEY_ACTION ), K( "F12", 0x7b, 5, KEY_ACTION ),
+    { NULL, NULL, 0, 0, 0 }
+};
 static const struct osk_key row0[] =
 {
     C( "`", "~", 0xc0 ), C( "1", "!", '1' ), C( "2", "@", '2' ), C( "3", "#", '3' ),
@@ -83,11 +93,19 @@ static const struct osk_key row4[] =
     K( ">", 0x27, 4, KEY_ARROW ), K( "Del", 0x2e, 6, KEY_ACTION ),
     K( "Close", 0, 8, KEY_CLOSE ), { NULL, NULL, 0, 0, 0 }
 };
-static const struct osk_key *const rows[ROWS] = { row0, row1, row2, row3, row4 };
+static const struct osk_key *const rows[ROWS] = { row_f, row0, row1, row2, row3, row4 };
 
 #define VK_SHIFT   0x10
 #define VK_CAPITAL 0x14
 #define ROW_CELLS  16             /* the longest row's keys, for the tables below */
+
+/* Where the keys the keyboard itself works with are: the two Shifts, and
+ * Close, which is not a key. */
+#define SHIFT_ROW       4
+#define SHIFT_LEFT_COL  0
+#define SHIFT_RIGHT_COL 11
+#define CLOSE_ROW       5
+#define CLOSE_COL       7
 
 #define MIN_HOLD_NS    40000000ull  /* a key stays down at least this long: a program that looks at the keyboard once a frame (DirectInput, GetAsyncKeyState) still sees it */
 #define REPEAT_FIRST_NS 500000000ull /* a key held this long is repeated, as Windows repeats its own */
@@ -99,7 +117,7 @@ static const struct osk_key *const rows[ROWS] = { row0, row1, row2, row3, row4 }
 
 static pthread_mutex_t osk_lock = PTHREAD_MUTEX_INITIALIZER;
 static int visible, at_top, caps;
-static int sel_row = 2, sel_col = 5;
+static int sel_row = 3, sel_col = 5;   /* g */
 static unsigned int ignored, previous, repeating;
 static uint64_t repeat_at;
 static unsigned int generation = 1;
@@ -234,7 +252,7 @@ static int modifier_cell( int row, int col )
 /* Shift is down: held by a finger or the controller, or left down by a tap. */
 static int shift_down( void )
 {
-    return cell_down[3][0] || cell_down[3][11];
+    return cell_down[SHIFT_ROW][SHIFT_LEFT_COL] || cell_down[SHIFT_ROW][SHIFT_RIGHT_COL];
 }
 
 /* A key goes down, and stays down while its button or finger does. */
@@ -301,7 +319,8 @@ static int cell_wanted( int row, int col )
     if (row == ctrl_a_row && col == ctrl_a_col) return 1;
     if (key->kind == KEY_CLOSE) return 0;
     if (key->kind == KEY_SHIFT)
-        return (ctrl_shift && row == 3 && col == 0) || (shift_sticky && row == sticky_row && col == sticky_col);
+        return (ctrl_shift && row == SHIFT_ROW && col == SHIFT_LEFT_COL) ||
+               (shift_sticky && row == sticky_row && col == sticky_col);
     for (i = 0; i < ctrl_count; i++)
         if (ctrl_vk[i] == key->vk) return 1;
     return 0;
@@ -316,7 +335,7 @@ static void sync_cells( void )
 
     /* Close is not a key: pressing it closes the keyboard, with everything
      * held let go first. */
-    if (touch_cell[4][7] || (ctrl_a_row == 4 && ctrl_a_col == 7))
+    if (touch_cell[CLOSE_ROW][CLOSE_COL] || (ctrl_a_row == CLOSE_ROW && ctrl_a_col == CLOSE_COL))
     {
         release_all();
         visible = 0;
@@ -325,7 +344,7 @@ static void sync_cells( void )
 
     /* Shift was left down by a tap and is pressed again: that lets it go. */
     if (shift_sticky && (touch_cell[sticky_row][sticky_col] ||
-                         (ctrl_shift && sticky_row == 3 && sticky_col == 0)))
+                         (ctrl_shift && sticky_row == SHIFT_ROW && sticky_col == SHIFT_LEFT_COL)))
     {
         shift_sticky = 0;   /* pressed again: it is let go, and stays let go */
         shift_keep = 1;
@@ -791,7 +810,7 @@ void wine_nx_osk_reset( void )
     caps = 0;
     shift_keep = 0;
     ignore_touch = 0;
-    sel_row = 2;
+    sel_row = 3;
     sel_col = 5;
     ignored = previous = repeating = 0;
     repeat_at = 0;

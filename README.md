@@ -207,12 +207,12 @@ are held:
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-A key held repeats, as it does on a keyboard, and keys held together are held
-together: a finger can hold Shift while another types, and two fingers can
-hold two keys at once. A tap on Shift with nothing typed after it leaves it
-down for the next key, as it has to when one button is all there is to press
-it with; Caps locks as it does on a keyboard. While it is open, the game gets
-no controller input.
+The top row is F1 to F12, where a keyboard has them. A key held repeats, as
+it does on a keyboard, and keys held together are held together: a finger can
+hold Shift while another types, and two fingers can hold two keys at once. A
+tap on Shift with nothing typed after it leaves it down for the next key, as
+it has to when one button is all there is to press it with; Caps locks as it
+does on a keyboard. While it is open, the game gets no controller input.
 
 ## If something goes wrong
 

@@ -62,12 +62,13 @@ static void key_point( const struct wine_nx_osk_frame *frame, int row, int col, 
 {
     int centers[][3] =
     {
-        { 0, 1, 44 },    /* 1 */
-        { 1, 1, 140 },   /* q */
-        { 2, 0, 68 },    /* Caps */
-        { 3, 0, 84 },    /* Shift */
-        { 3, 5, 444 },   /* b */
-        { 4, 1, 300 },   /* Space */
+        { 0, 4, 372 },   /* F5 */
+        { 1, 1, 44 },    /* 1 */
+        { 2, 1, 140 },   /* q */
+        { 3, 0, 68 },    /* Caps */
+        { 4, 0, 84 },    /* Shift */
+        { 4, 5, 444 },   /* b */
+        { 5, 1, 300 },   /* Space */
     };
     int i;
 
@@ -153,6 +154,18 @@ int main( int argc, char **argv )
     press( OSK_A );
     expect( "+47 -47" );
 
+    /* The function keys are the top row, as they are on a keyboard: three up
+     * from g is it, and the key above g is F5. */
+    press( OSK_UP );
+    press( OSK_UP );
+    press( OSK_UP );
+    press( OSK_A );
+    expect( "+74 -74" );
+
+    /* Back to g. */
+    wine_nx_osk_reset();
+    wine_nx_osk_show( 1, 0 );
+
     /* X is Shift. Let go at once, it stays down for the key after it (sticky):
      * the key comes between its down and its up, as it would from a hand. */
     press( OSK_X );
@@ -172,8 +185,8 @@ int main( int argc, char **argv )
     /* A finger holds Shift while another presses a key: the two are down at
      * once, Shift first, and it goes up after the key. */
     assert( wine_nx_osk_frame( 1280, 720, &frame ) );
-    key_point( &frame, 3, 0, &shift_x, &shift_y );
-    key_point( &frame, 1, 1, &q_x, &q_y );
+    key_point( &frame, 4, 0, &shift_x, &shift_y );
+    key_point( &frame, 2, 1, &q_x, &q_y );
     fingers[0] = (struct wine_nx_osk_point){ shift_x, shift_y };
     assert( wine_nx_osk_input( 0, 0, 0, fingers, 1, now ) );
     now += 16 * MS;
@@ -186,12 +199,25 @@ int main( int argc, char **argv )
     expect( "-51 -10" );
     now += 100 * MS;
 
+    /* A function key by finger, held and let go like any other. */
+    {
+        int f_x, f_y;
+
+        key_point( &frame, 0, 4, &f_x, &f_y );
+        fingers[0] = (struct wine_nx_osk_point){ f_x, f_y };
+    }
+    step_fingers( 0, fingers, 1 );
+    expect( "+74" );
+    step_fingers( 0, NULL, 0 );
+    expect( "-74" );
+    now += 100 * MS;
+
     /* Two fingers, two keys at once: both down and both up, as a hand holds
      * two keys, so keys that must be held together work. */
     {
         int b_x, b_y;
 
-        key_point( &frame, 3, 5, &b_x, &b_y );
+        key_point( &frame, 4, 5, &b_x, &b_y );
         fingers[0] = (struct wine_nx_osk_point){ q_x, q_y };
         fingers[1] = (struct wine_nx_osk_point){ b_x, b_y };
         step_fingers( 0, fingers, 2 );
@@ -282,7 +308,7 @@ int main( int argc, char **argv )
     /* The picture: ZL puts it at the top, ZR back at the bottom. */
     wine_nx_osk_reset();
     wine_nx_osk_show( 1, 0 );
-    assert( wine_nx_osk_frame( 1280, 720, &again ) && again.y == 380 && again.x == 148 );
+    assert( wine_nx_osk_frame( 1280, 720, &again ) && again.y == 324 && again.x == 148 );
     before = again.generation;
     press( OSK_ZL );
     assert( wine_nx_osk_frame( 1280, 720, &frame ) && frame.y == 12 && frame.generation != before );
@@ -297,7 +323,7 @@ int main( int argc, char **argv )
         uint32_t *pixels = held;
 
         assert( wine_nx_osk_copy( 1280, 720, held, frame.width * 4, 0 ) == frame.generation );
-        key_point( &frame, 3, 0, &shift_x, &shift_y );
+        key_point( &frame, 4, 0, &shift_x, &shift_y );
         before = pixels[(shift_y - frame.y) * frame.width + shift_x - frame.x];
         fingers[0] = (struct wine_nx_osk_point){ shift_x, shift_y };
         step_fingers( 0, fingers, 1 );
@@ -308,7 +334,7 @@ int main( int argc, char **argv )
     }
 
     /* Docked, the same keyboard, larger; the picture comes in either order. */
-    assert( wine_nx_osk_frame( 1920, 1080, &frame ) && frame.width == 1476 && frame.height == 492 );
+    assert( wine_nx_osk_frame( 1920, 1080, &frame ) && frame.width == 1476 && frame.height == 576 );
     save( dir, "osk-1080.png", 1920, 1080 );
     {
         void *pixels = malloc( (size_t)frame.width * frame.height * 4 );
@@ -326,7 +352,7 @@ int main( int argc, char **argv )
     wine_nx_osk_reset();
     wine_nx_osk_show( 1, 0 );
     assert( wine_nx_osk_frame( 1280, 720, &frame ) );
-    key_point( &frame, 1, 1, &q_x, &q_y );
+    key_point( &frame, 2, 1, &q_x, &q_y );
     fingers[0] = (struct wine_nx_osk_point){ q_x, q_y };
     /* The finger is still the keyboard's, not the program's. */
     assert( wine_nx_osk_input( 0, 0, 0, fingers, 1, now ) );
@@ -351,7 +377,7 @@ int main( int argc, char **argv )
     assert( !wine_nx_osk_visible() );
     expect( "" );
 
-    printf( "osk: keys held and let go, two keys at once, Shift held and sticky, "
-            "Caps, repeats, closing, placement and the picture at 720p and 1080p\n" );
+    printf( "osk: keys held and let go, function keys, two keys at once, Shift held and "
+            "sticky, Caps, repeats, closing, placement and the picture at 720p and 1080p\n" );
     return 0;
 }
