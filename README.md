@@ -193,20 +193,26 @@ XInput or DirectInput.
 
 **Minus + right stick click** opens the on-screen keyboard over the game (it
 also opens by itself when a text field is selected; **Settings -> On-screen
-keyboard** turns that off). It types like a real keyboard, one key at a time:
+keyboard** turns that off). It works as a keyboard does, keys held while they
+are held:
 
 | On the keyboard | Does |
 |---|---|
 | D-pad, left stick | Move between keys |
-| **A**, or tap a key | Press it |
+| **A**, or a finger on a key | Holds the key for as long as the button or the finger does |
 | **B** | Backspace |
-| **Y** / **X** | Space / Shift for the next key |
+| **Y** / **X** | Space / Shift |
 | **L**, **R** | Cursor left, right |
 | **+** | Enter |
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-While it is open, the game gets no controller input.
+A key held repeats, as it does on a keyboard, and keys held together are held
+together: a finger can hold Shift while another types, and two fingers can
+hold two keys at once. A tap on Shift with nothing typed after it leaves it
+down for the next key, as it has to when one button is all there is to press
+it with; Caps locks as it does on a keyboard. While it is open, the game gets
+no controller input.
 
 ## If something goes wrong
 

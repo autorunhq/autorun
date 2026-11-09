@@ -2,16 +2,25 @@
  *
  * The floating keyboard (osk.h): a US layout, five rows fifteen units wide,
  * the selection moved with the d-pad or the left stick, a key pressed with A
- * or a tap. Keys go out as virtual-key codes, down and up, with Shift held
- * around the ones that need it, so a program sees what a keyboard would send
- * for them: a field it draws itself can be backspaced, moved through and
- * typed into, and it only gets Enter when Enter is pressed.
+ * or a finger.
+ *
+ * It sends what a physical keyboard sends. A key is down while it is held --
+ * by a finger, or by the button that presses it -- and goes up when that ends,
+ * so Shift can be held with one finger while another types, and a key held
+ * repeats the way a held key does. Shift and Caps are keys like the others:
+ * Caps sends VK_CAPITAL and lets the system keep the lock, and Shift let go
+ * quickly stays down for the key after it (sticky keys), which is what a
+ * one-button selection needs. The keys leave as virtual-key codes with the
+ * scan codes the layout gives them, down and up, so a field a program draws
+ * itself can be backspaced, moved through and typed into, and it only gets
+ * Enter when Enter is pressed.
  *
  * Its picture is drawn here, in software, with SDL_ttf over the font
  * wine_nx_osk_font gives, and only when something on it changed.
  */
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,30 +85,46 @@ static const struct osk_key row4[] =
 };
 static const struct osk_key *const rows[ROWS] = { row0, row1, row2, row3, row4 };
 
-#define VK_SHIFT 0x10
-#define REPEAT_FIRST_NS 350000000ull
-#define REPEAT_NEXT_NS   70000000ull
+#define VK_SHIFT   0x10
+#define VK_CAPITAL 0x14
+#define ROW_CELLS  16             /* the longest row's keys, for the tables below */
+
+#define MIN_HOLD_NS    40000000ull  /* a key stays down at least this long: a program that looks at the keyboard once a frame (DirectInput, GetAsyncKeyState) still sees it */
+#define REPEAT_FIRST_NS 500000000ull /* a key held this long is repeated, as Windows repeats its own */
+#define REPEAT_NEXT_NS  60000000ull
+#define MOVE_FIRST_NS   350000000ull /* the selection, which is quicker than a key */
+#define MOVE_NEXT_NS    70000000ull
+#define SHIFT_TAP_NS   300000000ull /* Shift let go this quickly stays down for the key after it */
 #define STICK_DEAD 16000
 
 static pthread_mutex_t osk_lock = PTHREAD_MUTEX_INITIALIZER;
-static int visible, shift, caps, at_top;
+static int visible, at_top, caps;
 static int sel_row = 2, sel_col = 5;
 static unsigned int ignored, previous, repeating;
 static uint64_t repeat_at;
-static int touch_row = -1, touch_col = -1, touch_was_down;
 static unsigned int generation = 1;
 
-/* Keys to send, each with when it is due: a key is held down for a while, as
- * a finger holds one, so a program that looks at the keyboard once a frame
- * (DirectInput, GetAsyncKeyState) still sees it down, and sees Shift down
- * with it. */
+/* Keys to send, each with when it is due: a key stays down as long as it is
+ * held, and a key let go at once stays down MIN_HOLD_NS, so a program that
+ * looks at the keyboard once a frame still sees it down. */
 static struct { unsigned short vk; unsigned char up; uint64_t due; } queue[256];
 static unsigned int queue_head, queue_tail;
 static uint64_t input_now, last_due;
 
-#define KEY_GAP_NS   10000000ull  /* between one key and the next */
-#define KEY_HOLD_NS  40000000ull  /* how long a key stays down */
-#define SHIFT_LEAD_NS 20000000ull /* Shift down before the key, and up after it */
+/* What holds a key down: the fingers on the screen, the controller's buttons,
+ * and Shift and Caps, which stay down once let go for what comes next. */
+static int ctrl_a_row = -1, ctrl_a_col = -1;   /* A, on the key the selection is on when it goes down */
+static int ctrl_shift;                         /* X, which is Shift */
+static unsigned short ctrl_vk[8];              /* B, Y, L, R and +, by the key they hold */
+static int ctrl_count;
+static int shift_sticky, sticky_row, sticky_col;  /* Shift down for the next key */
+static int shift_used;                            /* a key went down while Shift was */
+static int shift_keep;     /* this press of Shift lets go of what a tap left down */
+static int ignore_touch;   /* fingers that were down when it opened press nothing */
+static unsigned char touch_cell[ROWS][ROW_CELLS];  /* cells a finger is on */
+static unsigned char cell_down[ROWS][ROW_CELLS];   /* cells the system has down */
+static unsigned char cell_repeat[ROWS][ROW_CELLS];
+static uint64_t cell_down_at[ROWS][ROW_CELLS], cell_repeat_at[ROWS][ROW_CELLS];
 
 /* The picture last drawn, for which screen and which generation. */
 static uint32_t *picture;
@@ -162,58 +187,194 @@ static float key_center( int row, int col )
     return quarters + rows[row][col].quarters / 2.0f;
 }
 
-/* delay: after the event before it, or now when the queue has gone quiet. */
-static void push( unsigned short vk, int up, uint64_t delay )
+/* Which key the system is sent for a key of the picture: Shift and Caps have
+ * their own codes, and Close is not a key at all. */
+static unsigned short key_vk( const struct osk_key *key )
+{
+    switch (key->kind)
+    {
+    case KEY_SHIFT: return VK_SHIFT;
+    case KEY_CAPS:  return VK_CAPITAL;
+    default:        return key->vk;
+    }
+}
+
+/* Keys Windows repeats while they are held: Shift and Caps are not. */
+static int repeatable( const struct osk_key *key )
+{
+    return key->kind == KEY_CHAR || key->kind == KEY_ACTION || key->kind == KEY_ARROW;
+}
+
+/* delay: after the event before it, or now when the queue has gone quiet.
+ * Returns when the event is due, which the repeats count from. */
+static uint64_t push( unsigned short vk, int up, uint64_t delay )
 {
     unsigned int slot = queue_tail % (sizeof(queue) / sizeof(queue[0]));
 
-    if (queue_tail - queue_head >= sizeof(queue) / sizeof(queue[0])) return;
     last_due = last_due + delay > input_now ? last_due + delay : input_now;
+    if (queue_tail - queue_head >= sizeof(queue) / sizeof(queue[0])) return last_due;
     queue[slot].vk = vk;
     queue[slot].up = !!up;
     queue[slot].due = last_due;
     queue_tail++;
+    return last_due;
 }
 
-static void tap( unsigned short vk )
+static int shift_cell( int row, int col )
 {
-    push( vk, 0, KEY_GAP_NS );
-    push( vk, 1, KEY_HOLD_NS );
+    return rows[row][col].kind == KEY_SHIFT;
 }
 
-static void press( int row, int col )
+/* Shift and Caps, which change the keys after them. */
+static int modifier_cell( int row, int col )
+{
+    return rows[row][col].kind == KEY_SHIFT || rows[row][col].kind == KEY_CAPS;
+}
+
+/* Shift is down: held by a finger or the controller, or left down by a tap. */
+static int shift_down( void )
+{
+    return cell_down[3][0] || cell_down[3][11];
+}
+
+/* A key goes down, and stays down while its button or finger does. */
+static void cell_press( int row, int col );
+/* Every key up, for the keyboard closing. */
+static void release_all( void );
+
+/* A key let go: it goes up, but not before MIN_HOLD_NS, so a program that
+ * looks at the keyboard once a frame still sees it down. Shift let go quickly
+ * and with nothing typed stays down for the key after it. */
+static void cell_release( int row, int col )
 {
     const struct osk_key *key = &rows[row][col];
-    int shifted;
+    int shift = shift_cell( row, col );
 
-    switch (key->kind)
+    if (!cell_down[row][col]) return;
+    if (shift)
     {
-    case KEY_CHAR:
-        shifted = is_letter( key ) ? shift ^ caps : shift;
-        if (shifted)
+        int tap = !shift_used && !shift_keep && input_now - cell_down_at[row][col] < SHIFT_TAP_NS;
+
+        shift_keep = 0;
+        if (tap)
         {
-            push( VK_SHIFT, 0, KEY_GAP_NS );
-            push( key->vk, 0, SHIFT_LEAD_NS );
-            push( key->vk, 1, KEY_HOLD_NS );
-            push( VK_SHIFT, 1, SHIFT_LEAD_NS );
+            shift_sticky = 1;
+            sticky_row = row;
+            sticky_col = col;
+            generation++;
+            return;
         }
-        else tap( key->vk );
-        shift = 0;  /* one character, as on a phone */
-        break;
-    case KEY_ACTION:
-    case KEY_ARROW:
-        tap( key->vk );
-        break;
-    case KEY_SHIFT:
-        shift = !shift;
-        break;
-    case KEY_CAPS:
-        caps = !caps;
-        break;
-    case KEY_CLOSE:
-        visible = 0;
-        break;
     }
+    cell_down[row][col] = 0;
+    cell_repeat[row][col] = 0;
+    push( key_vk( key ), 1, MIN_HOLD_NS );
+    /* Shift that was down for this key goes up after it. */
+    if (shift_sticky && repeatable( key )) shift_sticky = 0;
+    generation++;
+}
+
+static void cell_press( int row, int col )
+{
+    const struct osk_key *key = &rows[row][col];
+    uint64_t due;
+
+    if (cell_down[row][col]) return;
+    cell_down[row][col] = 1;
+    if (shift_cell( row, col )) shift_used = 0;
+    else if (repeatable( key )) shift_used = 1;
+    if (key->kind == KEY_CAPS) caps = !caps;
+    due = push( key_vk( key ), 0, 0 );
+    cell_down_at[row][col] = input_now;   /* when it was held, not when the event is due */
+    cell_repeat[row][col] = repeatable( key );
+    cell_repeat_at[row][col] = due + REPEAT_FIRST_NS;
+    generation++;
+}
+
+/* Whether a key should be down: a finger on it, the controller's button, or
+ * Shift left down by a tap. */
+static int cell_wanted( int row, int col )
+{
+    const struct osk_key *key = &rows[row][col];
+    int i;
+
+    if (touch_cell[row][col]) return 1;
+    if (row == ctrl_a_row && col == ctrl_a_col) return 1;
+    if (key->kind == KEY_CLOSE) return 0;
+    if (key->kind == KEY_SHIFT)
+        return (ctrl_shift && row == 3 && col == 0) || (shift_sticky && row == sticky_row && col == sticky_col);
+    for (i = 0; i < ctrl_count; i++)
+        if (ctrl_vk[i] == key->vk) return 1;
+    return 0;
+}
+
+/* Brings the keys in line with what holds them, and repeats those held: the
+ * key stays down and another down goes out, which the system marks as a
+ * repeat the way it marks one from a keyboard. */
+static void sync_cells( void )
+{
+    int row, col;
+
+    /* Close is not a key: pressing it closes the keyboard, with everything
+     * held let go first. */
+    if (touch_cell[4][7] || (ctrl_a_row == 4 && ctrl_a_col == 7))
+    {
+        release_all();
+        visible = 0;
+        return;
+    }
+
+    /* Shift was left down by a tap and is pressed again: that lets it go. */
+    if (shift_sticky && (touch_cell[sticky_row][sticky_col] ||
+                         (ctrl_shift && sticky_row == 3 && sticky_col == 0)))
+    {
+        shift_sticky = 0;   /* pressed again: it is let go, and stays let go */
+        shift_keep = 1;
+    }
+
+    /* Shift and Caps go down before the keys they change, and up after them,
+     * as a hand holds them. */
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (cell_wanted( row, col ) && !cell_down[row][col] && modifier_cell( row, col ))
+                cell_press( row, col );
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (cell_wanted( row, col ) && !cell_down[row][col]) cell_press( row, col );
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (!cell_wanted( row, col ) && cell_down[row][col] && !modifier_cell( row, col ))
+                cell_release( row, col );
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (!cell_wanted( row, col ) && cell_down[row][col]) cell_release( row, col );
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (cell_down[row][col] && cell_repeat[row][col] && input_now >= cell_repeat_at[row][col])
+            {
+                push( key_vk( &rows[row][col] ), 0, 0 );
+                cell_repeat_at[row][col] = input_now + REPEAT_NEXT_NS;
+            }
+}
+
+/* Every key up, for the keyboard closing: nothing is left down behind it. */
+static void release_all( void )
+{
+    int row, col;
+
+    for (row = 0; row < ROWS; row++)
+        for (col = 0; col < row_length( row ); col++)
+            if (cell_down[row][col])
+            {
+                cell_down[row][col] = 0;
+                cell_repeat[row][col] = 0;
+                push( key_vk( &rows[row][col] ), 1, MIN_HOLD_NS );
+            }
+    memset( touch_cell, 0, sizeof(touch_cell) );
+    ctrl_count = 0;
+    ctrl_a_row = ctrl_a_col = -1;
+    ctrl_shift = 0;
+    shift_sticky = 0;
+    shift_used = 0;
     generation++;
 }
 
@@ -240,30 +401,6 @@ static void move( unsigned int direction )
     generation++;
 }
 
-/* What a button does, pressed or repeated. */
-static void act( unsigned int button )
-{
-    switch (button)
-    {
-    case OSK_UP: case OSK_DOWN: case OSK_LEFT: case OSK_RIGHT: move( button ); break;
-    case OSK_A: press( sel_row, sel_col ); break;
-    case OSK_B: tap( 0x08 ); break;
-    case OSK_Y: tap( 0x20 ); break;
-    case OSK_X: shift = !shift; generation++; break;
-    case OSK_L: tap( 0x25 ); break;
-    case OSK_R: tap( 0x27 ); break;
-    case OSK_PLUS: tap( 0x0d ); break;
-    case OSK_ZL: if (!at_top) { at_top = 1; generation++; } break;
-    case OSK_ZR: if (at_top) { at_top = 0; generation++; } break;
-    case OSK_MINUS: visible = 0; generation++; break;
-    }
-}
-
-static int repeats( unsigned int button )
-{
-    return button & (OSK_UP | OSK_DOWN | OSK_LEFT | OSK_RIGHT | OSK_B | OSK_L | OSK_R);
-}
-
 int wine_nx_osk_visible( void )
 {
     return __atomic_load_n( &visible, __ATOMIC_RELAXED );
@@ -279,23 +416,72 @@ void wine_nx_osk_show( int show, unsigned int held )
     pthread_mutex_lock( &osk_lock );
     if (visible != !!show)
     {
+        if (!show) release_all();
         visible = !!show;
         ignored = held;
+        ignore_touch = !!show;
         previous = 0;
         repeating = 0;
-        touch_row = touch_col = -1;
-        touch_was_down = 0;
+        memset( touch_cell, 0, sizeof(touch_cell) );
         generation++;
     }
     pthread_mutex_unlock( &osk_lock );
 }
 
-int wine_nx_osk_input( unsigned int held, int stick_x, int stick_y, int touching, int touch_x, int touch_y,
-                       uint64_t now_ns )
+/* The cells under the fingers, and whether any finger is on the keyboard: the
+ * rest of the screen is then the program's, as before. */
+static int touch_update( const struct wine_nx_osk_point *points, int count )
+{
+    struct geometry g;
+    unsigned char now_cell[ROWS][ROW_CELLS];
+    int i, row, col, n, x, y, w, h, on_panel = 0;
+
+    memset( now_cell, 0, sizeof(now_cell) );
+    layout( 1280, 720, at_top, &g );
+    for (i = 0; i < count; i++)
+    {
+        int px = points[i].x - g.x, py = points[i].y - g.y;
+
+        if (px < 0 || py < 0 || px >= g.width || py >= g.height) continue;
+        on_panel = 1;
+        for (row = 0; row < ROWS; row++)
+            for (col = 0, n = row_length( row ); col < n; col++)
+            {
+                key_rect( &g, row, col, &x, &y, &w, &h );
+                if (px >= x - g.gap / 2 && px < x + w + g.gap / 2 && py >= y - g.gap / 2 &&
+                    py < y + h + g.gap / 2)
+                {
+                    if (!touch_cell[row][col])
+                    {
+                        sel_row = row;
+                        sel_col = col;
+                    }
+                    now_cell[row][col] = 1;
+                }
+            }
+    }
+    /* A finger that was down when it opened presses nothing until it lifts,
+     * as a button held when it opened does. */
+    if (ignore_touch)
+    {
+        if (!count) ignore_touch = 0;
+        memset( now_cell, 0, sizeof(now_cell) );
+    }
+    memcpy( touch_cell, now_cell, sizeof(touch_cell) );
+    return on_panel;
+}
+
+/* The controller's buttons that hold a key, by that key's code. */
+static const struct { unsigned int button; unsigned short vk; } holds[] =
+{
+    { OSK_B, 0x08 }, { OSK_Y, 0x20 }, { OSK_L, 0x25 }, { OSK_R, 0x27 }, { OSK_PLUS, 0x0d },
+};
+
+int wine_nx_osk_input( unsigned int held, int stick_x, int stick_y,
+                       const struct wine_nx_osk_point *points, int count, uint64_t now_ns )
 {
     unsigned int pressed, bit;
-    struct geometry g;
-    int on_panel = 0;
+    int i, on_panel;
 
     pthread_mutex_lock( &osk_lock );
     if (!visible)
@@ -313,59 +499,44 @@ int wine_nx_osk_input( unsigned int held, int stick_x, int stick_y, int touching
     pressed = held & ~previous;
     previous = held;
 
-    for (bit = 1; bit <= OSK_STICKR && visible; bit <<= 1)
-    {
-        if (!(pressed & bit)) continue;
-        act( bit );
-        if (repeats( bit ))
+    /* The selection moves with the d-pad and the stick, and repeats held. */
+    for (bit = OSK_UP; bit <= OSK_RIGHT; bit <<= 1)
+        if (pressed & bit)
         {
+            move( bit );
             repeating = bit;
-            repeat_at = now_ns + REPEAT_FIRST_NS;
+            repeat_at = now_ns + MOVE_FIRST_NS;
         }
-    }
     if (repeating && !(held & repeating)) repeating = 0;
     if (visible && repeating && now_ns >= repeat_at)
     {
-        act( repeating );
-        repeat_at = now_ns + REPEAT_NEXT_NS;
+        move( repeating );
+        repeat_at = now_ns + MOVE_NEXT_NS;
     }
 
-    /* A tap is a press where the finger comes up, on the key it went down on. */
-    layout( 1280, 720, at_top, &g );
-    if (visible && touching)
+    /* A holds the key the selection was on when it went down; X is Shift,
+     * held while it is, and the rest hold their key while pressed. */
+    if (pressed & OSK_A)
     {
-        int px = touch_x - g.x, py = touch_y - g.y, row, col, n, x, y, w, h;
+        ctrl_a_row = sel_row;
+        ctrl_a_col = sel_col;
+    }
+    if (!(held & OSK_A)) ctrl_a_row = ctrl_a_col = -1;
+    ctrl_shift = (held & OSK_X) != 0;
+    for (i = ctrl_count = 0; i < (int)(sizeof(holds) / sizeof(holds[0])); i++)
+        if (held & holds[i].button) ctrl_vk[ctrl_count++] = holds[i].vk;
 
-        on_panel = px >= 0 && py >= 0 && px < g.width && py < g.height;
-        if (!touch_was_down)
-        {
-            touch_row = touch_col = -1;
-            for (row = 0; on_panel && row < ROWS; row++)
-                for (col = 0, n = row_length( row ); col < n; col++)
-                {
-                    key_rect( &g, row, col, &x, &y, &w, &h );
-                    if (px >= x - g.gap / 2 && px < x + w + g.gap / 2 && py >= y - g.gap / 2 &&
-                        py < y + h + g.gap / 2)
-                    {
-                        touch_row = row;
-                        touch_col = col;
-                    }
-                }
-            if (touch_row >= 0)
-            {
-                sel_row = touch_row;
-                sel_col = touch_col;
-                generation++;
-            }
-        }
-        touch_was_down = 1;
-    }
-    else if (touch_was_down)
+    on_panel = touch_update( points, count );
+    sync_cells();
+
+    if (visible && (pressed & OSK_MINUS))
     {
-        touch_was_down = 0;
-        if (visible && touch_row >= 0) press( touch_row, touch_col );
-        touch_row = touch_col = -1;
+        release_all();
+        visible = 0;
     }
+    if (visible && (pressed & OSK_ZL) && !at_top) { at_top = 1; generation++; }
+    if (visible && (pressed & OSK_ZR) && at_top) { at_top = 0; generation++; }
+    if (!visible) on_panel = 0;
     pthread_mutex_unlock( &osk_lock );
     return on_panel;
 }
@@ -538,11 +709,12 @@ static void draw( int screen_w, int screen_h )
             uint32_t color = key->kind == KEY_CHAR ? KEY : SPECIAL;
             const char *label = key->label;
 
-            if ((key->kind == KEY_SHIFT && shift) || (key->kind == KEY_CAPS && caps)) color = ACTIVE;
+            /* Held keys are lit, as Shift and Caps are while they stay down. */
+            if (cell_down[row][col] || (key->kind == KEY_CAPS && caps)) color = ACTIVE;
             if (row == sel_row && col == sel_col) color = SELECTED;
             key_rect( &g, row, col, &x, &y, &w, &h );
             fill_rounded( x, y, w, h, (int)(g.key_h / 8), color );
-            if (key->kind == KEY_CHAR && (is_letter( key ) ? shift ^ caps : shift)) label = key->shifted;
+            if (key->kind == KEY_CHAR && (is_letter( key ) ? shift_down() ^ caps : shift_down())) label = key->shifted;
             if (key->kind == KEY_ARROW) arrow( x + w / 2, y + h / 2, (int)(g.key_h / 5), key->vk, TEXT );
             else text_centered( 0, key->kind == KEY_CHAR ? size : (int)(size * 0.8f), label, x + w / 2, y + h / 2, TEXT );
         }
@@ -614,12 +786,17 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
 void wine_nx_osk_reset( void )
 {
     pthread_mutex_lock( &osk_lock );
-    visible = shift = caps = at_top = 0;
+    visible = at_top = 0;
+    release_all();
+    caps = 0;
+    shift_keep = 0;
+    ignore_touch = 0;
     sel_row = 2;
     sel_col = 5;
     ignored = previous = repeating = 0;
-    touch_row = touch_col = -1;
-    touch_was_down = 0;
+    repeat_at = 0;
+    memset( cell_down_at, 0, sizeof(cell_down_at) );
+    memset( cell_repeat_at, 0, sizeof(cell_repeat_at) );
     queue_head = queue_tail = 0;
     input_now = last_due = 0;
     generation++;

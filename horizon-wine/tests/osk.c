@@ -1,5 +1,6 @@
-/* Host test of the floating keyboard (source/osk.c): what each button and tap
- * sends, and its picture (written as PNGs to the folder given, if any).
+/* Host test of the floating keyboard (source/osk.c): what a key sends while
+ * it is held and when it is let go, what several fingers at once send, and its
+ * picture (written as PNGs to the folder given, if any).
  *   clang -std=gnu11 -I source $(sdl2-config --cflags) tests/osk.c source/osk.c $(sdl2-config --libs) -lSDL2_ttf -lpng
  */
 #include <assert.h>
@@ -36,14 +37,48 @@ static uint64_t now = 1000 * MS;
 /* One reading, then 16 ms later. */
 static void step( unsigned int held )
 {
-    wine_nx_osk_input( held, 0, 0, 0, 0, 0, now );
+    wine_nx_osk_input( held, 0, 0, NULL, 0, now );
     now += 16 * MS;
 }
 
+/* The fingers down, for one reading. */
+static void step_fingers( unsigned int held, const struct wine_nx_osk_point *fingers, int count )
+{
+    wine_nx_osk_input( held, 0, 0, fingers, count, now );
+    now += 16 * MS;
+}
+
+/* A button pressed and let go, a frame apart. */
 static void press( unsigned int button )
 {
     step( button );
     step( 0 );
+}
+
+/* A key of the picture at 720p: 64 px a unit, 50 px a key, 6 px between them,
+ * 12 px of padding and 30 px of hint above the rows, the keyboard at the
+ * bottom. Only the keys these tests press. */
+static void key_point( const struct wine_nx_osk_frame *frame, int row, int col, int *x, int *y )
+{
+    int centers[][3] =
+    {
+        { 0, 1, 44 },    /* 1 */
+        { 1, 1, 140 },   /* q */
+        { 2, 0, 68 },    /* Caps */
+        { 3, 0, 84 },    /* Shift */
+        { 3, 5, 444 },   /* b */
+        { 4, 1, 300 },   /* Space */
+    };
+    int i;
+
+    for (i = 0; i < (int)(sizeof(centers) / sizeof(centers[0])); i++)
+        if (centers[i][0] == row && centers[i][1] == col)
+        {
+            *x = frame->x + centers[i][2];
+            *y = frame->y + 12 + 30 + row * 56 + 25;
+            return;
+        }
+    assert( !"no such key in this test" );
 }
 
 /* The keys queued since the last call, as "+VK -VK ..." in hex, however far
@@ -92,14 +127,15 @@ int main( int argc, char **argv )
 {
     const char *dir = argc > 2 ? argv[2] : NULL;
     struct wine_nx_osk_frame frame, again;
+    struct wine_nx_osk_point fingers[2];
     unsigned int before;
     uint8_t bgra[4], rgba[4];
-    int i;
+    int i, shift_x, shift_y, q_x, q_y;
 
     font_path = argc > 1 ? argv[1] : "/System/Library/Fonts/Supplemental/Arial.ttf";
 
     /* Hidden, it reads nothing and draws nothing. */
-    assert( !wine_nx_osk_visible() && !wine_nx_osk_input( OSK_A, 0, 0, 0, 0, 0, now ) );
+    assert( !wine_nx_osk_visible() && !wine_nx_osk_input( OSK_A, 0, 0, NULL, 0, now ) );
     assert( !wine_nx_osk_frame( 1280, 720, &frame ) );
     expect( "" );
 
@@ -110,112 +146,166 @@ int main( int argc, char **argv )
     step( OSK_MINUS );
     step( 0 );
     assert( wine_nx_osk_visible() );
+    expect( "" );
 
-    /* It starts on g. A types it, lower case: the key alone. */
+    /* It starts on g. A holds it down while it is pressed and lets it go
+     * when it comes up: the key alone, lower case. */
     press( OSK_A );
     expect( "+47 -47" );
-    /* X is Shift for one character, held around it. */
+
+    /* X is Shift. Let go at once, it stays down for the key after it (sticky):
+     * the key comes between its down and its up, as it would from a hand. */
     press( OSK_X );
+    expect( "+10" );
     press( OSK_A );
-    press( OSK_A );
-    expect( "+10 +47 -47 -10 +47 -47" );
-    /* Each key comes when it is due, as a finger holds keys: Shift at the
-     * press, the key 20 ms later and held 40 ms, Shift let go 20 ms after;
-     * the next key 10 ms after that, held 40 ms. */
-    {
-        uint64_t t;
-        unsigned short vk;
-        int up;
+    expect( "+47 -47 -10" );
 
-        now += 500 * MS;  /* the keys above have all gone by */
-        press( OSK_X );
-        t = now;
-        press( OSK_A );
-        press( OSK_A );
-        assert( wine_nx_osk_next_key( t, &vk, &up ) && vk == 0x10 && !up );
-        assert( !wine_nx_osk_next_key( t + 19 * MS, &vk, &up ) );
-        assert( wine_nx_osk_next_key( t + 20 * MS, &vk, &up ) && vk == 0x47 && !up );
-        assert( !wine_nx_osk_next_key( t + 59 * MS, &vk, &up ) );
-        assert( wine_nx_osk_next_key( t + 60 * MS, &vk, &up ) && vk == 0x47 && up );
-        assert( wine_nx_osk_next_key( t + 80 * MS, &vk, &up ) && vk == 0x10 && up );
-        assert( !wine_nx_osk_next_key( t + 89 * MS, &vk, &up ) );
-        assert( wine_nx_osk_next_key( t + 90 * MS, &vk, &up ) && vk == 0x47 && !up );
-        assert( !wine_nx_osk_next_key( t + 129 * MS, &vk, &up ) );
-        expect( "-47" );
-        now += 200 * MS;
-    }
-    /* Up from g is t, right is y; B is Backspace, Y space, L and R the arrows,
-     * + Enter. */
-    press( OSK_UP );
-    press( OSK_RIGHT );
-    press( OSK_A );
-    press( OSK_B );
-    press( OSK_Y );
-    press( OSK_L );
-    press( OSK_R );
-    press( OSK_PLUS );
-    expect( "+59 -59 +08 -08 +20 -20 +25 -25 +27 -27 +0d -0d" );
-
-    /* Held, B repeats: once at once, again after 350 ms, then every 70 ms. */
-    wine_nx_osk_input( OSK_B, 0, 0, 0, 0, 0, now );
-    expect( "+08 -08" );
-    wine_nx_osk_input( OSK_B, 0, 0, 0, 0, 0, now + 349 * MS );
-    expect( "" );
-    wine_nx_osk_input( OSK_B, 0, 0, 0, 0, 0, now + 350 * MS );
-    expect( "+08 -08" );
-    wine_nx_osk_input( OSK_B, 0, 0, 0, 0, 0, now + 420 * MS );
-    expect( "+08 -08" );
-    now += 500 * MS;
-    step( 0 );
-
-    /* The left stick moves the selection like the d-pad: down from y is h. */
-    wine_nx_osk_input( 0, 0, -30000, 0, 0, 0, now );
-    now += 16 * MS;
-    step( 0 );
-    press( OSK_A );
-    expect( "+48 -48" );
-
-    /* Caps makes letters capitals without Shift; Shift then makes them small
-     * again, and a digit still takes Shift. Up from h goes to y, up again
-     * to 6. */
-    for (i = 0; i < 6; i++) press( OSK_LEFT );   /* h g f d s a Caps */
-    press( OSK_A );
-    expect( "" );
-    for (i = 0; i < 6; i++) press( OSK_RIGHT );  /* back to h */
-    press( OSK_A );
+    /* Pressed again, it lets go: a second tap leaves Shift off, and the key
+     * after it goes out unshifted. */
     press( OSK_X );
-    press( OSK_A );
-    press( OSK_UP );
-    press( OSK_UP );
+    expect( "+10" );
     press( OSK_X );
+    expect( "-10" );
     press( OSK_A );
-    expect( "+10 +48 -48 -10 +48 -48 +10 +36 -36 -10" );
+    expect( "+47 -47" );
 
-    /* A tap types the key under the finger when it comes up: q, on a 720p
-     * screen with the keyboard at the bottom. Caps is still on: a capital. */
+    /* A finger holds Shift while another presses a key: the two are down at
+     * once, Shift first, and it goes up after the key. */
     assert( wine_nx_osk_frame( 1280, 720, &frame ) );
-    assert( frame.width == 984 && frame.height == 328 && frame.x == 148 && frame.y == 380 );
-    {
-        int qx = frame.x + 12 + 96 + 32, qy = frame.y + 12 + 30 + 56 + 25;  /* after Tab, one row down */
+    key_point( &frame, 3, 0, &shift_x, &shift_y );
+    key_point( &frame, 1, 1, &q_x, &q_y );
+    fingers[0] = (struct wine_nx_osk_point){ shift_x, shift_y };
+    assert( wine_nx_osk_input( 0, 0, 0, fingers, 1, now ) );
+    now += 16 * MS;
+    expect( "+10" );
+    fingers[1] = (struct wine_nx_osk_point){ q_x, q_y };
+    step_fingers( 0, fingers, 2 );
+    expect( "+51" );
+    /* Both let go: the key first, Shift after it. */
+    step_fingers( 0, NULL, 0 );
+    expect( "-51 -10" );
+    now += 100 * MS;
 
-        assert( wine_nx_osk_input( 0, 0, 0, 1, qx, qy, now ) );
-        expect( "" );
-        assert( !wine_nx_osk_input( 0, 0, 0, 0, 0, 0, now + 50 * MS ) );
-        expect( "+10 +51 -51 -10" );
-        /* Off the keyboard the finger is the program's. */
-        assert( !wine_nx_osk_input( 0, 0, 0, 1, 640, 100, now + 100 * MS ) );
-        assert( !wine_nx_osk_input( 0, 0, 0, 0, 0, 0, now + 150 * MS ) );
-        expect( "" );
-        now += 200 * MS;
+    /* Two fingers, two keys at once: both down and both up, as a hand holds
+     * two keys, so keys that must be held together work. */
+    {
+        int b_x, b_y;
+
+        key_point( &frame, 3, 5, &b_x, &b_y );
+        fingers[0] = (struct wine_nx_osk_point){ q_x, q_y };
+        fingers[1] = (struct wine_nx_osk_point){ b_x, b_y };
+        step_fingers( 0, fingers, 2 );
+        expect( "+51 +42" );
+        step_fingers( 0, NULL, 0 );
+        expect( "-51 -42" );
+        now += 100 * MS;
     }
 
-    /* ZL puts it at the top, ZR back at the bottom; the picture changes. */
-    before = frame.generation;
+    /* A finger on Shift and off at once, with nothing typed, leaves it down
+     * for the next key, as X does; the next key takes it up. */
+    fingers[0] = (struct wine_nx_osk_point){ shift_x, shift_y };
+    step_fingers( 0, fingers, 1 );
+    step_fingers( 0, NULL, 0 );
+    expect( "+10" );
+    fingers[0] = (struct wine_nx_osk_point){ q_x, q_y };
+    step_fingers( 0, fingers, 1 );
+    expect( "+51" );
+    step_fingers( 0, NULL, 0 );
+    expect( "-51 -10" );
+    now += 100 * MS;
+    expect( "" );
+
+    /* From here the controller: the keyboard starts again on g. */
+    wine_nx_osk_reset();
+    wine_nx_osk_show( 1, 0 );
+
+    /* Caps is VK_CAPITAL: the lock is the system's, not the keyboard's. Left
+     * from g five times is Caps. */
+    for (i = 0; i < 5; i++) press( OSK_LEFT );
+    expect( "" );
+    press( OSK_A );
+    expect( "+14 -14" );
+    /* With the lock on, a letter goes out as itself: the system makes it a
+     * capital, as it does for a keyboard. */
+    for (i = 0; i < 5; i++) press( OSK_RIGHT );
+    press( OSK_A );
+    expect( "+47 -47" );
+
+    /* A key held repeats: the key stays down and another down goes out every
+     * 60 ms after the first 500, which is what a held key of a keyboard
+     * does. Here B, held by the controller. */
+    {
+        const char *got;
+        uint64_t t = now;
+        int i, downs = 0;
+
+        wine_nx_osk_input( OSK_B, 0, 0, NULL, 0, t );
+        expect( "+08" );
+        /* Held, it is quiet for the first half second. */
+        wine_nx_osk_input( OSK_B, 0, 0, NULL, 0, t + 400 * MS );
+        expect( "" );
+        /* Then a down every 60 ms, and the key never goes up while it is
+         * held: the program sees one key down, repeated. */
+        for (i = 0; i < 100; i++)
+            wine_nx_osk_input( OSK_B, 0, 0, NULL, 0, t + (400 + i * 10) * MS );
+        got = sent();
+        assert( !strstr( got, "-08" ) );
+        for (i = 0; got[i]; )
+            if (!strncmp( got + i, "+08", 3 )) { downs++; i += 3; }
+            else i++;
+        assert( downs >= 5 );
+        now = t + 1500 * MS;
+        step( 0 );
+        expect( "-08" );
+    }
+
+    /* Every key the controller presses is held while its button is: B is
+     * Backspace, Y space, L and R the arrows, + Enter. */
+    step( OSK_Y );
+    step( 0 );
+    expect( "+20 -20" );
+    step( OSK_L );
+    step( OSK_R );
+    step( 0 );
+    expect( "+25 +27 -25 -27" );
+    step( OSK_PLUS );
+    step( 0 );
+    expect( "+0d -0d" );
+
+    /* Closing lets go of everything that is down: nothing is left held. */
+    step( OSK_B );
+    expect( "+08" );
+    press( OSK_MINUS );
+    expect( "-08" );
+    assert( !wine_nx_osk_visible() );
+
+    /* The picture: ZL puts it at the top, ZR back at the bottom. */
+    wine_nx_osk_reset();
+    wine_nx_osk_show( 1, 0 );
+    assert( wine_nx_osk_frame( 1280, 720, &again ) && again.y == 380 && again.x == 148 );
+    before = again.generation;
     press( OSK_ZL );
-    assert( wine_nx_osk_frame( 1280, 720, &again ) && again.y == 12 && again.generation != before );
+    assert( wine_nx_osk_frame( 1280, 720, &frame ) && frame.y == 12 && frame.generation != before );
     save( dir, "osk-720-top.png", 1280, 720 );
     press( OSK_ZR );
     save( dir, "osk-720.png", 1280, 720 );
+
+    /* A key that is down lights up, and so does the one the selection is on. */
+    assert( wine_nx_osk_frame( 1280, 720, &frame ) );
+    {
+        void *held = malloc( (size_t)frame.width * frame.height * 4 );
+        uint32_t *pixels = held;
+
+        assert( wine_nx_osk_copy( 1280, 720, held, frame.width * 4, 0 ) == frame.generation );
+        key_point( &frame, 3, 0, &shift_x, &shift_y );
+        before = pixels[(shift_y - frame.y) * frame.width + shift_x - frame.x];
+        fingers[0] = (struct wine_nx_osk_point){ shift_x, shift_y };
+        step_fingers( 0, fingers, 1 );
+        assert( wine_nx_osk_copy( 1280, 720, held, frame.width * 4, 0 ) );
+        assert( pixels[(shift_y - frame.y) * frame.width + shift_x - frame.x] != before );
+        step_fingers( 0, NULL, 0 );
+        free( held );
+    }
 
     /* Docked, the same keyboard, larger; the picture comes in either order. */
     assert( wine_nx_osk_frame( 1920, 1080, &frame ) && frame.width == 1476 && frame.height == 492 );
@@ -231,10 +321,26 @@ int main( int argc, char **argv )
         free( pixels );
     }
 
-    /* Minus closes it, and so does the Close key: down from g is v, then
-     * Space; left is Esc, and left again wraps round to Close. */
-    press( OSK_MINUS );
-    assert( !wine_nx_osk_visible() );
+    /* A finger that was down when the keyboard opened presses nothing until
+     * it lifts, as a button held when it opened does. */
+    wine_nx_osk_reset();
+    wine_nx_osk_show( 1, 0 );
+    assert( wine_nx_osk_frame( 1280, 720, &frame ) );
+    key_point( &frame, 1, 1, &q_x, &q_y );
+    fingers[0] = (struct wine_nx_osk_point){ q_x, q_y };
+    /* The finger is still the keyboard's, not the program's. */
+    assert( wine_nx_osk_input( 0, 0, 0, fingers, 1, now ) );
+    now += 16 * MS;
+    expect( "" );
+    step_fingers( 0, NULL, 0 );
+    expect( "" );
+    step_fingers( 0, fingers, 1 );
+    expect( "+51" );
+    step_fingers( 0, NULL, 0 );
+    expect( "-51" );
+
+    /* Close, the key itself: down from g is v, then Space; left is Esc, and
+     * left again wraps round to Close. */
     wine_nx_osk_reset();
     wine_nx_osk_show( 1, 0 );
     press( OSK_DOWN );
@@ -244,6 +350,8 @@ int main( int argc, char **argv )
     press( OSK_A );
     assert( !wine_nx_osk_visible() );
     expect( "" );
-    printf( "osk: keys, Shift and Caps, repeats, taps, placement and the picture at 720p and 1080p\n" );
+
+    printf( "osk: keys held and let go, two keys at once, Shift held and sticky, "
+            "Caps, repeats, closing, placement and the picture at 720p and 1080p\n" );
     return 0;
 }

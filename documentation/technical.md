@@ -75,10 +75,19 @@ runtime; the full package now ships the Mesa 26 one.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
-  that sends virtual keys one at a time, with scan codes, through the display
-  driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text field
-  taking focus). Horizon's keyboard applet only returns a finished string, so
-  fields a game draws itself could not be edited. Its picture is copied into
+  that sends what a physical keyboard sends, with scan codes, through the
+  display driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text
+  field taking focus). A key is down while it is held, by a finger or by the
+  button that presses it, so Shift can be held with one finger while another
+  types and two fingers hold two keys; the runtime hands it every finger that
+  is down, not only the first. A held key repeats the way a held key does
+  (another down goes out, the key never goes up between), Caps sends
+  `VK_CAPITAL` and lets the system keep the lock, and Shift let go at once
+  stays down for the next key (sticky keys), which is what a selection worked
+  with one button needs. Closing it lets go of every key that is down, and
+  fingers that were down when it opened press nothing until they lift.
+  Horizon's keyboard applet only returns a finished string, so fields a game
+  draws itself could not be edited. Its picture is copied into
   the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
   into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
   the compositor's top layer; the controller is its while it is up.

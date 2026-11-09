@@ -801,6 +801,10 @@ int wine_nx_osk_font( const void **data, size_t *size )
     return 1;
 }
 
+/* How many fingers the floating keyboard takes at once: a hand's worth, which
+ * is as many keys as a hand holds on a keyboard. */
+#define WINE_NX_OSK_FINGERS 8
+
 /* The controller's buttons as the floating keyboard reads them. */
 static unsigned int osk_buttons( u64 held )
 {
@@ -888,10 +892,18 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         __atomic_store_n( &osk_last_held, bits, __ATOMIC_RELAXED );
         if (wine_nx_osk_visible())
         {
-            int touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
-            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], touching,
-                                             touching ? (int)touch.touches[0].x : 0,
-                                             touching ? (int)touch.touches[0].y : 0, armTicksToNs( now ) );
+            /* Every finger, not only the first: the keyboard holds a key per
+             * finger, so Shift can be held while another types. */
+            struct wine_nx_osk_point fingers[WINE_NX_OSK_FINGERS];
+            int count = 0, i, touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+
+            for (i = 0; touching && i < (int)touch.count && count < WINE_NX_OSK_FINGERS; i++)
+            {
+                fingers[count].x = (int)touch.touches[i].x;
+                fingers[count].y = (int)touch.touches[i].y;
+                count++;
+            }
+            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], fingers, count, armTicksToNs( now ) );
             keyboard = 1;
             swallowed = held;
         }
