@@ -17,7 +17,11 @@ fi
 make -C "$pe" -j8 include/all
 sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
-docker run --rm -v "$root:/work" -w /work -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" \
+# See build-amd64-components.sh: the checkout is the container's to read, even
+# when the host owns it.
+docker run --rm -v "$root:/work" -w /work -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+    -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" \
     "${WINE_NX_DEVKIT_IMAGE:-$(cat "$root/horizon-wine/switch-dev.txt")}" sh -ec '
     cmake -S horizon-wine -B horizon-wine/build-switch-wow64-mesa-switch -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/work/horizon-wine/cmake/switch-devkitA64.cmake \
