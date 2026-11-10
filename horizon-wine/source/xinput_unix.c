@@ -26,8 +26,9 @@ _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX
                 "nx_pad.h button bits match libnx" );
 
 static pthread_mutex_t pad_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* The floating keyboard (osk.c). */
+/* The floating keyboard and the controls panel (osk.c). */
 int wine_nx_osk_visible( void );
+int wine_nx_osk_map_visible( void );
 
 static PadState pad;
 static int pad_ready;
@@ -54,14 +55,17 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
         HidAnalogStickState left = padGetStickPos( &pad, 0 ), right = padGetStickPos( &pad, 1 );
 
         struct input_pad raw = { padGetButtons( &pad ), { left.x, left.y, right.x, right.y } }, mapped;
-        const u64 keyboard = HidNpadButton_Minus | HidNpadButton_StickR;
+        const u64 keyboard = HidNpadButton_Minus | HidNpadButton_B;
+        const u64 tasks = HidNpadButton_Minus | HidNpadButton_Y;
 
         raw.buttons &= ~__atomic_load_n( &wine_nx_input_swallowed, __ATOMIC_RELAXED );
         if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;
+        if ((raw.buttons & tasks) == tasks) raw.buttons &= ~tasks;
         input_map_pad( &wine_nx_input_profile, &raw, &mapped );
         nx_xinput_map( mapped.buttons, mapped.axis[0], mapped.axis[1], mapped.axis[2], mapped.axis[3], &gamepad );
-        /* The floating keyboard has the controller while it is up (osk.c). */
-        if (wine_nx_osk_visible())
+        /* The floating keyboard, and the controls panel, have the controller
+         * while either is up (osk.c): reading the panel does not play. */
+        if (wine_nx_osk_visible() || wine_nx_osk_map_visible())
             memset( &gamepad, 0, sizeof(gamepad) );
         if (memcmp( &gamepad, &last_gamepad, sizeof(gamepad) ))
         {

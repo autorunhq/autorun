@@ -108,9 +108,13 @@ the same way.
      [autorun-horizon-dlls](https://github.com/autorunhq/autorun-horizon-dlls);
    - installs the boot changes some games need: a Mesosphere build that lets a
      game run at low memory addresses, with the stock loader or
-     [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC)'s for overclocking.
+     [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC)'s for overclocking;
+   - offers a **32-bit forwarder** for the games that need one. It gives the
+     game one four-gigabyte address space from zero, with no aliases and none
+     of the boot changes, and it cannot start a 64-bit game.
 
-   **Settings -> System -> Quick setup** runs it again.
+   **Settings -> System -> Quick setup** runs it again, and **Settings ->
+   System -> Make a 32-bit forwarder** makes only that one.
 
 Without a network, download that repository (Code, Download ZIP) and unzip its
 `switch` folder to the root of the SD card too.
@@ -141,13 +145,18 @@ decoder that game movies and music play through. It runs by itself, once.
 
 | Button | What it does |
 |---|---|
-| **A** | Play the selected game |
+| D-pad, left stick | Move around; one move up from the top row is the header, where A picks the tab |
+| **A** | Play the selected game, or open what the header is on |
 | **Y** | The game's options |
 | **L / R** | Switch between Home (recently played) and the Library |
+| **ZL / ZR** | A page of the grid at a time, keeping the same place in it |
 | **−** | Settings (on Home), filter and sort (in the Library) |
 | **+** | Add a game, run a program once without adding it (a setup, a patch), or exit Autorun |
+| **B** | Back; on the grid it asks whether to close Autorun |
 
-The touchscreen works everywhere too.
+The touchscreen works everywhere too. In the controls screens, **A** changes a
+binding, **Y** puts one back to its default, **X** clears it and **B** leaves;
+**L** and **R** move eight bindings at a time.
 
 **A game's options (Y)**:
 - mark it as a favorite or hide it, change its title, give it command-line
@@ -178,7 +187,9 @@ Out of the box the controller works as a mouse and keyboard:
 |---|---|
 | Right stick, or a finger on the screen | Moves the mouse pointer |
 | **A** / **B** | Left / right mouse button |
-| D-pad, left stick | Arrow keys |
+| D-pad | Arrow keys |
+| Left stick | W A S D |
+| **ZL**, **ZR** | Arrow down, arrow up |
 | **+** | Esc |
 | **X**, **Y** | Space, F |
 | **L**, **R** | Tab, Shift |
@@ -187,26 +198,48 @@ Every button can be changed: **Settings -> Game defaults -> Controls** for all
 games, or a game's options (**Y**) -> **Controls** for that game alone. Each
 stick, the d-pad and the touchscreen can move the mouse or send the arrow keys
 or W A S D. Games with controller support see an Xbox 360 controller, through
-XInput or DirectInput.
+XInput or DirectInput, and in **Controller** mode that is all they see: the
+stick, the d-pad and the buttons reach the game untouched. A stick deadzone
+says how far the stick must travel before the game -- and, in **Keyboard /
+mouse** mode, the pointer -- takes any notice; **Mouse speed** says how fast it
+goes above that.
 
 **Hold + and − together for a second** to close a game.
 
-**Minus + right stick click** opens the on-screen keyboard over the game (it
+**Minus + B** opens the on-screen keyboard over the game (it
 also opens by itself when a text field is selected; **Settings -> On-screen
-keyboard** turns that off). It types like a real keyboard, one key at a time:
+keyboard** turns that off). It works as a keyboard does, keys held while they
+are held:
 
 | On the keyboard | Does |
 |---|---|
 | D-pad, left stick | Move between keys |
-| **A**, or tap a key | Press it |
+| **A**, or a finger on a key | Holds the key for as long as the button or the finger does |
 | **B** | Backspace |
-| **Y** / **X** | Space / Shift for the next key |
+| **Y** / **X** | Space / Shift |
 | **L**, **R** | Cursor left, right |
 | **+** | Enter |
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-While it is open, the game gets no controller input.
+**Minus and A together** show what the controller sends, over the game: which
+button is the left click, which is Escape, what the sticks and the d-pad are
+set to. The same again takes it
+down, and while it is up the game gets no controller input. What it lists are the controls in effect, so a game with its
+own controls (its **Controls**, under **Y**) lists its own.
+
+**Minus and Y together** show what the program is doing, over it, and the same
+again takes it down: every thread the runtime is running, the core it is on and
+the share of a core it has taken, then the memory in use, what the card is
+reading and the frames drawn. It counts again every second while it is up, and
+the game gets no controller input meanwhile.
+
+The top row is F1 to F12, where a keyboard has them. A key held repeats, as
+it does on a keyboard, and keys held together are held together: a finger can
+hold Shift while another types, and two fingers can hold two keys at once. A
+tap on Shift with nothing typed after it leaves it down for the next key, as
+it has to when one button is all there is to press it with; Caps locks as it
+does on a keyboard. While it is open, the game gets no controller input.
 
 ## If something goes wrong
 
@@ -244,7 +277,7 @@ sh build.sh
 builds Autorun in the [switch-dev](https://github.com/autorunhq/switch-dev)
 Docker image and writes the SD card archive to
 `horizon-wine/build-autorun/autorun-NNN.zip`. It needs Docker, git, Python 3
-and, on a Mac, Homebrew's bison. `sh build.sh --help` lists the options. How
+and bison. `sh build.sh --help` lists the options. How
 Autorun works, its tests and its file layout are in
 [documentation/technical.md](documentation/technical.md).
 

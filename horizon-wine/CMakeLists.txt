@@ -689,6 +689,13 @@ add_custom_command(
             --header "${CMAKE_CURRENT_BINARY_DIR}/horizon_dll_features.h"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/runtime_features.py" ${HORIZON_DLL_FEATURE_SOURCES}
     VERBATIM)
+# What this build was made from (build.sh passes the commit, GitHub Actions has
+# one), so the first line of a log says which runtime is on the card.
+set(WINE_NX_BUILD_ID "" CACHE STRING "Identifier of the commit this build is made from")
+if(WINE_NX_BUILD_ID)
+    target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_BUILD_ID="${WINE_NX_BUILD_ID}")
+endif()
+
 if(WINE_NX_BOOT_BUNDLE)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_BOOT_BUNDLE)
     target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_BOOT_BUNDLE}")

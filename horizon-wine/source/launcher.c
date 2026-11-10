@@ -442,7 +442,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     p->settings.fex = p->settings.four_cores = 1;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
@@ -467,7 +467,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 static int describe_program( struct launcher *l, struct program *p, const char *path )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     if ((size_t)snprintf( p->path, sizeof(p->path), "%s", path ) >= sizeof(p->path)) return 0;
     if (!launcher_dos_path( path, p->dos, sizeof(p->dos) )) return 0;
     if (l->options->machine_of( path, &p->machine )) return 0;
@@ -480,7 +480,7 @@ static void describe_catalog_program( struct launcher *l, struct program *p,
                                       const struct launcher_catalog_entry *entry )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     snprintf( p->path, sizeof(p->path), "%s", entry->path );
     launcher_dos_path( p->path, p->dos, sizeof(p->dos) );
     p->catalog_id = entry->id;
@@ -1757,7 +1757,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
@@ -1801,39 +1801,46 @@ static void offer_quick_setup( struct launcher *l )
     quick_setup( l );
 }
 
-static int confirm_forwarder( struct launcher *l )
+static int confirm_forwarder( struct launcher *l, int space )
 {
     struct ui *ui = &l->ui;
-    char message[320];
+    char message[420];
 
     snprintf( message, sizeof(message),
-              "A forwarder is installed as an application. Consoles have been banned for homebrew "
-              "in that list.\n\nUse emuMMC only. %s",
+              space == 2
+              ? "A forwarder is installed as an application. Consoles have been banned for homebrew "
+                "in that list.\n\nThis one runs Autorun in a 32-bit address space, four gigabytes "
+                "from zero with no aliases: fixed-address Win32 games start in it without the "
+                "Atmosphere patch, and 64-bit games do not start at all.\n\nUse emuMMC only. %s"
+              : "A forwarder is installed as an application. Consoles have been banned for homebrew "
+                "in that list.\n\nUse emuMMC only. %s",
               l->options->emummc > 0 ? "This console is on emuMMC." :
               l->options->emummc == 0 ? "This console is NOT on emuMMC." :
               "Atmosphere did not say which this console is on." );
-    return ui_confirm( ui, "Install forwarder", message, "Install" );
+    return ui_confirm( ui, space == 2 ? "Install 32-bit forwarder" : "Install forwarder", message, "Install" );
 }
 
-static void make_forwarder( struct launcher *l )
+static void make_forwarder( struct launcher *l, int space )
 {
     struct ui *ui = &l->ui;
     const char *step = NULL;
     char message[256];
+    unsigned int (*install)( const char **step ) = space == 2 ? l->options->install_forwarder_32
+                                                              : l->options->install_forwarder;
     unsigned int rc;
 
-    if (!l->options->install_forwarder) return;
-    if (!confirm_forwarder( l )) { ui_start_screen( ui ); return; }
+    if (!install) return;
+    if (!confirm_forwarder( l, space )) { ui_start_screen( ui ); return; }
 
     /* One frame saying what is happening: building the three parts and writing
      * them takes a moment, and nothing is drawn while it does. */
     ui_start_screen( ui );
     ui_background( ui );
-    ui_header_back( ui, "Install forwarder", "Autorun" );
+    ui_header_back( ui, "Install forwarder", space == 2 ? "Autorun 32-bit" : "Autorun" );
     ui_text_centered( ui, ui->large, ui->width / 2, ui->height / 2 - 30, "Installing...", ui->value );
     ui_present( ui );
 
-    rc = l->options->install_forwarder( &step );
+    rc = install( &step );
     ui_start_screen( ui );
     if (rc)
     {
@@ -1843,7 +1850,9 @@ static void make_forwarder( struct launcher *l )
         ui_start_screen( ui );
         return;
     }
-    ui_message( ui, "Installed", "Autorun is on the home menu." );
+    ui_message( ui, "Installed", space == 2
+                ? "Autorun 32-bit is on the home menu. Start a fixed-address game from it."
+                : "Autorun is on the home menu." );
     ui_start_screen( ui );
 }
 
@@ -1980,8 +1989,36 @@ static int next_state( int state, int direction )
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
 }
 
+/* What a program that asks for a display mode of its own is shown as, in the
+ * four answers the shared setting gives; Settings, Game defaults, owns the one
+ * a program without a choice of its own follows. */
+static const char *const picture_labels[4] = { "Whole", "Edges cropped", "Stretched", "Own size" };
+
+static const char *picture_text( int state, int global, char *buffer, size_t size )
+{
+    if (state >= 0 && state < 4) return picture_labels[state];
+    snprintf( buffer, size, "Global (%s)", picture_labels[global < 0 || global > 3 ? 0 : global] );
+    return buffer;
+}
+
+static int next_picture_state( int state, int direction )
+{
+    static const int order[5] = { -1, 0, 1, 2, 3 };
+    int i;
+
+    for (i = 0; i < 4 && order[i] != state; i++) {}
+    return order[(i + (direction < 0 ? 4 : 1)) % 5];
+}
+
 static int address_space_fits( struct launcher *l, struct program *p )
 {
+    /* Under the 32-bit forwarder the program's whole address space is the four
+     * gigabytes from zero, so an image linked for a fixed address has it and
+     * there is no window to check. What cannot run is a 64-bit image, which
+     * wants to be above four gigabytes. */
+    if (l->options->address_space_bits == 32) return p->machine != 0x8664;
+    /* Under the 39-bit one the window below four gigabytes is only there when
+     * Atmosphere was patched for it, which is what low_window says. */
     return l->options->address_space_bits == 39 &&
            (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
 }
@@ -2016,9 +2053,14 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     }
     if (!address_space_fits( l, p ))
     {
-        ui_message( ui, "Address space unavailable", l->options->address_space_bits != 39
-                    ? "Start Autorun from its 39-bit forwarder. You can install it in Settings > System."
-                    : "This game requires the Atmosphere low-address patch. Restart with the patched loader and Mesosphere." );
+        ui_message( ui, "Address space unavailable", l->options->address_space_bits == 32
+                    ? "This is a 64-bit game, and Autorun is running in a 32-bit address space. "
+                      "Start it from the 39-bit forwarder (Settings > System)."
+                    : l->options->address_space_bits != 39
+                    ? "Start Autorun from a forwarder: the 39-bit one, or the 32-bit one for a "
+                      "fixed-address game. Both are in Settings > System."
+                    : "This game requires the Atmosphere low-address patch. Restart with the patched "
+                      "loader and Mesosphere, or run it from the 32-bit forwarder." );
         return 0;
     }
     /* Autorun ships no Windows DLLs: a card without them is offered them here. */
@@ -2506,6 +2548,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                   state_text( p->settings.framebuffer, l->options->framebuffer, "Framebuffer", "Compositor",
                               buffer, sizeof(buffer) ) );
 
+        ADD_ROW( ROW_PICTURE, SECTION_GRAPHICS, "Picture of another mode",
+                 "A game that asks for a resolution of its own is shown on the console's 1280x720 screen. "
+                 "Whole keeps all of it, with black bars round it; edges cropped fills the screen and loses "
+                 "the borders; stretched fills it and distorts; own size draws it in the middle, one pixel to "
+                 "one pixel. Global follows the setting in Settings (X on the library). A finger lands on what "
+                 "it sees in every one of them." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  picture_text( p->settings.picture_mode, l->options->picture_mode, buffer, sizeof(buffer) ) );
+
         if (l->options->vulkan && (x86 || x64))
         {
             ADD_ROW( ROW_D3D9, SECTION_GRAPHICS, "Direct3D renderer",
@@ -2803,6 +2855,12 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             break;
         }
 
+        case ROW_PICTURE:
+            p->settings.picture_mode = action == UI_ACTION_RESET ? -1 :
+                                       next_picture_state( p->settings.picture_mode, action == UI_ACTION_LEFT ? -1 : 1 );
+            save_program_settings( l, p );
+            break;
+
         case ROW_D3D9:
         {
             static const char *const names[] = { "Wine", "DXVK", "DXVK + VKD3D" };
@@ -3081,9 +3139,9 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_PICTURE,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
-    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
+    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN, SET_MAKE_MAIN_32,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE,
 #endif
@@ -3284,7 +3342,7 @@ static void settings_menu( struct launcher *l )
             [SET_HIDE_MISSING] = SET_SECTION_LIBRARY,
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
-            [SET_WINDOWS] = SET_SECTION_DEFAULTS,
+            [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_PICTURE] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
@@ -3292,6 +3350,7 @@ static void settings_menu( struct launcher *l )
             [SET_UPDATE] = SET_SECTION_SYSTEM,
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
+            [SET_MAKE_MAIN_32] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
             [SET_SWAP_SIZE] = SET_SECTION_SYSTEM,
 #endif
@@ -3335,6 +3394,15 @@ static void settings_menu( struct launcher *l )
                   l->options->framebuffer ? "Framebuffer" : "Compositor" );
         rows[SET_WINDOWS].help = "The framebuffer copies window pixels straight to the screen, "
                                  "for when the OpenGL compositor misbehaves.";
+        snprintf( rows[SET_PICTURE].label, sizeof(rows[0].label), "Picture of another mode" );
+        snprintf( rows[SET_PICTURE].value, sizeof(rows[0].value), "%s",
+                  picture_labels[l->options->picture_mode < 0 || l->options->picture_mode > 3 ?
+                                 0 : l->options->picture_mode] );
+        rows[SET_PICTURE].help = "A game that asks for a resolution of its own is shown on the console's "
+                                 "1280x720 screen. Whole keeps all of it, with black bars round it; edges "
+                                 "cropped fills the screen and loses the borders; stretched fills it and "
+                                 "distorts; own size draws it in the middle, one pixel to one pixel, as a "
+                                 "window stands on a desk. A finger lands on what it sees in every one.";
         launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
         for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
 
@@ -3382,6 +3450,14 @@ static void settings_menu( struct launcher *l )
                                    "require the Atmosphere low-address patch. Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
+        snprintf( rows[SET_MAKE_MAIN_32].label, sizeof(rows[0].label), "Make a 32-bit forwarder" );
+        snprintf( rows[SET_MAKE_MAIN_32].value, sizeof(rows[0].value), "%s",
+                  l->options->install_forwarder_32 ? "Autorun 32-bit" : "Unavailable" );
+        rows[SET_MAKE_MAIN_32].help = "A forwarder for a 32-bit address space: four gigabytes from "
+                                      "zero, no aliases, no Atmosphere patch needed. Fixed-address "
+                                      "Win32 games start in it; 64-bit games do not. Use emuMMC only.";
+        rows[SET_MAKE_MAIN_32].adjustable = 0;
+        rows[SET_MAKE_MAIN_32].disabled = !l->options->install_forwarder_32;
 #ifdef WINE_NX_SWAP_POC
         {
             int size = launcher_kv_get_int( &l->look, "swap-mb", 0 );
@@ -3427,6 +3503,9 @@ static void settings_menu( struct launcher *l )
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
         case SET_PROFILE: l->options->profile = !l->options->profile; break;
         case SET_WINDOWS: l->options->framebuffer = !l->options->framebuffer; break;
+        case SET_PICTURE:
+            l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 3 : 1)) % 4;
+            break;
         case SET_DXVK_ON_ADD: l->options->dxvk_on_add = !l->options->dxvk_on_add; break;
         case SET_REOPEN: l->options->reopen_launcher = !l->options->reopen_launcher; break;
         case SET_DLLS:
@@ -3453,7 +3532,10 @@ static void settings_menu( struct launcher *l )
             ui_start_screen( ui );
             break;
         case SET_MAKE_MAIN:
-            if (action == UI_ACTION_CHOOSE) make_forwarder( l );
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 3 );
+            break;
+        case SET_MAKE_MAIN_32:
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 2 );
             break;
 
 #ifdef WINE_NX_SWAP_POC

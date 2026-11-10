@@ -111,8 +111,8 @@ int main(void)
     pixels = filled( 64, 64, 0x0000ff00 );
     compositor_gl_upload( &comp, &green, 64, 64, pixels, 64, 0, 0, 64, 64 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0 };
-    quads[1] = (struct compositor_gl_quad){ &green, 150, 150, 64, 64, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0, 128, 128 };
+    quads[1] = (struct compositor_gl_quad){ &green, 150, 150, 64, 64, 0, 0, 64, 64 };
     compositor_gl_draw( &comp, quads, 2, 0, 0, 0 );
     check_gl( "draw" );
     check_pixel( "background", 99, 99, 0x000000 );
@@ -122,8 +122,8 @@ int main(void)
     check_pixel( "bottom window past the top one", 214, 214, 0xff0000 );
     check_pixel( "bottom window corner", 227, 227, 0xff0000 );
     check_pixel( "past the bottom window", 228, 228, 0x000000 );
-    quads[0] = (struct compositor_gl_quad){ &green, 150, 150, 64, 64, 0, 0 };
-    quads[1] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &green, 150, 150, 64, 64, 0, 0, 64, 64 };
+    quads[1] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0, 128, 128 };
     compositor_gl_draw( &comp, quads, 2, 0, 0, 0 );
     check_pixel( "order reversed", 160, 160, 0xff0000 );
 
@@ -133,18 +133,27 @@ int main(void)
     for (y = 0; y < 128; y++) for (x = 0; x < 100; x++) pixels[y * 128 + x] = 0x00123456;
     compositor_gl_upload( &comp, &edge, 128, 128, pixels, 128, 0, 0, 128, 128 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &edge, 400, 100, 100, 128, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &edge, 400, 100, 100, 128, 0, 0, 100, 128 };
     compositor_gl_draw( &comp, quads, 1, 0, 0, 0 );
     check_pixel( "channel order", 450, 150, 0x123456 );
     check_pixel( "visible edge", 499, 150, 0x123456 );
     check_pixel( "allocation past the visible part", 500, 150, 0x000000 );
+
+    /* A layer placed larger than its own pixels is stretched, not clipped: a
+     * desktop fitted to the screen is drawn this way. */
+    quads[0] = (struct compositor_gl_quad){ &red, 100, 100, 256, 256, 0, 0, 128, 128 };
+    compositor_gl_draw( &comp, quads, 1, 0, 0, 0 );
+    check_gl( "stretch" );
+    check_pixel( "stretched layer", 300, 300, 0xff0000 );
+    check_pixel( "stretched layer corner", 355, 355, 0xff0000 );
+    check_pixel( "past the stretched layer", 356, 356, 0x000000 );
 
     /* Partial upload: only the dirty rectangle changes. */
     pixels = filled( 128, 128, 0x00ff0000 );
     for (y = 10; y < 40; y++) for (x = 10; x < 40; x++) pixels[y * 128 + x] = 0x000000ff;
     compositor_gl_upload( &comp, &red, 128, 128, pixels, 128, 10, 10, 20, 20 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &red, 100, 100, 128, 128, 0, 0, 128, 128 };
     compositor_gl_draw( &comp, quads, 1, 0, 0, 0 );
     check_pixel( "dirty rectangle", 115, 115, 0x0000ff );
     check_pixel( "dirty rectangle edge", 119, 119, 0x0000ff );
@@ -155,8 +164,8 @@ int main(void)
     for (y = 0; y < 64; y++) for (x = 0; x < 256; x++) pixels[y * 256 + x] = (uint32_t)x << 16 | (uint32_t)y;
     compositor_gl_upload( &comp, &ramp, 256, 64, pixels, 256, 0, 0, 256, 64 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &ramp, -20, 300, 100, 50, 0, 0 };
-    quads[1] = (struct compositor_gl_quad){ &ramp, 600, 300, 50, 50, 30, 5 };
+    quads[0] = (struct compositor_gl_quad){ &ramp, -20, 300, 100, 50, 0, 0, 100, 50 };
+    quads[1] = (struct compositor_gl_quad){ &ramp, 600, 300, 50, 50, 30, 5 , 50, 50 };
     compositor_gl_draw( &comp, quads, 2, 0, 0, 0 );
     check_pixel( "off the left edge", 0, 310, 0x14000a );
     check_pixel( "off the left edge, right side", 79, 349, 0x630031 );
@@ -168,7 +177,7 @@ int main(void)
     for (y = 0; y < 50; y++) for (x = 0; x < 100; x++) pixels[y * 200 + x] = (uint32_t)y << 8;
     compositor_gl_upload( &comp, &padded, 100, 50, pixels, 200, 0, 0, 100, 50 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &padded, 800, 400, 100, 50, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &padded, 800, 400, 100, 50, 0, 0, 100, 50 };
     compositor_gl_draw( &comp, quads, 1, 0, 0, 0 );
     check_pixel( "stride row 0", 850, 400, 0x000000 );
     check_pixel( "stride row 49", 899, 449, 0x003100 );
@@ -177,7 +186,7 @@ int main(void)
     pixels = filled( 32, 16, 0x00abcdef );
     compositor_gl_upload( &comp, &red, 32, 16, pixels, 32, 0, 0, 32, 16 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &red, 10, 10, 32, 16, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &red, 10, 10, 32, 16, 0, 0, 32, 16 };
     compositor_gl_draw( &comp, quads, 1, 0, 0, 0 );
     check_gl( "resize" );
     check_pixel( "resized texture", 41, 25, 0xabcdef );
@@ -186,7 +195,7 @@ int main(void)
     pixels = filled( 200, 200, 0x00ff0000 );
     compositor_gl_upload( &comp, &white, 200, 200, pixels, 200, 0, 0, 200, 200 );
     free( pixels );
-    quads[0] = (struct compositor_gl_quad){ &white, 650, 450, 200, 200, 0, 0 };
+    quads[0] = (struct compositor_gl_quad){ &white, 650, 450, 200, 200, 0, 0, 200, 200 };
     compositor_gl_draw( &comp, quads, 1, 700, 500, 1 );
     check_gl( "pointer" );
     check_pixel( "pointer tip", 700, 500, 0x000000 );

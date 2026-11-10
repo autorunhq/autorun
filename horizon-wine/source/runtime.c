@@ -109,6 +109,10 @@ u32 __nx_exception_ignoredebug = 1;
 #define WINE_NX_RUNTIME_BUILD "nx-amd64-box64-3"
 #elif defined(WINE_NX_BOX64_DYNAREC)
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-dynarec-258"
+/* The commit the build says it was made from (CMakeLists.txt, from build.sh). */
+#ifndef WINE_NX_BUILD_ID
+#define WINE_NX_BUILD_ID ""
+#endif
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
@@ -522,6 +526,26 @@ extern int wine_nx_nouveau_skip_clean __attribute__((weak));
  * forced virtual screen, in case that walk of the registry misbehaves. */
 int wine_nx_display_devices = 1;
 
+/* How a program that asked for a display mode of its own fills the console's
+ * screen. Read by win32u's mapping (source_virt_to_raw_ratios in
+ * dlls/win32u/sysparams.c), which is at once what the screen shows and where a
+ * finger's points land: 0 the whole picture with black bars round it, 1 the
+ * picture filling the screen with its edges cropped, 2 stretched to it. The
+ * launcher's "Picture of another mode" setting owns it; picture-mode: "whole",
+ * "edges" or "stretched" in config/settings.json says the same. */
+int wine_nx_picture_mode = 0;
+
+static const char *picture_mode_text( int mode )
+{
+    switch (mode)
+    {
+    case 1: return "fills the screen, edges cropped";
+    case 2: return "stretched to the screen";
+    case 3: return "its own size, in the middle";
+    default: return "whole, with black bars";
+    }
+}
+
 /* Whether the win32u Switch driver opens the on-screen keyboard by itself
  * when an edit-like control gets keyboard focus (dlls/win32u/winnx_drv.c).
  * keyboard-on-text-focus: false in config/settings.json turns that off (an
@@ -801,6 +825,10 @@ int wine_nx_osk_font( const void **data, size_t *size )
     return 1;
 }
 
+/* How many fingers the floating keyboard takes at once: a hand's worth, which
+ * is as many keys as a hand holds on a keyboard. */
+#define WINE_NX_OSK_FINGERS 8
+
 /* The controller's buttons as the floating keyboard reads them. */
 static unsigned int osk_buttons( u64 held )
 {
@@ -826,6 +854,154 @@ static unsigned int osk_buttons( u64 held )
  * take the A that clicked the field for a key. */
 static unsigned int osk_last_held;
 
+/* The controls panel (osk.c): what the controller sends, over the program,
+ * which - and A together put up and take down. Its rows are what the profile
+ * in effect says -- the program's controller in the controller mode, the keys
+ * and mouse actions in the keyboard mode -- so a game whose mapping was
+ * remapped says what it now sends. */
+static int controls_open;
+static u64 controls_before;
+
+/* The tasks panel: what the program is running, over it. Another view of the
+ * keyboard's surface, like the controls panel, and worked the same way -- the
+ * program gets no controller while it is up. Its rows come from the same walk
+ * of the thread registry as the [THREADS] line (thread_profile.c), with the
+ * memory and the frames beside them, and they are built again every second it
+ * is up: a task manager that showed what was there when it opened would be a
+ * picture of the past. */
+#define TASKS_ROWS 24
+
+static int tasks_open;
+static u64 tasks_built, tasks_before;
+static char tasks_title[96];
+static struct wine_nx_osk_map_row tasks_rows[TASKS_ROWS];
+static char tasks_names[TASKS_ROWS][40], tasks_values[TASKS_ROWS][44];
+static struct wine_nx_osk_map_row controls_rows[INPUT_SOURCE_COUNT];
+static char controls_names[INPUT_SOURCE_COUNT][28], controls_values[INPUT_SOURCE_COUNT][48];
+
+static void controls_panel_build( const char **title, int *count )
+{
+    const struct input_profile *profile = &wine_nx_input_profile;
+    int controller = profile->mode == INPUT_CONTROLLER, n = 0;
+    unsigned int i;
+
+    for (i = 0; i < INPUT_SOURCE_COUNT && n < INPUT_SOURCE_COUNT; i++)
+    {
+        const struct input_binding *binding = controller ? &profile->pad[i] : &profile->keys[i];
+
+        if (!binding->count) continue;   /* what the profile leaves alone sends nothing */
+        snprintf( controls_names[n], sizeof(controls_names[0]), "%s", input_sources[i].label );
+        input_binding_label( binding, controller, controls_values[n], sizeof(controls_values[0]) );
+        controls_rows[n].name = controls_names[n];
+        controls_rows[n].value = controls_values[n];
+        n++;
+    }
+    *title = controller ? "Controls: the controller, as the program sees it"
+                        : "Controls: the keyboard and mouse it gets";
+    *count = n;
+}
+
+static void tasks_panel( int show );
+
+static void controls_panel( int show )
+{
+    const char *title;
+    int count = 0;
+
+    if (show)
+    {
+        /* One panel at a time: they are two views of one surface. */
+        if (tasks_open) tasks_panel( 0 );
+        controls_panel_build( &title, &count );
+    }
+    wine_nx_osk_map_show( show, show ? title : NULL, controls_rows, count );
+    controls_open = show;
+    log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
+}
+
+static void tasks_panel_build( const char **title, int *count )
+{
+    static struct wine_nx_task tasks[TASKS_ROWS];
+    static u64 last_build;
+    static unsigned int last_frames, last_mb;
+    extern unsigned int wine_nx_gl_swaps __attribute__((weak));
+    extern unsigned int wine_nx_vk_presents __attribute__((weak));
+    extern unsigned long long wine_nx_sd_bytes __attribute__((weak));
+    extern unsigned int wine_nx_sd_cache_mb( void );
+    extern char *fake_heap_start, *fake_heap_end;
+    u64 now = armGetSystemTick();
+    struct mallinfo heap = mallinfo();
+    unsigned long long heap_size = (unsigned long long)(fake_heap_end - fake_heap_start);
+    unsigned long long heap_free = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
+    unsigned int frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
+                          (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
+                          wine_nx_compositor_frames_fast() +
+                          (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
+    unsigned int card = &wine_nx_sd_bytes ? (unsigned int)( __atomic_load_n( &wine_nx_sd_bytes, __ATOMIC_RELAXED ) >> 20 ) : 0;
+    unsigned int fps = 0, read = 0, total = 0, n, i;
+
+    if (last_build && now != last_build)
+    {
+        unsigned long long ns = armTicksToNs( now - last_build );
+
+        fps = (unsigned int)((unsigned long long)(frames - last_frames) * 1000000000ull / ns);
+        read = (unsigned int)((unsigned long long)(card - last_mb) * 1000000000ull / ns);
+    }
+    last_build = now;
+    last_frames = frames;
+    last_mb = card;
+
+    n = wine_nx_tasks_snapshot( tasks, TASKS_ROWS, &total );
+    snprintf( tasks_title, sizeof(tasks_title), "Tasks: %u threads, %u.%u cores, %u fps",
+              n, total / 1000, total % 1000 / 10, fps );
+    for (i = 0; i < n; i++)
+    {
+        snprintf( tasks_names[i], sizeof(tasks_names[0]), "%u %s", tasks[i].tid,
+                  tasks[i].name[0] ? tasks[i].name : (tasks[i].kind == 's' ? "server" : "thread") );
+        snprintf( tasks_values[i], sizeof(tasks_values[0]), "%u.%u%% on core %d",
+                  tasks[i].permille / 10, tasks[i].permille % 10, tasks[i].core );
+        tasks_rows[i].name = tasks_names[i];
+        tasks_rows[i].value = tasks_values[i];
+    }
+    /* The three that are not threads, where they fit. */
+    {
+        static const char *const extra[] = { "Memory", "Card", "Heap" };
+        char values[3][44];
+
+        snprintf( values[0], sizeof(values[0]), "%llu MB used, %llu MB free",
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20 );
+        snprintf( values[1], sizeof(values[1]), "%u MB/s, cache %u MB", read, wine_nx_sd_cache_mb() );
+        snprintf( values[2], sizeof(values[2]), "%llu MB arena", (unsigned long long)heap.arena >> 20 );
+        for (i = 0; i < 3 && n + i < TASKS_ROWS; i++)
+        {
+            snprintf( tasks_names[n + i], sizeof(tasks_names[0]), "%s", extra[i] );
+            snprintf( tasks_values[n + i], sizeof(tasks_values[0]), "%s", values[i] );
+            tasks_rows[n + i].name = tasks_names[n + i];
+            tasks_rows[n + i].value = tasks_values[n + i];
+        }
+        n += i;
+    }
+    *title = tasks_title;
+    *count = n;
+}
+
+static void tasks_panel( int show )
+{
+    const char *title = NULL;
+    int count = 0;
+
+    if (show)
+    {
+        if (controls_open) controls_panel( 0 );
+        tasks_panel_build( &title, &count );
+        tasks_built = armGetSystemTick();
+    }
+    wine_nx_osk_tasks_show( show, title, tasks_rows, count );
+    tasks_open = show;
+    if (show) log_line( "[TASKS] panel shown, %d rows", count );
+    else log_line( "[TASKS] panel hidden" );
+}
+
 uint64_t wine_nx_osk_clock( void )
 {
     return armTicksToNs( armGetSystemTick() );
@@ -837,7 +1013,10 @@ void wine_nx_keyboard_open( void )
     wine_nx_osk_show( 1, __atomic_load_n( &osk_last_held, __ATOMIC_RELAXED ) );
 }
 
+/* The buttons the display driver reads from the pointer: 0x1 left, 0x2 right,
+ * 0x4 middle, as dlls/win32u/winnx_drv.c has them. */
 #define WINE_NX_POINTER_LEFT  0x1
+#define WINE_NX_POINTER_RIGHT 0x2
 
 static struct input_key_edges runtime_key_edges;
 static uint64_t runtime_keys_delivered[INPUT_KEY_WORDS];
@@ -855,7 +1034,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     const struct input_profile *profile = &wine_nx_input_profile;
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
+    int controls_were_open = 0, tasks_were_open = 0, finger_down = 0;
     static int osk_combo;
+    static int touch_press;          /* a finger is pressing, across frames */
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
 
@@ -863,6 +1044,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     if (!wine_nx_pointer_ready)
     {
         hidInitializeTouchScreen();
+        /* A mouse in the dock points too; it says so when it is plugged in. */
+        hidInitializeMouse();
         padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
         padInitializeDefault( &wine_nx_pad );
         wine_nx_pointer_tick = armGetSystemTick();
@@ -880,7 +1063,102 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
     }
     {
-        const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
+        /* - and A together: the controls panel up, and the same again down.
+         * The keyboard is not up (it has - of its own), and a button held when
+         * the panel opened is not a second press. A fifth of a second of the
+         * two held does as well as the frame that saw them come down, so a
+         * slow frame cannot swallow the press. */
+        const u64 with_a = HidNpadButton_Minus | HidNpadButton_A;
+        u64 controls = (held & with_a) == with_a ? with_a : 0;
+        static u64 controls_since;
+        static int controls_fired;
+
+        controls_were_open = controls_open;
+        if (!controls)
+        {
+            controls_since = 0;
+            controls_fired = 0;
+        }
+        else
+        {
+            if (!controls_since)
+            {
+                controls_since = now;
+                log_line( "[CONTROLS] - and A down, pad %llx", (unsigned long long)held );
+            }
+            if (!controls_fired && !wine_nx_osk_visible() &&
+                ((controls_before & controls) != controls ||
+                 armTicksToNs( now - controls_since ) >= 200000000ull))
+            {
+                controls_fired = 1;
+                controls_panel( !controls_open );
+            }
+        }
+        if (controls_open && wine_nx_osk_visible()) controls_panel( 0 );
+        controls_were_open |= controls_open;
+        controls_before = held;
+    }
+    {
+        /* - and Y together: the tasks panel up, and the same again down, on
+         * the same terms as the controls panel. While it is up its rows are
+         * built again every second, so it shows the program as it is. */
+        const u64 with_y = HidNpadButton_Minus | HidNpadButton_Y;
+        u64 tasks = (held & with_y) == with_y ? with_y : 0;
+        static u64 tasks_since;
+        static int tasks_fired;
+
+        tasks_were_open = tasks_open;
+        if (!tasks)
+        {
+            tasks_since = 0;
+            tasks_fired = 0;
+        }
+        else
+        {
+            if (!tasks_since)
+            {
+                tasks_since = now;
+                log_line( "[TASKS] - and Y down" );
+            }
+            if (!tasks_fired && !wine_nx_osk_visible() &&
+                ((tasks_before & tasks) != tasks ||
+                 armTicksToNs( now - tasks_since ) >= 200000000ull))
+            {
+                tasks_fired = 1;
+                tasks_panel( !tasks_open );
+            }
+        }
+        if (tasks_open && wine_nx_osk_visible()) tasks_panel( 0 );
+        tasks_were_open |= tasks_open;
+        tasks_before = held;
+        if (tasks_open && armTicksToNs( now - tasks_built ) >= 1000000000ull)
+        {
+            const char *title;
+            int count;
+
+            tasks_panel_build( &title, &count );
+            wine_nx_osk_tasks_show( 1, title, tasks_rows, count );
+            tasks_built = now;
+        }
+    }
+    {
+        /* The keyboard opens and closes from a combination, from the program,
+         * and from its own Close key: the log says which happened, and when. */
+        static int osk_was_visible;
+        int up = wine_nx_osk_visible();
+
+        if (up != osk_was_visible)
+        {
+            osk_was_visible = up;
+            log_line( "[OSK] %s", up ? "up" : "down" );
+        }
+    }
+    /* One look at the screen for the whole poll: the keyboard, the fingers that
+     * scroll and the finger that presses all read the same sample, and the mouse
+     * in the dock can see whether a finger is on the glass. */
+    finger_down = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+    {
+        const u64 osk = HidNpadButton_Minus | HidNpadButton_B;
         unsigned int bits = osk_buttons( held );
         if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible())
             wine_nx_osk_show( 1, bits );
@@ -888,14 +1166,25 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         __atomic_store_n( &osk_last_held, bits, __ATOMIC_RELAXED );
         if (wine_nx_osk_visible())
         {
-            int touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
-            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], touching,
-                                             touching ? (int)touch.touches[0].x : 0,
-                                             touching ? (int)touch.touches[0].y : 0, armTicksToNs( now ) );
+            /* Every finger, not only the first: the keyboard holds a key per
+             * finger, so Shift can be held while another types. */
+            struct wine_nx_osk_point fingers[WINE_NX_OSK_FINGERS];
+            int count = 0, i, touching = finger_down;
+
+            for (i = 0; touching && i < (int)touch.count && count < WINE_NX_OSK_FINGERS; i++)
+            {
+                fingers[count].x = (int)touch.touches[i].x;
+                fingers[count].y = (int)touch.touches[i].y;
+                count++;
+            }
+            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], fingers, count, armTicksToNs( now ) );
             keyboard = 1;
             swallowed = held;
         }
         else swallowed &= held;
+        /* And the panel has the controller while it is up, so reading it does
+         * not click or type under it -- nor does taking it down. */
+        if ((controls_were_open || tasks_were_open) && !wine_nx_osk_visible()) swallowed = held;
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
@@ -906,16 +1195,138 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             wine_nx_compositor_redraw();
         }
     }
-    emulate = !keyboard && profile->mode == INPUT_KEYBOARD_MOUSE;
+    /* Said once: the profile in force decides whether the stick may move the
+     * cursor at all, and a finger is the one pointer that should always
+     * work. */
+    {
+        static int profile_told;
 
-    if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+        if (!profile_told)
+        {
+            profile_told = 1;
+            log_line( "[POINTER] input mode %d, mouse speed %d, deadzone %d/%d",
+                      profile->mode, profile->mouse_speed, profile->deadzone[0], profile->deadzone[1] );
+        }
+    }
+    emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
+
+    /* A mouse plugged into the dock points as a finger does -- it says where it
+     * is rather than how far it went -- and turns the wheel the controller's
+     * stick does. Nothing above the program may take it, as with a finger, and
+     * a finger on the glass wins over it: the screen is the pointer the program
+     * was written for. From YangStark/autorun's "Switch USB mouse" branch,
+     * which taught the runtime to read libnx's mouse; the position is absolute
+     * there. */
+    {
+        static int mouse_was_connected;
+        static u64 last_mouse_sample;
+        HidMouseState mouse;
+
+        if (hidGetMouseStates( &mouse, 1 ) && (mouse.attributes & HidMouseAttribute_IsConnected))
+        {
+            if (!mouse_was_connected) log_line( "[NXINPUT] physical mouse connected" );
+            mouse_was_connected = 1;
+            if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
+            {
+                int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+
+                pointer_cursor_place( &wine_nx_pointer, mouse.x, mouse.y );
+                moved |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                wine_nx_pointer_placed |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                if (mouse.buttons & HidMouseButton_Left) output.buttons |= WINE_NX_POINTER_LEFT;
+                if (mouse.buttons & HidMouseButton_Right) output.buttons |= WINE_NX_POINTER_RIGHT;
+            }
+            /* The wheel is a difference, so read each HID sample once: the input
+             * thread and ProcessEvents can both read the same one. */
+            if (mouse.sampling_number != last_mouse_sample)
+            {
+                last_mouse_sample = mouse.sampling_number;
+                if (mouse.wheel_delta_y)
+                    runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + (int)mouse.wheel_delta_y * 120 ) );
+                if (mouse.wheel_delta_x)
+                    runtime_wheel[1] = max( -7680, min( 7680, runtime_wheel[1] + (int)mouse.wheel_delta_x * 120 ) );
+            }
+        }
+        else mouse_was_connected = 0;
+    }
+
+    /* Two fingers scroll the picture under them instead of pressing: a notch of
+     * the wheel every 40 pixels they travel, as a wheel does, so a list or a map
+     * in a game moves without a keyboard. A gesture is what it began as: fingers
+     * added to a press keep pressing, and a scroll that began with two fingers
+     * clicks nothing, so a tap cannot become a drag or the other way round. The
+     * first finger is the one that presses. */
+    {
+        static int scrolling, scroll_y, scroll_left;
+        int two = 0, y = 0;
+
+        if (!on_keyboard && !controls_open && !tasks_open && touch.count >= 2)
+        {
+            two = 1;
+            y = ((int)touch.touches[0].y + (int)touch.touches[1].y) / 2;
+        }
+        if (two && !touch_press)
+        {
+            if (!scrolling)
+            {
+                log_line( "[TOUCH] two fingers scroll" );
+                scrolling = 1;
+                scroll_left = 0;
+            }
+            else scroll_left += y - scroll_y;
+            scroll_y = y;
+            while (scroll_left >= 40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + 120 ) );
+                scroll_left -= 40;
+            }
+            while (scroll_left <= -40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] - 120 ) );
+                scroll_left += 40;
+            }
+        }
+        else scrolling = 0;
+    }
+
+    if (!on_keyboard && !controls_open && !tasks_open &&
+        touch.count > 0 && (touch.count == 1 || touch_press))
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+
+        finger_down = 1;
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
         wine_nx_pointer_placed |= moved;
         output.buttons |= WINE_NX_POINTER_LEFT;
+        /* A finger points at a place, so say where it went down and where the
+         * pointer went: a click that lands nowhere is then a number to read,
+         * not a guess. Once a second while it stays down. */
+        {
+            static u64 finger_told;
+
+            if (!finger_told || armTicksToNs( now - finger_told ) >= 1000000000ull)
+            {
+                finger_told = now;
+                log_line( "[TOUCH] finger %d,%d, pointer %d,%d", (int)touch.touches[0].x,
+                          (int)touch.touches[0].y, (int)wine_nx_pointer.x, (int)wine_nx_pointer.y );
+            }
+        }
     }
+    else if (finger_down)
+    {
+        /* The finger is there and something above the program has it: the
+         * keyboard, the controls panel or the task list. */
+        static u64 gated_told;
+
+        if (!gated_told || armTicksToNs( now - gated_told ) >= 1000000000ull)
+        {
+            gated_told = now;
+            log_line( "[TOUCH] finger %d,%d taken by the %s", (int)touch.touches[0].x, (int)touch.touches[0].y,
+                      on_keyboard ? "keyboard" : controls_open ? "controls panel" : "task list" );
+        }
+    }
+    touch_press = touch.count > 0 && (touch.count == 1 || touch_press);
     if (emulate)
     {
         struct input_output mapped;
@@ -3702,25 +4113,42 @@ static void log_line_plain( const char *line )
     log_line( "%s", line );
 }
 
-static unsigned int launcher_install_forwarder( const char **step )
+static unsigned int launcher_install_forwarder_space( int address_space, const char **step )
 {
     struct wine_nx_forwarder request =
     {
         .nro_path = RUNTIME_DIR "/wine-nx-runtime.nro",
         .args = NULL,
-        .name = "Autorun",
+        .name = address_space == 2 ? "Autorun 32-bit" : "Autorun",
         .author = "ticoverse.com",
         .icon = wine_nx_icon_any,
         .icon_size = wine_nx_icon_any_size,
+        .address_space = address_space,
     };
     unsigned int rc;
 
     wine_nx_forwarder_report = log_line_plain;
     rc = wine_nx_forwarder_install( &request, step );
-    log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
-              wine_nx_forwarder_title_id( request.nro_path, NULL ), rc,
+    log_line( "[LAUNCHER] forwarder %016llx (%d-bit): rc=0x%x%s%s",
+              wine_nx_forwarder_title_id_for( request.nro_path, NULL, address_space ),
+              address_space == 2 ? 32 : 39, rc,
               rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
+}
+
+/* The 39-bit forwarder: what everything but a fixed-address Win32 image runs
+ * under, and the one the Atmosphere low-address patch is written for. */
+static unsigned int launcher_install_forwarder( const char **step )
+{
+    return launcher_install_forwarder_space( 3, step );
+}
+
+/* The 32-bit one, with no alias region: the program's whole address space is
+ * the four gigabytes from zero, so an image linked for one address has it,
+ * and no patch is needed for it. It cannot start a 64-bit image. */
+static unsigned int launcher_install_forwarder_32( const char **step )
+{
+    return launcher_install_forwarder_space( 2, step );
 }
 
 static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
@@ -3865,7 +4293,8 @@ int main( int argc, char **argv )
     /* First, before anything else: which build this is and which file it was
      * started from. Without it a log from an older NRO on the card reads just
      * like one from the new one. */
-    log_line( "[BUILD] %s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD, own_nro,
+    log_line( "[BUILD] %s%s%s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD,
+              WINE_NX_BUILD_ID[0] ? " made from " : "", WINE_NX_BUILD_ID, own_nro,
               runtime_address_space_bits() );
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
@@ -3932,6 +4361,17 @@ int main( int argc, char **argv )
     runtime_profile = config_bool( "profiler", 0, "profile.txt", 0 );
     if (!config_bool( "display-devices", 1, "no-display-devices.txt", 1 )) wine_nx_display_devices = 0;
     log_line( "[INIT] display devices %s", wine_nx_display_devices ? "registered" : "off" );
+    {
+        char picture[16] = "";
+
+        if (wine_nx_config_string_value( &runtime_config, "picture-mode", picture, sizeof(picture) ))
+        {
+            if (!strcmp( picture, "edges" )) wine_nx_picture_mode = 1;
+            else if (!strcmp( picture, "stretched" )) wine_nx_picture_mode = 2;
+            else if (!strcmp( picture, "own-size" )) wine_nx_picture_mode = 3;
+        }
+        log_line( "[INIT] a picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
+    }
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -4054,10 +4494,12 @@ int main( int argc, char **argv )
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
             .four_cores_available = wine_nx_four_cores_available(),
-            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ),
+            .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ) ||
+                             runtime_title_id() == wine_nx_forwarder_title_id_for( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 2 ),
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
+            .install_forwarder_32 = launcher_install_forwarder_32,
             .install_game_forwarder = launcher_install_game_forwarder,
             .launch_error = launch_error,
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
@@ -4068,6 +4510,7 @@ int main( int argc, char **argv )
             .profile = runtime_profile,
             .framebuffer = !wine_nx_compositor_mode,
             .swkbd_auto = wine_nx_swkbd_auto_enabled,
+            .picture_mode = wine_nx_picture_mode,
         };
         int chosen;
 
@@ -4109,6 +4552,12 @@ int main( int argc, char **argv )
         runtime_dxvk_on_add = options.dxvk_on_add;
         wine_nx_config_set_bool( &runtime_config, "keyboard-on-text-focus", options.swkbd_auto );
         wine_nx_swkbd_auto_enabled = options.swkbd_auto;
+        wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 3 ? 0 : options.picture_mode;
+        log_line( "[INIT] the picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
+        wine_nx_config_set( &runtime_config, "picture-mode",
+                            wine_nx_picture_mode == 1 ? "\"edges\"" :
+                            wine_nx_picture_mode == 2 ? "\"stretched\"" :
+                            wine_nx_picture_mode == 3 ? "\"own-size\"" : "\"whole\"" );
         wine_nx_config_save( &runtime_config, CONFIG_FILE );
         if (!chosen)
         {
@@ -4178,6 +4627,11 @@ int main( int argc, char **argv )
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
+            if (settings.picture_mode >= 0)
+            {
+                wine_nx_picture_mode = settings.picture_mode;
+                log_line( "[INIT] the program's own picture: %s", picture_mode_text( wine_nx_picture_mode ) );
+            }
 #ifdef WINE_NX_MESA_SWITCH
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;

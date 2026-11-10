@@ -36,6 +36,9 @@ struct wine_nx_launcher_options
     int (*schedule_restart)(void);
     /* Install the 39-bit forwarder; returns 0 or the failing Result and step. */
     unsigned int (*install_forwarder)( const char **step );
+    /* And the 32-bit one, one four-gigabyte region without aliases, for a
+     * Win32 image linked for a fixed address. NULL when it cannot be made. */
+    unsigned int (*install_forwarder_32)( const char **step );
     unsigned int (*install_game_forwarder)( const struct wine_nx_forwarder *request, const char **step );
     const char *launch_error;
     /* The global settings on entry, as the user left them on return. The
@@ -46,6 +49,9 @@ struct wine_nx_launcher_options
     int reopen_launcher;  /* come back here when a program ends, rather than to the menu */
     int dxvk_on_add;      /* a game added to the library starts with DXVK enabled */
     int swkbd_auto;       /* the on-screen keyboard opens when a text field takes focus */
+    int picture_mode;     /* a mode of the program's own: 0 whole with bars, 1 filling
+                           * the screen with its edges cropped, 2 stretched to it, 3 at
+                           * its own size in the middle */
 };
 
 /* Show the launcher. Returns 1 with the chosen program's path in target, or 0

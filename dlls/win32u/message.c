@@ -47,6 +47,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #ifdef __SWITCH__
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int wine_nx_runtime_verbose __attribute__((weak));
+/* winnx_drv.c: how many key messages programs have taken from their queues. */
+extern unsigned int wine_nx_keys_taken;
 
 static BOOL nx_trace_enabled(void)
 {
@@ -3230,6 +3232,17 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
                     continue;  /* ignore it */
                 }
                 *msg = info.msg;
+#ifdef __SWITCH__
+                switch (info.msg.message)
+                {
+                case WM_KEYDOWN:
+                case WM_KEYUP:
+                case WM_SYSKEYDOWN:
+                case WM_SYSKEYUP:
+                    __atomic_add_fetch( &wine_nx_keys_taken, 1, __ATOMIC_RELAXED );
+                    break;
+                }
+#endif
                 thread_info->message_pos   = MAKELONG( info.msg.pt.x, info.msg.pt.y );
                 thread_info->message_time  = info.msg.time;
                 thread_info->message_extra = msg_data->hardware.info;

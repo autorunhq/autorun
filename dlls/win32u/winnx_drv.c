@@ -83,20 +83,110 @@ static pthread_t wine_nx_input_thread_id;
 static void nxdrv_trace( const char *fmt, int a, int b, int c, int d );
 static void nxdrv_trace_hot( const char *fmt, int a, int b, int c, int d );
 
+/* The screen the arrow is drawn on and the framebuffer's size: the monitor
+ * reported to win32u below, and what a finger's pixels mean. */
+#define WINE_NX_SCREEN_W 1280
+#define WINE_NX_SCREEN_H 720
+
+/* What the log is told whether or not verbose tracing is on: a few lines about
+ * where the input goes, not the stream of every event. */
+static void nxdrv_say( const char *text )
+{
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( text );
+}
+
+/* The same, for the OpenGL path, which has its own idea of where the picture
+ * goes and should say so when it differs from the desktop's. */
+void wine_nx_say( const char *text )
+{
+    nxdrv_say( text );
+}
+
+/* Said from the threads of this driver only, and only for the reasons below. */
+static volatile unsigned int wine_nx_input_pumps;   /* calls to ProcessEvents */
+
 /* Moves the drawn cursor while the program is too busy to pump messages, such
  * as OpenTTD loading its sprites. This thread has no TEB, so it must not call
  * into Wine: the first server call dereferences a NULL TEB. It only polls the
  * controller and presents; ProcessEvents sends the input from a Wine thread. */
+/* Key messages a program has taken out of its queue since the runtime started
+ * (message.c counts them): what says whether a key the floating keyboard sent
+ * was ever read, or is still sitting in a queue nobody looks at, or never
+ * reached one because a low-level hook stopped it. */
+unsigned int wine_nx_keys_taken;
+
+static BYTE pending_key_vk;
+static BOOL pending_key_up;
+static unsigned int pending_key_time, pending_key_taken;
+
+/* Notes what was just sent, to be answered for in the input thread. Called
+ * where the key is sent, which may be any thread. */
+static void nxdrv_note_key_sent( BYTE vk, BOOL up )
+{
+    pending_key_vk = vk;
+    pending_key_up = up;
+    pending_key_time = NtGetTickCount();
+    pending_key_taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+}
+
+/* Four hundred milliseconds later: did the program take it? Said once, and
+ * only when it did not: a film that ignores the keyboard says here whether the
+ * keyboard was ever offered to it. */
+static void nxdrv_check_key_taken(void)
+{
+    char line[112];
+
+    if (!pending_key_time || NtGetTickCount() - pending_key_time < 400) return;
+    if (__atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED ) == pending_key_taken)
+    {
+        snprintf( line, sizeof(line), "[KEY] the program did not take key %02x %s from its queue in 400 ms",
+                  pending_key_vk, pending_key_up ? "up" : "down" );
+        nxdrv_say( line );
+    }
+    pending_key_time = 0;
+}
+
 static void *wine_nx_input_thread( void *arg )
 {
+    unsigned int pumps = __atomic_load_n( &wine_nx_input_pumps, __ATOMIC_RELAXED );
+    unsigned int waited = 0;
+    int paused = 0;
+
     (void)arg;
     while (!__atomic_load_n( &wine_nx_input_thread_quit, __ATOMIC_ACQUIRE ))
     {
-        unsigned int buttons;
+        unsigned int buttons = 0, now;
         int x, y;
 
         wine_nx_pointer_poll( &x, &y, &buttons );
         wine_nx_fb_present();
+        nxdrv_check_key_taken();
+        /* Nothing is delivered to a program that is not taking its messages:
+         * it waits in the queue, or the server drops it. Say so when five
+         * seconds pass without a call to ProcessEvents, with the pad as it is
+         * at the time, so a film that cannot be skipped says whether the pad
+         * was even seen, and say when the program takes messages again. This
+         * thread has no TEB: only the runtime's own log may be written here. */
+        now = __atomic_load_n( &wine_nx_input_pumps, __ATOMIC_RELAXED );
+        if (now != pumps)
+        {
+            if (paused) nxdrv_say( "[NXINPUT] the program pumps its messages again" );
+            pumps = now;
+            waited = 0;
+            paused = 0;
+        }
+        else if (++waited >= 300)
+        {
+            waited = 0;
+            if (!paused)
+            {
+                char line[96];
+
+                paused = 1;
+                snprintf( line, sizeof(line), "[NXINPUT] no messages pumped for 5 s, pad %x", buttons );
+                nxdrv_say( line );
+            }
+        }
         usleep( 16000 );
     }
     __atomic_store_n( &wine_nx_input_thread_ended, 1, __ATOMIC_RELEASE );
@@ -280,10 +370,87 @@ static struct wine_nx_surface_entry *wine_nx_find_surface_entry( HWND hwnd, BOOL
 /* With the compositor, each window shows through the layer of its current
  * surface. A surface forgets its layer here before destroying it, so a layer
  * found under the entries mutex stays alive while the mutex is held. */
+static void nxdrv_layer_rect( int *x, int *y, int *w, int *h );
+static void nxdrv_layer_rect_of( const RECT *desktop, int *x, int *y, int *w, int *h );
+
 static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, const POINT *origin,
                                        const RECT *present )
 {
     struct wine_nx_surface_entry *entry;
+    static POINT last_origin;
+    static RECT last_present;
+    static unsigned int told;
+    int x = origin->x, y = origin->y;
+    int w = present->right - present->left, h = present->bottom - present->top;
+    int source_w = w, source_h = h;
+    struct ratio dpi = get_dpi_for_window( hwnd ), raw_dpi;
+    RECT client;
+
+    /* Where the picture goes on the screen: the client's own rectangle, fitted
+     * with the desktop when a program asked for a mode of its own. The layer's
+     * allocation is not the picture -- it can be as large as the whole screen's
+     * worth, a mode change giving the surface the new window's padding -- so
+     * fitting that would both oversize the picture and put it out of step with
+     * the rectangle a finger's points are measured by. Asked before the mutex
+     * below, which is not worth holding the display devices for. */
+    if (get_client_rect( hwnd, &client, dpi ))
+    {
+        map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
+        if (client.right > client.left && client.bottom > client.top)
+            nxdrv_layer_rect_of( &client, &x, &y, &w, &h );
+        else
+            nxdrv_layer_rect( &x, &y, &w, &h );
+    }
+    else nxdrv_layer_rect( &x, &y, &w, &h );
+
+    /* How much of the surface is the picture. The layer is the window's whole
+     * surface allocation -- the client followed by padding, and after a display
+     * mode change possibly the whole screen's worth -- so fitting the visible
+     * rectangle would shrink the picture and displace it inside the very
+     * rectangle the pointer is mapped through. The picture is the client, said
+     * in the monitor's own pixels. From alonsohinojosa379-creator/autorun's GDI
+     * centring fix. */
+    get_win_monitor_dpi( hwnd, &raw_dpi );
+    if (get_client_rect( hwnd, &client, dpi ))
+    {
+        client = map_dpi_rect( client, dpi, raw_dpi );
+        if (client.right > client.left && client.bottom > client.top)
+        {
+            source_w = client.right - client.left;
+            source_h = client.bottom - client.top;
+        }
+    }
+
+    /* Where a window's picture goes, whenever that changes. Said before the
+     * mutex, since the log is not worth holding it for. */
+    if (told < 24 && (origin->x != last_origin.x || origin->y != last_origin.y ||
+                      present->right != last_present.right || present->bottom != last_present.bottom))
+    {
+        char line[176];
+
+        last_origin = *origin;
+        last_present = *present;
+        told++;
+        if (source_w != present->right - present->left || source_h != present->bottom - present->top)
+        {
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x the picture is the client, %dx%d of the %dx%d it draws in",
+                      (int)(ULONG_PTR)hwnd, source_w, source_h,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top) );
+            nxdrv_say( line );
+        }
+        if (x != origin->x || y != origin->y || w != present->right - present->left ||
+            h != present->bottom - present->top)
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the desktop, drawn at %d,%d %dx%d of the %dx%d screen",
+                      (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top),
+                      x, y, w, h, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        else
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the %dx%d screen",
+                      (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top),
+                      WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        nxdrv_say( line );
+    }
 
     pthread_mutex_lock( &wine_nx_surface_entries_mutex );
     if ((entry = find_surface_entry_locked( hwnd, TRUE )))
@@ -292,7 +459,9 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         if (entry->layer && entry->layer != layer) wine_nx_layer_place( entry->layer, 0, 0, 0, 0 );
         entry->layer = layer;
     }
-    wine_nx_layer_place( layer, origin->x, origin->y, present->right, present->bottom );
+    /* The rect's sides are coordinates, not sizes: a window away from the
+     * corner would get a layer as large again as its own offset. */
+    wine_nx_layer_place_scaled( layer, x, y, source_w, source_h, w, h );
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
@@ -542,8 +711,6 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
  * Report a single 1280x720 primary monitor so win32u has a real virtual
  * screen; without it the desktop is 0x0 and every window clips to nothing.
  */
-#define WINE_NX_SCREEN_W 1280
-#define WINE_NX_SCREEN_H 720
 
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
@@ -608,6 +775,34 @@ static void wine_nx_pointer_flags( unsigned int last, unsigned int held, unsigne
     }
 }
 
+/* A key goes to the focus window of the foreground thread's input, and to its
+ * active window when it has no focus; with neither, the server drops it and
+ * only the key state is left for a program that asks (server/queue.c,
+ * queue_hardware_message). A program showing a film before its first dialog
+ * can be in that state, so say where a key would go, once a second while keys
+ * are being sent: it tells a key the program ignored from one that never
+ * arrived. Both windows are named, the foreground thread's and this thread's,
+ * because a key sent to no window in particular takes the first. */
+static void nxdrv_trace_key_target(void)
+{
+    static DWORD last;
+    GUITHREADINFO foreground = { .cbSize = sizeof(foreground) };
+    GUITHREADINFO mine = { .cbSize = sizeof(mine) };
+    char line[176];
+    DWORD now = NtGetTickCount();
+
+    if (!&wine_nx_runtime_trace) return;
+    if (last && now - last < 1000) return;
+    last = now;
+    if (!NtUserGetGUIThreadInfo( 0, &foreground )) memset( &foreground, 0, sizeof(foreground) );
+    if (!NtUserGetGUIThreadInfo( GetCurrentThreadId(), &mine )) memset( &mine, 0, sizeof(mine) );
+    snprintf( line, sizeof(line), "[NXINPUT] keys: foreground %x focus %x active %x, ours focus %x active %x",
+              (int)(ULONG_PTR)NtUserGetForegroundWindow(), (int)(ULONG_PTR)foreground.hwndFocus,
+              (int)(ULONG_PTR)foreground.hwndActive, (int)(ULONG_PTR)mine.hwndFocus,
+              (int)(ULONG_PTR)mine.hwndActive );
+    nxdrv_say( line );
+}
+
 static void wine_nx_send_key( const struct input_key_event *event )
 {
     INPUT input = {0};
@@ -619,6 +814,8 @@ static void wine_nx_send_key( const struct input_key_event *event )
     input.ki.wScan = scan & 0xff;
     if ((scan & 0xff00) == 0xe000 || event->code == INPUT_NUMPAD_ENTER) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    nxdrv_note_key_sent( input.ki.wVk, !event->down );
+    nxdrv_trace_key_target();
 }
 
 static void wine_nx_send_extra_mouse( unsigned int last, unsigned int held, unsigned int pressed,
@@ -681,6 +878,175 @@ static void wine_nx_send_mouse_motion( int dx, int dy )
     NtUserSendHardwareInput( 0, 0, &input, 0 );
 }
 
+/* The screen the panel shows and the desktop the server keeps. A program that
+ * asks for a display mode smaller than the screen (a 640x480 game on the
+ * 1280x720 panel) makes the desktop that size, and the screen shows that
+ * desktop fitted and centred, its proportions kept: 960x720 at 160,0, with
+ * bars either side. That rectangle is Wine's own (`map_rect_virt_to_raw()` in
+ * `sysparams.c`, the one the server clips the cursor to), and the OpenGL path
+ * draws the picture in it, so a finger, the arrow and the picture all say the
+ * same numbers. Without a mode change the two are the same rectangle and this
+ * is a plain copy. */
+struct nxdrv_screen_map
+{
+    int desktop_w, desktop_h;  /* the desktop, in the program's pixels */
+    int pane_x, pane_y;        /* where the desktop's picture starts on the screen */
+    int pane_w, pane_h;        /* and how many screen pixels it takes */
+};
+
+/* Where a rectangle of the desktop is on the screen: Wine's own fit, the
+ * same rectangle its raw and virtual coordinates are related by, and the one
+ * the server clips the cursor to. A 640x480 desktop is 960x720 at 160,0 of
+ * the 1280x720 screen -- the picture keeps its proportions, scaled to the
+ * height, with bars either side. */
+BOOL wine_nx_picture_rect( RECT rect, RECT *pane )
+{
+    RECT mapped = map_rect_virt_to_raw( rect, (struct ratio){0} );
+
+    if (mapped.right - mapped.left <= 0 || mapped.bottom - mapped.top <= 0) return FALSE;
+    *pane = mapped;
+    return TRUE;
+}
+
+/* The screen a picture is drawn on, for the OpenGL path, which has to place
+ * the picture in the same rectangle this file maps the finger through. */
+int wine_nx_screen_width( void )
+{
+    return WINE_NX_SCREEN_W;
+}
+
+int wine_nx_screen_height( void )
+{
+    return WINE_NX_SCREEN_H;
+}
+
+/* The desktop, and where the screen shows its pixels. */
+static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
+{
+    int w = NtUserGetSystemMetrics( SM_CXSCREEN ), h = NtUserGetSystemMetrics( SM_CYSCREEN );
+    RECT pane;
+
+    if (w <= 0 || h <= 0) return FALSE;
+    map->desktop_w = w;
+    map->desktop_h = h;
+    if (!wine_nx_picture_rect( (RECT){0, 0, w, h}, &pane ))
+    {
+        /* Nothing to ask: the picture is the desktop, where it stands. */
+        pane.left = pane.top = 0;
+        pane.right = w;
+        pane.bottom = h;
+    }
+    map->pane_x = pane.left;
+    map->pane_y = pane.top;
+    map->pane_w = pane.right - pane.left;
+    map->pane_h = pane.bottom - pane.top;
+    if (map->pane_x || map->pane_y || map->pane_w != w || map->pane_h != h)
+    {
+        static int last_w, last_h, last_x, last_y, told;
+        char line[176];
+
+        /* Said once per shape: the picture's rectangle on the screen, which is
+         * also what the pointer is mapped by and the cursor clipped to. */
+        if (told++ < 12 && (w != last_w || h != last_h || pane.left != last_x || pane.top != last_y))
+        {
+            last_w = w;
+            last_h = h;
+            last_x = pane.left;
+            last_y = pane.top;
+            snprintf( line, sizeof(line), "[NXDRV] the %dx%d desktop is drawn at %d,%d %dx%d of the %dx%d screen",
+                      w, h, map->pane_x, map->pane_y, map->pane_w, map->pane_h, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+            nxdrv_say( line );
+        }
+    }
+    return TRUE;
+}
+
+/* Whether the screen shows the desktop anywhere but exactly where it stands:
+ * fitted with bars, cropped, stretched or merely moved, a point of the desktop
+ * is not a point of the screen and has to be mapped. */
+static BOOL nxdrv_map_displaces( const struct nxdrv_screen_map *map )
+{
+    return map->pane_x || map->pane_y || map->pane_w != map->desktop_w || map->pane_h != map->desktop_h;
+}
+
+static int nxdrv_scale( int value, int from, int to )
+{
+    long long scaled;
+
+    if (from <= 0) return 0;
+    scaled = ((long long)value * to + (value < 0 ? -from / 2 : from / 2)) / from;
+    return (int)scaled;
+}
+
+/* A point on the screen, as the desktop sees it: inside the desktop, so a
+ * finger in a bar still clicks the nearest edge of the picture rather than
+ * nothing at all. */
+static void nxdrv_screen_point_to_desktop( const struct nxdrv_screen_map *map, int *x, int *y )
+{
+    int dx = nxdrv_scale( *x - map->pane_x, map->pane_w, map->desktop_w );
+    int dy = nxdrv_scale( *y - map->pane_y, map->pane_h, map->desktop_h );
+
+    *x = dx < 0 ? 0 : dx >= map->desktop_w ? map->desktop_w - 1 : dx;
+    *y = dy < 0 ? 0 : dy >= map->desktop_h ? map->desktop_h - 1 : dy;
+}
+
+/* The other way: a point of the desktop's own pixels, where the screen shows
+ * it. The server answers in the desktop's pixels, while the finger and the
+ * arrow live on the screen. */
+static void nxdrv_desktop_point_to_screen( const struct nxdrv_screen_map *map, int *x, int *y )
+{
+    *x = map->pane_x + nxdrv_scale( *x, map->desktop_w, map->pane_w );
+    *y = map->pane_y + nxdrv_scale( *y, map->desktop_h, map->pane_h );
+}
+
+/* A window's rectangle in the desktop's pixels, as the screen shows it. */
+static void nxdrv_layer_rect( int *x, int *y, int *w, int *h )
+{
+    struct nxdrv_screen_map map;
+
+    if (!nxdrv_screen_map_get( &map )) return;
+    nxdrv_desktop_point_to_screen( &map, x, y );
+    *w = nxdrv_scale( *w, map.desktop_w, map.pane_w );
+    *h = nxdrv_scale( *h, map.desktop_h, map.pane_h );
+}
+
+/* A rectangle of a window's pixels, as the screen shows it. */
+static void nxdrv_layer_rect_of( const RECT *desktop, int *x, int *y, int *w, int *h )
+{
+    *x = desktop->left;
+    *y = desktop->top;
+    *w = desktop->right - desktop->left;
+    *h = desktop->bottom - desktop->top;
+    nxdrv_layer_rect( x, y, w, h );
+}
+
+/* Said once, and with the first few points: the two numbers the mapping is
+ * made of, so a click that lands beside the finger is a number to read. */
+static void nxdrv_trace_pointer_target( const struct nxdrv_screen_map *map, int screen_x, int screen_y,
+                                        int x, int y, DWORD flags, BOOL finger )
+{
+    static unsigned int count;
+    char line[208];
+
+    if (count >= 8) return;
+    if (!count++)
+    {
+        snprintf( line, sizeof(line),
+                  "[MOUSE] the screen is %dx%d, the desktop is %dx%d, its picture at %d,%d %dx%d",
+                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H, map->desktop_w, map->desktop_h,
+                  map->pane_x, map->pane_y, map->pane_w, map->pane_h );
+        nxdrv_say( line );
+    }
+    /* Said apart: a finger on the screen and the stick come through the same
+     * mapping, and a log that calls both a finger says nothing about whether
+     * the touchscreen was used at all. */
+    snprintf( line, sizeof(line), finger
+              ? "[MOUSE] the finger's %d,%d (flags %x) is %d,%d to the program"
+              : "[MOUSE] the stick's %d,%d (flags %x) is %d,%d to the program",
+              screen_x, screen_y, (int)flags, x, y );
+    nxdrv_say( line );
+}
+
 static void wine_nx_flush_mouse(void)
 {
     static const INPUT input = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
@@ -721,6 +1087,26 @@ static void wine_nx_send_vk( HKL layout, BYTE vk, BOOL up )
     input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
     if ((scan & 0xff00) == 0xe000) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    if (&wine_nx_runtime_trace)
+    {
+        BYTE state[256];
+        char line[80];
+
+        /* Where the key ended up, as the desktop holds it: a key the system
+         * kept reads 0x80 down or 0 up here, and a key a low-level hook took
+         * before the desktop saw it reads as nothing happened at all. This is
+         * what a game polling GetAsyncKeyState would be told, so a film it
+         * cannot skip says here whether the key was ever there to be read. */
+        if (get_async_keyboard_state( state ))
+            snprintf( line, sizeof(line), "[OSK] key %02x %s, system state %02x", vk,
+                      up ? "up" : "down", state[vk] );
+        else
+            snprintf( line, sizeof(line), "[OSK] key %02x %s, system state unknown", vk,
+                      up ? "up" : "down" );
+        wine_nx_runtime_trace( line );
+    }
+    nxdrv_note_key_sent( vk, up );
+    nxdrv_trace_key_target();
 }
 
 /* The floating keyboard (horizon-wine/source/osk.c) queues the keys pressed
@@ -743,8 +1129,14 @@ static BOOL wine_nx_send_keyboard_keys( void )
     while (wine_nx_osk_next_key( now, &vk, &up ))
     {
         if (!sent) layout = NtUserGetKeyboardLayout( 0 );
-        wine_nx_send_vk( layout, vk, up );
+        wine_nx_send_vk( layout, vk, up );   /* and says where it went */
         sent = TRUE;
+        /* One key event per look at the program's messages: a key that went
+         * down is down while the program is told anything else, so a program
+         * that polls the keyboard once a frame -- a game skipping an intro
+         * with Escape -- sees it down, and a down and its up are never handed
+         * over in the same call. */
+        if (up) break;
     }
     return sent;
 }
@@ -779,6 +1171,136 @@ static void wine_nx_update_cursor( void )
     wine_nx_cursor_show( wine_nx_cursor_visible_for( cursor, count, &seen ) );
 }
 
+/**********************************************************************
+ *           the screen follows the game's window
+ *
+ * Wine fits an emulated mode into the console's screen -- proportions kept,
+ * centred, the mouse mapped for the program -- but it cannot know that a game
+ * asking for 640x480 still means to fill the screen, and a game in a window
+ * means it just the same.  So the screen takes the size of the game's main
+ * window, the largest visible window of the program that has no owner, and the
+ * window moves so its client area is in the corner.  The program's picture is
+ * then the screen, and the fit does the rest.
+ *
+ * From Carafe (carafe-nx/carafe), runtime/patches/autorun/0017 and its
+ * docs/decisions/0027, which checked it on three games.
+ */
+#define WINE_NX_GAME_WINDOW_MIN_W 640
+#define WINE_NX_GAME_WINDOW_MIN_H 400
+
+extern LONG wine_nx_fit_screen( UINT width, UINT height );
+
+static LONG wine_nx_fit_pending;
+static DWORD wine_nx_fit_thread;
+
+static BOOL wine_nx_game_window( HWND hwnd, RECT *client )
+{
+    struct ratio dpi = get_thread_dpi();
+    DWORD style = get_window_long( hwnd, GWL_STYLE );
+    DWORD pid = 0;
+
+    if (!(style & WS_VISIBLE) || (style & (WS_CHILD | WS_MINIMIZE))) return FALSE;
+    if (get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_TOOLWINDOW) return FALSE;
+    if (get_window_relative( hwnd, GW_OWNER )) return FALSE;
+    if (!NtUserGetWindowThread( hwnd, &pid ) || pid != GetCurrentProcessId()) return FALSE;
+    if (!get_client_rect( hwnd, client, dpi )) return FALSE;
+    map_window_points( hwnd, 0, (POINT *)client, 2, dpi );
+    return client->right - client->left >= WINE_NX_GAME_WINDOW_MIN_W &&
+           client->bottom - client->top >= WINE_NX_GAME_WINDOW_MIN_H;
+}
+
+static void wine_nx_log_window( HWND hwnd, BOOL chosen )
+{
+    static unsigned int logged;
+    struct ratio dpi = get_thread_dpi();
+    RECT client = {0};
+    DWORD pid = 0;
+    char line[200];
+
+    if (logged >= 40) return;
+    logged++;
+    NtUserGetWindowThread( hwnd, &pid );
+    if (get_client_rect( hwnd, &client, dpi )) map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
+    snprintf( line, sizeof(line), "[NXSCREEN] window %p style %08x exstyle %08x owner %p pid %u client %d,%d %dx%d: %s",
+              hwnd, (unsigned int)get_window_long( hwnd, GWL_STYLE ), (unsigned int)get_window_long( hwnd, GWL_EXSTYLE ),
+              get_window_relative( hwnd, GW_OWNER ), (unsigned int)pid, (int)client.left, (int)client.top,
+              (int)(client.right - client.left), (int)(client.bottom - client.top), chosen ? "a candidate" : "skipped" );
+    nxdrv_say( line );
+}
+
+static HWND wine_nx_find_game_window( RECT *client )
+{
+    HWND *list, game = 0;
+    RECT rect;
+    LONGLONG area, best = 0;
+    unsigned int i;
+
+    if (!(list = list_window_children( NtUserGetDesktopWindow() ))) return 0;
+    for (i = 0; list[i]; i++)
+    {
+        BOOL candidate = wine_nx_game_window( list[i], &rect );
+
+        if (get_window_long( list[i], GWL_STYLE ) & WS_VISIBLE) wine_nx_log_window( list[i], candidate );
+        if (!candidate) continue;
+        area = (LONGLONG)(rect.right - rect.left) * (rect.bottom - rect.top);
+        if (area <= best) continue;
+        best = area;
+        game = list[i];
+        *client = rect;
+    }
+    free( list );
+    return game;
+}
+
+static void wine_nx_fit_screen_to_game( void )
+{
+    struct ratio dpi = get_thread_dpi();
+    int width, height, screen_width, screen_height;
+    RECT client, window;
+    HWND game;
+    DWORD thread;
+    UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    LONG ret;
+    char line[176];
+
+    /* Only the window's own thread moves it, and not while it waits for another
+     * thread's answer: a thread that reads another's messages -- DirectShow
+     * starts one while a game waits -- would move that game's window. Carafe's
+     * 0097 found this out the hard way. */
+    if (wine_nx_fit_thread && wine_nx_fit_thread != GetCurrentThreadId()) return;
+    if (!InterlockedExchange( &wine_nx_fit_pending, 0 )) return;
+    if (!(game = wine_nx_find_game_window( &client ))) return;
+    if ((thread = NtUserGetWindowThread( game, NULL )) != GetCurrentThreadId())
+    {
+        wine_nx_fit_thread = thread;
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+        return;
+    }
+    width = client.right - client.left;
+    height = client.bottom - client.top;
+    screen_width = get_system_metrics( SM_CXSCREEN );
+    screen_height = get_system_metrics( SM_CYSCREEN );
+    if (width != screen_width || height != screen_height)
+    {
+        ret = wine_nx_fit_screen( width, height );
+        snprintf( line, sizeof(line), "[NXSCREEN] the screen follows the game's window: %dx%d, was %dx%d, result %d",
+                  width, height, screen_width, screen_height, (int)ret );
+        nxdrv_say( line );
+        if (ret != DISP_CHANGE_SUCCESSFUL || !wine_nx_game_window( game, &client )) return;
+        flags |= SWP_FRAMECHANGED;
+    }
+    if (!client.left && !client.top) flags |= SWP_NOMOVE;
+    if ((flags & SWP_NOMOVE) && !(flags & SWP_FRAMECHANGED)) return;
+    if (!get_window_rect( game, &window, dpi )) return;
+    NtUserSetWindowPos( game, 0, window.left - client.left, window.top - client.top, 0, 0, flags );
+    if (!(flags & SWP_NOMOVE))
+    {
+        snprintf( line, sizeof(line), "[NXSCREEN] the game's window moved by %d,%d to the screen's corner",
+                  (int)-client.left, (int)-client.top );
+        nxdrv_say( line );
+    }
+}
+
 BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 {
     static unsigned int delivering;
@@ -789,11 +1311,14 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     static unsigned int last_buttons;
     unsigned int buttons, pressed, released;
     DWORD first, second;
-    BOOL moved, keys, placed, stepped;
+    BOOL moved, keys, placed, stepped, map_scaled;
+    struct nxdrv_screen_map map = {0};
     int x, y, dx, dy;
 
     (void)mask;
+    wine_nx_fit_screen_to_game();
     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
+    __atomic_add_fetch( &wine_nx_input_pumps, 1, __ATOMIC_RELAXED );
     wine_nx_fb_present();
     /* Poll here too, then deliver everything the polls saw since the last
      * call, including those of the background thread. */
@@ -816,9 +1341,32 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     while (key_after && !key_events[key_after - 1].down) key_after--;
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
-    if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
-    if (stepped) wine_nx_send_mouse_motion( dx, dy );
-    if (second) wine_nx_send_mouse( x, y, second );
+    /* A program that asked for a display mode smaller than the screen has a
+     * desktop of that size, drawn fitted and centred -- 640x480 becomes 960x720
+     * at 160,0 -- so every point has to be said in the program's own pixels,
+     * and the stick points rather than pushes: a whole screen pixel is not a
+     * whole desktop pixel any more. Without a mode change the picture is the
+     * screen and this is a plain copy. */
+    map_scaled = nxdrv_screen_map_get( &map ) && nxdrv_map_displaces( &map );
+    {
+        int desktop_x = x, desktop_y = y;
+
+        if (map_scaled) nxdrv_screen_point_to_desktop( &map, &desktop_x, &desktop_y );
+        if (placed || first || (stepped && map_scaled))
+        {
+            /* The point goes with every click, even a tap that moved nothing:
+             * without MOUSEEVENTF_MOVE the server takes the button's place
+             * from where the cursor already was, not from the point said. */
+            DWORD flags = (placed || (stepped && map_scaled) || (first & MOUSEEVENTF_LEFTDOWN)
+                           ? MOUSEEVENTF_MOVE : 0) | first;
+
+            nxdrv_trace_pointer_target( &map, x, y, desktop_x, desktop_y, flags, placed );
+            wine_nx_send_mouse( desktop_x, desktop_y, flags );
+            if (stepped && map_scaled) stepped = FALSE;  /* it went with the point */
+        }
+        if (stepped) wine_nx_send_mouse_motion( dx, dy );
+        if (second) wine_nx_send_mouse( desktop_x, desktop_y, second );
+    }
     wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
     for (unsigned int i = key_after; i < key_count; i++) wine_nx_send_key( key_events + i );
@@ -829,21 +1377,42 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
         /* The arrow belongs where the cursor is, which after movement is for
          * the server to say: it clips the cursor to the screen, and holds it
          * still for a program that has taken the mouse for itself. Nothing is
-         * lost by snapping to it, the movement having been sent already. */
-        if (wine_nx_cursor_pos( &pos ) && (pos.x != x || pos.y != y))
+         * lost by snapping to it, the movement having been sent already. What
+         * it answers is also the proof that the point arrived: the first few
+         * are said whether or not it agrees, and a disagreement is followed. */
+        if (wine_nx_cursor_pos( &pos ))
         {
-            static unsigned int followed;
+            /* The server answers in the desktop's own pixels; the finger and
+             * the arrow are on the screen, so the answer is put there first --
+             * else a tap in a shrunken desktop would move the finger to the
+             * same numbers read as screen pixels, and the next tap would be
+             * measured from the wrong place. */
+            static unsigned int told;
+            static int followed;
+            int cursor_x = pos.x, cursor_y = pos.y;
 
-            /* Quiet once it is plainly working, loud enough to see that it is. */
-            if (followed++ < 8 && &wine_nx_runtime_trace)
+            if (map_scaled) nxdrv_desktop_point_to_screen( &map, &cursor_x, &cursor_y );
+            if (told++ < 8 && &wine_nx_runtime_trace)
             {
-                char line[128];
+                char line[144];
 
-                snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
-                          pos.x, pos.y, dx, dy );
+                snprintf( line, sizeof(line), "[MOUSE] the cursor is at %d,%d of the screen, the finger at %d,%d",
+                          cursor_x, cursor_y, x, y );
                 wine_nx_runtime_trace( line );
             }
-            wine_nx_pointer_follow( pos.x, pos.y );
+            if (cursor_x != x || cursor_y != y)
+            {
+                /* Quiet once it is plainly working, loud enough to see that it is. */
+                if (followed++ < 8 && &wine_nx_runtime_trace)
+                {
+                    char line[144];
+
+                    snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
+                              cursor_x, cursor_y, dx, dy );
+                    wine_nx_runtime_trace( line );
+                }
+                wine_nx_pointer_follow( cursor_x, cursor_y );
+            }
         }
     }
     if (first) nxdrv_trace( "[NXINPUT] buttons=%x flags=%x,%x x=%d", buttons, first, second, x );
@@ -884,10 +1453,32 @@ BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND hwnd )
 }
 
 /**********************************************************************
+ *           wine_nx_drv_GetCursorPos
+ *
+ * Where the pointer is, for GetCursorPos().  win32u asks the driver only when
+ * the server's answer is older than 100 ms, and the null driver's answer is
+ * "no": a program that draws its own cursor read a position that stopped
+ * moving, or a call that failed, whenever the pointer stood still.  The
+ * desktop's own state is the answer, in the desktop's pixels, which is what
+ * win32u hands the program unchanged.
+ */
+BOOL wine_nx_drv_GetCursorPos( POINT *pos )
+{
+    return wine_nx_cursor_pos( pos );
+}
+
+/**********************************************************************
  *           wine_nx_drv_SetCursorPos
  */
 BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
 {
+    struct nxdrv_screen_map map;
+
+    /* The point comes in the desktop's own pixels, which is what the server
+     * keeps; the arrow lives on the screen, so it goes where the desktop shows
+     * that point. The same when the two are alike. */
+    if (nxdrv_screen_map_get( &map ) && nxdrv_map_displaces( &map ))
+        nxdrv_desktop_point_to_screen( &map, &x, &y );
     wine_nx_pointer_set_pos( x, y );
     return TRUE;
 }
@@ -956,6 +1547,13 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
     BOOL has_old_screen_rect = wine_nx_get_cached_screen_rect( hwnd, &old_screen_rect );
 
     nxdrv_trace( "[NXDRV] WindowPosChanged surface=%d swp=%x", surface ? 1 : 0, swp_flags, 0, 0 );
+    /* A top-level window moved or showed itself: the screen may have to
+     * follow it at the next pass. */
+    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
+    {
+        wine_nx_fit_thread = NtUserGetWindowThread( hwnd, NULL );  /* it moves its own windows */
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+    }
     if (swp_flags & SWP_HIDEWINDOW)
     {
         wine_nx_note_surface_hidden( hwnd );

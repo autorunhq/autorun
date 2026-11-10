@@ -832,16 +832,16 @@ UINT WINAPI NtUserSendInput( UINT count, INPUT *inputs, int size )
  */
 BOOL WINAPI NtUserSetCursorPos( INT x, INT y )
 {
-    RECT rect = {x, y, x, y};
     BOOL ret;
     INT prev_x, prev_y, new_x, new_y;
 
-    rect = map_rect_virt_to_raw( rect, get_thread_dpi() );
+    /* The server keeps the pointer in the desktop's own pixels, the same ones
+     * its windows are in, and clamps one against the other. */
     SERVER_START_REQ( set_cursor )
     {
         req->flags = SET_CURSOR_POS;
-        req->x     = rect.left;
-        req->y     = rect.top;
+        req->x     = x;
+        req->y     = y;
         if ((ret = !wine_server_call( req )))
         {
             prev_x = reply->prev_x;
@@ -865,7 +865,6 @@ BOOL WINAPI NtUserGetCursorPos( POINT *pt )
     BOOL ret = TRUE;
     DWORD last_change = 0;
     NTSTATUS status;
-    RECT rect;
 
     if (!pt) return FALSE;
 
@@ -879,11 +878,6 @@ BOOL WINAPI NtUserGetCursorPos( POINT *pt )
 
     /* query new position from graphics driver if we haven't updated recently */
     if (NtGetTickCount() - last_change > 100) ret = user_driver->pGetCursorPos( pt );
-    if (!ret) return FALSE;
-
-    SetRect( &rect, pt->x, pt->y, pt->x, pt->y );
-    rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
-    *pt = *(POINT *)&rect.left;
     return ret;
 }
 
@@ -1188,6 +1182,14 @@ BOOL WINAPI NtUserGetKeyboardState( BYTE *state )
     UINT i;
 
     TRACE("(%p)\n", state);
+
+    /* Hardware input lands in the desktop's key state the moment the server
+     * takes it, while this thread's copy of it only catches up when the thread
+     * reads its queue. A program that polls its keyboard once a frame through
+     * a video reads none of its queue, and on Windows the driver would answer
+     * it anyway; asking for one key is what brings the copy up to date, and
+     * costs a request only when it is stale. */
+    NtUserGetKeyState( 0 );
 
     while ((status = get_shared_input( GetCurrentThreadId(), &lock, &input_shm )) == STATUS_PENDING)
         memcpy( state, (const void *)input_shm->keystate, 256 );
@@ -2869,7 +2871,7 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
 {
     struct user_thread_info *thread_info = get_user_thread_info();
     MONITORINFO monitor_info = {.cbSize = sizeof(MONITORINFO)};
-    RECT monitor_rect, window_rect, virtual_rect;
+    RECT window_rect, virtual_rect;
     DWORD style;
     UINT ctx;
     BOOL ret;
@@ -2888,7 +2890,6 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
         ret = get_window_rect( hwnd, &window_rect, get_thread_dpi() );
     monitor_info = monitor_info_from_window( hwnd, MONITOR_DEFAULTTONEAREST );
     virtual_rect = get_virtual_screen_rect( get_thread_dpi(), MDT_DEFAULT );
-    monitor_rect = map_rect_virt_to_raw( monitor_info.rcMonitor, get_thread_dpi() );
     set_thread_dpi_awareness_context( ctx );
 
     if (!ret || !is_fullscreen( &monitor_info, &window_rect )) return FALSE;
@@ -2907,7 +2908,14 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
     SERVER_START_REQ( set_cursor )
     {
         req->flags = SET_CURSOR_CLIP | SET_CURSOR_FSCLIP;
-        req->clip  = wine_server_rectangle( monitor_rect );
+        /* The clip is the desktop as the program lays it out: the server keeps
+         * the pointer and every window rect in those pixels and clamps one
+         * against the other, so a clip said in the screen's pixels instead
+         * cuts the pointer off short of the desktop's edge. Wine's raw/virtual
+         * ratio would put a 640x480 desktop's clip at 160..1120 across (the
+         * fit it makes for a picture scaled up to the 1280x720 panel), and the
+         * left of that desktop could not be pointed at at all. */
+        req->clip  = wine_server_rectangle( monitor_info.rcMonitor );
         ret = !wine_server_call( req );
     }
     SERVER_END_REQ;
@@ -2979,9 +2987,24 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
             rect = &new_rect;
         }
         if (rect->left > rect->right || rect->top > rect->bottom) return FALSE;
-        new_rect = map_rect_virt_to_raw( *rect, dpi );
+        /* As above: the server clips in the desktop's pixels. */
+    }
+
+#ifdef __SWITCH__
+    /* A cursor that is not clipped stays on the program's screen, as on
+     * Windows. When the screen follows a smaller game window it is shown in
+     * the middle of the console's, with black bars round it; left unclipped,
+     * the server let the arrow onto them, outside the program's screen, where
+     * a click landed on the window's frame and a right click opened its system
+     * menu. A finger in a bar therefore clicks the nearest edge of the
+     * picture, which is where the driver already measures it. From
+     * carafe-nx/carafe's patch 0100. */
+    if (!rect)
+    {
+        new_rect = map_rect_virt_to_raw( get_virtual_screen_rect( dpi, MDT_DEFAULT ), dpi );
         rect = &new_rect;
     }
+#endif
 
     SERVER_START_REQ( set_cursor )
     {

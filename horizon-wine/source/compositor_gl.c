@@ -148,7 +148,9 @@ void compositor_gl_upload( struct compositor_gl *comp, struct compositor_gl_text
     {
         /* One level, sampled texel for pixel. The parameters go first: Mesa
          * gives a texture whose filter still wants mipmaps a whole mipmap
-         * chain when its first level is defined. */
+         * chain when its first level is defined. A layer drawn larger than
+         * its own pixels is therefore stretched whole pixels at a time, the
+         * sample landing on a texel rather than between two. */
         gl->TexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0 );
         gl->TexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
         gl->TexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
@@ -179,7 +181,8 @@ void compositor_gl_release( struct compositor_gl *comp, struct compositor_gl_tex
 }
 
 static void draw_quad( struct compositor_gl *comp, const struct compositor_gl_texture *texture,
-                       int x, int y, int width, int height, int src_x, int src_y )
+                       int x, int y, int width, int height, int src_x, int src_y,
+                       int src_width, int src_height )
 {
     const struct compositor_gl_funcs *gl = comp->gl;
     float sw = (float)comp->screen_width, sh = (float)comp->screen_height;
@@ -187,7 +190,7 @@ static void draw_quad( struct compositor_gl *comp, const struct compositor_gl_te
 
     gl->Uniform4f( comp->rect_uniform, 2.0f * x / sw - 1.0f, 1.0f - 2.0f * y / sh,
                    2.0f * (x + width) / sw - 1.0f, 1.0f - 2.0f * (y + height) / sh );
-    gl->Uniform4f( comp->src_uniform, src_x / tw, src_y / th, (src_x + width) / tw, (src_y + height) / th );
+    gl->Uniform4f( comp->src_uniform, src_x / tw, src_y / th, (src_x + src_width) / tw, (src_y + src_height) / th );
     gl->BindTexture( GL_TEXTURE_2D, texture->name );
     gl->DrawArrays( GL_TRIANGLE_STRIP, 0, 4 );
 }
@@ -213,7 +216,8 @@ void compositor_gl_draw( struct compositor_gl *comp, const struct compositor_gl_
         const struct compositor_gl_quad *quad = &quads[i];
 
         if (!quad->texture->name || quad->width <= 0 || quad->height <= 0) continue;
-        draw_quad( comp, quad->texture, quad->x, quad->y, quad->width, quad->height, quad->src_x, quad->src_y );
+        draw_quad( comp, quad->texture, quad->x, quad->y, quad->width, quad->height, quad->src_x, quad->src_y,
+                   quad->src_width, quad->src_height );
     }
 
     if (cursor_visible && comp->cursor.name)
@@ -221,7 +225,8 @@ void compositor_gl_draw( struct compositor_gl *comp, const struct compositor_gl_
         gl->Enable( GL_BLEND );
         gl->BlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
         gl->Uniform1i( comp->window_uniform, 0 );
-        draw_quad( comp, &comp->cursor, cursor_x, cursor_y, POINTER_CURSOR_W, POINTER_CURSOR_H, 0, 0 );
+        draw_quad( comp, &comp->cursor, cursor_x, cursor_y, POINTER_CURSOR_W, POINTER_CURSOR_H, 0, 0,
+                   POINTER_CURSOR_W, POINTER_CURSOR_H );
         gl->Disable( GL_BLEND );
     }
 }

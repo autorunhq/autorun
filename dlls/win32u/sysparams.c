@@ -165,13 +165,23 @@ static INT64 last_query_display_time;
 static UINT64 monitor_update_serial;
 static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef __SWITCH__
+BOOL emulate_modeset = TRUE;
+#else
 BOOL emulate_modeset = FALSE;
+#endif
 BOOL decorated_mode = TRUE;
 UINT64 thunk_lock_callback = 0;
 
 #ifdef __SWITCH__
 /* horizon-wine/source/runtime.c, cleared by switch/wine/no-display-devices.txt */
 extern int wine_nx_display_devices __attribute__((weak));
+/* And how a picture of another display mode fills the screen: 0 whole, with
+ * black bars; 1 filling it, its edges cropped; 2 stretched to it; 3 at its own
+ * size in the middle, as a window stands on a desk. The same number decides
+ * what the screen shows and where a finger's points land, since both are this
+ * mapping. */
+extern int wine_nx_picture_mode __attribute__((weak));
 #endif
 
 #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
@@ -2347,21 +2357,48 @@ static BOOL is_monitor_primary( struct monitor *monitor )
     return !!(source->state_flags & DISPLAY_DEVICE_PRIMARY_DEVICE);
 }
 
-/* display_lock must be held */
-static void source_virt_to_raw_ratio( struct source *source, UINT *num, UINT *den )
+/* display_lock must be held
+ *
+ * How many pixels of the physical screen one pixel of the virtual display
+ * takes, across and down. A program that asked for a display mode of its own
+ * has the whole physical screen to be shown on, and the three answers are the
+ * three things a player can ask for: the whole picture with black bars round
+ * it, the picture filling the screen with its edges cropped, or the picture
+ * stretched to it. */
+static void source_virt_to_raw_ratios( struct source *source, struct ratio *across_out,
+                                       struct ratio *down_out )
 {
-    *num = *den = 1;
+    UINT width = source->current.dmPelsWidth, height = source->current.dmPelsHeight;
+    struct ratio across = {1, 1}, down = {1, 1};
+    BOOL across_is_smaller;
+    int mode = 0;
 
-    if (source->physical.dmPelsWidth * source->current.dmPelsHeight <=
-        source->physical.dmPelsHeight * source->current.dmPelsWidth)
+    if (width && height)
     {
-        *num = source->physical.dmPelsWidth;
-        *den = source->current.dmPelsWidth;
+        across.num = source->physical.dmPelsWidth;
+        across.den = width;
+        down.num = source->physical.dmPelsHeight;
+        down.den = height;
     }
-    else
+    across_is_smaller = (UINT64)across.num * down.den <= (UINT64)down.num * across.den;
+#ifdef __SWITCH__
+    if (&wine_nx_picture_mode) mode = wine_nx_picture_mode;
+#endif
+    switch (mode)
     {
-        *num = source->physical.dmPelsHeight;
-        *den = source->current.dmPelsHeight;
+    case 1: /* the picture fills the screen, its edges cropped */
+        *across_out = *down_out = across_is_smaller ? down : across;
+        break;
+    case 2: /* the picture fills the screen, stretched to it */
+        *across_out = across;
+        *down_out = down;
+        break;
+    case 3: /* the picture at its own size, centred, as a window on a desk */
+        *across_out = *down_out = (struct ratio){1, 1};
+        break;
+    default: /* the whole picture, centred, with black bars round it */
+        *across_out = *down_out = across_is_smaller ? across : down;
+        break;
     }
 }
 
@@ -2399,8 +2436,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
     {
         double points[4] = {rect.left, rect.top, rect.right, rect.bottom}, from[2], to[2];
         DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)}, physical_mode;
-        struct ratio dpi;
-        UINT num, den;
+        struct ratio dpi, scale[2];
 
         source_get_current_settings( source, &current_mode );
         physical_mode = source->physical;
@@ -2409,9 +2445,13 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         if (!dpi_from.num) dpi_from = dpi;
         if (!dpi_to.num) dpi_to = dpi;
 
+        /* One ratio per axis now: the picture may be stretched, which is what
+         * asking for a mode the screen does not share means to some players. */
+        source_virt_to_raw_ratios( source, &scale[0], &scale[1] );
         if (type_from == MDT_RAW_DPI)
         {
-            source_virt_to_raw_ratio( source, &den, &num );
+            int i;
+            for (i = 0; i < 2; i++) scale[i] = (struct ratio){scale[i].den, scale[i].num};
             from[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
             from[1] = physical_mode.dmPosition.y + physical_mode.dmPelsHeight / 2.0;
             to[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
@@ -2419,7 +2459,6 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         }
         else
         {
-            source_virt_to_raw_ratio( source, &num, &den );
             from[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
             from[1] = current_mode.dmPosition.y + current_mode.dmPelsHeight / 2.0;
             to[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
@@ -2430,7 +2469,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         {
             points[i] *= (double)dpi.num * dpi_from.den / (dpi_from.num * dpi.den);
             points[i] -= from[i & 1];
-            points[i] *= (double)num / den;
+            points[i] *= scale[i & 1].den ? (double)scale[i & 1].num / scale[i & 1].den : 1.0;
             points[i] += to[i & 1];
             points[i] *= (double)dpi_to.num * dpi.den / (dpi.num * dpi_to.den);
             points[i] = roundf( points[i] );
@@ -4631,6 +4670,26 @@ LONG WINAPI NtUserChangeDisplaySettings( UNICODE_STRING *devname, DEVMODEW *devm
     if (ret) ERR( "Changing %s display settings returned %d.\n", debugstr_us(devname), ret );
     return ret;
 }
+
+#ifdef __SWITCH__
+LONG wine_nx_fit_screen( UINT width, UINT height )
+{
+    DEVMODEW mode = {.dmSize = sizeof(DEVMODEW)};
+    struct source *source;
+    LONG ret;
+
+    if (!(source = find_source( NULL ))) return DISP_CHANGE_BADPARAM;
+    source_get_current_settings( source, &mode );
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
+    mode.dmPosition.x = 0;
+    mode.dmPosition.y = 0;
+    ret = apply_display_settings( source, &mode, NULL, CDS_FULLSCREEN, NULL );
+    source_release( source );
+    return ret;
+}
+#endif
 
 static BOOL source_enum_display_settings( const struct source *source, UINT index, DEVMODEW *devmode, UINT flags )
 {

@@ -52,6 +52,12 @@ void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, 
 /* Show the layer's top-left width by height pixels with their corner at x, y on
  * the screen; a width or height of 0 hides it. */
 void wine_nx_layer_place( struct wine_nx_layer *layer, int x, int y, int width, int height );
+/* The same, saying which part of the layer is the picture: its first
+ * source_width by source_height pixels fill the width by height rectangle on
+ * the screen. A window's surface is a padded allocation; the picture is the
+ * client inside it. */
+void wine_nx_layer_place_scaled( struct wine_nx_layer *layer, int x, int y, int source_width,
+                                 int source_height, int width, int height );
 /* The stacking order, topmost first. Layers left out go below all of these. */
 void wine_nx_compositor_restack( struct wine_nx_layer **layers, int count );
 

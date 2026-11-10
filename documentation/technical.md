@@ -74,19 +74,81 @@ runtime; the full package now ships the Mesa 26 one.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
+  A program that asks for a display mode smaller than the screen (a 640x480
+  game on the 1280x720 panel) makes Wine's desktop that size, and the screen
+  then shows that desktop's own pixels from the top left, one for one -- the
+  compositor and the framebuffer both copy a window's surface where the
+  window's own pixels say (`wine_nx_surface_flush` in `winnx_drv.c`), so a
+  finger at 640,360 is at 640,360 in the program. `nxdrv_screen_map_get()`
+  says exactly that and cuts the point to the picture's edge; it is also where
+  the fit (`map_rect_virt_to_raw()` in `sysparams.c`, a single ratio about the
+  centre, 640x480 landing at 160,0 960x720) belongs once the picture is scaled
+  up to the screen, which it is not yet.
+  Everything -- the pointer, the clip, every window rect -- is in the desktop's
+  own pixels, so `NtUserSetCursorPos`, `NtUserGetCursorPos`,
+  `clip_fullscreen_window` and `NtUserClipCursor` hand the server the desktop's
+  numbers unchanged (`input.c`). Converting them to the screen's made the clip
+  of a fullscreen program 160..1120 across, which clamped the pointer at 160
+  in a 640 wide desktop and made the left of the picture unreachable.
+- **Controls panel.** `-` and `A` together put up what the controller sends,
+  over the program: `source/osk.c` draws it as a second view of its own
+  surface, so the compositor and the three ways a frame reaches the screen
+  copy it the same way -- each presenter asks the surface which view is up
+  (`wine_nx_osk_frame`, or both of `wine_nx_osk_visible` and
+  `wine_nx_osk_map_visible` in the OpenGL one), rather than asking for the
+  keyboard -- and `source/runtime.c` builds its rows from the profile in
+  effect (`input_profile.c`), which is the program's controller in the
+  controller mode and the keys and mouse actions in the keyboard mode.
+- **Tasks panel.** `-` and `Y` together show what the program is running:
+  every thread the runtime has registered, the core it is on and the share of
+  a core it took, then the memory, what the card is reading and the frames
+  drawn. The rows are the ones the `[THREADS]` line is made of
+  (`wine_nx_tasks_snapshot` in `source/thread_profile.c`), the runtime adds the
+  rest and builds them again every second the panel is up, and `source/osk.c`
+  draws them as the third view of its surface -- one picture, three views: the
+  keyboard, the controls and the tasks, never two at once.
 - **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
-  that sends virtual keys one at a time, with scan codes, through the display
-  driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text field
-  taking focus). Horizon's keyboard applet only returns a finished string, so
-  fields a game draws itself could not be edited. Its picture is copied into
+  that sends what a physical keyboard sends, with scan codes, through the
+  display driver (Minus + B, or `NtUserShowSoftwareKeyboard` / a text
+  field taking focus). A key is down while it is held, by a finger or by the
+  button that presses it, so Shift can be held with one finger while another
+  types and two fingers hold two keys; the runtime hands it every finger that
+  is down, not only the first. A held key repeats the way a held key does
+  (another down goes out, the key never goes up between), Caps sends
+  `VK_CAPITAL` and lets the system keep the lock, and Shift let go at once
+  stays down for the next key (sticky keys), which is what a selection worked
+  with one button needs. Closing it lets go of every key that is down, and
+  fingers that were down when it opened press nothing until they lift.
+  Horizon's keyboard applet only returns a finished string, so fields a game
+  draws itself could not be edited. Its picture is copied into
   the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
   into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
   the compositor's top layer; the controller is its while it is up.
-- **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
-  launch the NRO through a forwarder made with "32-bit, no alias", which the
-  launcher can install itself and which also raises the memory limit to 2 GiB.
-  AMD64 programs use the main 39-bit application forwarder. The same NRO
-  selects the execution path from the program's PE header.
+- **Keyboard without a message loop.** A program that polls its keyboard once
+  a frame and never pumps its own messages -- a game during its intro video --
+  is told nothing by messages, however they are delivered. The DirectInput
+  keyboard device therefore reads the system's key state as it polls
+  (`keyboard_sync_hardware_state()` in `dlls/dinput/keyboard.c`), and that
+  state is where hardware input lands the moment the server takes it, whether
+  or not a window of the program is there to be told. Keys the message queue
+  did report are already in the device's state, so none arrives twice. A
+  low-level keyboard hook -- the one a DirectInput device of the older
+  interface installs -- stops the message, never the key: the desktop's key
+  state is written when the input reaches the server, before the hook is
+  asked, as Windows has it, so a game polling that state sees a key its own
+  hook swallowed.
+- **Memory.** Fixed-base games such as NFSU2 need an address space that is one
+  four-gigabyte region from zero, with no alias region above it: the "32-bit,
+  no alias" width the NPDM's address-space bits select. Autorun makes that
+  forwarder itself (`Settings -> System -> Make a 32-bit forwarder`, or the
+  second choice in Quick setup), and starts a PE32 image linked for a fixed
+  address from it without the Atmosphere patch; a 64-bit image is refused
+  there. The width is part of the title id (`forwarder_hash_space()`), so both
+  forwarders can be installed at once: the 39-bit one keeps the id
+  `0548EABB35576000` the low-window patch is written for, and the 32-bit one is
+  a second entry on the home menu. AMD64 programs use the 39-bit one, whose
+  patch places guest memory below 4 GiB. The same NRO selects the execution
+  path from the program's PE header.
   Wine reserves the program's low address space early, keeps its allocations
   clear of the memory Horizon hands to libnx, and leaves 32-bit programs'
   Vulkan memory in the driver's own mappings.
@@ -198,8 +260,13 @@ Requirements:
   tests. It is devkitA64 with a newer libnx, mesa-switch (Mesa 26: OpenGL and
   NVK Vulkan), LSFG-VK's Horizon port and libusbhsfs with UASP in portlibs,
   each from a pinned revision.
-- LLVM-MinGW 20260505 in `horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal`,
-  and bison (Homebrew's), for Wine's PE modules.
+- LLVM-MinGW 20260505 in `horizon-wine/toolchains/`, which `build.sh` fetches
+  for the machine it runs on (`llvm-mingw-20260505-ucrt-ubuntu-22.04-x86_64` on
+  the GitHub runner), and bison, for Wine's PE modules.
+
+The build runs on Linux: `.github/workflows/build.yml` runs `build.sh` on an
+ubuntu-24.04 runner and keeps the card archive as the run's artifact. There is
+no llvm-mingw download for other machines, so nothing else builds it.
 
 Autorun builds the runtime; the Windows modules it runs are the DLL
 repository's, [autorun-horizon-dlls](https://github.com/autorunhq/autorun-horizon-dlls),
@@ -214,7 +281,7 @@ the part of Windows each file belongs to. No Autorun package carries any of it.
 ```sh
 docker run --rm -v "$PWD:/work" -w /work -e DEVKITPRO=/opt/devkitpro-release "$(cat horizon-wine/switch-dev.txt)" \
     sh horizon-wine/build-boot-bundle.sh         # Atmosphere 1.11.2 and HOC boot payloads, once
-WINE_NX_LLVM_MINGW="$PWD/horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal" \
+WINE_NX_LLVM_MINGW="$PWD/horizon-wine/toolchains/llvm-mingw-20260505-ucrt-ubuntu-22.04-x86_64" \
 WINE_NX_FEX=1 WINE_NX_DXVK=1 WINE_NX_VKD3D=1 \
     sh horizon-wine/build-amd64-components.sh    # the AMD64 NRO, and the build-wine-amd64-pe tree
 horizon-dlls/tools/build-dlls.py                  # the DLL repository: what changed since its manifest
@@ -293,8 +360,9 @@ changes, and fails if the pinned text moves.
   the DirectShow and DMO DLLs, which lay out their own filter data. The
   program waits in `run-next.txt` and starts when the runtime starts again; the
   mark is `registry/components-1.done`, so a reset registry runs it again.
-- A 32-bit address space leaves a program about 2 GiB of addresses and caps the
-  whole process at 2 GiB of memory.
+- Under the 32-bit forwarder the program has one four-gigabyte region from
+  zero and nothing else: a fixed-address Win32 image starts in it, and a 64-bit
+  one does not.
 - AMD64 programs require the 39-bit application forwarder and remain
   experimental.
 - One program at a time; one controller.

@@ -7397,15 +7397,65 @@ static int horizon_server_handle_set_process_winstation( struct horizon_server_c
     return horizon_server_write_status( connection->reply_fd, status );
 }
 
+struct horizon_monitor_info
+{
+    struct horizon_rectangle raw;
+    struct horizon_rectangle virt;
+    unsigned int flags;
+    unsigned short dpi_num, dpi_den;
+    unsigned short raw_dpi_num, raw_dpi_den;
+};
+
+#define HORIZON_MAX_MONITORS 8
+
+static struct horizon_monitor_info horizon_monitors[HORIZON_MAX_MONITORS];
+static unsigned int horizon_monitor_count;
+
+static void horizon_server_map_point_raw_to_virt_locked( int *x, int *y )
+{
+    const struct horizon_monitor_info *monitor = NULL;
+    int width_from, height_from, width_to, height_to;
+    unsigned int i;
+
+    for (i = 0; i < horizon_monitor_count && !monitor; i++)
+    {
+        const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+        if (*x >= raw->left && *x < raw->right && *y >= raw->top && *y < raw->bottom) monitor = &horizon_monitors[i];
+    }
+    if (!monitor && horizon_monitor_count) monitor = &horizon_monitors[0];
+    if (!monitor) return;
+    width_from = monitor->raw.right - monitor->raw.left;
+    height_from = monitor->raw.bottom - monitor->raw.top;
+    width_to = monitor->virt.right - monitor->virt.left;
+    height_to = monitor->virt.bottom - monitor->virt.top;
+    if (width_from <= 0 || height_from <= 0) return;
+
+    *x = *x * 2 - (monitor->raw.left * 2 + width_from);
+    *x = (*x * width_to * 2 + width_from) / (width_from * 2);
+    *x = (*x + monitor->virt.left * 2 + width_to) / 2;
+
+    *y = *y * 2 - (monitor->raw.top * 2 + height_from);
+    *y = (*y * height_to * 2 + height_from) / (height_from * 2);
+    *y = (*y + monitor->virt.top * 2 + height_to) / 2;
+}
+
 static int horizon_server_handle_set_winstation_monitors( struct horizon_server_connection *connection,
-                                                          const unsigned char *message )
+                                                          const unsigned char *message,
+                                                          const void *data, unsigned int data_size )
 {
     const struct horizon_set_winstation_monitors_request *request = (const void *)message;
     struct horizon_set_winstation_monitors_reply reply;
     struct horizon_server_object *winstation;
+    unsigned int count = data_size / sizeof(struct horizon_monitor_info);
 
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (count > HORIZON_MAX_MONITORS) count = HORIZON_MAX_MONITORS;
+    if (data && count)
+    {
+        memcpy( horizon_monitors, data, count * sizeof(struct horizon_monitor_info) );
+        horizon_monitor_count = count;
+    }
     if (!(winstation = horizon_server_find_handle_object_locked( horizon_process_winstation,
                                                                  HORIZON_SERVER_OBJECT_WINSTATION )))
         reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
@@ -8950,6 +9000,7 @@ static struct horizon_user_window *horizon_server_shallow_window_from_point_lock
 {
     struct horizon_user_window *window;
 
+    horizon_server_map_point_raw_to_virt_locked( &x, &y );
     for (window = horizon_windows; window; window = window->next)
     {
         struct horizon_rectangle rect, client;
@@ -9725,6 +9776,23 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
             desktop->cursor.clip.left = desktop->cursor.clip.top = 0;
             desktop->cursor.clip.right = 1280;
             desktop->cursor.clip.bottom = 720;
+        }
+        if ((request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
+            desktop->cursor.clip.left < desktop->cursor.clip.right &&
+            desktop->cursor.clip.top < desktop->cursor.clip.bottom)
+        {
+            int x = desktop->cursor.x, y = desktop->cursor.y;
+
+            if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
+            if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
+            if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+            if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
+            if (x != desktop->cursor.x || y != desktop->cursor.y)
+            {
+                desktop->cursor.x = x;
+                desktop->cursor.y = y;
+                desktop->cursor.last_change = horizon_server_input_time();
+            }
         }
         reply.new_x = desktop->cursor.x;
         reply.new_y = desktop->cursor.y;
@@ -17126,7 +17194,8 @@ static void *horizon_server_thread( void *param )
             status = horizon_server_handle_close_handle( connection, message );
             break;
         case HORIZON_REQ_SET_WINSTATION_MONITORS:
-            status = horizon_server_handle_set_winstation_monitors( connection, message );
+            status = horizon_server_handle_set_winstation_monitors( connection, message, request_data,
+                                                                    header->request_size );
             break;
         case HORIZON_REQ_GET_PROCESS_WINSTATION:
             status = horizon_server_handle_get_process_winstation( connection );
@@ -20577,7 +20646,79 @@ static Result check_thread_local_reservations( u64 *conflict )
 
 extern Result __real_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core );
 
-Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+#define HORIZON_THREAD_WAIT_NS        20000000000ull
+#define HORIZON_THREAD_WAIT_SLOW_NS   100000000ull
+#define HORIZON_THREAD_WAIT_NOTE_NS   5000000000ull
+#define HORIZON_THREAD_WAIT_STEP_NS   2000000ll
+#define HORIZON_THREAD_WAIT_SLOW_STEP 20000000ll
+
+int horizon_pthread_ended( pthread_t thread )
+{
+    return R_SUCCEEDED( svcWaitSynchronizationSingle( *(Handle *)thread, 0 ) );
+}
+
+static unsigned int horizon_zombie_reap_ended( struct horizon_zombie_list *list )
+{
+    struct horizon_zombie **link, *node, *ended = NULL;
+    unsigned int joined = 0;
+
+    pthread_mutex_lock( &list->lock );
+    for (link = &list->head; (node = *link);)
+    {
+        if (!horizon_pthread_ended( node->thread ))
+        {
+            link = &node->next;
+            continue;
+        }
+        *link = node->next;
+        node->next = ended;
+        ended = node;
+    }
+    pthread_mutex_unlock( &list->lock );
+    for (; (node = ended); joined++)
+    {
+        ended = node->next;
+        pthread_join( node->thread, NULL );
+        free( node );
+    }
+    if (!joined) return 0;
+    pthread_mutex_lock( &list->lock );
+    list->pending -= joined;
+    list->reaped += joined;
+    pthread_mutex_unlock( &list->lock );
+    return joined;
+}
+
+static unsigned int horizon_reap_ended_threads( void )
+{
+    extern unsigned int horizon_join_ended_thread(void);
+
+    return horizon_zombie_reap_ended( &horizon_server_zombies ) + horizon_join_ended_thread();
+}
+
+static int horizon_threads_at_limit( void )
+{
+    s64 used = 0, limit = 0;
+    u64 resource = 0;
+    Result rc;
+
+    if (R_FAILED( svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 ) ) || !resource) return 0;
+    rc = svcGetResourceLimitCurrentValue( &used, resource, LimitableResource_Threads );
+    if (R_SUCCEEDED(rc)) rc = svcGetResourceLimitLimitValue( &limit, resource, LimitableResource_Threads );
+    svcCloseHandle( resource );
+    return R_SUCCEEDED(rc) && limit > 0 && used >= limit;
+}
+
+static int horizon_thread_may_wait( void )
+{
+    extern volatile int wine_nx_quit_requested __attribute__((weak));
+
+    if (&wine_nx_quit_requested && wine_nx_quit_requested) return 0;
+    return __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) > 0;
+}
+
+static Result horizon_create_thread_once( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority,
+                                          s32 core, int may_wait, unsigned int *tls_retries )
 {
     Result rc = 0;
     unsigned int retries = 0;
@@ -20590,6 +20731,11 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         Handle created;
         Result close_rc;
 
+        if (may_wait && horizon_threads_at_limit())
+        {
+            rc = MAKERESULT( Module_Kernel, KernelError_OutOfResource );
+            break;
+        }
         rc = __real_svcCreateThread( &created, entry, arg, stack, priority, core );
         if (R_FAILED(rc)) break;
         rc = check_thread_local_reservations( &conflict );
@@ -20608,6 +20754,37 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         }
     }
     pthread_mutex_unlock( &mapping_mutex );
+    *tls_retries += retries;
+    return rc;
+}
+
+Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+{
+    unsigned long long waited_from = 0, noted = 0, now;
+    unsigned int retries = 0;
+    Result rc;
+
+    for (;;)
+    {
+        int may_wait = horizon_thread_may_wait();
+        char message[96];
+
+        rc = horizon_create_thread_once( handle, entry, arg, stack, priority, core, may_wait, &retries );
+        if (rc != MAKERESULT( Module_Kernel, KernelError_OutOfResource ) || !may_wait) break;
+        if (horizon_reap_ended_threads()) continue;
+        now = armTicksToNs( armGetSystemTick() );
+        if (!waited_from) waited_from = noted = now;
+        else if (now - waited_from >= HORIZON_THREAD_WAIT_NS) break;
+        if (now - noted >= HORIZON_THREAD_WAIT_NOTE_NS)
+        {
+            snprintf( message, sizeof(message), "[THREAD] limit reached; still waiting for a place after %llu s",
+                      (now - waited_from) / 1000000000ull );
+            wine_nx_runtime_trace( message );
+            noted = now;
+        }
+        svcSleepThread( now - waited_from < HORIZON_THREAD_WAIT_SLOW_NS ? HORIZON_THREAD_WAIT_STEP_NS
+                                                                       : HORIZON_THREAD_WAIT_SLOW_STEP );
+    }
     if (R_FAILED(rc))
     {
         u64 resource = 0;

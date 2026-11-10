@@ -189,6 +189,10 @@ struct launcher_settings
     int four_cores;
     int lazy_file_views;  /* views of files read from the card on demand */
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
+    /* A display mode of the program's own: -1 the shared setting, 0 the whole
+     * picture with black bars, 1 filling the screen with its edges cropped,
+     * 2 stretched to it, 3 at its own size in the middle. */
+    int picture_mode;
     enum launcher_d3d_renderer d3d;
     enum dxvk_source dxvk_source;
     char vkd3d_version[32];
@@ -411,6 +415,14 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         if (!strcasecmp( value, "framebuffer" )) settings->framebuffer = 1;
         else if (!strcasecmp( value, "compositor" )) settings->framebuffer = 0;
     }
+    settings->picture_mode = -1;
+    if (launcher_kv_get( kv, "picture", value, sizeof(value) ))
+    {
+        if (!strcasecmp( value, "whole" )) settings->picture_mode = 0;
+        else if (!strcasecmp( value, "edges" )) settings->picture_mode = 1;
+        else if (!strcasecmp( value, "stretched" )) settings->picture_mode = 2;
+        else if (!strcasecmp( value, "own-size" )) settings->picture_mode = 3;
+    }
     if (!launcher_kv_get( kv, "d3d", value, sizeof(value) ) &&
         !launcher_kv_get( kv, "d3d9", value, sizeof(value) )) value[0] = 0;
     settings->d3d = !strcasecmp( value, "wine" ) ? LAUNCHER_D3D_WINE :
@@ -480,7 +492,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
         settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
         settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
-        settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT) return 0;
+        settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT ||
+        settings->picture_mode < -1 || settings->picture_mode > 3) return 0;
     return launcher_kv_set( kv, "title", settings->title[0] ? settings->title : NULL ) &&
            launcher_kv_set( kv, "hidden", settings->hidden ? "1" : NULL ) &&
            launcher_kv_set( kv, "verbose", states[settings->verbose + 1] ) &&
@@ -491,6 +504,10 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
+           launcher_kv_set( kv, "picture", settings->picture_mode < 0 ? NULL :
+                                      settings->picture_mode == 1 ? "edges" :
+                                      settings->picture_mode == 2 ? "stretched" :
+                                      settings->picture_mode == 3 ? "own-size" : "whole" ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&
            launcher_kv_set( kv, "d3d", settings->d3d == LAUNCHER_D3D_WINE ? "wine" :
                             settings->d3d == LAUNCHER_D3D_DXVK_VKD3D ? "dxvk+vkd3d" : NULL ) &&

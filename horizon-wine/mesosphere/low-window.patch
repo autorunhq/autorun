@@ -143,3 +143,21 @@ index 8ba4fac..1828d04 100644
                          break;
                      case svc::CreateProcessParameterFlag_AddressSpace64Bit42:
                          aslr_start = svc::AddressMap42Start;
+diff --git a/libraries/libmesosphere/source/kern_k_resource_limit.cpp b/libraries/libmesosphere/source/kern_k_resource_limit.cpp
+index 6ed10a7..b752e6a 100644
+--- a/libraries/libmesosphere/source/kern_k_resource_limit.cpp
++++ b/libraries/libmesosphere/source/kern_k_resource_limit.cpp
+@@ -105,6 +105,13 @@ namespace ams::kern {
+         KScopedLightLock lk(m_lock);
+         R_UNLESS(m_current_values[which] <= value, svc::ResultInvalidState());
+ 
++        /* Autorun: applications get 192 threads instead of 96 (retail boost value).
++         * From alonsohinojosa379-creator/autorun's Mesosphere patch; Vampire: The
++         * Masquerade - Bloodlines asks for 96 and then cannot start a thread. */
++        if (which == ams::svc::LimitableResource_ThreadCountMax && value == 0x60) {
++            value = 0xC0;
++        }
++
+         m_limit_values[which] = value;
+         m_peak_values[which]  = m_current_values[which];
+ 
