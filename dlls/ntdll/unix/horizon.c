@@ -9777,6 +9777,23 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
             desktop->cursor.clip.right = 1280;
             desktop->cursor.clip.bottom = 720;
         }
+        if ((request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
+            desktop->cursor.clip.left < desktop->cursor.clip.right &&
+            desktop->cursor.clip.top < desktop->cursor.clip.bottom)
+        {
+            int x = desktop->cursor.x, y = desktop->cursor.y;
+
+            if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
+            if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
+            if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+            if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
+            if (x != desktop->cursor.x || y != desktop->cursor.y)
+            {
+                desktop->cursor.x = x;
+                desktop->cursor.y = y;
+                desktop->cursor.last_change = horizon_server_input_time();
+            }
+        }
         reply.new_x = desktop->cursor.x;
         reply.new_y = desktop->cursor.y;
         reply.new_clip = desktop->cursor.clip;

@@ -1036,6 +1036,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
     int controls_were_open = 0, tasks_were_open = 0, finger_down = 0;
     static int osk_combo;
+    static int touch_press;          /* a finger is pressing, across frames */
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
 
@@ -1242,7 +1243,48 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         else mouse_was_connected = 0;
     }
 
-    if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    /* Two fingers scroll the picture under them instead of pressing: a notch of
+     * the wheel every 40 pixels they travel, as a wheel does, so a list or a map
+     * in a game moves without a keyboard. A gesture is what it began as: fingers
+     * added to a press keep pressing, and a scroll that began with two fingers
+     * clicks nothing, so a tap cannot become a drag or the other way round. The
+     * first finger is the one that presses. */
+    {
+        static int scrolling, scroll_y, scroll_left;
+        int two = 0, y = 0;
+
+        if (!on_keyboard && !controls_open && !tasks_open &&
+            hidGetTouchScreenStates( &touch, 1 ) && touch.count >= 2)
+        {
+            two = 1;
+            y = ((int)touch.touches[0].y + (int)touch.touches[1].y) / 2;
+        }
+        if (two && !touch_press)
+        {
+            if (!scrolling)
+            {
+                log_line( "[TOUCH] two fingers scroll" );
+                scrolling = 1;
+                scroll_left = 0;
+            }
+            else scroll_left += y - scroll_y;
+            scroll_y = y;
+            while (scroll_left >= 40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + 120 ) );
+                scroll_left -= 40;
+            }
+            while (scroll_left <= -40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] - 120 ) );
+                scroll_left += 40;
+            }
+        }
+        else scrolling = 0;
+    }
+
+    if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) &&
+        touch.count > 0 && (touch.count == 1 || touch_press))
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
 
@@ -1278,6 +1320,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
                       on_keyboard ? "keyboard" : controls_open ? "controls panel" : "task list" );
         }
     }
+    touch_press = touch.count > 0 && (touch.count == 1 || touch_press);
     if (emulate)
     {
         struct input_output mapped;

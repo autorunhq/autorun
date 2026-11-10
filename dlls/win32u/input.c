@@ -2990,6 +2990,22 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
         /* As above: the server clips in the desktop's pixels. */
     }
 
+#ifdef __SWITCH__
+    /* A cursor that is not clipped stays on the program's screen, as on
+     * Windows. When the screen follows a smaller game window it is shown in
+     * the middle of the console's, with black bars round it; left unclipped,
+     * the server let the arrow onto them, outside the program's screen, where
+     * a click landed on the window's frame and a right click opened its system
+     * menu. A finger in a bar therefore clicks the nearest edge of the
+     * picture, which is where the driver already measures it. From
+     * carafe-nx/carafe's patch 0100. */
+    if (!rect)
+    {
+        new_rect = map_rect_virt_to_raw( get_virtual_screen_rect( dpi, MDT_DEFAULT ), dpi );
+        rect = &new_rect;
+    }
+#endif
+
     SERVER_START_REQ( set_cursor )
     {
         if (rect)
