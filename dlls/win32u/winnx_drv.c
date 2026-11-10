@@ -853,18 +853,72 @@ struct nxdrv_screen_map
     int pane_w, pane_h;        /* and how many screen pixels it takes */
 };
 
-/* Where a rectangle of the desktop is on the screen: Wine's own fit, the
- * same rectangle its raw and virtual coordinates are related by, and the one
- * the server clips the cursor to. A 640x480 desktop is 960x720 at 160,0 of
- * the 1280x720 screen -- the picture keeps its proportions, scaled to the
- * height, with bars either side. */
-BOOL wine_nx_picture_rect( RECT rect, RECT *pane )
+/* The rectangle a picture of this size takes on the screen: its proportions
+ * kept, as large as fits, centred. A 640x480 picture is 960x720 at 160,0 of
+ * the 1280x720 panel, with bars either side. */
+static BOOL nxdrv_fit_rect( int w, int h, RECT *pane )
 {
-    RECT mapped = map_rect_virt_to_raw( rect, (struct ratio){0} );
+    int pane_w, pane_h;
 
-    if (mapped.right - mapped.left <= 0 || mapped.bottom - mapped.top <= 0) return FALSE;
-    *pane = mapped;
+    if (w <= 0 || h <= 0) return FALSE;
+    if ((long long)h * WINE_NX_SCREEN_W >= (long long)w * WINE_NX_SCREEN_H)
+    {
+        /* Taller than the screen, so the height is what fills it. */
+        pane_h = WINE_NX_SCREEN_H;
+        pane_w = (int)(((long long)w * WINE_NX_SCREEN_H + h / 2) / h);
+    }
+    else
+    {
+        pane_w = WINE_NX_SCREEN_W;
+        pane_h = (int)(((long long)h * WINE_NX_SCREEN_W + w / 2) / w);
+    }
+    if (pane_w < 1) pane_w = 1;
+    if (pane_h < 1) pane_h = 1;
+    pane->left = (WINE_NX_SCREEN_W - pane_w) / 2;
+    pane->top = (WINE_NX_SCREEN_H - pane_h) / 2;
+    pane->right = pane->left + pane_w;
+    pane->bottom = pane->top + pane_h;
     return TRUE;
+}
+
+/* The display mode a program asked for and did not get: the desktop is virtual,
+ * so the change is answered "done" and changes nothing, and this is what the
+ * picture the program draws is fitted to. Zero when it asked for nothing. */
+static int nxdrv_mode_w, nxdrv_mode_h;
+
+/* Told as the program asks, before the desktop decides to leave itself alone.
+ * The picture is fitted by it, so a game in a mode of its own is 960x720 at
+ * 160,0 on the 1280x720 panel rather than a small window in the corner. */
+LONG wine_nx_drv_ChangeDisplaySettings( DEVMODEW *devmode, LPCWSTR devname, HWND hwnd, DWORD flags, void *lparam )
+{
+    int w = devmode ? (int)devmode->dmPelsWidth : 0;
+    int h = devmode ? (int)devmode->dmPelsHeight : 0;
+
+    if (!(flags & CDS_TEST) && (w != nxdrv_mode_w || h != nxdrv_mode_h))
+    {
+        char line[176];
+        RECT pane;
+
+        nxdrv_mode_w = w;
+        nxdrv_mode_h = h;
+        if (w > 0 && h > 0 && nxdrv_fit_rect( w, h, &pane ))
+            snprintf( line, sizeof(line), "[NXDRV] the program asks for %dx%d; its picture is drawn at %d,%d %dx%d of the %dx%d screen",
+                      w, h, (int)pane.left, (int)pane.top, (int)(pane.right - pane.left),
+                      (int)(pane.bottom - pane.top), WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        else
+            snprintf( line, sizeof(line), "[NXDRV] the program asks for no mode of its own; the picture is the screen" );
+        nxdrv_say( line );
+    }
+    return DISP_CHANGE_SUCCESSFUL;
+}
+
+/* Where a picture of this size goes on the screen: the fit, when it is the
+ * picture the program asked for a mode for. Anything else -- a window that is
+ * not the whole of the program's own picture -- is where it stands. */
+BOOL wine_nx_picture_rect( SIZE size, RECT *pane )
+{
+    if (size.cx != nxdrv_mode_w || size.cy != nxdrv_mode_h) return FALSE;
+    return nxdrv_fit_rect( size.cx, size.cy, pane );
 }
 
 /* The screen a picture is drawn on, for the OpenGL path, which has to place
@@ -916,15 +970,17 @@ BOOL wine_nx_make_virtual_desktop( void )
 /* The desktop, and where the screen shows its pixels. */
 static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
 {
-    int w = NtUserGetSystemMetrics( SM_CXSCREEN ), h = NtUserGetSystemMetrics( SM_CYSCREEN );
+    int screen_w = NtUserGetSystemMetrics( SM_CXSCREEN ), screen_h = NtUserGetSystemMetrics( SM_CYSCREEN );
+    int w = nxdrv_mode_w > 0 ? nxdrv_mode_w : screen_w;
+    int h = nxdrv_mode_h > 0 ? nxdrv_mode_h : screen_h;
     RECT pane;
 
     if (w <= 0 || h <= 0) return FALSE;
     map->desktop_w = w;
     map->desktop_h = h;
-    if (!wine_nx_picture_rect( (RECT){0, 0, w, h}, &pane ))
+    if (!nxdrv_fit_rect( w, h, &pane ))
     {
-        /* Nothing to ask: the picture is the desktop, where it stands. */
+        /* Nothing to ask: the picture is the screen, where it stands. */
         pane.left = pane.top = 0;
         pane.right = w;
         pane.bottom = h;
@@ -984,11 +1040,23 @@ static void nxdrv_desktop_point_to_screen( const struct nxdrv_screen_map *map, i
     *y = map->pane_y + nxdrv_scale( *y, map->desktop_h, map->pane_h );
 }
 
-/* A window's rectangle in the desktop's pixels, as the screen shows it. */
+/* A window's rectangle in the picture's pixels, as the screen shows it. The
+ * program's own window -- the one of the size it asked a mode for -- goes into
+ * the fit, wherever the desktop has put it; everything else is scaled with the
+ * picture around it. */
 static void nxdrv_layer_rect( int *x, int *y, int *w, int *h )
 {
     struct nxdrv_screen_map map;
+    RECT pane;
 
+    if (nxdrv_mode_w > 0 && *w == nxdrv_mode_w && *h == nxdrv_mode_h && nxdrv_fit_rect( *w, *h, &pane ))
+    {
+        *x = pane.left;
+        *y = pane.top;
+        *w = pane.right - pane.left;
+        *h = pane.bottom - pane.top;
+        return;
+    }
     if (!nxdrv_screen_map_get( &map )) return;
     nxdrv_desktop_point_to_screen( &map, x, y );
     *w = nxdrv_scale( *w, map.desktop_w, map.pane_w );
