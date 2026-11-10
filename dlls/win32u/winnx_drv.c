@@ -891,7 +891,7 @@ static void nxdrv_desktop_point_to_screen( const struct nxdrv_screen_map *map, i
 /* Said once, and with the first few points: the two numbers the mapping is
  * made of, so a click that lands beside the finger is a number to read. */
 static void nxdrv_trace_pointer_target( const struct nxdrv_screen_map *map, int screen_x, int screen_y,
-                                        int x, int y, DWORD flags )
+                                        int x, int y, DWORD flags, BOOL finger )
 {
     static unsigned int count;
     char line[208];
@@ -905,7 +905,12 @@ static void nxdrv_trace_pointer_target( const struct nxdrv_screen_map *map, int 
                   map->pane_x, map->pane_y, map->pane_w, map->pane_h );
         nxdrv_say( line );
     }
-    snprintf( line, sizeof(line), "[MOUSE] the finger's %d,%d (flags %x) is %d,%d to the program",
+    /* Said apart: a finger on the screen and the stick come through the same
+     * mapping, and a log that calls both a finger says nothing about whether
+     * the touchscreen was used at all. */
+    snprintf( line, sizeof(line), finger
+              ? "[MOUSE] the finger's %d,%d (flags %x) is %d,%d to the program"
+              : "[MOUSE] the stick's %d,%d (flags %x) is %d,%d to the program",
               screen_x, screen_y, (int)flags, x, y );
     nxdrv_say( line );
 }
@@ -1086,9 +1091,13 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
         if (map_scaled) nxdrv_screen_point_to_desktop( &map, &desktop_x, &desktop_y );
         if (placed || first || (stepped && map_scaled))
         {
-            DWORD flags = (placed || (stepped && map_scaled) ? MOUSEEVENTF_MOVE : 0) | first;
+            /* The point goes with every click, even a tap that moved nothing:
+             * without MOUSEEVENTF_MOVE the server takes the button's place
+             * from where the cursor already was, not from the point said. */
+            DWORD flags = (placed || (stepped && map_scaled) || (first & MOUSEEVENTF_LEFTDOWN)
+                           ? MOUSEEVENTF_MOVE : 0) | first;
 
-            nxdrv_trace_pointer_target( &map, x, y, desktop_x, desktop_y, flags );
+            nxdrv_trace_pointer_target( &map, x, y, desktop_x, desktop_y, flags, placed );
             wine_nx_send_mouse( desktop_x, desktop_y, flags );
             if (stepped && map_scaled) stepped = FALSE;  /* it went with the point */
         }
