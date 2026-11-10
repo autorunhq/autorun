@@ -890,7 +890,9 @@ int wine_nx_screen_height( void )
 
 BOOL wine_nx_make_virtual_desktop( void )
 {
-    static WCHAR name[] = L"Default";
+    /* No wide literal here: the unix side is built where wchar_t is not the
+     * Windows WCHAR, and this file never had one before. */
+    static WCHAR name[] = {'D', 'e', 'f', 'a', 'u', 'l', 't', 0};
     UNICODE_STRING string = { sizeof(name) - sizeof(WCHAR), sizeof(name), name };
     OBJECT_ATTRIBUTES attr = {0};
     DEVMODEW devmode = {0};
