@@ -898,7 +898,7 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
 
 #ifdef __SWITCH__
     {
-        extern BOOL wine_nx_picture_rect( SIZE, RECT * );
+        extern BOOL wine_nx_picture_rect( RECT, RECT * );
         extern int wine_nx_screen_width( void );
         extern int wine_nx_screen_height( void );
         extern void wine_nx_say( const char * );
@@ -912,7 +912,8 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
          * (`wine_nx_picture_rect()`), not into the screen's corner: the
          * picture is scaled to the height and the rest of the screen is black.
          * A window that is not the whole desktop is drawn where it stands. */
-        if (wine_nx_picture_rect( src, &pane ))
+        if (src.cx == desktop_w && src.cy == desktop_h &&
+            wine_nx_picture_rect( (RECT){0, 0, desktop_w, desktop_h}, &pane ))
         {
             dst.cx = pane.right - pane.left;
             dst.cy = pane.bottom - pane.top;

@@ -1057,7 +1057,6 @@ static void load_display_driver(void)
             extern void wine_nx_drv_WindowPosChanged( HWND, HWND, HWND, UINT,
                                                       const struct window_rects *, struct window_surface * );
             extern BOOL wine_nx_drv_ProcessEvents( DWORD );
-            extern LONG wine_nx_drv_ChangeDisplaySettings( DEVMODEW *, LPCWSTR, HWND, DWORD, void * );
             extern BOOL wine_nx_drv_GetCursorPos( POINT * );
             extern BOOL wine_nx_drv_SetCursorPos( INT, INT );
             extern void wine_nx_drv_SetCursor( HWND, HCURSOR );
@@ -1073,7 +1072,6 @@ static void load_display_driver(void)
             null_user_driver.pCreateWindowSurface  = wine_nx_drv_CreateWindowSurface;
             null_user_driver.pWindowPosChanged     = wine_nx_drv_WindowPosChanged;
             null_user_driver.pProcessEvents        = wine_nx_drv_ProcessEvents;
-            null_user_driver.pChangeDisplaySettings = wine_nx_drv_ChangeDisplaySettings;
             null_user_driver.pGetCursorPos         = wine_nx_drv_GetCursorPos;
             null_user_driver.pSetCursorPos         = wine_nx_drv_SetCursorPos;
             null_user_driver.pSetCursor            = wine_nx_drv_SetCursor;

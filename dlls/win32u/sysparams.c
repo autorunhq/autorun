@@ -4573,16 +4573,8 @@ static LONG apply_display_settings( struct source *target, const DEVMODEW *devmo
 
     place_all_displays( displays, primary_name );
 
-    /* Use the default implementation in virtual desktop mode -- the change is
-     * answered "done" and nothing moves. The driver is told anyway: the Switch
-     * one fits the picture the program draws to the screen by the mode asked
-     * for, the desktop being one size and the program's picture another. */
-    if (is_virtual_desktop() || emulate_modeset)
-    {
-        if (user_driver->pChangeDisplaySettings)
-            user_driver->pChangeDisplaySettings( displays, primary_name, hwnd, flags, lparam );
-        ret = DISP_CHANGE_SUCCESSFUL;
-    }
+    /* use the default implementation in virtual desktop mode */
+    if (is_virtual_desktop() || emulate_modeset) ret = DISP_CHANGE_SUCCESSFUL;
     else ret = user_driver->pChangeDisplaySettings( displays, primary_name, hwnd, flags, lparam );
 
     if (ret == DISP_CHANGE_SUCCESSFUL)
