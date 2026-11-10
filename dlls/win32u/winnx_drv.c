@@ -371,6 +371,7 @@ static struct wine_nx_surface_entry *wine_nx_find_surface_entry( HWND hwnd, BOOL
  * surface. A surface forgets its layer here before destroying it, so a layer
  * found under the entries mutex stays alive while the mutex is held. */
 static void nxdrv_layer_rect( int *x, int *y, int *w, int *h );
+static void nxdrv_layer_rect_of( const RECT *desktop, int *x, int *y, int *w, int *h );
 
 static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, const POINT *origin,
                                        const RECT *present )
@@ -385,10 +386,22 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     struct ratio dpi = get_dpi_for_window( hwnd ), raw_dpi;
     RECT client;
 
-    /* Where the picture goes on the screen: its desktop rectangle, fitted with
-     * the desktop when a program asked for a mode of its own. Asked before the
-     * mutex below, which is not worth holding the display devices for. */
-    nxdrv_layer_rect( &x, &y, &w, &h );
+    /* Where the picture goes on the screen: the client's own rectangle, fitted
+     * with the desktop when a program asked for a mode of its own. The layer's
+     * allocation is not the picture -- it can be as large as the whole screen's
+     * worth, a mode change giving the surface the new window's padding -- so
+     * fitting that would both oversize the picture and put it out of step with
+     * the rectangle a finger's points are measured by. Asked before the mutex
+     * below, which is not worth holding the display devices for. */
+    if (get_client_rect( hwnd, &client, dpi ))
+    {
+        map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
+        if (client.right > client.left && client.bottom > client.top)
+            nxdrv_layer_rect_of( &client, &x, &y, &w, &h );
+        else
+            nxdrv_layer_rect( &x, &y, &w, &h );
+    }
+    else nxdrv_layer_rect( &x, &y, &w, &h );
 
     /* How much of the surface is the picture. The layer is the window's whole
      * surface allocation -- the client followed by padding, and after a display
@@ -987,6 +1000,16 @@ static void nxdrv_layer_rect( int *x, int *y, int *w, int *h )
     nxdrv_desktop_point_to_screen( &map, x, y );
     *w = nxdrv_scale( *w, map.desktop_w, map.pane_w );
     *h = nxdrv_scale( *h, map.desktop_h, map.pane_h );
+}
+
+/* A rectangle of a window's pixels, as the screen shows it. */
+static void nxdrv_layer_rect_of( const RECT *desktop, int *x, int *y, int *w, int *h )
+{
+    *x = desktop->left;
+    *y = desktop->top;
+    *w = desktop->right - desktop->left;
+    *h = desktop->bottom - desktop->top;
+    nxdrv_layer_rect( x, y, w, h );
 }
 
 /* Said once, and with the first few points: the two numbers the mapping is

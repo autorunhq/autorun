@@ -20,6 +20,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 
 #include "ntstatus.h"
@@ -230,6 +231,169 @@ static PFN_glFramebufferTexture2D p_glFramebufferTexture2D;
 static PFN_glBlitFramebuffer p_glBlitFramebuffer;
 static PFN_glIsFramebuffer p_glIsFramebuffer;
 static PFN_glBindBuffer p_glBindBuffer;
+static PFN_glCheckFramebufferStatus p_glCheckFramebufferStatus;
+
+/* What taking a picture out of a framebuffer and putting it back elsewhere
+ * needs, asked for once. Both the keyboard's own blit and the picture's
+ * use it, so it lives here rather than in either of them. */
+static BOOL nx_load_blit_procs(void)
+{
+    if (p_glBlitFramebuffer) return TRUE;
+    p_glGenFramebuffers = (void *)funcs->p_eglGetProcAddress( "glGenFramebuffers" );
+    p_glBindFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" );
+    p_glFramebufferTexture2D = (void *)funcs->p_eglGetProcAddress( "glFramebufferTexture2D" );
+    p_glIsFramebuffer = (void *)funcs->p_eglGetProcAddress( "glIsFramebuffer" );
+    p_glBindBuffer = (void *)funcs->p_eglGetProcAddress( "glBindBuffer" );
+    p_glBlitFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBlitFramebuffer" );
+    p_glCheckFramebufferStatus = (void *)funcs->p_eglGetProcAddress( "glCheckFramebufferStatus" );
+    if (!p_glGenFramebuffers || !p_glBindFramebuffer || !p_glFramebufferTexture2D || !p_glIsFramebuffer ||
+        !p_glBindBuffer || !p_glBlitFramebuffer)
+    {
+        p_glBlitFramebuffer = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* The picture of a program that asked for another display mode is as big as
+ * the window it asked for, while the screen it is shown on is the console's.
+ * Where the picture belongs is what the driver fits the window into, and it is
+ * the same rectangle the points a finger sends are measured by: win32u gives
+ * that in map_rect_virt_to_raw(). The window's own framebuffer knows nothing
+ * of it, so what the program draws arrives in the corner at its own size.
+ * Take it out of the framebuffer, make the screen black, and put it back
+ * scaled into its place: then the picture is where the points are. */
+struct nx_picture
+{
+    EGLContext context;
+    GLuint texture, framebuffer;
+    int width, height;
+};
+static struct nx_picture nx_pictures[8];
+static unsigned int nx_picture_next;
+
+static void nx_picture_present( struct opengl_drawable *base )
+{
+    EGLint screen_width = 0, screen_height = 0;
+    GLint source_width, source_height, read_fb, draw_fb, texture;
+    GLboolean scissor, srgb;
+    struct nx_picture *picture = NULL;
+    struct ratio dpi;
+    EGLContext context;
+    RECT client, place;
+    unsigned int i;
+    int left, top, right, bottom;
+
+    if (!base->client || !nx_load_blit_procs()) return;
+    if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &screen_width ) ||
+        !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &screen_height ) ||
+        screen_width <= 0 || screen_height <= 0 || !(context = funcs->p_eglGetCurrentContext()))
+        return;
+    source_width = base->virtual_size.cx;
+    source_height = base->virtual_size.cy;
+    if (source_width <= 0 || source_height <= 0) return;
+
+    /* The window in the screen's own points, which is where the picture is
+     * looked for: the whole screen for a program that fills it. */
+    dpi = get_dpi_for_window( base->client->hwnd );
+    if (!get_client_rect( base->client->hwnd, &client, dpi )) return;
+    map_window_points( base->client->hwnd, 0, (POINT *)&client, 2, dpi );
+    place = map_rect_virt_to_raw( client, dpi );
+    left = min( max( place.left, 0 ), screen_width );
+    right = min( max( place.right, 0 ), screen_width );
+    top = min( max( place.top, 0 ), screen_height );
+    bottom = min( max( place.bottom, 0 ), screen_height );
+    if (right - left <= 0 || bottom - top <= 0) return;
+    if (!left && !top && right == screen_width && bottom == screen_height) return;
+
+    {
+        static int told[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+        int now[8] = {source_width, source_height, left, top, right - left, bottom - top,
+                      (int)screen_width, (int)screen_height};
+        char line[144];
+
+        if (memcmp( now, told, sizeof(now) ))
+        {
+            memcpy( told, now, sizeof(now) );
+            snprintf( line, sizeof(line), "[NXGL] the %dx%d picture is drawn at %d,%d %dx%d of the %dx%d screen",
+                      source_width, source_height, left, top, right - left, bottom - top,
+                      (int)screen_width, (int)screen_height );
+            nx_log( "%s", line );
+        }
+    }
+
+    for (i = 0; i < ARRAY_SIZE(nx_pictures) && !picture; i++)
+        if (nx_pictures[i].context == context) picture = &nx_pictures[i];
+    if (!picture)
+    {
+        /* A context not seen before: its names are its own, so the slot's old
+         * ones are only forgotten, never deleted from here. */
+        picture = &nx_pictures[nx_picture_next++ % ARRAY_SIZE(nx_pictures)];
+        memset( picture, 0, sizeof(*picture) );
+        picture->context = context;
+    }
+
+    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &read_fb );
+    funcs->p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb );
+    funcs->p_glGetIntegerv( GL_TEXTURE_BINDING_2D, &texture );
+    scissor = funcs->p_glIsEnabled( GL_SCISSOR_TEST );
+    srgb = funcs->p_glIsEnabled( GL_FRAMEBUFFER_SRGB );
+
+    if (!picture->texture || !funcs->p_glIsTexture( picture->texture ) ||
+        !p_glIsFramebuffer( picture->framebuffer ))
+    {
+        funcs->p_glGenTextures( 1, &picture->texture );
+        p_glGenFramebuffers( 1, &picture->framebuffer );
+        picture->width = picture->height = 0;
+    }
+    funcs->p_glBindTexture( GL_TEXTURE_2D, picture->texture );
+    if (picture->width != source_width || picture->height != source_height)
+    {
+        funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, source_width, source_height, 0, GL_RGBA,
+                               GL_UNSIGNED_BYTE, NULL );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+        picture->width = source_width;
+        picture->height = source_height;
+    }
+    if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+    if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
+
+    /* Out of the window's framebuffer at its own size: no scaling, no flip. */
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, picture->framebuffer );
+    p_glFramebufferTexture2D( GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, picture->texture, 0 );
+    if (p_glCheckFramebufferStatus && p_glCheckFramebufferStatus( GL_DRAW_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        static BOOL told;
+        char line[128];
+
+        if (!told++)
+        {
+            snprintf( line, sizeof(line), "[NXGL] the picture cannot be moved: the screen's framebuffer is not usable" );
+            nx_log( "%s", line );
+        }
+        goto done;
+    }
+    p_glBlitFramebuffer( 0, 0, source_width, source_height, 0, 0, source_width, source_height,
+                         GL_COLOR_BUFFER_BIT, GL_NEAREST );
+
+    /* The screen black, then the picture scaled into its place. The screen's
+     * first row is its top and the window's is its bottom. */
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, picture->framebuffer );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+    funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+    funcs->p_glClear( GL_COLOR_BUFFER_BIT );
+    p_glBlitFramebuffer( 0, 0, source_width, source_height, left, screen_height - bottom, right,
+                         screen_height - top, GL_COLOR_BUFFER_BIT, GL_LINEAR );
+
+done:
+    p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, draw_fb );
+    funcs->p_glBindTexture( GL_TEXTURE_2D, texture );
+    if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+    if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+}
 
 static void nx_osk_draw( struct opengl_drawable *base )
 {
@@ -246,19 +410,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
         !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
         !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
         return;
-    if (!p_glBlitFramebuffer)
-    {
-        p_glGenFramebuffers = (void *)funcs->p_eglGetProcAddress( "glGenFramebuffers" );
-        p_glBindFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" );
-        p_glFramebufferTexture2D = (void *)funcs->p_eglGetProcAddress( "glFramebufferTexture2D" );
-        p_glIsFramebuffer = (void *)funcs->p_eglGetProcAddress( "glIsFramebuffer" );
-        p_glBindBuffer = (void *)funcs->p_eglGetProcAddress( "glBindBuffer" );
-        if (!p_glGenFramebuffers || !p_glBindFramebuffer || !p_glFramebufferTexture2D || !p_glIsFramebuffer ||
-            !p_glBindBuffer)
-            return;
-        p_glBlitFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBlitFramebuffer" );
-        if (!p_glBlitFramebuffer) return;
-    }
+    if (!nx_load_blit_procs()) return;
     for (i = 0; i < ARRAY_SIZE(nx_osk_gl) && !osk; i++)
         if (nx_osk_gl[i].context == context) osk = &nx_osk_gl[i];
     if (!osk)
@@ -342,6 +494,7 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
     if (!impl_from_opengl_drawable( base )->screen)
         return funcs->p_eglSwapBuffers( egl->display, base->surface );
+    nx_picture_present( base );
     nx_osk_draw( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
