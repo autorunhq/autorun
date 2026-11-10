@@ -6,6 +6,13 @@ That is Autorun's generation-2 main forwarder for
 sdmc:/switch/wine/wine-nx-runtime.nro, without additional arguments.
 Other titles keep their normal layout.
 
+The same patch raises an application's thread limit from 96 to 192
+(KResourceLimit::SetLimitValue, ThreadCountMax), and
+ShouldIncreaseThreadResourceLimit() returns true, so a program that spends its
+96 threads and then asks for one more -- Vampire: The Masquerade - Bloodlines
+is one, its log says "threads=96/96" -- is not refused. Without this kernel
+every application, Autorun or not, is held to 96.
+
 The 39-bit forwarder, native heap, stacks and TLS stay above 4 GiB. The low
 window starts at 0x00200000 and is reserved for Win32 guest mappings. A
 game's normal 2 GiB/non-LAA or 4 GiB/LAA pointer limit still applies.
