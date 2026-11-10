@@ -177,6 +177,28 @@ static void nx_drawable_flush( struct opengl_drawable *base, UINT flags )
 
     if (impl_from_opengl_drawable( base )->screen && (flags & GL_FLUSH_INTERVAL))
         funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
+    if (flags & GL_FLUSH_UPDATED)
+    {
+        /* Said again whenever the window's size changes, which is what a
+         * program asking for another display mode does: whether the picture
+         * then fills the monitor or keeps its own size is the one thing the
+         * points a finger sends are measured by. */
+        static int told_cx, told_cy, told_mx, told_my;
+        char line[128];
+
+        if (base->virtual_size.cx != told_cx || base->virtual_size.cy != told_cy ||
+            base->monitor_size.cx != told_mx || base->monitor_size.cy != told_my)
+        {
+            told_cx = base->virtual_size.cx;
+            told_cy = base->virtual_size.cy;
+            told_mx = base->monitor_size.cx;
+            told_my = base->monitor_size.cy;
+            snprintf( line, sizeof(line), "[NXGL] the window's surface is %dx%d, the monitor %dx%d%s",
+                      told_cx, told_cy, told_mx, told_my,
+                      impl_from_opengl_drawable( base )->screen ? "" : ", offscreen" );
+            nx_log( "%s", line );
+        }
+    }
 }
 
 /* Frames presented and the time inside eglSwapBuffers, for [PROGRESS]. */

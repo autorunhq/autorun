@@ -2908,12 +2908,13 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
     SERVER_START_REQ( set_cursor )
     {
         req->flags = SET_CURSOR_CLIP | SET_CURSOR_FSCLIP;
-        /* The clip is the screen as the program lays it out, not as the driver
-         * paints it: the server keeps the pointer and every window rect in the
-         * desktop's own pixels, and clamps one against the other. A desktop
-         * shown scaled up (a 640x480 program on the 1280x720 panel) would
-         * otherwise be clipped to the picture's own pixels, 160..1120 across,
-         * and the left of the picture could not be pointed at at all. */
+        /* The clip is the desktop as the program lays it out: the server keeps
+         * the pointer and every window rect in those pixels and clamps one
+         * against the other, so a clip said in the screen's pixels instead
+         * cuts the pointer off short of the desktop's edge. Wine's raw/virtual
+         * ratio would put a 640x480 desktop's clip at 160..1120 across (the
+         * fit it makes for a picture scaled up to the 1280x720 panel), and the
+         * left of that desktop could not be pointed at at all. */
         req->clip  = wine_server_rectangle( monitor_info.rcMonitor );
         ret = !wine_server_call( req );
     }

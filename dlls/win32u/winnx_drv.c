@@ -371,10 +371,8 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     static RECT last_present;
     static unsigned int told;
 
-    /* Where a window's picture goes, whenever that changes: a program that
-     * asked for a smaller display mode shows its picture through Wine's own
-     * raw mapping, and the driver's points have to use the same one. Said
-     * before the mutex, since the log is not worth holding it for. */
+    /* Where a window's picture goes, whenever that changes. Said before the
+     * mutex, since the log is not worth holding it for. */
     if (told < 24 && (origin->x != last_origin.x || origin->y != last_origin.y ||
                       present->right != last_present.right || present->bottom != last_present.bottom))
     {
@@ -384,8 +382,9 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         last_present = *present;
         told++;
         snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the %dx%d screen",
-                  (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y, (int)present->right,
-                  (int)present->bottom, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+                  (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
+                  (int)(present->right - present->left), (int)(present->bottom - present->top),
+                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
         nxdrv_say( line );
     }
 
@@ -396,7 +395,10 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         if (entry->layer && entry->layer != layer) wine_nx_layer_place( entry->layer, 0, 0, 0, 0 );
         entry->layer = layer;
     }
-    wine_nx_layer_place( layer, origin->x, origin->y, present->right, present->bottom );
+    /* The rect's sides are coordinates, not sizes: a window away from the
+     * corner would get a layer as large again as its own offset. */
+    wine_nx_layer_place( layer, origin->x, origin->y,
+                         present->right - present->left, present->bottom - present->top );
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
@@ -749,6 +751,7 @@ static void wine_nx_send_key( const struct input_key_event *event )
     input.ki.wScan = scan & 0xff;
     if ((scan & 0xff00) == 0xe000 || event->code == INPUT_NUMPAD_ENTER) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    nxdrv_note_key_sent( input.ki.wVk, !event->down );
     nxdrv_trace_key_target();
 }
 
@@ -1045,7 +1048,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     unsigned int buttons, pressed, released;
     DWORD first, second;
     BOOL moved, keys, placed, stepped, map_scaled;
-    struct nxdrv_screen_map map;
+    struct nxdrv_screen_map map = {0};
     int x, y, dx, dy;
 
     (void)mask;
@@ -1074,12 +1077,13 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
     /* A program that asked for a display mode smaller than the screen has a
-     * desktop of that size, and the screen shows its picture scaled up. Then
-     * every point has to be said in the program's own pixels, and the stick
-     * points rather than pushes: whole screen pixels are not whole desktop
-     * pixels, so a step of one is sometimes less than one. */
+     * desktop of that size. While the screen shows that picture as it is, one
+     * for one, a screen point is the program's point and a step of one is a
+     * step of one; once the picture is scaled up, every point has to be said
+     * in the program's own pixels and the stick points rather than pushes,
+     * whole screen pixels no longer being whole desktop pixels. */
     map_scaled = nxdrv_screen_map_get( &map ) &&
-                 (map.desktop_w != WINE_NX_SCREEN_W || map.desktop_h != WINE_NX_SCREEN_H);
+                 (map.pane_w != map.desktop_w || map.pane_h != map.desktop_h);
     {
         int desktop_x = x, desktop_y = y;
 
@@ -1185,6 +1189,21 @@ BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND hwnd )
 }
 
 /**********************************************************************
+ *           wine_nx_drv_GetCursorPos
+ *
+ * Where the pointer is, for GetCursorPos().  win32u asks the driver only when
+ * the server's answer is older than 100 ms, and the null driver's answer is
+ * "no": a program that draws its own cursor read a position that stopped
+ * moving, or a call that failed, whenever the pointer stood still.  The
+ * desktop's own state is the answer, in the desktop's pixels, which is what
+ * win32u hands the program unchanged.
+ */
+BOOL wine_nx_drv_GetCursorPos( POINT *pos )
+{
+    return wine_nx_cursor_pos( pos );
+}
+
+/**********************************************************************
  *           wine_nx_drv_SetCursorPos
  */
 BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
@@ -1194,8 +1213,7 @@ BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
     /* The point comes in the desktop's own pixels, which is what the server
      * keeps; the arrow lives on the screen, so it goes where the desktop shows
      * that point. The same when the two are alike. */
-    if (nxdrv_screen_map_get( &map ) &&
-        (map.desktop_w != WINE_NX_SCREEN_W || map.desktop_h != WINE_NX_SCREEN_H))
+    if (nxdrv_screen_map_get( &map ) && (map.pane_w != map.desktop_w || map.pane_h != map.desktop_h))
         nxdrv_desktop_point_to_screen( &map, &x, &y );
     wine_nx_pointer_set_pos( x, y );
     return TRUE;
