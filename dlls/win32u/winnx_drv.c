@@ -97,6 +97,43 @@ static volatile unsigned int wine_nx_input_pumps;   /* calls to ProcessEvents */
  * as OpenTTD loading its sprites. This thread has no TEB, so it must not call
  * into Wine: the first server call dereferences a NULL TEB. It only polls the
  * controller and presents; ProcessEvents sends the input from a Wine thread. */
+/* Key messages a program has taken out of its queue since the runtime started
+ * (message.c counts them): what says whether a key the floating keyboard sent
+ * was ever read, or is still sitting in a queue nobody looks at, or never
+ * reached one because a low-level hook stopped it. */
+unsigned int wine_nx_keys_taken;
+
+static BYTE pending_key_vk;
+static BOOL pending_key_up;
+static unsigned int pending_key_time, pending_key_taken;
+
+/* Notes what was just sent, to be answered for in the input thread. Called
+ * where the key is sent, which may be any thread. */
+static void nxdrv_note_key_sent( BYTE vk, BOOL up )
+{
+    pending_key_vk = vk;
+    pending_key_up = up;
+    pending_key_time = NtGetTickCount();
+    pending_key_taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+}
+
+/* Four hundred milliseconds later: did the program take it? Said once, and
+ * only when it did not: a film that ignores the keyboard says here whether the
+ * keyboard was ever offered to it. */
+static void nxdrv_check_key_taken(void)
+{
+    char line[112];
+
+    if (!pending_key_time || NtGetTickCount() - pending_key_time < 400) return;
+    if (__atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED ) == pending_key_taken)
+    {
+        snprintf( line, sizeof(line), "[KEY] the program did not take key %02x %s from its queue in 400 ms",
+                  pending_key_vk, pending_key_up ? "up" : "down" );
+        nxdrv_say( line );
+    }
+    pending_key_time = 0;
+}
+
 static void *wine_nx_input_thread( void *arg )
 {
     unsigned int pumps = __atomic_load_n( &wine_nx_input_pumps, __ATOMIC_RELAXED );
@@ -111,6 +148,7 @@ static void *wine_nx_input_thread( void *arg )
 
         wine_nx_pointer_poll( &x, &y, &buttons );
         wine_nx_fb_present();
+        nxdrv_check_key_taken();
         /* Nothing is delivered to a program that is not taking its messages:
          * it waits in the queue, or the server drops it. Say so when five
          * seconds pass without a call to ProcessEvents, with the pad as it is
@@ -808,6 +846,7 @@ static void wine_nx_send_vk( HKL layout, BYTE vk, BOOL up )
                       up ? "up" : "down" );
         wine_nx_runtime_trace( line );
     }
+    nxdrv_note_key_sent( vk, up );
     nxdrv_trace_key_target();
 }
 
