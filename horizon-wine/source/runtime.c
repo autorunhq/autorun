@@ -993,7 +993,10 @@ void wine_nx_keyboard_open( void )
     wine_nx_osk_show( 1, __atomic_load_n( &osk_last_held, __ATOMIC_RELAXED ) );
 }
 
+/* The buttons the display driver reads from the pointer: 0x1 left, 0x2 right,
+ * 0x4 middle, as dlls/win32u/winnx_drv.c has them. */
 #define WINE_NX_POINTER_LEFT  0x1
+#define WINE_NX_POINTER_RIGHT 0x2
 
 static struct input_key_edges runtime_key_edges;
 static uint64_t runtime_keys_delivered[INPUT_KEY_WORDS];
@@ -1011,7 +1014,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     const struct input_profile *profile = &wine_nx_input_profile;
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
-    int controls_were_open = 0, tasks_were_open = 0;
+    int controls_were_open = 0, tasks_were_open = 0, finger_down = 0;
     static int osk_combo;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
@@ -1020,6 +1023,8 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     if (!wine_nx_pointer_ready)
     {
         hidInitializeTouchScreen();
+        /* A mouse in the dock points too; it says so when it is plugged in. */
+        hidInitializeMouse();
         padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
         padInitializeDefault( &wine_nx_pad );
         wine_nx_pointer_tick = armGetSystemTick();
@@ -1179,10 +1184,49 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
+    /* A mouse plugged into the dock points as a finger does -- it says where it
+     * is rather than how far it went -- and turns the wheel the controller's
+     * stick does. Nothing above the program may take it, as with a finger.
+     * From YangStark/autorun's "Switch USB mouse" branch, which taught the
+     * runtime to read libnx's mouse; the position is absolute there. */
+    {
+        static int mouse_was_connected;
+        static u64 last_mouse_sample;
+        HidMouseState mouse;
+
+        if (hidGetMouseStates( &mouse, 1 ) && (mouse.attributes & HidMouseAttribute_IsConnected))
+        {
+            if (!mouse_was_connected) log_line( "[NXINPUT] physical mouse connected" );
+            mouse_was_connected = 1;
+            if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
+            {
+                int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+
+                pointer_cursor_place( &wine_nx_pointer, mouse.x, mouse.y );
+                moved |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                wine_nx_pointer_placed |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                if (mouse.buttons & HidMouseButton_Left) output.buttons |= WINE_NX_POINTER_LEFT;
+                if (mouse.buttons & HidMouseButton_Right) output.buttons |= WINE_NX_POINTER_RIGHT;
+            }
+            /* The wheel is a difference, so read each HID sample once: the input
+             * thread and ProcessEvents can both read the same one. */
+            if (mouse.sampling_number != last_mouse_sample)
+            {
+                last_mouse_sample = mouse.sampling_number;
+                if (mouse.wheel_delta_y)
+                    runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + (int)mouse.wheel_delta_y * 120 ) );
+                if (mouse.wheel_delta_x)
+                    runtime_wheel[1] = max( -7680, min( 7680, runtime_wheel[1] + (int)mouse.wheel_delta_x * 120 ) );
+            }
+        }
+        else mouse_was_connected = 0;
+    }
+
     if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
 
+        finger_down = 1;
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
         wine_nx_pointer_placed |= moved;
