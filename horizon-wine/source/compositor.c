@@ -435,8 +435,13 @@ static void *presenter_thread( void *arg )
             quads[i].texture = &layer->texture;
             quads[i].x = layer->x;
             quads[i].y = layer->y;
-            quads[i].width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
-            quads[i].height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
+            /* Where it goes, and how much of its own pixels that shows: the
+             * screen may be asked to stretch a whole desktop up, and the
+             * window may still be larger than the allocation it draws in. */
+            quads[i].width = layer->visible_width;
+            quads[i].height = layer->visible_height;
+            quads[i].src_width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
+            quads[i].src_height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
             quads[i].src_x = quads[i].src_y = 0;
         }
         if (count < capacity && wine_nx_osk_frame( comp.width, comp.height, &osk ))
@@ -477,6 +482,8 @@ static void *presenter_thread( void *arg )
                 quads[count].y = osk.y;
                 quads[count].width = keyboard->width;
                 quads[count].height = keyboard->height;
+                quads[count].src_width = keyboard->width;
+                quads[count].src_height = keyboard->height;
                 quads[count].src_x = quads[count].src_y = 0;
                 drawn[count++] = keyboard;
             }

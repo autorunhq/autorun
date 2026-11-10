@@ -370,6 +370,8 @@ static struct wine_nx_surface_entry *wine_nx_find_surface_entry( HWND hwnd, BOOL
 /* With the compositor, each window shows through the layer of its current
  * surface. A surface forgets its layer here before destroying it, so a layer
  * found under the entries mutex stays alive while the mutex is held. */
+static void nxdrv_layer_rect( int *x, int *y, int *w, int *h );
+
 static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, const POINT *origin,
                                        const RECT *present )
 {
@@ -377,6 +379,13 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     static POINT last_origin;
     static RECT last_present;
     static unsigned int told;
+    int x = origin->x, y = origin->y;
+    int w = present->right - present->left, h = present->bottom - present->top;
+
+    /* Where the picture goes on the screen: its desktop rectangle, fitted with
+     * the desktop when a program asked for a mode of its own. Asked before the
+     * mutex below, which is not worth holding the display devices for. */
+    nxdrv_layer_rect( &x, &y, &w, &h );
 
     /* Where a window's picture goes, whenever that changes. Said before the
      * mutex, since the log is not worth holding it for. */
@@ -388,10 +397,17 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         last_origin = *origin;
         last_present = *present;
         told++;
-        snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the %dx%d screen",
-                  (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
-                  (int)(present->right - present->left), (int)(present->bottom - present->top),
-                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        if (x != origin->x || y != origin->y || w != present->right - present->left ||
+            h != present->bottom - present->top)
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the desktop, drawn at %d,%d %dx%d of the %dx%d screen",
+                      (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top),
+                      x, y, w, h, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        else
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the %dx%d screen",
+                      (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top),
+                      WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
         nxdrv_say( line );
     }
 
@@ -404,8 +420,7 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     }
     /* The rect's sides are coordinates, not sizes: a window away from the
      * corner would get a layer as large again as its own offset. */
-    wine_nx_layer_place( layer, origin->x, origin->y,
-                         present->right - present->left, present->bottom - present->top );
+    wine_nx_layer_place( layer, x, y, w, h );
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
@@ -933,6 +948,17 @@ static void nxdrv_desktop_point_to_screen( const struct nxdrv_screen_map *map, i
 {
     *x = map->pane_x + nxdrv_scale( *x, map->desktop_w, map->pane_w );
     *y = map->pane_y + nxdrv_scale( *y, map->desktop_h, map->pane_h );
+}
+
+/* A window's rectangle in the desktop's pixels, as the screen shows it. */
+static void nxdrv_layer_rect( int *x, int *y, int *w, int *h )
+{
+    struct nxdrv_screen_map map;
+
+    if (!nxdrv_screen_map_get( &map )) return;
+    nxdrv_desktop_point_to_screen( &map, x, y );
+    *w = nxdrv_scale( *w, map.desktop_w, map.pane_w );
+    *h = nxdrv_scale( *h, map.desktop_h, map.pane_h );
 }
 
 /* Said once, and with the first few points: the two numbers the mapping is
