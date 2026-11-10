@@ -367,6 +367,27 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
                                        const RECT *present )
 {
     struct wine_nx_surface_entry *entry;
+    static POINT last_origin;
+    static RECT last_present;
+    static unsigned int told;
+
+    /* Where a window's picture goes, whenever that changes: a program that
+     * asked for a smaller display mode shows its picture through Wine's own
+     * raw mapping, and the driver's points have to use the same one. Said
+     * before the mutex, since the log is not worth holding it for. */
+    if (told < 24 && (origin->x != last_origin.x || origin->y != last_origin.y ||
+                      present->right != last_present.right || present->bottom != last_present.bottom))
+    {
+        char line[176];
+
+        last_origin = *origin;
+        last_present = *present;
+        told++;
+        snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the %dx%d screen",
+                  (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y, (int)present->right,
+                  (int)present->bottom, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        nxdrv_say( line );
+    }
 
     pthread_mutex_lock( &wine_nx_surface_entries_mutex );
     if ((entry = find_surface_entry_locked( hwnd, TRUE )))
@@ -376,23 +397,6 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         entry->layer = layer;
     }
     wine_nx_layer_place( layer, origin->x, origin->y, present->right, present->bottom );
-    {
-        /* The first picture the compositor draws and where: a window smaller
-         * than the screen shows there, and a point on the screen means what
-         * the window says only in that part of it. */
-        static int told;
-
-        if (!told)
-        {
-            char line[160];
-
-            told = 1;
-            snprintf( line, sizeof(line), "[NXCOMP] the first picture is drawn at %d,%d %dx%d of %dx%d",
-                      (int)origin->x, (int)origin->y, (int)present->right, (int)present->bottom,
-                      WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
-            nxdrv_say( line );
-        }
-    }
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
