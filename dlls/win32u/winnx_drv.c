@@ -808,49 +808,90 @@ static void wine_nx_send_mouse_motion( int dx, int dy )
     NtUserSendHardwareInput( 0, 0, &input, 0 );
 }
 
-/* The point about to be handed over, and the window it is over. A finger that
- * lands outside the program's window clicks the desktop instead of the
- * program, and a window shown scaled up (a 640x480 game on the 1280x720
- * screen) takes its clicks only in the part of the screen it really covers:
- * the log gives both numbers, so the mapping can be read rather than
- * guessed. Said for the first handful of points. */
-static void nxdrv_trace_pointer_target( int x, int y, DWORD flags )
+/* The screen the panel shows and the desktop the server keeps. A program that
+ * asks for a display mode smaller than the screen (a 640x480 game on the
+ * 1280x720 panel) makes the desktop that size: the picture is then shown on
+ * the whole screen, keeping its shape and centred, with bars where the
+ * shapes differ. A finger points at the screen; the program it clicks at
+ * works in its own desktop. These two say what the one means to the other. */
+struct nxdrv_screen_map
+{
+    int desktop_w, desktop_h;  /* the desktop, in the program's pixels */
+    int pane_x, pane_y;        /* where the desktop's picture starts on the screen */
+    int pane_w, pane_h;        /* and how many screen pixels it takes */
+};
+
+/* Whether the desktop is smaller than the screen and so shown scaled up. */
+static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
+{
+    int w = NtUserGetSystemMetrics( SM_CXSCREEN ), h = NtUserGetSystemMetrics( SM_CYSCREEN );
+    long long pane_w, pane_h;
+
+    if (w <= 0 || h <= 0) return FALSE;
+    map->desktop_w = w;
+    map->desktop_h = h;
+    /* The whole desktop fits the screen, keeping its shape: the shorter side
+     * fills and the longer one takes bars, which are the same either way
+     * round. */
+    if ((long long)w * WINE_NX_SCREEN_H >= (long long)h * WINE_NX_SCREEN_W)
+    {
+        pane_h = WINE_NX_SCREEN_H;
+        pane_w = ((long long)w * WINE_NX_SCREEN_H + h / 2) / h;
+    }
+    else
+    {
+        pane_w = WINE_NX_SCREEN_W;
+        pane_h = ((long long)h * WINE_NX_SCREEN_W + w / 2) / w;
+    }
+    if (pane_w < 1) pane_w = 1;
+    if (pane_h < 1) pane_h = 1;
+    map->pane_w = (int)pane_w;
+    map->pane_h = (int)pane_h;
+    map->pane_x = (WINE_NX_SCREEN_W - map->pane_w) / 2;
+    map->pane_y = (WINE_NX_SCREEN_H - map->pane_h) / 2;
+    return TRUE;
+}
+
+static int nxdrv_scale( int value, int from, int to )
+{
+    long long scaled;
+
+    if (from <= 0) return 0;
+    scaled = ((long long)value * to + (value < 0 ? -from / 2 : from / 2)) / from;
+    return (int)scaled;
+}
+
+/* A point on the screen, as the desktop sees it: inside the desktop, so a
+ * finger in a bar still clicks the nearest edge of the picture rather than
+ * nothing at all. */
+static void nxdrv_screen_point_to_desktop( const struct nxdrv_screen_map *map, int *x, int *y )
+{
+    int dx = nxdrv_scale( *x - map->pane_x, map->pane_w, map->desktop_w );
+    int dy = nxdrv_scale( *y - map->pane_y, map->pane_h, map->desktop_h );
+
+    *x = dx < 0 ? 0 : dx >= map->desktop_w ? map->desktop_w - 1 : dx;
+    *y = dy < 0 ? 0 : dy >= map->desktop_h ? map->desktop_h - 1 : dy;
+}
+
+/* Said once, and with the first few points: the two numbers the mapping is
+ * made of, so a click that lands beside the finger is a number to read. */
+static void nxdrv_trace_pointer_target( const struct nxdrv_screen_map *map, int screen_x, int screen_y,
+                                        int x, int y, DWORD flags )
 {
     static unsigned int count;
     char line[208];
-    HWND hwnd;
-    RECT rect, client;
-    POINT point = { x, y };
-    UINT dpi;
 
-    if (count >= 12) return;
+    if (count >= 8) return;
     if (!count++)
     {
-        /* The screen the arrow is drawn on and the desktop the server holds:
-         * when they differ, a finger's point means something else to the
-         * program than it does on the panel. */
         snprintf( line, sizeof(line),
-                  "[MOUSE] the screen is %dx%d, the desktop is %dx%d; a finger points at the screen in its pixels",
-                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H,
-                  (int)NtUserGetSystemMetrics( SM_CXSCREEN ), (int)NtUserGetSystemMetrics( SM_CYSCREEN ) );
+                  "[MOUSE] the screen is %dx%d, the desktop is %dx%d, its picture at %d,%d %dx%d",
+                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H, map->desktop_w, map->desktop_h,
+                  map->pane_x, map->pane_y, map->pane_w, map->pane_h );
         nxdrv_say( line );
     }
-    hwnd = NtUserWindowFromPoint( x, y );
-    if (!hwnd)
-    {
-        snprintf( line, sizeof(line), "[MOUSE] %d,%d (flags %x) is over no window", x, y, (int)flags );
-        nxdrv_say( line );
-        return;
-    }
-    dpi = NtUserGetDpiForWindow( hwnd );
-    if (!NtUserGetWindowRect( hwnd, &rect, dpi )) SetRectEmpty( &rect );
-    if (!NtUserGetClientRect( hwnd, &client, dpi )) SetRectEmpty( &client );
-    if (!NtUserScreenToClient( hwnd, &point )) point.x = point.y = -1;
-    snprintf( line, sizeof(line),
-              "[MOUSE] %d,%d (flags %x) is over hwnd %x rect %d,%d-%d,%d client %dx%d, at %d,%d of it",
-              x, y, (int)flags, (int)(ULONG_PTR)hwnd, (int)rect.left, (int)rect.top, (int)rect.right,
-              (int)rect.bottom, (int)(client.right - client.left), (int)(client.bottom - client.top),
-              (int)point.x, (int)point.y );
+    snprintf( line, sizeof(line), "[MOUSE] the finger's %d,%d (flags %x) is %d,%d to the program",
+              screen_x, screen_y, (int)flags, x, y );
     nxdrv_say( line );
 }
 
@@ -988,7 +1029,8 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     static unsigned int last_buttons;
     unsigned int buttons, pressed, released;
     DWORD first, second;
-    BOOL moved, keys, placed, stepped;
+    BOOL moved, keys, placed, stepped, map_scaled;
+    struct nxdrv_screen_map map;
     int x, y, dx, dy;
 
     (void)mask;
@@ -1016,15 +1058,28 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     while (key_after && !key_events[key_after - 1].down) key_after--;
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
-    if (placed || first)
+    /* A program that asked for a display mode smaller than the screen has a
+     * desktop of that size, and the screen shows its picture scaled up. Then
+     * every point has to be said in the program's own pixels, and the stick
+     * points rather than pushes: whole screen pixels are not whole desktop
+     * pixels, so a step of one is sometimes less than one. */
+    map_scaled = nxdrv_screen_map_get( &map ) &&
+                 (map.desktop_w != WINE_NX_SCREEN_W || map.desktop_h != WINE_NX_SCREEN_H);
     {
-        DWORD flags = (placed ? MOUSEEVENTF_MOVE : 0) | first;
+        int desktop_x = x, desktop_y = y;
 
-        nxdrv_trace_pointer_target( x, y, flags );
-        wine_nx_send_mouse( x, y, flags );
+        if (map_scaled) nxdrv_screen_point_to_desktop( &map, &desktop_x, &desktop_y );
+        if (placed || first || (stepped && map_scaled))
+        {
+            DWORD flags = (placed || (stepped && map_scaled) ? MOUSEEVENTF_MOVE : 0) | first;
+
+            nxdrv_trace_pointer_target( &map, x, y, desktop_x, desktop_y, flags );
+            wine_nx_send_mouse( desktop_x, desktop_y, flags );
+            if (stepped && map_scaled) stepped = FALSE;  /* it went with the point */
+        }
+        if (stepped) wine_nx_send_mouse_motion( dx, dy );
+        if (second) wine_nx_send_mouse( desktop_x, desktop_y, second );
     }
-    if (stepped) wine_nx_send_mouse_motion( dx, dy );
-    if (second) wine_nx_send_mouse( x, y, second );
     wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
     for (unsigned int i = key_after; i < key_count; i++) wine_nx_send_key( key_events + i );
@@ -1045,10 +1100,10 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 
             if (told++ < 8 && &wine_nx_runtime_trace)
             {
-                char line[128];
+                char line[144];
 
-                snprintf( line, sizeof(line), "[MOUSE] handed over %d,%d, the cursor is at %d,%d",
-                          x, y, pos.x, pos.y );
+                snprintf( line, sizeof(line), "[MOUSE] the cursor is at %d,%d of the screen, the finger at %d,%d",
+                          pos.x, pos.y, x, y );
                 wine_nx_runtime_trace( line );
             }
             if (pos.x != x || pos.y != y)
@@ -1056,7 +1111,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
                 /* Quiet once it is plainly working, loud enough to see that it is. */
                 if (followed++ < 8 && &wine_nx_runtime_trace)
                 {
-                    char line[128];
+                    char line[144];
 
                     snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
                               pos.x, pos.y, dx, dy );
@@ -1108,6 +1163,8 @@ BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND hwnd )
  */
 BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
 {
+    /* The point comes in the screen's own pixels, which is where the arrow
+     * lives: the desktop's shape is what the points going the other way need. */
     wine_nx_pointer_set_pos( x, y );
     return TRUE;
 }

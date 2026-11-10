@@ -74,6 +74,13 @@ runtime; the full package now ships the Mesa 26 one.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
+  A program that asks for a display mode smaller than the screen (a 640x480
+  game on the 1280x720 panel) makes Wine's desktop that size while the screen
+  shows its picture scaled up, keeping its shape and centred; a finger's point
+  is then the screen's and has to be said in the program's own pixels, which is
+  what `winnx_drv.c` does for touches, clicks and the stick alike. Without it a
+  touch mirrored the two axes the wrong way and, past the desktop's edge,
+  clicked nothing at all.
 - **Controls panel.** `-` and `A` together put up what the controller sends,
   over the program: `source/osk.c` draws it as a second view of its own
   surface, so the compositor and the three ways a frame reaches the screen
