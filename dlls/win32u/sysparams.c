@@ -176,6 +176,11 @@ UINT64 thunk_lock_callback = 0;
 #ifdef __SWITCH__
 /* horizon-wine/source/runtime.c, cleared by switch/wine/no-display-devices.txt */
 extern int wine_nx_display_devices __attribute__((weak));
+/* And how a picture of another display mode fills the screen: 0 whole, with
+ * black bars; 1 filling it, its edges cropped; 2 stretched to it. The same
+ * number decides what the screen shows and where a finger's points land,
+ * since both are this mapping. */
+extern int wine_nx_picture_mode __attribute__((weak));
 #endif
 
 #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
@@ -2351,21 +2356,45 @@ static BOOL is_monitor_primary( struct monitor *monitor )
     return !!(source->state_flags & DISPLAY_DEVICE_PRIMARY_DEVICE);
 }
 
-/* display_lock must be held */
-static void source_virt_to_raw_ratio( struct source *source, UINT *num, UINT *den )
+/* display_lock must be held
+ *
+ * How many pixels of the physical screen one pixel of the virtual display
+ * takes, across and down. A program that asked for a display mode of its own
+ * has the whole physical screen to be shown on, and the three answers are the
+ * three things a player can ask for: the whole picture with black bars round
+ * it, the picture filling the screen with its edges cropped, or the picture
+ * stretched to it. */
+static void source_virt_to_raw_ratios( struct source *source, struct ratio *across_out,
+                                       struct ratio *down_out )
 {
-    *num = *den = 1;
+    UINT width = source->current.dmPelsWidth, height = source->current.dmPelsHeight;
+    struct ratio across = {1, 1}, down = {1, 1};
+    BOOL across_is_smaller;
+    int mode = 0;
 
-    if (source->physical.dmPelsWidth * source->current.dmPelsHeight <=
-        source->physical.dmPelsHeight * source->current.dmPelsWidth)
+    if (width && height)
     {
-        *num = source->physical.dmPelsWidth;
-        *den = source->current.dmPelsWidth;
+        across.num = source->physical.dmPelsWidth;
+        across.den = width;
+        down.num = source->physical.dmPelsHeight;
+        down.den = height;
     }
-    else
+    across_is_smaller = (UINT64)across.num * down.den <= (UINT64)down.num * across.den;
+#ifdef __SWITCH__
+    if (&wine_nx_picture_mode) mode = wine_nx_picture_mode;
+#endif
+    switch (mode)
     {
-        *num = source->physical.dmPelsHeight;
-        *den = source->current.dmPelsHeight;
+    case 1: /* the picture fills the screen, its edges cropped */
+        *across_out = *down_out = across_is_smaller ? down : across;
+        break;
+    case 2: /* the picture fills the screen, stretched to it */
+        *across_out = across;
+        *down_out = down;
+        break;
+    default: /* the whole picture, centred, with black bars round it */
+        *across_out = *down_out = across_is_smaller ? across : down;
+        break;
     }
 }
 
@@ -2403,8 +2432,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
     {
         double points[4] = {rect.left, rect.top, rect.right, rect.bottom}, from[2], to[2];
         DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)}, physical_mode;
-        struct ratio dpi;
-        UINT num, den;
+        struct ratio dpi, scale[2];
 
         source_get_current_settings( source, &current_mode );
         physical_mode = source->physical;
@@ -2413,9 +2441,13 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         if (!dpi_from.num) dpi_from = dpi;
         if (!dpi_to.num) dpi_to = dpi;
 
+        /* One ratio per axis now: the picture may be stretched, which is what
+         * asking for a mode the screen does not share means to some players. */
+        source_virt_to_raw_ratios( source, &scale[0], &scale[1] );
         if (type_from == MDT_RAW_DPI)
         {
-            source_virt_to_raw_ratio( source, &den, &num );
+            int i;
+            for (i = 0; i < 2; i++) scale[i] = (struct ratio){scale[i].den, scale[i].num};
             from[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
             from[1] = physical_mode.dmPosition.y + physical_mode.dmPelsHeight / 2.0;
             to[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
@@ -2423,7 +2455,6 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         }
         else
         {
-            source_virt_to_raw_ratio( source, &num, &den );
             from[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
             from[1] = current_mode.dmPosition.y + current_mode.dmPelsHeight / 2.0;
             to[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
@@ -2434,7 +2465,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         {
             points[i] *= (double)dpi.num * dpi_from.den / (dpi_from.num * dpi.den);
             points[i] -= from[i & 1];
-            points[i] *= (double)num / den;
+            points[i] *= scale[i & 1].den ? (double)scale[i & 1].num / scale[i & 1].den : 1.0;
             points[i] += to[i & 1];
             points[i] *= (double)dpi_to.num * dpi.den / (dpi.num * dpi_to.den);
             points[i] = roundf( points[i] );

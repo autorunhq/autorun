@@ -282,7 +282,7 @@ static void nx_picture_present( struct opengl_drawable *base )
     EGLContext context;
     RECT client, place;
     unsigned int i;
-    int left, top, right, bottom;
+    int pane_w, pane_h, left, top, right, bottom, from_x, from_y, to_x, to_y;
 
     if (!base->client || !nx_load_blit_procs()) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &screen_width ) ||
@@ -292,6 +292,12 @@ static void nx_picture_present( struct opengl_drawable *base )
     source_width = base->virtual_size.cx;
     source_height = base->virtual_size.cy;
     if (source_width <= 0 || source_height <= 0) return;
+    /* Only a picture that is the whole desktop: a program in a window of its
+     * own on a desktop it shares is the compositor's business, and the screen
+     * it would be put on is not this framebuffer's to blacken. */
+    if (source_width != NtUserGetSystemMetrics( SM_CXSCREEN ) ||
+        source_height != NtUserGetSystemMetrics( SM_CYSCREEN ))
+        return;
 
     /* The window in the screen's own points, which is where the picture is
      * looked for: the whole screen for a program that fills it. */
@@ -299,18 +305,39 @@ static void nx_picture_present( struct opengl_drawable *base )
     if (!get_client_rect( base->client->hwnd, &client, dpi )) return;
     map_window_points( base->client->hwnd, 0, (POINT *)&client, 2, dpi );
     place = map_rect_virt_to_raw( client, dpi );
+    pane_w = place.right - place.left;
+    pane_h = place.bottom - place.top;
+
+    /* What of the picture the screen shows: all of it when it is placed inside
+     * the screen, the middle of it when it is larger -- a picture filling the
+     * screen has lost its edges to the sides of it. */
     left = min( max( place.left, 0 ), screen_width );
     right = min( max( place.right, 0 ), screen_width );
     top = min( max( place.top, 0 ), screen_height );
     bottom = min( max( place.bottom, 0 ), screen_height );
-    if (right - left <= 0 || bottom - top <= 0) return;
-    if (!left && !top && right == screen_width && bottom == screen_height) return;
+    if (right - left <= 0 || bottom - top <= 0 || pane_w <= 0 || pane_h <= 0) return;
+    if (!left && !top && !place.left && !place.top && right == screen_width && bottom == screen_height &&
+        place.right == screen_width && place.bottom == screen_height &&
+        source_width == pane_w && source_height == pane_h)
+        return;
+
+    /* The same rectangle in the picture's own pixels, so that a picture placed
+     * larger than the screen is cropped rather than squashed into it. */
+    from_x = (int)((INT64)(left - place.left) * source_width / pane_w);
+    to_x = (int)((INT64)(right - place.left) * source_width / pane_w);
+    from_y = (int)((INT64)(top - place.top) * source_height / pane_h);
+    to_y = (int)((INT64)(bottom - place.top) * source_height / pane_h);
+    if (from_x < 0) from_x = 0;
+    if (from_y < 0) from_y = 0;
+    if (to_x > source_width) to_x = source_width;
+    if (to_y > source_height) to_y = source_height;
+    if (to_x - from_x <= 0 || to_y - from_y <= 0) return;
 
     {
         static int told[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
         int now[8] = {source_width, source_height, left, top, right - left, bottom - top,
                       (int)screen_width, (int)screen_height};
-        char line[144];
+        char line[160];
 
         if (memcmp( now, told, sizeof(now) ))
         {
@@ -384,8 +411,9 @@ static void nx_picture_present( struct opengl_drawable *base )
     p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
     funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
     funcs->p_glClear( GL_COLOR_BUFFER_BIT );
-    p_glBlitFramebuffer( 0, 0, source_width, source_height, left, screen_height - bottom, right,
-                         screen_height - top, GL_COLOR_BUFFER_BIT, GL_LINEAR );
+    p_glBlitFramebuffer( from_x, source_height - to_y, to_x, source_height - from_y,
+                         left, screen_height - bottom, right, screen_height - top,
+                         GL_COLOR_BUFFER_BIT, GL_LINEAR );
 
 done:
     p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );

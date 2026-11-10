@@ -3102,7 +3102,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_PICTURE,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
     SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN, SET_MAKE_MAIN_32,
 #ifdef WINE_NX_SWAP_POC
@@ -3305,7 +3305,7 @@ static void settings_menu( struct launcher *l )
             [SET_HIDE_MISSING] = SET_SECTION_LIBRARY,
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
-            [SET_WINDOWS] = SET_SECTION_DEFAULTS,
+            [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_PICTURE] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
@@ -3357,6 +3357,14 @@ static void settings_menu( struct launcher *l )
                   l->options->framebuffer ? "Framebuffer" : "Compositor" );
         rows[SET_WINDOWS].help = "The framebuffer copies window pixels straight to the screen, "
                                  "for when the OpenGL compositor misbehaves.";
+        snprintf( rows[SET_PICTURE].label, sizeof(rows[0].label), "Picture of another mode" );
+        snprintf( rows[SET_PICTURE].value, sizeof(rows[0].value), "%s",
+                  l->options->picture_mode == 1 ? "Edges cropped" :
+                  l->options->picture_mode == 2 ? "Stretched" : "Whole" );
+        rows[SET_PICTURE].help = "A game that asks for a resolution of its own is shown on the console's "
+                                 "1280x720 screen. Whole keeps all of it, with black bars round it; edges "
+                                 "cropped fills the screen and loses the borders; stretched fills it and "
+                                 "distorts. A finger lands on what it sees in every one of them.";
         launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
         for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
 
@@ -3457,6 +3465,9 @@ static void settings_menu( struct launcher *l )
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
         case SET_PROFILE: l->options->profile = !l->options->profile; break;
         case SET_WINDOWS: l->options->framebuffer = !l->options->framebuffer; break;
+        case SET_PICTURE:
+            l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 2 : 1)) % 3;
+            break;
         case SET_DXVK_ON_ADD: l->options->dxvk_on_add = !l->options->dxvk_on_add; break;
         case SET_REOPEN: l->options->reopen_launcher = !l->options->reopen_launcher; break;
         case SET_DLLS:

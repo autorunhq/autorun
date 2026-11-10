@@ -526,6 +526,15 @@ extern int wine_nx_nouveau_skip_clean __attribute__((weak));
  * forced virtual screen, in case that walk of the registry misbehaves. */
 int wine_nx_display_devices = 1;
 
+/* How a program that asked for a display mode of its own fills the console's
+ * screen. Read by win32u's mapping (source_virt_to_raw_ratios in
+ * dlls/win32u/sysparams.c), which is at once what the screen shows and where a
+ * finger's points land: 0 the whole picture with black bars round it, 1 the
+ * picture filling the screen with its edges cropped, 2 stretched to it. The
+ * launcher's "Picture of another mode" setting owns it; picture-mode: "whole",
+ * "edges" or "stretched" in config/settings.json says the same. */
+int wine_nx_picture_mode = 0;
+
 /* Whether the win32u Switch driver opens the on-screen keyboard by itself
  * when an edit-like control gets keyboard focus (dlls/win32u/winnx_drv.c).
  * keyboard-on-text-focus: false in config/settings.json turns that off (an
@@ -4292,6 +4301,17 @@ int main( int argc, char **argv )
     runtime_profile = config_bool( "profiler", 0, "profile.txt", 0 );
     if (!config_bool( "display-devices", 1, "no-display-devices.txt", 1 )) wine_nx_display_devices = 0;
     log_line( "[INIT] display devices %s", wine_nx_display_devices ? "registered" : "off" );
+    {
+        char picture[16] = "";
+
+        if (wine_nx_config_string_value( &runtime_config, "picture-mode", picture, sizeof(picture) ))
+        {
+            if (!strcmp( picture, "edges" )) wine_nx_picture_mode = 1;
+            else if (!strcmp( picture, "stretched" )) wine_nx_picture_mode = 2;
+        }
+        log_line( "[INIT] a picture of another mode: %s", wine_nx_picture_mode == 1 ? "fills the screen, edges cropped"
+                  : wine_nx_picture_mode == 2 ? "stretched to the screen" : "whole, with black bars" );
+    }
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -4430,6 +4450,7 @@ int main( int argc, char **argv )
             .profile = runtime_profile,
             .framebuffer = !wine_nx_compositor_mode,
             .swkbd_auto = wine_nx_swkbd_auto_enabled,
+            .picture_mode = wine_nx_picture_mode,
         };
         int chosen;
 
@@ -4471,6 +4492,10 @@ int main( int argc, char **argv )
         runtime_dxvk_on_add = options.dxvk_on_add;
         wine_nx_config_set_bool( &runtime_config, "keyboard-on-text-focus", options.swkbd_auto );
         wine_nx_swkbd_auto_enabled = options.swkbd_auto;
+        wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 2 ? 0 : options.picture_mode;
+        wine_nx_config_set( &runtime_config, "picture-mode",
+                            wine_nx_picture_mode == 1 ? "\"edges\"" :
+                            wine_nx_picture_mode == 2 ? "\"stretched\"" : "\"whole\"" );
         wine_nx_config_save( &runtime_config, CONFIG_FILE );
         if (!chosen)
         {
