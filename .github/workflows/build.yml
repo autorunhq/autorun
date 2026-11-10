@@ -113,10 +113,23 @@ jobs:
           X86: ${{ inputs.x86 }}
         run: |
           if [ "$X86" = "true" ]; then
-            sh build.sh --x86 --jobs "$(nproc)"
+            sh build.sh --x86 --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
           else
-            sh build.sh --jobs "$(nproc)"
+            sh build.sh --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
           fi
+
+      - name: What went wrong
+        # The job's own log lives on a host this sandbox cannot reach; an
+        # annotation can be read from the API, so the failing lines go there.
+        if: failure()
+        run: |
+          test -f "$RUNNER_TEMP/build.log" || exit 0
+          grep -i -m 12 "error:\|Error 1\|undefined reference" "$RUNNER_TEMP/build.log" | cut -c1-400 | while IFS= read -r line; do
+            printf '::error::%s\n' "$line"
+          done
+          exit 0
 
       - name: Hand the tree back to the runner
         # The switch-dev container writes as root, so what it wrote is not the
