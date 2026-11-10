@@ -535,6 +535,17 @@ int wine_nx_display_devices = 1;
  * "edges" or "stretched" in config/settings.json says the same. */
 int wine_nx_picture_mode = 0;
 
+static const char *picture_mode_text( int mode )
+{
+    switch (mode)
+    {
+    case 1: return "fills the screen, edges cropped";
+    case 2: return "stretched to the screen";
+    case 3: return "its own size, in the middle";
+    default: return "whole, with black bars";
+    }
+}
+
 /* Whether the win32u Switch driver opens the on-screen keyboard by itself
  * when an edit-like control gets keyboard focus (dlls/win32u/winnx_drv.c).
  * keyboard-on-text-focus: false in config/settings.json turns that off (an
@@ -4310,9 +4321,7 @@ int main( int argc, char **argv )
             else if (!strcmp( picture, "stretched" )) wine_nx_picture_mode = 2;
             else if (!strcmp( picture, "own-size" )) wine_nx_picture_mode = 3;
         }
-        log_line( "[INIT] a picture of another mode: %s", wine_nx_picture_mode == 1 ? "fills the screen, edges cropped"
-                  : wine_nx_picture_mode == 2 ? "stretched to the screen"
-                  : wine_nx_picture_mode == 3 ? "its own size, in the middle" : "whole, with black bars" );
+        log_line( "[INIT] a picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
     }
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
@@ -4495,6 +4504,7 @@ int main( int argc, char **argv )
         wine_nx_config_set_bool( &runtime_config, "keyboard-on-text-focus", options.swkbd_auto );
         wine_nx_swkbd_auto_enabled = options.swkbd_auto;
         wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 3 ? 0 : options.picture_mode;
+        log_line( "[INIT] the picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
         wine_nx_config_set( &runtime_config, "picture-mode",
                             wine_nx_picture_mode == 1 ? "\"edges\"" :
                             wine_nx_picture_mode == 2 ? "\"stretched\"" :
@@ -4568,6 +4578,11 @@ int main( int argc, char **argv )
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
+            if (settings.picture_mode >= 0)
+            {
+                wine_nx_picture_mode = settings.picture_mode;
+                log_line( "[INIT] the program's own picture: %s", picture_mode_text( wine_nx_picture_mode ) );
+            }
 #ifdef WINE_NX_MESA_SWITCH
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;

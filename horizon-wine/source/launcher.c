@@ -442,7 +442,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     p->settings.fex = p->settings.four_cores = 1;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
@@ -467,7 +467,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 static int describe_program( struct launcher *l, struct program *p, const char *path )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     if ((size_t)snprintf( p->path, sizeof(p->path), "%s", path ) >= sizeof(p->path)) return 0;
     if (!launcher_dos_path( path, p->dos, sizeof(p->dos) )) return 0;
     if (l->options->machine_of( path, &p->machine )) return 0;
@@ -480,7 +480,7 @@ static void describe_catalog_program( struct launcher *l, struct program *p,
                                       const struct launcher_catalog_entry *entry )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     snprintf( p->path, sizeof(p->path), "%s", entry->path );
     launcher_dos_path( p->path, p->dos, sizeof(p->dos) );
     p->catalog_id = entry->id;
@@ -1757,7 +1757,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
@@ -1987,6 +1987,27 @@ static int next_state( int state, int direction )
 
     for (i = 0; i < 2 && order[i] != state; i++) {}
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
+}
+
+/* What a program that asks for a display mode of its own is shown as, in the
+ * four answers the shared setting gives; Settings, Game defaults, owns the one
+ * a program without a choice of its own follows. */
+static const char *const picture_labels[4] = { "Whole", "Edges cropped", "Stretched", "Own size" };
+
+static const char *picture_text( int state, int global, char *buffer, size_t size )
+{
+    if (state >= 0 && state < 4) return picture_labels[state];
+    snprintf( buffer, size, "Global (%s)", picture_labels[global < 0 || global > 3 ? 0 : global] );
+    return buffer;
+}
+
+static int next_picture_state( int state, int direction )
+{
+    static const int order[5] = { -1, 0, 1, 2, 3 };
+    int i;
+
+    for (i = 0; i < 4 && order[i] != state; i++) {}
+    return order[(i + (direction < 0 ? 4 : 1)) % 5];
 }
 
 static int address_space_fits( struct launcher *l, struct program *p )
@@ -2527,6 +2548,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                   state_text( p->settings.framebuffer, l->options->framebuffer, "Framebuffer", "Compositor",
                               buffer, sizeof(buffer) ) );
 
+        ADD_ROW( ROW_PICTURE, SECTION_GRAPHICS, "Picture of another mode",
+                 "A game that asks for a resolution of its own is shown on the console's 1280x720 screen. "
+                 "Whole keeps all of it, with black bars round it; edges cropped fills the screen and loses "
+                 "the borders; stretched fills it and distorts; own size draws it in the middle, one pixel to "
+                 "one pixel. Global follows the setting in Settings (X on the library). A finger lands on what "
+                 "it sees in every one of them." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  picture_text( p->settings.picture_mode, l->options->picture_mode, buffer, sizeof(buffer) ) );
+
         if (l->options->vulkan && (x86 || x64))
         {
             ADD_ROW( ROW_D3D9, SECTION_GRAPHICS, "Direct3D renderer",
@@ -2823,6 +2854,12 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             save_program_settings( l, p );
             break;
         }
+
+        case ROW_PICTURE:
+            p->settings.picture_mode = action == UI_ACTION_RESET ? -1 :
+                                       next_picture_state( p->settings.picture_mode, action == UI_ACTION_LEFT ? -1 : 1 );
+            save_program_settings( l, p );
+            break;
 
         case ROW_D3D9:
         {
@@ -3359,9 +3396,8 @@ static void settings_menu( struct launcher *l )
                                  "for when the OpenGL compositor misbehaves.";
         snprintf( rows[SET_PICTURE].label, sizeof(rows[0].label), "Picture of another mode" );
         snprintf( rows[SET_PICTURE].value, sizeof(rows[0].value), "%s",
-                  l->options->picture_mode == 1 ? "Edges cropped" :
-                  l->options->picture_mode == 2 ? "Stretched" :
-                  l->options->picture_mode == 3 ? "Own size" : "Whole" );
+                  picture_labels[l->options->picture_mode < 0 || l->options->picture_mode > 3 ?
+                                 0 : l->options->picture_mode] );
         rows[SET_PICTURE].help = "A game that asks for a resolution of its own is shown on the console's "
                                  "1280x720 screen. Whole keeps all of it, with black bars round it; edges "
                                  "cropped fills the screen and loses the borders; stretched fills it and "

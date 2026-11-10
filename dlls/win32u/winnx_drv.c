@@ -940,7 +940,7 @@ static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
     map->pane_y = pane.top;
     map->pane_w = pane.right - pane.left;
     map->pane_h = pane.bottom - pane.top;
-    if (map->pane_w != w || map->pane_h != h)
+    if (map->pane_x || map->pane_y || map->pane_w != w || map->pane_h != h)
     {
         static int last_w, last_h, last_x, last_y, told;
         char line[176];
@@ -959,6 +959,14 @@ static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
         }
     }
     return TRUE;
+}
+
+/* Whether the screen shows the desktop anywhere but exactly where it stands:
+ * fitted with bars, cropped, stretched or merely moved, a point of the desktop
+ * is not a point of the screen and has to be mapped. */
+static BOOL nxdrv_map_displaces( const struct nxdrv_screen_map *map )
+{
+    return map->pane_x || map->pane_y || map->pane_w != map->desktop_w || map->pane_h != map->desktop_h;
 }
 
 static int nxdrv_scale( int value, int from, int to )
@@ -1339,8 +1347,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
      * and the stick points rather than pushes: a whole screen pixel is not a
      * whole desktop pixel any more. Without a mode change the picture is the
      * screen and this is a plain copy. */
-    map_scaled = nxdrv_screen_map_get( &map ) &&
-                 (map.pane_w != map.desktop_w || map.pane_h != map.desktop_h);
+    map_scaled = nxdrv_screen_map_get( &map ) && nxdrv_map_displaces( &map );
     {
         int desktop_x = x, desktop_y = y;
 
@@ -1470,7 +1477,7 @@ BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
     /* The point comes in the desktop's own pixels, which is what the server
      * keeps; the arrow lives on the screen, so it goes where the desktop shows
      * that point. The same when the two are alike. */
-    if (nxdrv_screen_map_get( &map ) && (map.pane_w != map.desktop_w || map.pane_h != map.desktop_h))
+    if (nxdrv_screen_map_get( &map ) && nxdrv_map_displaces( &map ))
         nxdrv_desktop_point_to_screen( &map, &x, &y );
     wine_nx_pointer_set_pos( x, y );
     return TRUE;
