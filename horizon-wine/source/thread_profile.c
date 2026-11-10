@@ -29,6 +29,7 @@
 #include "thread_profile.h"
 
 #define NX_PROF_MAX_THREADS  128
+#define WINE_NX_STOP_END     2
 #define NX_PROF_TARGETS      4
 #define NX_PROF_PERIOD_NS    2000000
 #define NX_PROF_MIN_PERMILLE 30  /* sample threads that used at least 3% of a core */
@@ -68,6 +69,7 @@ struct nx_prof_thread
     u64 app_mask;
     uint64_t teb;
     uint64_t last_ticks, balance_ticks;
+    volatile int stop[2];
 };
 
 /* horizon.c: a moved Wine thread's server connection thread follows it. */
@@ -107,6 +109,8 @@ static int profiling;
 /* The runtime's image: __start__ is an absolute 0, so the base comes from the
  * kernel's view of the code mapping. */
 static uintptr_t runtime_base, runtime_end;
+
+__thread volatile int *wine_nx_stop_word;
 
 extern Result __real_svcSetThreadCoreMask( Handle handle, s32 core, u32 mask );
 
@@ -317,6 +321,7 @@ void wine_nx_thread_register( char kind, unsigned int tid, void *teb )
         registry[slot].teb = (uintptr_t)teb;
         registry[slot].fixed = affinity_fixed;
         registry[slot].last_ticks = registry[slot].balance_ticks = thread_ticks( handle );
+        wine_nx_stop_word = registry[slot].stop;
         if (kind == 'c')
         {
             snprintf( registry[slot].name, sizeof(registry[slot].name), "compositor" );
@@ -383,6 +388,7 @@ void wine_nx_thread_unregister( void )
     pthread_mutex_lock( &registry_mutex );
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
         if (registry[i].handle == handle) registry[i].handle = 0;
+    wine_nx_stop_word = NULL;
     pthread_mutex_unlock( &registry_mutex );
     pthread_mutex_lock( &profile_mutex );
     for (i = 0; i < NX_PROF_TARGETS; i++)
@@ -393,6 +399,65 @@ void wine_nx_thread_unregister( void )
 static int in_runtime( uint64_t address )
 {
     return address - runtime_base < runtime_end - runtime_base;
+}
+
+int wine_nx_thread_stop_request( const void *teb, unsigned int tid, int set, int clear, int code, Handle *handle )
+{
+    unsigned int i;
+    int found = 0;
+
+    if (!teb) return 0;
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS && !found; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+
+        if (!thread->handle || thread->teb != (uintptr_t)teb || thread->tid != tid) continue;
+        if (set & WINE_NX_STOP_END) thread->stop[1] = code;
+        __atomic_store_n( &thread->stop[0], (thread->stop[0] | set) & ~clear, __ATOMIC_RELEASE );
+        if (set) svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
+        if (handle) *handle = thread->handle;
+        found = 1;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return found;
+}
+
+int wine_nx_stop_state( int *code )
+{
+    volatile int *word = wine_nx_stop_word;
+
+    if (!word) return 0;
+    if (code) *code = word[1];
+    return __atomic_load_n( word, __ATOMIC_ACQUIRE );
+}
+
+void wine_nx_stop_sleep( s64 ns )
+{
+    volatile int *word = wine_nx_stop_word;
+
+    if (!word) svcSleepThread( ns );
+    else if (!__atomic_load_n( word, __ATOMIC_ACQUIRE ))
+        svcWaitForAddress( (void *)word, ArbitrationType_WaitIfEqual, 0, ns );
+}
+
+int wine_nx_in_runtime_code( uint64_t address )
+{
+    MemoryInfo info;
+    u32 page;
+
+    if (!runtime_end)
+    {
+        if (R_FAILED( svcQueryMemory( &info, &page, (u64)(uintptr_t)&wine_nx_in_runtime_code ) )) return 1;
+        runtime_base = info.addr;
+        runtime_end = (uintptr_t)__end__;
+    }
+    return in_runtime( address );
+}
+
+int wine_nx_thread_pause_granted( void )
+{
+    return envIsSyscallHinted( 0x32 ) && envIsSyscallHinted( 0x33 );
 }
 
 static uint64_t read_word( uint64_t address )
@@ -859,16 +924,21 @@ static void server_report( void )
     wine_nx_runtime_trace( line );
 }
 
-void wine_nx_thread_report( void )
-{
-    static u64 last;
-    struct nx_prof_row rows[NX_PROF_MAX_THREADS], row;
-    u64 now = armGetSystemTick(), interval = last ? now - last : 0, mask;
-    unsigned int count = 0, total = 0, i, j;
-    char line[NX_PROF_LINE + 24];
-    int len;
+/* The tick the shares are measured from, and the rows themselves: filled under
+ * registry_mutex, which is held for the whole walk, so neither the [THREADS]
+ * line nor the tasks panel races the registry. */
+static u64 rows_last;
+static struct nx_prof_row rows_all[NX_PROF_MAX_THREADS];
 
-    last = now;
+static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, unsigned int *total )
+{
+    u64 now = armGetSystemTick(), interval = rows_last ? now - rows_last : 0, mask;
+    unsigned int count = 0, i, j;
+    struct nx_prof_row row;
+
+    rows_last = now;
+    *total = 0;
+    if (!interval) return 0;
     pthread_mutex_lock( &registry_mutex );
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
@@ -885,12 +955,46 @@ void wine_nx_thread_report( void )
         row.permille = nx_prof_permille( ticks, thread->last_ticks, interval );
         if (R_FAILED( svcGetThreadCoreMask( &row.core, &mask, thread->handle ) )) row.core = thread->core;
         thread->last_ticks = ticks;
-        for (j = count++; j > 0 && rows[j - 1].permille < row.permille; j--) rows[j] = rows[j - 1];
-        rows[j] = row;
-        total += row.permille;
+        for (j = count++; j > 0 && rows_all[j - 1].permille < row.permille; j--) rows_all[j] = rows_all[j - 1];
+        rows_all[j] = row;
+        *total += row.permille;
     }
+    if (count > max) count = max;
+    memcpy( rows, rows_all, count * sizeof(*rows) );
     pthread_mutex_unlock( &registry_mutex );
-    if (!interval) return;
+    return count;
+}
+
+unsigned int wine_nx_tasks_snapshot( struct wine_nx_task *tasks, unsigned int max, unsigned int *total )
+{
+    /* Twelve rows fill a panel that is one column, and two columns are 24: no
+     * caller needs more than this, and the panel is drawn from a thread whose
+     * stack is not the runtime's. */
+    struct nx_prof_row rows[24];
+    unsigned int count, i;
+
+    if (max > sizeof(rows) / sizeof(rows[0])) max = sizeof(rows) / sizeof(rows[0]);
+    count = collect_rows( rows, max, total );
+    for (i = 0; i < count; i++)
+    {
+        tasks[i].tid = rows[i].tid;
+        tasks[i].kind = rows[i].kind;
+        tasks[i].core = (int)rows[i].core;
+        tasks[i].permille = rows[i].permille;
+        snprintf( tasks[i].name, sizeof(tasks[i].name), "%s", rows[i].name );
+    }
+    return count;
+}
+
+void wine_nx_thread_report( void )
+{
+    struct nx_prof_row rows[NX_PROF_MAX_THREADS];
+    unsigned int count, total = 0, i;
+    char line[NX_PROF_LINE + 24];
+    int len;
+
+    count = collect_rows( rows, NX_PROF_MAX_THREADS, &total );
+    if (!count) return;
 
     /* tid, w (Wine) or s (server connection), @core, share of that core. */
     len = appendf( line, 0, "[THREADS] %u threads use %u.%02u cores:", count, total / 1000, total % 1000 / 10 );

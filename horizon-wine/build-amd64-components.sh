@@ -14,8 +14,9 @@ esac
 if [ -n "${WINE_NX_LLVM_MINGW:-}" ]; then
     export PATH="$WINE_NX_LLVM_MINGW/bin:$PATH"
 fi
-# Wine's configure wants a newer bison than macOS has.
-[ -d /opt/homebrew/opt/bison/bin ] && export PATH="/opt/homebrew/opt/bison/bin:$PATH"
+# build.sh has fetched llvm-mingw and put it in WINE_NX_LLVM_MINGW; bison and
+# the rest of Wine's PE-build requirements (bison 3.0 or newer) come with the
+# machine: on the GitHub runner, from the image.
 for tool in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang i686-w64-mingw32-clang x86_64-w64-mingw32-clang x86_64-w64-mingw32-windres llvm-readobj; do
     command -v "$tool" >/dev/null || { echo "Missing $tool; set WINE_NX_LLVM_MINGW." >&2; exit 1; }
 done
@@ -51,13 +52,20 @@ sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # The switch-dev image (switch-dev.txt) has libnx, mesa-switch, LSFG-VK and
 # libusbhsfs in portlibs. WINE_NX_MESA_SWITCH_DIR links another mesa-switch.
+# A checkout the build container does not own -- a bind mount keeping the host's
+# user ids, as on Linux and in CI -- is still that checkout; without this, git
+# calls it "dubious ownership" and the Box64 core check fails.
 docker run --rm --network none -v "$root:/work" -w /work \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
     -e NX_PE="/work/${pe#"$root/"}" -e NX_BUILD="/work/${build#"$root/"}" \
     -e NX_JOBS="$jobs" -e NX_DYNAREC="${WINE_NX_BOX64_DYNAREC:-ON}" \
     -e WINE_NX_JOBS="$jobs" \
     -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" -e NX_FEX="$fex" -e NX_BOOT_BUNDLE="$boot_bundle" \
+    -e NX_BUILD_ID="${WINE_NX_BUILD_ID:-}" \
     "${WINE_NX_DEVKIT_IMAGE:-$(cat "$root/horizon-wine/switch-dev.txt")}" sh -ec '
     cmake -S horizon-wine -B "$NX_BUILD" -G Ninja \
+        -DWINE_NX_BUILD_ID="$NX_BUILD_ID" \
         -DCMAKE_TOOLCHAIN_FILE=/work/horizon-wine/cmake/switch-devkitA64.cmake \
         -DWINE_NX_PE_BUILD_DIR="$NX_PE" -DWINE_NX_AMD64=ON -DWINE_NX_FEX="$NX_FEX" \
         -DWINE_NX_BOX64_INTERPRETER=ON -DWINE_NX_BOX64_DYNAREC="$NX_DYNAREC" \

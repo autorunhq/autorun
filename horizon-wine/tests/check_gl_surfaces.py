@@ -53,6 +53,7 @@ typedef struct mock_surface { int window, width, height; } *EGLSurface;
 #define GL_BACK_RIGHT 0x403
 #define GL_FRONT_AND_BACK 0x408
 #define GL_FLUSH_INTERVAL 2
+#define GL_FLUSH_UPDATED 0x04
 #define WND_DESKTOP ((WND *)1)
 #define WND_OTHER_PROCESS ((WND *)2)
 #define CONTAINING_RECORD(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))

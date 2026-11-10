@@ -67,16 +67,33 @@ struct horizon_server_object {
     struct horizon_server_object *wait_port;
     struct horizon_completion_queue completion;
     struct horizon_completion_msg wait_msg;
-    int completion_closed, wait_has_msg;
+    int completion_closed, wait_has_msg, ending;
 };
 struct horizon_server_handle_entry { struct horizon_server_object *object; };
+struct horizon_pipe;
 struct horizon_server_connection {
     int reply_fd;
     unsigned tid, pid;
     struct horizon_server_object *thread;
+    struct horizon_pipe *request_pipe;
     void *direct_reply, *direct_data;
     size_t direct_size;
 };
+static pthread_mutex_t horizon_server_objects_mutex;
+static struct horizon_pipe *fake_client_pipe = (struct horizon_pipe *)0x1234;
+static const struct horizon_pipe *last_fd_owner;
+static const struct horizon_pipe *horizon_fd_client_owner(void) { return fake_client_pipe; }
+static int horizon_server_sync_reply( struct horizon_server_connection *connection,
+                                      const void *reply, size_t reply_size,
+                                      const void *data, size_t data_size );
+static int horizon_server_handle_get_handle_fd( struct horizon_server_connection *c, const unsigned char *m )
+{
+    struct horizon_server_reply_header reply = {0};
+    (void)m;
+    last_fd_owner = c->request_pipe;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_sync_reply( c, &reply, sizeof(reply), NULL, 0 );
+}
 static struct horizon_server_object objects[8], threads[2];
 static struct horizon_server_handle_entry handles[8];
 static struct horizon_msgqs horizon_msg_queues;
@@ -509,6 +526,9 @@ int main(void) {
     objects[3].type = HORIZON_SERVER_OBJECT_MUTEX;
     objects[4].type = HORIZON_SERVER_OBJECT_SEMAPHORE; objects[4].max = 2;
     struct horizon_query_event_request query = { .header.req = HORIZON_REQ_QUERY_EVENT, .handle = 1 };
+    struct horizon_server_request_header fd_req = { .req = HORIZON_REQ_GET_HANDLE_FD };
+    assert(horizon_server_sync_call(4, &fd_req, NULL, 0, &reply, NULL));
+    assert(last_fd_owner == fake_client_pipe);
     horizon_fast_sync_enabled = 0;
     assert(!horizon_server_sync_call(4, &query, NULL, 0, &reply, NULL));
     horizon_fast_sync_enabled = 1;
@@ -649,7 +669,7 @@ static struct thread_data thread_data = { .tid = 42 };
 #define NtCurrentTeb() get_thread_data()
 #define HandleToULong(value) (value)
 enum { REQ_select, REQ_event_op, REQ_query_event, REQ_release_mutex, REQ_query_mutex,
-       REQ_release_semaphore, REQ_query_semaphore, REQ_other };
+       REQ_release_semaphore, REQ_query_semaphore, REQ_get_handle_fd, REQ_other };
 union apc_result { uint64_t words[8]; };
 struct request_header { unsigned req, request_size; };
 struct __server_request_info {
@@ -697,15 +717,18 @@ int main(void)
     req.u.req.request_header.request_size = 1;
     assert(!horizon_sync_call(&req) && reads == 1);
     req.u.req.request_header.request_size = 0;
+    req.u.req.request_header.req = REQ_get_handle_fd;
+    assert(horizon_sync_call(&req) && calls == 2);
+    req.u.req.request_header.req = REQ_event_op;
     wine_nx_quit_requested = 1;
     quitting = 1;
     if (!setjmp(quit_jump)) { horizon_sync_call(&req); assert(0); }
-    assert(quit_calls == 1 && reads == 1 && calls == 1);
+    assert(quit_calls == 1 && reads == 2 && calls == 2);
     horizon_fast_sync_enabled = 0;
-    assert(!horizon_sync_call(&req) && quit_calls == 1 && reads == 1);
+    assert(!horizon_sync_call(&req) && quit_calls == 1 && reads == 2);
     horizon_fast_sync_enabled = 1;
     quitting = 0;
-    assert(horizon_sync_call(&req) && quit_calls == 2 && reads == 2);
+    assert(horizon_sync_call(&req) && quit_calls == 2 && reads == 3);
     puts("Horizon direct sync client: teardown before TEB access, cancelled quit, mode and payload bounds passed");
 }
 '''

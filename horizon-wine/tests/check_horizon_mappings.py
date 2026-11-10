@@ -47,11 +47,23 @@ stubs = r'''
 static const char *path_taken;
 static void *tryfixed_result;
 static int tryfixed_errno;
+static unsigned long long alias_start = 0x50000000ull, alias_end = 0x60000000ull;
+static int alias_probes;
 /* Views of sections with no file have their own test (check_horizon_sections.py). */
 struct horizon_memfile;
 static struct horizon_memfile *horizon_memfile_from_fd( int fd ) { (void)fd; return NULL; }
 static int check_section_syscalls(void) { return -1; }
 static void wine_nx_runtime_trace( const char *msg ) { (void)msg; }
+static int horizon_in_alias_region( const void *start, size_t size )
+{
+    unsigned long long begin = (unsigned long long)(size_t)start, end = begin + size;
+    return alias_start < alias_end && begin < alias_end && end > alias_start;
+}
+static void horizon_report_alias_probe( const void *start, size_t size )
+{
+    (void)start; (void)size;
+    alias_probes++;
+}
 static void *horizon_mmap_section( void *start, size_t size, int prot, int flags,
                                    struct horizon_memfile *section, off_t offset )
 { (void)start; (void)size; (void)prot; (void)flags; (void)section; (void)offset; abort(); }
@@ -162,6 +174,15 @@ int main(void)
     tryfixed_result = MAP_FAILED;
     tryfixed_errno = ENOMEM;
     assert( horizon_mmap( (void *)0x30000000, PAGE, 0, MAP_PRIVATE | MAP_ANON, -1, 0 ) == MAP_FAILED && errno == ENOMEM );
+
+    /* Hints inside the alias region refuse MAP_FIXED_NOREPLACE with ENOMEM and
+     * fall back to alloc for plain hints without probing tryfixed. */
+    path_taken = "none";
+    errno = 0;
+    assert( horizon_mmap( (void *)0x50000000, PAGE, 0, MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0 ) == MAP_FAILED );
+    assert( errno == ENOMEM && !strcmp( path_taken, "none" ) && alias_probes == 1 );
+    assert( horizon_mmap( (void *)0x50000000, PAGE, 0, MAP_PRIVATE | MAP_ANON, -1, 0 ) == (void *)0x9000000 );
+    assert( !strcmp( path_taken, "alloc" ) && alias_probes == 2 );
 
     printf( "PASS: Horizon mapping index and MAP_FIXED_NOREPLACE\n" );
     return 0;

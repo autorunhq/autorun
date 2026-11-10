@@ -1,0 +1,151 @@
+name: build
+
+# The card archive Autorun ships (horizon-wine/build-autorun/autorun-NNN.zip),
+# built the way build.sh builds it: in the switch-dev image named in
+# horizon-wine/switch-dev.txt. Beside it, the floating keyboard's host test,
+# which needs SDL2 and no toolchain at all, so it says at once whether the
+# keyboard still does what it should.
+#
+# Run it from the Actions tab, or push to a branch. The build is Linux only:
+# build.sh has no toolchain download for other machines, and this is where the
+# card archive is made. Notes:
+# - The first run downloads llvm-mingw and builds the boot payloads
+#   (Atmosphere and Horizon-OC) once, unless the toolchain cache has them.
+# - Wine's PE tree is kept between runs, so a run rebuilds only what a commit
+#   moved rather than twelve minutes of the same objects.
+# - The Windows DLLs are not built here: a card downloads them from the DLL
+#   repository, and the package is checked against its manifest.
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+      - main
+  workflow_dispatch:
+    inputs:
+      x86:
+        description: 'Build the x86-only runtime (Box64, no FEX) instead of the AMD64 one'
+        type: boolean
+        default: false
+
+jobs:
+  keyboard:
+    name: floating keyboard (host test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SDL2, libpng and a font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev libpng-dev fonts-dejavu-core
+
+      - name: Address space and forwarder names (host test)
+        # What the launcher will let start, and the title ids the two
+        # forwarders are filed under, without a toolchain: the 32-bit one is
+        # outside the Atmosphere low-window patch's scope by construction.
+        run: python3 horizon-wine/tests/check_low_window_routing.py
+
+      - name: Build the keyboard and run its test
+        # Its pictures go up with the run: the keyboard at 720p and 1080p, and
+        # the controls panel that - and A put over the program.
+        # The test keeps its picture and its labels for the life of the
+        # process, as it does under the console's font; there is nothing to
+        # free, so LeakSanitizer has nothing to say about it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cc -std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -I horizon-wine/source $(sdl2-config --cflags) \
+            horizon-wine/tests/osk.c horizon-wine/source/osk.c \
+            $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o "$RUNNER_TEMP/osk"
+          mkdir -p "$RUNNER_TEMP/shots"
+          "$RUNNER_TEMP/osk" /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$RUNNER_TEMP/shots"
+
+      - name: What it looks like
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyboard-pictures-${{ github.sha }}
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: error
+          retention-days: 14
+
+  runtime:
+    name: card archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    # One build at a time per branch, and a push waits for the one running
+    # rather than killing it: an hour of compiling is worth keeping.
+    concurrency:
+      group: runtime-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Toolchains and boot payloads
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/toolchains
+          key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt') }}
+
+      - name: Wine's PE tree
+        # Most of the build's time is here, and most of it does not change
+        # between commits: the key is the commit, so nothing ever hits exactly,
+        # and the newest tree is restored, which ninja then brings up to date.
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/build-wine-amd64-pe
+          key: wine-pe-${{ github.sha }}
+          restore-keys: wine-pe-
+
+      - name: Build
+        env:
+          X86: ${{ inputs.x86 }}
+        run: |
+          if [ "$X86" = "true" ]; then
+            sh build.sh --x86 --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
+          else
+            sh build.sh --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
+          fi
+
+      - name: What went wrong
+        # The job's own log lives on a host this sandbox cannot reach; an
+        # annotation can be read from the API, so the failing lines go there.
+        if: failure()
+        run: |
+          test -f "$RUNNER_TEMP/build.log" || exit 0
+          grep -i -m 12 "error:\|Error 1\|undefined reference" "$RUNNER_TEMP/build.log" | cut -c1-400 | while IFS= read -r line; do
+            printf '::error::%s\n' "$line"
+          done
+          exit 0
+
+      - name: Hand the tree back to the runner
+        # The switch-dev container writes as root, so what it wrote is not the
+        # runner's until it is given back: the steps after this one read and
+        # write that tree, and the PE cache saves it as the runner.
+        run: sudo chown -R "$(id -u):$(id -g)" horizon-wine/toolchains horizon-wine/build-* || true
+
+      - name: What was built
+        run: |
+          ls -l horizon-wine/build-autorun/
+          sha256sum horizon-wine/build-autorun/autorun-*.zip
+
+      - name: Upload the card archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-card-${{ github.sha }}
+          path: horizon-wine/build-autorun/autorun-*.zip
+          if-no-files-found: error
+          retention-days: 30

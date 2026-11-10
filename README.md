@@ -178,35 +178,49 @@ Out of the box the controller works as a mouse and keyboard:
 |---|---|
 | Right stick, or a finger on the screen | Moves the mouse pointer |
 | **A** / **B** | Left / right mouse button |
-| D-pad, left stick | Arrow keys |
+| D-pad | Arrow keys |
+| Left stick | W A S D |
+| **ZL**, **ZR** | Arrow down, arrow up |
 | **+** | Esc |
 | **X**, **Y** | Space, F |
 | **L**, **R** | Tab, Shift |
+
+Two fingers on the screen scroll the wheel vertically; a USB mouse connected
+to the dock moves the cursor and sends left, right, middle, and wheel events
+when no finger is on the screen.
 
 Every button can be changed: **Settings -> Game defaults -> Controls** for all
 games, or a game's options (**Y**) -> **Controls** for that game alone. Each
 stick, the d-pad and the touchscreen can move the mouse or send the arrow keys
 or W A S D. Games with controller support see an Xbox 360 controller, through
-XInput or DirectInput.
+XInput or DirectInput (**Controller face buttons** switches between Xbox
+positions and Nintendo A/B/X/Y labels), and **Picture of another mode**
+controls how non-native display modes fill the screen (**Whole**, **Edges
+cropped**, **Stretched**, or **Own size**).
 
 **Hold + and − together for a second** to close a game.
 
-**Minus + right stick click** opens the on-screen keyboard over the game (it
+**Minus + B** opens the on-screen keyboard over the game (it
 also opens by itself when a text field is selected; **Settings -> On-screen
-keyboard** turns that off). It types like a real keyboard, one key at a time:
+keyboard** turns that off). It works like a physical keyboard with F1–F12 on the
+top row, key repeat, sticky or held Shift, and multi-touch chord input:
 
 | On the keyboard | Does |
 |---|---|
 | D-pad, left stick | Move between keys |
-| **A**, or tap a key | Press it |
+| **A**, or a finger on a key | Holds the key while pressed |
 | **B** | Backspace |
-| **Y** / **X** | Space / Shift for the next key |
+| **Y** / **X** | Space / Shift |
 | **L**, **R** | Cursor left, right |
 | **+** | Enter |
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-While it is open, the game gets no controller input.
+**Minus + A** shows the **Controls** panel over the program (what each button
+and stick sends under the active profile). **Minus + Y** shows the **Tasks**
+panel over the program (running threads, core shares, memory, SD card rate,
+and FPS, refreshed every second). While the keyboard or either panel is open,
+the game gets no controller input.
 
 ## If something goes wrong
 

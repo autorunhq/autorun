@@ -115,6 +115,28 @@ static void test_settings( const char *dir )
     assert( settings.verbose == 1 && settings.profile == 0 && settings.framebuffer == 1 &&
             settings.d3d == LAUNCHER_D3D_DXVK_VKD3D );
     assert( settings.hidden == 0 && !settings.title[0] );  /* only 1 or on hides */
+    assert( settings.picture_mode == -1 );
+
+    load_text( &kv, "picture=edges\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 1 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=edges" ) );
+    load_text( &kv, "picture=stretched\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 2 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=stretched" ) );
+    load_text( &kv, "picture=own-size\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 3 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=own-size" ) );
+    load_text( &kv, "picture=whole\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 0 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=whole" ) );
+    load_text( &kv, "picture=unknown\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == -1 && launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "picture=" ) );
 
     load_text( &kv, "d3d=wine\nd3d9=dxvk\n" );
     launcher_settings_read( &kv, &settings );
@@ -218,6 +240,7 @@ static void test_settings( const char *dir )
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
+    settings.verbose = settings.profile = settings.framebuffer = settings.picture_mode = -1;
     strcpy( settings.title, "Need for Speed" );
     settings.hidden = 1;
     settings.verbose = -1;
@@ -230,13 +253,13 @@ static void test_settings( const char *dir )
     assert( !strcmp( kv.text, "# written by hand\ntitle=Need for Speed\nhidden=1\nprofile=1\nwindows=compositor\ndxvk-version=2.7.1\n" ) );
     launcher_settings_read( &kv, &back );
     assert( !strcmp( back.title, settings.title ) && back.hidden == 1 && back.verbose == -1 && back.profile == 1 );
-    assert( back.framebuffer == 0 && back.d3d == LAUNCHER_D3D_DXVK && !strcmp( back.dxvk_version, "2.7.1" ) );
+    assert( back.framebuffer == 0 && back.picture_mode == -1 && back.d3d == LAUNCHER_D3D_DXVK && !strcmp( back.dxvk_version, "2.7.1" ) );
 
     /* Back to the global settings: only the comment stays; without it the file goes. */
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
     settings.d3d = LAUNCHER_D3D_DXVK;
-    settings.verbose = settings.profile = settings.framebuffer = -1;
+    settings.verbose = settings.profile = settings.framebuffer = settings.picture_mode = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     assert( launcher_settings_write( &kv, &settings ) && !strcmp( kv.text, "# written by hand\n" ) );
     assert( launcher_kv_save( &kv, path ) && !access( path, F_OK ) );

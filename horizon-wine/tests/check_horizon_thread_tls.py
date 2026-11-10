@@ -15,6 +15,7 @@ fixture = r'''
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "wine/rbtree.h"
 typedef uint64_t u64;
@@ -26,6 +27,7 @@ typedef struct { u64 addr, size; u32 type; } MemoryInfo;
 #define R_FAILED(rc) ((rc) != 0)
 #define R_SUCCEEDED(rc) ((rc) == 0)
 #define Module_Kernel 1
+#define KernelError_OutOfResource 103
 #define KernelError_InvalidMemoryState 106
 #define KernelError_OutOfMemory 104
 #define MAKERESULT(module, code) ((module) | ((code) << 9))
@@ -34,6 +36,14 @@ typedef struct { u64 addr, size; u32 type; } MemoryInfo;
 #define INVALID_HANDLE 0
 #define LimitableResource_Threads 1
 #define SECTION_HOLE 2
+struct horizon_zombie { pthread_t thread; struct horizon_zombie *next; };
+struct horizon_zombie_list { pthread_mutex_t lock; struct horizon_zombie *head; unsigned int pending, reaped; };
+static struct horizon_zombie_list horizon_server_zombies = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0 };
+static struct { unsigned int tebs; } horizon_lifecycle;
+static Result svcWaitSynchronizationSingle(Handle handle, u64 timeout) { (void)handle; (void)timeout; return 1; }
+static u64 armGetSystemTick(void) { return 0; }
+static u64 armTicksToNs(u64 ticks) { return ticks; }
+static void svcSleepThread(s64 ns) { (void)ns; }
 struct horizon_mapping {
   void *addr;
   size_t size;

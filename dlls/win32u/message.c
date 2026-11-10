@@ -44,6 +44,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(msg);
 WINE_DECLARE_DEBUG_CHANNEL(key);
 WINE_DECLARE_DEBUG_CHANNEL(relay);
 
+/* Count of key messages a program has pulled out of its queue (PM_REMOVE), for
+ * winnx_drv.c's check that keyboard input is actually reaching a running window. */
+unsigned int wine_nx_keys_taken;
+
 #ifdef __SWITCH__
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int wine_nx_runtime_verbose __attribute__((weak));
@@ -3230,6 +3234,10 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
                     continue;  /* ignore it */
                 }
                 *msg = info.msg;
+                if ((flags & PM_REMOVE) &&
+                    (info.msg.message == WM_KEYDOWN || info.msg.message == WM_SYSKEYDOWN ||
+                     info.msg.message == WM_KEYUP || info.msg.message == WM_SYSKEYUP))
+                    __atomic_add_fetch( &wine_nx_keys_taken, 1, __ATOMIC_RELAXED );
                 thread_info->message_pos   = MAKELONG( info.msg.pt.x, info.msg.pt.y );
                 thread_info->message_time  = info.msg.time;
                 thread_info->message_extra = msg_data->hardware.info;

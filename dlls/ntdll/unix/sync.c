@@ -2468,6 +2468,8 @@ NTSTATUS WINAPI NtYieldExecution(void)
  * a few sessions: a sleeping thread could wait there forever (OpenTTD's game
  * loop never woke from its first Sleep). NtDelayExecution sleeps the thread. */
 extern void svcSleepThread( int64_t nano );
+extern void wine_nx_stop_point( void ) __attribute__((weak));
+extern void wine_nx_stop_sleep( int64_t nano ) __attribute__((weak));
 #endif
 
 /******************************************************************
@@ -2508,7 +2510,12 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
     if (!timeout || timeout->QuadPart == TIMEOUT_INFINITE)  /* sleep forever */
     {
 #ifdef __SWITCH__
-        for (;;) svcSleepThread( 1000000000LL );
+        for (;;)
+        {
+            if (&wine_nx_stop_sleep) wine_nx_stop_sleep( 1000000000LL );
+            else svcSleepThread( 1000000000LL );
+            if (&wine_nx_stop_point) wine_nx_stop_point();
+        }
 #else
         for (;;) select( 0, NULL, NULL, NULL, NULL );
 #endif
@@ -2539,7 +2546,12 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
             if (diff <= 0) break;
 #ifdef __SWITCH__
             /* diff is in microseconds; wake at least hourly to recheck. */
-            svcSleepThread( (diff < 3600000000LL ? diff : 3600000000LL) * 1000 );
+            {
+                int64_t ns = (diff < 3600000000LL ? diff : 3600000000LL) * 1000;
+                if (&wine_nx_stop_sleep) wine_nx_stop_sleep( ns );
+                else svcSleepThread( ns );
+                if (&wine_nx_stop_point) wine_nx_stop_point();
+            }
 #else
             tv.tv_sec  = diff / 1000000;
             tv.tv_usec = diff % 1000000;

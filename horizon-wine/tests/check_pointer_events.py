@@ -14,7 +14,9 @@ fixture = r'''
 #include "input_events.h"
 typedef int BOOL, INT;
 typedef unsigned int UINT, DWORD;
+typedef unsigned short WORD;
 typedef unsigned char BYTE;
+typedef unsigned long ULONG_PTR;
 typedef void *HWND, *HCURSOR, *HKL;
 typedef int NTSTATUS;
 typedef unsigned int user_handle_t;
@@ -24,6 +26,7 @@ struct object_lock { int id; };
 typedef struct { user_handle_t cursor; int cursor_count; } input_shm_t;
 typedef struct { int x, y; } POINT;
 typedef struct { POINT cursor; } desktop_shm_t;
+typedef struct { DWORD cbSize; DWORD flags; HWND hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; int rcCaret[4]; } GUITHREADINFO;
 #define wine_server_ptr_handle(h) ((void *)(unsigned long)(h))
 /* The input state the program's SetCursor and ShowCursor calls leave. */
 static input_shm_t shared_input;
@@ -36,7 +39,13 @@ static NTSTATUS get_shared_input(unsigned int tid, struct object_lock *lock, con
 }
 static int cursor_shown = 1;
 static void wine_nx_cursor_show(int visible) { cursor_shown = visible; }
-static NTSTATUS get_shared_desktop(struct object_lock *lock, const desktop_shm_t **desktop) { return -1; }
+static desktop_shm_t shared_desktop = { .cursor = { 640, 360 } };
+static NTSTATUS shared_desktop_status = -1;
+static NTSTATUS get_shared_desktop(struct object_lock *lock, const desktop_shm_t **desktop) {
+    if (shared_desktop_status) return shared_desktop_status;
+    if (!lock->id) { lock->id = 1; *desktop = &shared_desktop; return STATUS_PENDING; }
+    return 0;
+}
 static void wine_nx_pointer_follow(int x, int y) { assert(0); }
 extern void wine_nx_runtime_trace(const char *line) __attribute__((weak));
 typedef long LPARAM;
@@ -59,6 +68,7 @@ typedef long LPARAM;
 #define MOUSEEVENTF_XUP 0x0100
 #define MOUSEEVENTF_WHEEL 0x0800
 #define MOUSEEVENTF_HWHEEL 0x1000
+#define MOUSEEVENTF_MOVE_NOCOALESCE 0x2000
 #define MOUSEEVENTF_ABSOLUTE 0x8000
 #define XBUTTON1 1
 #define XBUTTON2 2
@@ -71,6 +81,7 @@ static struct input_snapshot state;
 static INPUT sent[128];
 static int sent_count, presents, polls, set_x = -1, set_y = -1;
 static int reenter;
+static DWORD mock_tick;
 BOOL wine_nx_drv_ProcessEvents(DWORD mask);
 static int wine_nx_pointer_poll(int *x, int *y, unsigned int *buttons) {
     polls++; *x = state.x; *y = state.y; *buttons = state.buttons; return state.moved;
@@ -80,6 +91,23 @@ static void wine_nx_pointer_set_pos(int x, int y) { set_x = x; set_y = y; }
 static void wine_nx_fb_present(void) { presents++; }
 static void nxdrv_trace(const char *fmt, int a, int b, int c, int d) {}
 static void nxdrv_trace_hot(const char *fmt, int a, int b, int c, int d) {}
+static void nxdrv_say(const char *line) { (void)line; }
+static void nxdrv_note_key_sent(WORD vk, BOOL up) { (void)vk; (void)up; }
+static void nxdrv_check_key_taken(void) {}
+static void nxdrv_trace_key_target(void) {}
+static DWORD NtGetTickCount(void) { return mock_tick; }
+static DWORD GetCurrentThreadId(void) { return 1; }
+static BOOL NtUserGetGUIThreadInfo(DWORD tid, GUITHREADINFO *info) { (void)tid; (void)info; return FALSE; }
+static HWND NtUserGetForegroundWindow(void) { return NULL; }
+static BOOL get_async_keyboard_state(BYTE s[256]) { (void)s; return TRUE; }
+static struct { unsigned short vk; int up; } osk_queue[8];
+static int osk_head, osk_tail;
+int test_osk_next_key(unsigned long long now_ns, unsigned short *vk, int *up) {
+    (void)now_ns;
+    if (osk_head >= osk_tail) return 0;
+    *vk = osk_queue[osk_head].vk; *up = osk_queue[osk_head].up; osk_head++;
+    return 1;
+}
 static HKL NtUserGetKeyboardLayout(DWORD id) { return (HKL)1; }
 static UINT NtUserMapVirtualKeyEx(UINT vk, UINT type, HKL layout) {
     assert(type == MAPVK_VK_TO_VSC_EX && layout == (HKL)1);
@@ -89,6 +117,7 @@ static UINT NtUserMapVirtualKeyEx(UINT vk, UINT type, HKL layout) {
 }
 static UINT NtUserSendHardwareInput(HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam) {
     assert(!hwnd && !flags && !lparam && sent_count < 128);
+    if (input->type == INPUT_MOUSE && input->mi.dwFlags == MOUSEEVENTF_MOVE_NOCOALESCE) return TRUE;
     if (reenter) { reenter = 0; assert(!wine_nx_drv_ProcessEvents(0)); }
     sent[sent_count++] = *input; return TRUE;
 }
@@ -208,6 +237,27 @@ int main(void) {
     assert(sent[5].mi.dwFlags == MOUSEEVENTF_XUP && sent[5].mi.mouseData == XBUTTON2);
     assert(sent[6].mi.dwFlags == MOUSEEVENTF_WHEEL && sent[6].mi.mouseData == 120);
     assert(sent[7].mi.dwFlags == MOUSEEVENTF_HWHEEL && (int)sent[7].mi.mouseData == -120);
+
+    /* OSK stops after releasing a key so a polling loop sees the press first. */
+    sent_count = 0;
+    state = (struct input_snapshot){0};
+    osk_head = 0; osk_tail = 4;
+    osk_queue[0] = (typeof(osk_queue[0])){ 'A', 0 };
+    osk_queue[1] = (typeof(osk_queue[1])){ 'A', 1 };
+    osk_queue[2] = (typeof(osk_queue[2])){ 'B', 0 };
+    osk_queue[3] = (typeof(osk_queue[3])){ 'B', 1 };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 2);
+    assert(sent[0].ki.wVk == 'A' && !(sent[0].ki.dwFlags & KEYEVENTF_KEYUP));
+    assert(sent[1].ki.wVk == 'A' && (sent[1].ki.dwFlags & KEYEVENTF_KEYUP));
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 4);
+    assert(sent[2].ki.wVk == 'B' && !(sent[2].ki.dwFlags & KEYEVENTF_KEYUP));
+    assert(sent[3].ki.wVk == 'B' && (sent[3].ki.dwFlags & KEYEVENTF_KEYUP));
+
+    POINT gp = {0};
+    shared_desktop_status = 0;
+    assert(wine_nx_drv_GetCursorPos(&gp) && gp.x == 640 && gp.y == 360);
+    shared_desktop_status = -1;
+
     puts("PASS: stick moves, A left and B right clicks, drag, touch press, clicks between calls, cursor visibility "
          "and SetCursorPos");
     return 0;
@@ -215,8 +265,16 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='wine-nx-pointer-') as temp:
     src = Path(temp) / 'test.c'
+    osk = Path(temp) / 'osk_stub.c'
     exe = Path(temp) / 'test'
     src.write_text(fixture + defines + events + tests)
+    osk.write_text(
+        'int test_osk_next_key(unsigned long long now_ns, unsigned short *vk, int *up);\n'
+        'int wine_nx_osk_next_key(unsigned long long now_ns, unsigned short *vk, int *up) {\n'
+        '    return test_osk_next_key(now_ns, vk, up);\n'
+        '}\n'
+        'unsigned long long wine_nx_osk_clock(void) { return 1000; }\n'
+    )
     subprocess.run(['cc', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
-                    '-I', str(root / 'horizon-wine/source'), str(src), '-o', str(exe)], check=True)
+                    '-I', str(root / 'horizon-wine/source'), str(src), str(osk), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

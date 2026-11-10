@@ -67,21 +67,36 @@ runtime; the full package now ships the Mesa 26 one.
   nvc0 and Vulkan through NVK, with Wine's winevulkan on top. Direct3D runs
   through wined3d on OpenGL, or through architecture-specific DXVK payloads on
   Vulkan for programs set to use it; frames of another size than the screen's
-  (800x600 or 640x480 in full
-  screen) are scaled to it, keeping the aspect ratio. The earlier runtime on
+  (800x600 or 640x480 in full screen) are placed and scaled according to
+  `wine_nx_picture_mode` / **Picture of another mode** (`whole`, `edges`,
+  `stretched`, `own-size`), with pointer coordinates, `GetCursorPos`, and
+  `NtUserClipCursor` mapped consistently between desktop and screen space. The earlier runtime on
   Mesa 20.1's nouveau driver, patched for pinned 32-bit buffers
   (`horizon-wine/mesa`), can still be built.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
-- **Input.** The touchscreen, the controller as a mouse or as a keyboard with
-  per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
-- **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
-  that sends virtual keys one at a time, with scan codes, through the display
-  driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text field
-  taking focus). Horizon's keyboard applet only returns a finished string, so
-  fields a game draws itself could not be edited. Its picture is copied into
-  the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
-  into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
-  the compositor's top layer; the controller is its while it is up.
+- **Input.** Single-finger and two-finger 40px scroll touchscreen input, docked
+  USB mouse (`hidGetMouseStates` with left/right/middle buttons and wheel delta
+  deduplication), raw mouse/wheel LL hooks in `horizon.c`/`server/queue.c`,
+  DirectInput keyboard hardware-state sync (`dinput/keyboard.c`), the
+  controller as a mouse or as a keyboard with per-game mappings, and XInput,
+  which sees player 1 as an Xbox 360 controller (with **Controller face
+  buttons** / `button-layout` switching positional Xbox and label-matched
+  Nintendo face layouts).
+- **Controls and Tasks panels.** `- + A` (`controls_panel`) and `- + Y`
+  (`tasks_panel`, backed by `wine_nx_tasks_snapshot` in
+  `source/thread_profile.c` and refreshed every second) share `source/osk.c`'s
+  overlay surface to display active bindings or live thread/core/memory/SD/FPS
+  telemetry while suppressing controller input to the game.
+- **On-screen keyboard.** `source/osk.c` is a 6-row (including F1–F12) keyboard
+  drawn over the program that sends virtual keys as held/released physical
+  keyboard events with scan codes through the display driver (Minus + B, or
+  `NtUserShowSoftwareKeyboard` / a text field taking focus), with multi-touch
+  finger tracking, key repeat, Caps lock, and sticky Shift. Horizon's keyboard
+  applet only returns a finished string, so fields a game draws itself could not
+  be edited. Its picture is copied into the Vulkan swapchain image before
+  present (`dlls/win32u/vulkan.c`), blitted into the back buffer before
+  `eglSwapBuffers` (`winnx_opengl.c`), or drawn as the compositor's top layer;
+  the controller is its while it is up.
 - **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
   launch the NRO through a forwarder made with "32-bit, no alias", which the
   launcher can install itself and which also raises the memory limit to 2 GiB.
@@ -130,6 +145,7 @@ the first time a newer build starts.
 | `verbose-log` | false | Wine's traces in the log (`verbose.txt`) |
 | `profiler` | false | Thread, server and sampling reports (`profile.txt`) |
 | `windows-through-opengl` | true | Windows drawn by the compositor, not the framebuffer (`framebuffer.txt`, inverted) |
+| `picture-mode` | `"whole"` | Display scaling for non-native resolutions (`"whole"`, `"edges"`, `"stretched"`, `"own-size"`) |
 | `reopen-the-launcher-on-exit` | false | Start the launcher again when a program ends (`reload-launcher.txt`) |
 | `core-balancing` | true | Move busy threads between cores (`no-balance.txt`, inverted) |
 | `display-devices` | true | Report display devices (`no-display-devices.txt`, inverted) |

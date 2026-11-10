@@ -24,6 +24,7 @@ definitions = '\n'.join(re.findall(r'^#define HORIZON_(?:STATUS_|IMAGE_FILE_MACH
 structures = '\n'.join(block(source, 'struct horizon_' + name + '\n') + ';' for name in (
     'server_request_header', 'server_reply_header', 'select_request', 'select_reply',
     'resume_thread_request', 'resume_thread_reply', 'suspend_thread_request', 'suspend_thread_reply',
+    'terminate_thread_request', 'terminate_thread_reply',
     'get_thread_context_request', 'get_thread_context_reply',
     'set_thread_context_request', 'set_thread_context_reply'))
 fixture = r'''
@@ -41,14 +42,31 @@ fixture = r'''
 #include "wine/server_protocol.h"
 #include "horizon_threads.h"
 #define TRACE(...) ((void)0)
+static void horizon_trace(const char *fmt, ...) { (void)fmt; }
+#define HORIZON_STOP_SUSPEND 1
+#define HORIZON_STOP_END     2
+#define R_FAILED(rc) ((rc) != 0)
+typedef unsigned Handle;
+typedef int Result;
+enum { ThreadActivity_Paused, ThreadActivity_Runnable };
+typedef struct {
+    struct { uint64_t x; } pc;
+    uint64_t sp, lr, fp, psr;
+    struct { uint64_t x; } cpu_gprs[29];
+    unsigned char fpu_gprs[32][16];
+    uint32_t fpcr, fpsr;
+} ThreadContext;
 ''' + definitions + '\n' + structures + r'''
 struct horizon_server_object {
     struct horizon_thread_state thread;
     struct context_data *thread_contexts;
+    struct context_data *frozen_context;
+    Handle frozen;
     unsigned thread_context_count;
     int thread_context_valid;
+    int ending;
 };
-struct horizon_server_connection { int reply_fd; struct horizon_server_object *thread; void *direct_reply; };
+struct horizon_server_connection { int reply_fd; unsigned tid; struct horizon_server_object *thread; void *direct_reply; };
 struct horizon_user_apc { unsigned size; unsigned char call[HORIZON_APC_CALL_SIZE]; };
 static struct horizon_server_object target;
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -62,6 +80,32 @@ static void horizon_server_quit_check_locked(void) {}
 static struct horizon_server_object *horizon_server_get_thread_locked(unsigned handle, unsigned *status) {
     *status = handle == 1 ? 0 : STATUS_INVALID_HANDLE;
     return handle == 1 ? &target : NULL;
+}
+static Handle kernel_thread_handle;
+static int kernel_paused, kernel_in_runtime, stop_mask, stop_exit_code, pause_granted = 1;
+static uint64_t kernel_pc = 0x55550000ULL;
+__attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned tid, int set, int clear, int code, Handle *h) {
+    (void)t; (void)tid;
+    if (!kernel_thread_handle) return 0;
+    if (set & HORIZON_STOP_END) stop_exit_code = code;
+    stop_mask = (stop_mask | set) & ~clear;
+    if (h) *h = kernel_thread_handle;
+    return 1;
+}
+__attribute__((weak)) int wine_nx_in_runtime_code(uint64_t addr) { (void)addr; return kernel_in_runtime; }
+__attribute__((weak)) int wine_nx_thread_pause_granted(void) { return pause_granted; }
+static Result svcSetThreadActivity(Handle h, int activity) {
+    assert(h == kernel_thread_handle);
+    if (activity == ThreadActivity_Paused) { assert(!kernel_paused); kernel_paused = 1; }
+    else { assert(kernel_paused); kernel_paused = 0; }
+    return 0;
+}
+static Result svcGetThreadContext3(ThreadContext *ctx, Handle h) {
+    assert(h == kernel_thread_handle && kernel_paused);
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->pc.x = kernel_pc;
+    ctx->sp = 0x77770000ULL;
+    return 0;
 }
 static int horizon_server_write_reply(int fd, const void *reply, size_t size, const void *data, size_t data_size) {
     assert(size <= sizeof(replies[fd].reply) && data_size <= sizeof(replies[fd].data));
@@ -89,14 +133,22 @@ NTSTATUS WINAPI NtQuerySystemTime(LARGE_INTEGER *n) { n->QuadPart = 0; return 0;
 fixture += legacy_sync_support(source)
 functions = '\n'.join(block(source, name) for name in (
     'static void horizon_server_set_suspend_doorbell_locked(',
+    'static int horizon_server_has_doorbell_locked(',
+    'static int horizon_server_stop_request_locked(',
+    'static int horizon_server_can_pause(',
+    'static void horizon_server_context_from_kernel(',
+    'static int horizon_server_freeze_locked(',
+    'static void horizon_server_thaw_locked(',
+    'static int horizon_server_snapshot_locked(',
     'static int horizon_server_handle_resume_thread(',
     'static int horizon_server_handle_suspend_thread(',
     'static void horizon_server_merge_context(',
     'static int horizon_server_handle_get_thread_context(',
     'static int horizon_server_handle_set_thread_context(',
+    'static int horizon_server_handle_terminate_thread(',
     'static int horizon_server_handle_select('))
 tests = r'''
-static struct horizon_server_connection control = {0}, client = {1, &target};
+static struct horizon_server_connection control = {0, 1}, client = {1, 2, &target};
 static ULONG doorbell;
 static CHPE_V2_CPU_AREA_INFO area;
 static TEB teb;
@@ -167,7 +219,35 @@ int main(void) {
     suspend(); resume();
     select_thread((void *)1);
     assert(!target.thread_contexts && !target.thread_context_valid);
-    puts("Horizon suspend: safe-point contexts, nested suspend/resume and unavailable contexts passed");
+
+    /* Non-doorbell thread: freeze outside runtime code, snapshot, terminate. */
+    teb.ChpeV2CpuAreaInfo = NULL;
+    kernel_thread_handle = 42;
+    kernel_in_runtime = 0;
+    suspend();
+    assert(kernel_paused && target.frozen == 42 && target.thread_context_valid);
+    assert(!horizon_server_handle_get_thread_context(&control, (void *)&get) && !reply_status());
+    returned = (void *)replies[0].data;
+    assert(returned->ctl.arm64_regs.pc == kernel_pc);
+    assert(!horizon_server_handle_set_thread_context(&control, (void *)&set, (void *)&update, sizeof(update)));
+    assert(reply_status() == STATUS_NOT_SUPPORTED);
+    resume();
+    assert(!kernel_paused && !target.frozen && !target.thread_context_valid);
+    /* Freeze fails when inside runtime code and falls back to stop-word, then terminates. */
+    kernel_in_runtime = 1;
+    suspend();
+    assert(!kernel_paused && !target.frozen && (stop_mask & HORIZON_STOP_SUSPEND));
+    {
+        struct horizon_terminate_thread_request term = {.handle = 1, .exit_code = 77};
+        assert(!horizon_server_handle_terminate_thread(&control, (void *)&term) && !reply_status());
+        assert(target.ending && !target.thread.suspend && (stop_mask & HORIZON_STOP_END));
+        assert(!(stop_mask & HORIZON_STOP_SUSPEND) && stop_exit_code == 77);
+        assert(target.thread.exit_code == 77);
+        select_thread((void *)0);
+        assert(((struct horizon_server_reply_header *)replies[1].reply)->error == HORIZON_STATUS_THREAD_IS_TERMINATING);
+    }
+    free(target.frozen_context);
+    puts("Horizon suspend: safe-point contexts, nested suspend/resume, kernel freeze and terminate passed");
 }
 '''
 

@@ -347,6 +347,90 @@ index 3691bca..7538793 100644
    }
  }
  
+diff --git a/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp b/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
+index 014a8c6..5aa29c9 100644
+--- a/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
+@@ -83,6 +83,7 @@ DEF_OP(CASPair) {
+     // Might have hit the case where ldaxr was hit but stlxr wasn't
+     clrex();
+     (void)Bind(&LoopExpected);
++    dmb(ARMEmitter::BarrierScope::ISH);
+ 
+     // Restore
+     msr(ARMEmitter::SystemRegister::NZCV, TMP1);
+@@ -135,6 +136,7 @@ DEF_OP(CAS) {
+     // Might have hit the case where ldaxr was hit but stlxr wasn't
+     clrex();
+     (void)Bind(&LoopExpected);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -164,6 +166,7 @@ DEF_OP(AtomicSwap) {
+     stlxr(SubEmitSize, TMP4, Src, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     ubfm(EmitSize, GetReg(Node), TMP2, 0, IR::OpSizeAsBits(OpSize) - 1);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -185,6 +188,7 @@ DEF_OP(AtomicFetchAdd) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -207,6 +211,7 @@ DEF_OP(AtomicFetchSub) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -229,6 +234,7 @@ DEF_OP(AtomicFetchAnd) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -250,6 +256,7 @@ DEF_OP(AtomicFetchCLR) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -271,6 +278,7 @@ DEF_OP(AtomicFetchOr) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -292,6 +300,7 @@ DEF_OP(AtomicFetchXor) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -321,6 +330,7 @@ DEF_OP(AtomicFetchNeg) {
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
 diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
 index 4cbf45c..cf4b624 100644
 --- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp

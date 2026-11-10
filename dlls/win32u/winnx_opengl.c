@@ -177,6 +177,22 @@ static void nx_drawable_flush( struct opengl_drawable *base, UINT flags )
 
     if (impl_from_opengl_drawable( base )->screen && (flags & GL_FLUSH_INTERVAL))
         funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
+    if (flags & GL_FLUSH_UPDATED)
+    {
+        static int told_cx, told_cy, told_mx, told_my;
+
+        if (base->virtual_size.cx != told_cx || base->virtual_size.cy != told_cy ||
+            base->monitor_size.cx != told_mx || base->monitor_size.cy != told_my)
+        {
+            told_cx = base->virtual_size.cx;
+            told_cy = base->virtual_size.cy;
+            told_mx = base->monitor_size.cx;
+            told_my = base->monitor_size.cy;
+            nx_log( "[NXGL] the window's surface is %dx%d, the monitor %dx%d%s",
+                    told_cx, told_cy, told_mx, told_my,
+                    impl_from_opengl_drawable( base )->screen ? "" : ", offscreen" );
+        }
+    }
 }
 
 /* Frames presented and the time inside eglSwapBuffers, for [PROGRESS]. */
@@ -215,7 +231,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
     GLboolean scissor, srgb;
     unsigned int i;
 
-    if (!wine_nx_osk_visible()) return;
+    if (!wine_nx_osk_visible() && !wine_nx_osk_map_visible()) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
         !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
         !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))

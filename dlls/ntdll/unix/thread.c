@@ -1597,6 +1597,20 @@ void abort_process( int status )
 
 /* The thread that ended last, waiting to be joined by the next one to end. */
 static void *prev_data;
+#ifdef __SWITCH__
+static pthread_mutex_t prev_data_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct thread_data *horizon_swap_prev_data( struct thread_data *next )
+{
+    struct thread_data *data;
+
+    pthread_mutex_lock( &prev_data_mutex );
+    data = prev_data;
+    prev_data = next;
+    pthread_mutex_unlock( &prev_data_mutex );
+    return data;
+}
+#endif
 
 /***********************************************************************
  *           exit_thread
@@ -1609,7 +1623,11 @@ static DECLSPEC_NORETURN void exit_thread( int status )
 
     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
 
+#ifdef __SWITCH__
+    if ((data = horizon_swap_prev_data( get_thread_data() )))
+#else
     if ((data = InterlockedExchangePointer( &prev_data, get_thread_data() )))
+#endif
     {
         if (data->pthread_id)
         {
@@ -1639,9 +1657,26 @@ static DECLSPEC_NORETURN void exit_thread( int status )
  */
 unsigned int horizon_join_last_exited_thread(void)
 {
-    struct thread_data *data = InterlockedExchangePointer( &prev_data, NULL );
+    struct thread_data *data = horizon_swap_prev_data( NULL );
 
     if (!data || !data->pthread_id) return 0;
+    pthread_join( data->pthread_id, NULL );
+    virtual_free_thread_data( data );
+    __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
+    return 1;
+}
+
+unsigned int horizon_join_ended_thread(void)
+{
+    extern int horizon_pthread_ended( pthread_t thread );
+    struct thread_data *data;
+
+    pthread_mutex_lock( &prev_data_mutex );
+    data = prev_data;
+    if (data && data->pthread_id && horizon_pthread_ended( data->pthread_id )) prev_data = NULL;
+    else data = NULL;
+    pthread_mutex_unlock( &prev_data_mutex );
+    if (!data) return 0;
     pthread_join( data->pthread_id, NULL );
     virtual_free_thread_data( data );
     __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
@@ -1778,13 +1813,57 @@ NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
 }
 
 
+#ifdef __SWITCH__
+static const char *nx_cxx_type_name( const EXCEPTION_RECORD *rec )
+{
+    const unsigned int *info, *types, *type;
+    const char *name;
+
+    if (rec->ExceptionCode != 0xe06d7363 || rec->NumberParameters != 3 || !rec->ExceptionInformation[2])
+        return "";
+    info = ULongToPtr( rec->ExceptionInformation[2] );
+    if (!virtual_check_buffer_for_read( info, 4 * sizeof(*info) ) || !info[3]) return "";
+    types = ULongToPtr( info[3] );
+    if (!virtual_check_buffer_for_read( types, 2 * sizeof(*types) ) || !types[0] || !types[1]) return "";
+    type = ULongToPtr( types[1] );
+    if (!virtual_check_buffer_for_read( type, 2 * sizeof(*type) ) || !type[1]) return "";
+    name = (const char *)ULongToPtr( type[1] ) + 8;
+    if (!virtual_check_buffer_for_read( name, 64 )) return "";
+    return name;
+}
+
+static void nx_trace_raised_exception( const EXCEPTION_RECORD *rec )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    static unsigned int traced;
+    char buffer[320];
+
+    if (!&wine_nx_runtime_trace) return;
+    if (rec->ExceptionCode == DBG_PRINTEXCEPTION_C || rec->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C ||
+        rec->ExceptionCode == 0x406d1388)
+        return;
+    if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 32) return;
+    snprintf( buffer, sizeof(buffer), "[SEH] raised tid=%04x code=%08x at %p flags=%x params=%u: %lx %lx %lx %.64s",
+              (unsigned int)GetCurrentThreadId(), (unsigned int)rec->ExceptionCode, rec->ExceptionAddress,
+              (unsigned int)rec->ExceptionFlags, (unsigned int)rec->NumberParameters,
+              (unsigned long)rec->ExceptionInformation[0], (unsigned long)rec->ExceptionInformation[1],
+              (unsigned long)rec->ExceptionInformation[2], nx_cxx_type_name( rec ) );
+    wine_nx_runtime_trace( buffer );
+}
+#endif
+
 /*******************************************************************
  *		NtRaiseException (NTDLL.@)
  */
 NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
 {
     struct thread_data *data = get_thread_data();
-    NTSTATUS status = send_debug_event( data, rec, context, first_chance );
+    NTSTATUS status;
+
+#ifdef __SWITCH__
+    if (first_chance) nx_trace_raised_exception( rec );
+#endif
+    status = send_debug_event( data, rec, context, first_chance );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
         return NtContinue( context, FALSE );

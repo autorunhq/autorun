@@ -9,10 +9,12 @@
 #   --clean  remove the runtime's build folders first
 #   --jobs   parallel jobs (default: the machine's cores)
 #
-# Needs Docker, git, Python 3, make and bison (Homebrew's, on a Mac). It fetches
-# the llvm-mingw toolchain Wine's Windows side is built with, and builds the
-# boot payloads Quick setup installs, when they are missing. The Windows DLLs
-# are not in the archive: Autorun downloads them.
+# Runs on Linux, which is where the builds are made: GitHub Actions
+# (.github/workflows/build.yml) runs this on a runner, and the card archive is
+# its artifact. Needs Docker, git, Python 3, make and bison; it fetches the
+# llvm-mingw toolchain Wine's Windows side is built with, and builds the boot
+# payloads Quick setup installs, when they are missing. The Windows DLLs are not
+# in the archive: Autorun downloads them.
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 hw="$root/horizon-wine"
@@ -46,10 +48,10 @@ fi
 # llvm-mingw, for Wine's headers and Windows modules.
 llvm_version=20260505
 case "$(uname -s)-$(uname -m)" in
-    Darwin-*) llvm_name="llvm-mingw-$llvm_version-ucrt-macos-universal" ;;
     Linux-aarch64|Linux-arm64) llvm_name="llvm-mingw-$llvm_version-ucrt-ubuntu-22.04-aarch64" ;;
     Linux-x86_64) llvm_name="llvm-mingw-$llvm_version-ucrt-ubuntu-22.04-x86_64" ;;
-    *) echo "No llvm-mingw build for $(uname -s) $(uname -m)." >&2; exit 1 ;;
+    *) echo "The build runs on Linux, as GitHub Actions runs it; there is no" >&2
+       echo "llvm-mingw download for $(uname -s) $(uname -m)." >&2; exit 1 ;;
 esac
 llvm="$hw/toolchains/$llvm_name"
 if [ ! -x "$llvm/bin/aarch64-w64-mingw32-clang" ]; then
@@ -60,7 +62,12 @@ if [ ! -x "$llvm/bin/aarch64-w64-mingw32-clang" ]; then
     tar -xJf "$hw/toolchains/$llvm_name.tar.xz" -C "$hw/toolchains"
     rm "$hw/toolchains/$llvm_name.tar.xz"
 fi
-export WINE_NX_LLVM_MINGW="$llvm" WINE_NX_JOBS="$jobs"
+# What this build is: the commit, when the tree is one, so the log a card
+# leaves says which runtime is on it.
+if [ -z "${WINE_NX_BUILD_ID:-}" ] && [ -d "$root/.git" ]; then
+    WINE_NX_BUILD_ID="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)"
+fi
+export WINE_NX_LLVM_MINGW="$llvm" WINE_NX_JOBS="$jobs" WINE_NX_BUILD_ID="${WINE_NX_BUILD_ID:-}"
 
 step "Pulling $image"
 docker pull -q "$image" >/dev/null
@@ -72,6 +79,7 @@ docker pull -q "$image" >/dev/null
 if [ ! -f "$hw/toolchains/boot-payloads/bundle/setup_boot_manifest.h" ]; then
     step "Building the boot payloads (Atmosphere and Horizon-OC), once"
     docker run --rm -v "$root:/work" -w /work -e WINE_NX_JOBS="$jobs" \
+        -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
         -e DEVKITPRO=/opt/devkitpro-release "$image" sh horizon-wine/build-boot-bundle.sh
 fi
 

@@ -13,6 +13,7 @@ start = syscall.index('static NTSTATUS thread_init(void)')
 init = syscall[start:syscall.index('\n}\n', start) + 3]
 fixture = r'''
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -29,16 +30,40 @@ static TEB teb;
 static TEB32 teb32;
 #define NtCurrentTeb() (&teb)
 #define NtCurrentTeb32() (&teb32)
-static WOW64_CPURESERVED cpu = {0, IMAGE_FILE_MACHINE_I386};
-static I386_CONTEXT saved;
-static unsigned queries, comparisons;
-static NTSTATUS query_error;
-struct thread_data {};
-static struct thread_data thread_data;
+static WOW64_CPURESERVED cpu = {0, IMAGE_FILE_MACHINE_I386}, remote_cpu = {0, IMAGE_FILE_MACHINE_I386};
+static I386_CONTEXT saved, remote_saved;
+static unsigned queries, comparisons, server_info_calls, wait_stopped_calls;
+static NTSTATUS query_error, server_info_error = STATUS_NOT_IMPLEMENTED;
+struct thread_data { TEB *teb; };
+struct teb_data { struct thread_data *thread; };
+static struct thread_data thread_data = { &teb }, remote_thread_data;
+static TEB remote_teb;
 static struct thread_data *get_thread_data(void) { return &thread_data; }
+static NTSTATUS get_thread_context(HANDLE handle, void *context, BOOL *self, USHORT machine) {
+    CONTEXT *ctx = context;
+    assert(handle == (HANDLE)16 && machine == IMAGE_FILE_MACHINE_ARM64 && ctx->ContextFlags == CONTEXT_ARM64_CONTROL);
+    (void)self;
+    wait_stopped_calls++;
+    return STATUS_SUCCESS;
+}
 static void *get_cpu_area(struct thread_data *data, USHORT machine) {
-    assert(data == &thread_data && machine == IMAGE_FILE_MACHINE_I386);
-    return &saved;
+    assert((data == &thread_data || data == &remote_thread_data) && machine == IMAGE_FILE_MACHINE_I386);
+    return data == &remote_thread_data ? &remote_saved : &saved;
+}
+struct { unsigned handle, access; } get_thread_info_req, *req = &get_thread_info_req;
+struct { ULONG64 teb; } get_thread_info_reply, *reply = &get_thread_info_reply;
+#define SERVER_START_REQ(name) do { memset(req, 0, sizeof(*req)); memset(reply, 0, sizeof(*reply));
+#define SERVER_END_REQ } while (0)
+static unsigned wine_server_obj_handle(HANDLE h) { return (unsigned)(uintptr_t)h; }
+static void *wine_server_get_ptr(ULONG64 ptr) { return (void *)(uintptr_t)ptr; }
+static NTSTATUS wine_server_call(void *r) {
+    (void)r;
+    server_info_calls++;
+    if (req->handle == 16 && !server_info_error) {
+        reply->teb = (ULONG64)(uintptr_t)&remote_teb;
+        return STATUS_SUCCESS;
+    }
+    return server_info_error;
 }
 NTSTATUS WINAPI NtCompareObjects(HANDLE first, HANDLE second) {
     assert(second == GetCurrentThread());
@@ -109,6 +134,19 @@ int main(void) {
     count = queries;
     assert(get_thread_wow64_context((HANDLE)16, &ctx, sizeof(ctx)) == STATUS_NOT_IMPLEMENTED);
     assert(set_thread_wow64_context((HANDLE)16, &ctx, sizeof(ctx)) == STATUS_NOT_IMPLEMENTED);
+    assert(server_info_calls == 2 && wait_stopped_calls == 0);
+    server_info_error = STATUS_SUCCESS;
+    remote_thread_data.teb = &remote_teb;
+    ((struct teb_data *)&remote_teb.GdiTebBatch)->thread = &remote_thread_data;
+    remote_teb.TlsSlots[WOW64_TLS_CPURESERVED] = &remote_cpu;
+    remote_saved.ContextFlags = CONTEXT_I386_FULL;
+    remote_saved.Eax = 0xfeedface;
+    assert(!get_thread_wow64_context((HANDLE)16, &ctx, sizeof(ctx)) && ctx.Eax == 0xfeedface);
+    assert(wait_stopped_calls == 1);
+    ctx.Eax = 0xcafebabe;
+    assert(!set_thread_wow64_context((HANDLE)16, &ctx, sizeof(ctx)) && remote_saved.Eax == 0xcafebabe);
+    assert(wait_stopped_calls == 2);
+    server_info_error = STATUS_NOT_IMPLEMENTED;
     assert(get_thread_wow64_context(NULL, &ctx, sizeof(ctx)) == STATUS_INVALID_HANDLE);
     assert(set_thread_wow64_context(NULL, &ctx, sizeof(ctx)) == STATUS_INVALID_HANDLE);
     assert(queries == count);

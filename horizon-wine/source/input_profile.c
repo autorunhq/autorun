@@ -30,6 +30,7 @@ const char *const input_pad_labels[INPUT_PAD_TARGET_COUNT] =
     "Right stick up", "Right stick down", "Right stick left", "Right stick right"
 };
 const char *const input_mode_labels[2] = { "Controller", "Keyboard / mouse" };
+const char *const input_face_layout_labels[2] = { "Xbox (B / A / Y / X)", "Nintendo (A / B / X / Y)" };
 static const char *const mouse_labels[] =
     { "Left click", "Right click", "Middle click", "Mouse back", "Mouse forward",
       "Wheel up", "Wheel down", "Wheel left", "Wheel right",
@@ -56,7 +57,10 @@ void input_profile_defaults( struct input_profile *p, int keyboard_auto )
     static const unsigned short keys[] =
     {
         INPUT_MOUSE_LEFT, INPUT_MOUSE_RIGHT, 0x20, 0x46, 0x09, 0x10, 0x28, 0x26,
-        0x1b, 0x09, 0x11, 0x12, 0x31, 0x32, 0x33, 0x34,
+        /* The d-pad is the arrow keys, as the README says: it is the only
+         * direction pad a menu expects. The left stick keeps W A S D, and a
+         * stick direction left unassigned inherits the d-pad's (left_inherit). */
+        0x1b, 0x09, 0x11, 0x12, 0x26, 0x28, 0x25, 0x27,
         0x57, 0x53, 0x41, 0x44, INPUT_MOUSE_UP, INPUT_MOUSE_DOWN, INPUT_MOUSE_MOVE_LEFT, INPUT_MOUSE_MOVE_RIGHT,
     };
     memset( p, 0, sizeof(*p) );
@@ -132,13 +136,29 @@ void input_profile_apply( struct input_profile *p, const struct launcher_kv *kv 
     for (unsigned int i = 0; i < INPUT_SOURCE_COUNT; i++)
     {
         snprintf( name, sizeof(name), "pad.%s", input_sources[i].name );
-        if (launcher_kv_get( kv, name, value, sizeof(value) )) input_binding_parse( &p->pad[i], value, 1 );
+        if (launcher_kv_get( kv, name, value, sizeof(value) ) &&
+            input_binding_parse( &p->pad[i], value, 1 ) && i < 4)
+            p->pad_custom |= 1u << i;
         snprintf( name, sizeof(name), "key.%s", input_sources[i].name );
         if (launcher_kv_get( kv, name, value, sizeof(value) ) && input_binding_parse( &p->keys[i], value, 0 ) &&
             i >= 16 && i < 20) p->left_inherit &= ~(1u << (i - 16));
     }
     for (unsigned int i = 0; i < 4; i++) if (p->left_inherit & (1u << i)) p->keys[16 + i] = p->keys[12 + i];
     p->mode = setting( kv, "input-mode", p->mode, INPUT_CONTROLLER, INPUT_KEYBOARD_MOUSE );
+    if (launcher_kv_get( kv, "button-layout", value, sizeof(value) ))
+    {
+        if (!strcasecmp( value, "switch" ) || !strcasecmp( value, "nintendo" ) || !strcasecmp( value, "bayx" ))
+            p->face_layout = 1;
+        else if (!strcasecmp( value, "xbox" ) || !strcasecmp( value, "abxy" ))
+            p->face_layout = 0;
+        else
+            p->face_layout = setting( kv, "button-layout", p->face_layout, 0, 1 );
+    }
+    for (unsigned int i = 0; i < 4; i++)
+    {
+        if (p->pad_custom & (1u << i)) continue;
+        p->pad[i] = (struct input_binding){ { p->face_layout ? (uint16_t)((i ^ 1) + 1) : (uint16_t)(i + 1) }, 1 };
+    }
     p->deadzone[0] = setting( kv, "left-deadzone", p->deadzone[0], 0, 25 );
     p->deadzone[1] = setting( kv, "right-deadzone", p->deadzone[1], 0, 25 );
     p->keyboard_auto = setting( kv, "keyboard-auto", p->keyboard_auto, 0, 1 );
@@ -278,7 +298,11 @@ void input_map_keys( const struct input_profile *profile, const struct input_pad
             unsigned int code = binding->code[j];
             if (code >= INPUT_MOUSE_UP && code < INPUT_MOUSE_END)
             {
-                int value = source_value( raw, i );
+                /* The pointer has a curve of its own (pointer_cursor.h). The
+                 * profile's deadzone is a gate in front of it: a stick the
+                 * program is told to ignore does not creep the pointer either,
+                 * and above the gate the pointer keeps its full travel. */
+                int value = strength ? source_value( raw, i ) : 0;
                 if (value > motion[code - INPUT_MOUSE_UP]) motion[code - INPUT_MOUSE_UP] = value;
                 continue;
             }

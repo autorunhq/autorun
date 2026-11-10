@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -72,17 +73,108 @@ struct horizon_memfile_anchor
     unsigned int users;                   /* aliased view ranges using these pages */
 };
 
+struct horizon_memfile_piece
+{
+    unsigned char *data;
+    size_t offset, size;
+};
+
 struct horizon_memfile
 {
     pthread_mutex_t mutex;
     const struct horizon_memfile_ops *ops;
     unsigned char *data;       /* the kernel locks the pages that are anchored */
+    struct horizon_memfile_piece *pieces;
+    size_t piece_count;
     size_t size;               /* whole pages */
     off_t pos;                 /* shared by the descriptors duplicated from one */
     unsigned int refs;         /* its descriptor, views the server records, view ranges */
     struct horizon_memfile_anchor *anchors;
     unsigned char *committed;  /* SEC_RESERVE: a byte per page, set once committed */
 };
+
+static inline void horizon_memfile_release_pages( struct horizon_memfile *file )
+{
+    size_t i;
+
+    if (file->data) HORIZON_MEMFILE_FREE_PAGES( file->data, file->size );
+    for (i = 0; i < file->piece_count; i++)
+        if (file->pieces[i].data)
+            HORIZON_MEMFILE_FREE_PAGES( file->pieces[i].data, file->pieces[i].size );
+    free( file->pieces );
+    file->data = NULL;
+    file->pieces = NULL;
+    file->piece_count = 0;
+}
+
+static inline int horizon_memfile_allocate_pages( struct horizon_memfile *file )
+{
+    const size_t minimum = HORIZON_MEMFILE_PAGE_SIZE;
+    size_t piece_size = 2 * 1048576, offset = 0, capacity = 0;
+
+    if ((file->data = HORIZON_MEMFILE_ALLOC_PAGES( file->size )))
+    {
+        memset( file->data, 0, file->size );
+        return 1;
+    }
+    if (errno != ENOMEM || file->size <= minimum) return 0;
+    if (piece_size >= file->size) piece_size = (file->size / 2) & ~(minimum - 1);
+    if (piece_size < minimum) piece_size = minimum;
+    while (offset < file->size)
+    {
+        unsigned char *data;
+        size_t bytes = file->size - offset;
+        if (bytes > piece_size) bytes = piece_size;
+        if (file->piece_count == capacity)
+        {
+            size_t next_capacity = capacity ? capacity * 2 : 8;
+            struct horizon_memfile_piece *pieces;
+            if (next_capacity > file->size / minimum) next_capacity = file->size / minimum;
+            if (next_capacity <= capacity || next_capacity > SIZE_MAX / sizeof(*pieces)) goto failed;
+            if (!(pieces = realloc( file->pieces, next_capacity * sizeof(*pieces) ))) goto failed;
+            file->pieces = pieces;
+            capacity = next_capacity;
+        }
+        while (!(data = HORIZON_MEMFILE_ALLOC_PAGES( bytes )))
+        {
+            if (errno != ENOMEM || bytes <= minimum) goto failed;
+            piece_size = (bytes / 2) & ~(minimum - 1);
+            if (piece_size < minimum) piece_size = minimum;
+            bytes = file->size - offset;
+            if (bytes > piece_size) bytes = piece_size;
+        }
+        file->pieces[file->piece_count++] = (struct horizon_memfile_piece){ data, offset, bytes };
+        memset( data, 0, bytes );
+        offset += bytes;
+    }
+    return 1;
+
+failed:
+    horizon_memfile_release_pages( file );
+    errno = ENOMEM;
+    return 0;
+}
+
+static inline unsigned char *horizon_memfile_source( struct horizon_memfile *file, size_t offset, size_t *limit )
+{
+    size_t first = 0, end = file->piece_count;
+    const struct horizon_memfile_piece *piece;
+
+    if (file->data)
+    {
+        if (limit) *limit = file->size;
+        return file->data + offset;
+    }
+    while (first + 1 < end)
+    {
+        size_t middle = first + (end - first) / 2;
+        if (offset < file->pieces[middle].offset) end = middle;
+        else first = middle;
+    }
+    piece = &file->pieces[first];
+    if (limit) *limit = piece->offset + piece->size;
+    return piece->data + offset - piece->offset;
+}
 
 /* The flags wineserver keeps for a section without a file (get_mapping_flags in
  * server/mapping.c), or 0 with *status set to the error it reports. */
@@ -122,15 +214,15 @@ static inline struct horizon_memfile *horizon_memfile_alloc( unsigned long long 
         errno = ENOMEM;
         return NULL;
     }
-    if (!(file->data = HORIZON_MEMFILE_ALLOC_PAGES( size )) ||
+    file->size = size;
+    if (!horizon_memfile_allocate_pages( file ) ||
         (reserve && !(file->committed = calloc( size / HORIZON_MEMFILE_PAGE_SIZE, 1 ))))
     {
-        if (file->data) HORIZON_MEMFILE_FREE_PAGES( file->data, size );
+        horizon_memfile_release_pages( file );
         free( file );
         errno = ENOMEM;
         return NULL;
     }
-    memset( file->data, 0, size );
     pthread_mutex_init( &file->mutex, NULL );
     file->ops = ops;
     file->size = size;
@@ -156,7 +248,8 @@ static inline void horizon_memfile_unref( struct horizon_memfile *file )
 
     /* An anchor the kernel would not remove still locks its pages, so they
      * are never handed back to the heap. */
-    if (!file->anchors) HORIZON_MEMFILE_FREE_PAGES( file->data, file->size );
+    if (!file->anchors) horizon_memfile_release_pages( file );
+    free( file->pieces );
     pthread_mutex_destroy( &file->mutex );
     free( file->committed );
     free( file );
@@ -177,7 +270,7 @@ static inline void horizon_memfile_trim_locked( struct horizon_memfile *file )
     while ((anchor = *next))
     {
         if (anchor->users ||
-            file->ops->unanchor( anchor->addr, file->data + anchor->first * page_size,
+            file->ops->unanchor( anchor->addr, horizon_memfile_source( file, anchor->first * page_size, NULL ),
                                  anchor->count * page_size, anchor->token ))
         {
             next = &anchor->next;
@@ -198,7 +291,8 @@ static inline int horizon_memfile_anchor_locked( struct horizon_memfile *file, s
 
     while (page < end)
     {
-        size_t stop;
+        size_t stop, limit;
+        unsigned char *source;
 
         while (*next && (*next)->first + (*next)->count <= page) next = &(*next)->next;
         if (*next && (*next)->first <= page)
@@ -207,6 +301,8 @@ static inline int horizon_memfile_anchor_locked( struct horizon_memfile *file, s
             continue;
         }
         stop = *next && (*next)->first < end ? (*next)->first : end;
+        source = horizon_memfile_source( file, page * page_size, &limit );
+        if (stop > limit / page_size) stop = limit / page_size;
         if (!(anchor = calloc( 1, sizeof(*anchor) )))
         {
             errno = ENOMEM;
@@ -214,7 +310,7 @@ static inline int horizon_memfile_anchor_locked( struct horizon_memfile *file, s
         }
         anchor->first = page;
         anchor->count = stop - page;
-        if (!(anchor->addr = file->ops->anchor( file->data + page * page_size, anchor->count * page_size,
+        if (!(anchor->addr = file->ops->anchor( source, anchor->count * page_size,
                                                 &anchor->token )))
         {
             free( anchor );
@@ -373,8 +469,10 @@ static inline void horizon_memfile_copy_locked( struct horizon_memfile *file, si
         }
         else
         {
+            size_t limit;
             stop = anchor ? anchor->first * page_size : file->size;
-            ptr = file->data + offset;
+            ptr = horizon_memfile_source( file, offset, &limit );
+            if (stop > limit) stop = limit;
         }
         chunk = stop - offset < len ? stop - offset : len;
         if (write) memcpy( ptr, buffer, chunk );
