@@ -818,13 +818,12 @@ static void wine_nx_send_mouse_motion( int dx, int dy )
 /* The screen the panel shows and the desktop the server keeps. A program that
  * asks for a display mode smaller than the screen (a 640x480 game on the
  * 1280x720 panel) makes the desktop that size, and the screen shows that
- * desktop's own pixels from the top left, one for one: a finger's point on
- * the screen is the same point in the program, and the picture is that
- * desktop's corner rather than a fitted one. These two say what the one means
- * to the other, and `pane` is where the desktop's pixels are on the screen --
- * the whole of both, until the picture is scaled up to the screen, at which
- * point the fit (`map_rect_virt_to_raw()` in `sysparams.c`) is what goes
- * here. */
+ * desktop fitted and centred, its proportions kept: 960x720 at 160,0, with
+ * bars either side. That rectangle is Wine's own (`map_rect_virt_to_raw()` in
+ * `sysparams.c`, the one the server clips the cursor to), and the OpenGL path
+ * draws the picture in it, so a finger, the arrow and the picture all say the
+ * same numbers. Without a mode change the two are the same rectangle and this
+ * is a plain copy. */
 struct nxdrv_screen_map
 {
     int desktop_w, desktop_h;  /* the desktop, in the program's pixels */
@@ -832,27 +831,70 @@ struct nxdrv_screen_map
     int pane_w, pane_h;        /* and how many screen pixels it takes */
 };
 
+/* Where a rectangle of the desktop is on the screen: Wine's own fit, the
+ * same rectangle its raw and virtual coordinates are related by, and the one
+ * the server clips the cursor to. A 640x480 desktop is 960x720 at 160,0 of
+ * the 1280x720 screen -- the picture keeps its proportions, scaled to the
+ * height, with bars either side. */
+BOOL wine_nx_picture_rect( RECT rect, RECT *pane )
+{
+    RECT mapped = map_rect_virt_to_raw( rect, (struct ratio){0} );
+
+    if (mapped.right - mapped.left <= 0 || mapped.bottom - mapped.top <= 0) return FALSE;
+    *pane = mapped;
+    return TRUE;
+}
+
+/* The screen a picture is drawn on, for the OpenGL path, which has to place
+ * the picture in the same rectangle this file maps the finger through. */
+int wine_nx_screen_width( void )
+{
+    return WINE_NX_SCREEN_W;
+}
+
+int wine_nx_screen_height( void )
+{
+    return WINE_NX_SCREEN_H;
+}
+
 /* The desktop, and where the screen shows its pixels. */
 static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
 {
     int w = NtUserGetSystemMetrics( SM_CXSCREEN ), h = NtUserGetSystemMetrics( SM_CYSCREEN );
+    RECT pane;
 
     if (w <= 0 || h <= 0) return FALSE;
     map->desktop_w = w;
     map->desktop_h = h;
-    /* The desktop's pixels are the screen's, from the top left: the compositor
-     * and the framebuffer alike copy a window's surface where the window's own
-     * pixels say (`wine_nx_surface_flush`), so a 640x480 program's picture is
-     * the top left corner of the 1280x720 panel and a finger at 640,360 is at
-     * 640,360 in the program. Wine's own raw/virtual ratio would rather see it
-     * fitted and centred at 160,0 960x720 -- that is a picture scaled to the
-     * screen, which this driver does not draw yet, and mapping the finger by
-     * it put every touch a hundred pixels and a third of the height beside the
-     * mark. */
-    map->pane_x = 0;
-    map->pane_y = 0;
-    map->pane_w = w;
-    map->pane_h = h;
+    if (!wine_nx_picture_rect( (RECT){0, 0, w, h}, &pane ))
+    {
+        /* Nothing to ask: the picture is the desktop, where it stands. */
+        pane.left = pane.top = 0;
+        pane.right = w;
+        pane.bottom = h;
+    }
+    map->pane_x = pane.left;
+    map->pane_y = pane.top;
+    map->pane_w = pane.right - pane.left;
+    map->pane_h = pane.bottom - pane.top;
+    if (map->pane_w != w || map->pane_h != h)
+    {
+        static int last_w, last_h, last_x, last_y, told;
+        char line[176];
+
+        /* Said once per shape: the picture's rectangle on the screen, which is
+         * also what the pointer is mapped by and the cursor clipped to. */
+        if (told++ < 12 && (w != last_w || h != last_h || pane.left != last_x || pane.top != last_y))
+        {
+            last_w = w;
+            last_h = h;
+            last_x = pane.left;
+            last_y = pane.top;
+            snprintf( line, sizeof(line), "[NXDRV] the %dx%d desktop is drawn at %d,%d %dx%d of the %dx%d screen",
+                      w, h, map->pane_x, map->pane_y, map->pane_w, map->pane_h, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+            nxdrv_say( line );
+        }
+    }
     return TRUE;
 }
 
@@ -1077,11 +1119,11 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
     /* A program that asked for a display mode smaller than the screen has a
-     * desktop of that size. While the screen shows that picture as it is, one
-     * for one, a screen point is the program's point and a step of one is a
-     * step of one; once the picture is scaled up, every point has to be said
-     * in the program's own pixels and the stick points rather than pushes,
-     * whole screen pixels no longer being whole desktop pixels. */
+     * desktop of that size, drawn fitted and centred -- 640x480 becomes 960x720
+     * at 160,0 -- so every point has to be said in the program's own pixels,
+     * and the stick points rather than pushes: a whole screen pixel is not a
+     * whole desktop pixel any more. Without a mode change the picture is the
+     * screen and this is a plain copy. */
     map_scaled = nxdrv_screen_map_get( &map ) &&
                  (map.pane_w != map.desktop_w || map.pane_h != map.desktop_h);
     {
