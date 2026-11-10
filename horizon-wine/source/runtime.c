@@ -4308,9 +4308,11 @@ int main( int argc, char **argv )
         {
             if (!strcmp( picture, "edges" )) wine_nx_picture_mode = 1;
             else if (!strcmp( picture, "stretched" )) wine_nx_picture_mode = 2;
+            else if (!strcmp( picture, "own-size" )) wine_nx_picture_mode = 3;
         }
         log_line( "[INIT] a picture of another mode: %s", wine_nx_picture_mode == 1 ? "fills the screen, edges cropped"
-                  : wine_nx_picture_mode == 2 ? "stretched to the screen" : "whole, with black bars" );
+                  : wine_nx_picture_mode == 2 ? "stretched to the screen"
+                  : wine_nx_picture_mode == 3 ? "its own size, in the middle" : "whole, with black bars" );
     }
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
@@ -4492,10 +4494,11 @@ int main( int argc, char **argv )
         runtime_dxvk_on_add = options.dxvk_on_add;
         wine_nx_config_set_bool( &runtime_config, "keyboard-on-text-focus", options.swkbd_auto );
         wine_nx_swkbd_auto_enabled = options.swkbd_auto;
-        wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 2 ? 0 : options.picture_mode;
+        wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 3 ? 0 : options.picture_mode;
         wine_nx_config_set( &runtime_config, "picture-mode",
                             wine_nx_picture_mode == 1 ? "\"edges\"" :
-                            wine_nx_picture_mode == 2 ? "\"stretched\"" : "\"whole\"" );
+                            wine_nx_picture_mode == 2 ? "\"stretched\"" :
+                            wine_nx_picture_mode == 3 ? "\"own-size\"" : "\"whole\"" );
         wine_nx_config_save( &runtime_config, CONFIG_FILE );
         if (!chosen)
         {

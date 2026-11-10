@@ -3360,11 +3360,13 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_PICTURE].label, sizeof(rows[0].label), "Picture of another mode" );
         snprintf( rows[SET_PICTURE].value, sizeof(rows[0].value), "%s",
                   l->options->picture_mode == 1 ? "Edges cropped" :
-                  l->options->picture_mode == 2 ? "Stretched" : "Whole" );
+                  l->options->picture_mode == 2 ? "Stretched" :
+                  l->options->picture_mode == 3 ? "Own size" : "Whole" );
         rows[SET_PICTURE].help = "A game that asks for a resolution of its own is shown on the console's "
                                  "1280x720 screen. Whole keeps all of it, with black bars round it; edges "
                                  "cropped fills the screen and loses the borders; stretched fills it and "
-                                 "distorts. A finger lands on what it sees in every one of them.";
+                                 "distorts; own size draws it in the middle, one pixel to one pixel, as a "
+                                 "window stands on a desk. A finger lands on what it sees in every one.";
         launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
         for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
 
@@ -3466,7 +3468,7 @@ static void settings_menu( struct launcher *l )
         case SET_PROFILE: l->options->profile = !l->options->profile; break;
         case SET_WINDOWS: l->options->framebuffer = !l->options->framebuffer; break;
         case SET_PICTURE:
-            l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 2 : 1)) % 3;
+            l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 3 : 1)) % 4;
             break;
         case SET_DXVK_ON_ADD: l->options->dxvk_on_add = !l->options->dxvk_on_add; break;
         case SET_REOPEN: l->options->reopen_launcher = !l->options->reopen_launcher; break;

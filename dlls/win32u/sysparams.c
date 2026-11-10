@@ -177,9 +177,10 @@ UINT64 thunk_lock_callback = 0;
 /* horizon-wine/source/runtime.c, cleared by switch/wine/no-display-devices.txt */
 extern int wine_nx_display_devices __attribute__((weak));
 /* And how a picture of another display mode fills the screen: 0 whole, with
- * black bars; 1 filling it, its edges cropped; 2 stretched to it. The same
- * number decides what the screen shows and where a finger's points land,
- * since both are this mapping. */
+ * black bars; 1 filling it, its edges cropped; 2 stretched to it; 3 at its own
+ * size in the middle, as a window stands on a desk. The same number decides
+ * what the screen shows and where a finger's points land, since both are this
+ * mapping. */
 extern int wine_nx_picture_mode __attribute__((weak));
 #endif
 
@@ -2391,6 +2392,9 @@ static void source_virt_to_raw_ratios( struct source *source, struct ratio *acro
     case 2: /* the picture fills the screen, stretched to it */
         *across_out = across;
         *down_out = down;
+        break;
+    case 3: /* the picture at its own size, centred, as a window on a desk */
+        *across_out = *down_out = (struct ratio){1, 1};
         break;
     default: /* the whole picture, centred, with black bars round it */
         *across_out = *down_out = across_is_smaller ? across : down;
