@@ -879,38 +879,6 @@ int wine_nx_screen_height( void )
     return WINE_NX_SCREEN_H;
 }
 
-/* One desktop for everything, the screen's size, marked virtual: a program
- * that asks for a display mode of its own is told the change was made and goes
- * on drawing in its own window, which stays inside this desktop instead of
- * shrinking it. Nothing then moves the desktop out from under the pointer --
- * a point on the screen is the point in the program -- and what the program
- * does not cover is the desktop's own background, as it is on Windows.
- * Called by the runtime before the program starts. */
-#define NXDRV_DESKTOP_ALL_ACCESS 0x01ff   /* as winstation.c counts it */
-
-BOOL wine_nx_make_virtual_desktop( void )
-{
-    static WCHAR name[] = L"Default";
-    UNICODE_STRING string = { sizeof(name) - sizeof(WCHAR), sizeof(name), name };
-    OBJECT_ATTRIBUTES attr = {0};
-    DEVMODEW devmode = {0};
-    HDESK desktop;
-
-    attr.Length = sizeof(attr);
-    attr.ObjectName = &string;
-    devmode.dmSize = sizeof(devmode);
-    devmode.dmPelsWidth = WINE_NX_SCREEN_W;
-    devmode.dmPelsHeight = WINE_NX_SCREEN_H;
-
-    /* The desktop is already there: this marks it, and keeps the driver's own
-     * size for it rather than letting a program's mode change take it. */
-    if (!(desktop = NtUserCreateDesktopEx( &attr, NULL, &devmode, DF_WINE_VIRTUAL_DESKTOP,
-                                          NXDRV_DESKTOP_ALL_ACCESS, 0 )))
-        return FALSE;
-    NtUserCloseDesktop( desktop );
-    return TRUE;
-}
-
 /* The desktop, and where the screen shows its pixels. */
 static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
 {
