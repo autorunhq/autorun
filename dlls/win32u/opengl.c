@@ -883,6 +883,18 @@ static void framebuffer_surface_destroy( struct opengl_drawable *drawable )
     if (surface->target) opengl_drawable_release( surface->target );
 }
 
+#ifdef __SWITCH__
+static BOOL client_surface_screen_rect( struct client_surface *client, RECT *rect )
+{
+    struct ratio dpi = get_dpi_for_window( client->hwnd );
+
+    if (!get_client_rect( client->hwnd, rect, dpi )) return FALSE;
+    map_window_points( client->hwnd, 0, (POINT *)rect, 2, dpi );
+    *rect = map_rect_virt_to_raw( *rect, dpi );
+    return rect->right > rect->left && rect->bottom > rect->top;
+}
+#endif
+
 static void blit_framebuffer_surface( struct opengl_drawable *drawable )
 {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -890,79 +902,48 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
     const struct opengl_funcs *funcs = &display_funcs;
     SIZE src = drawable->virtual_size, dst = drawable->monitor_size;
     float ramp_data[GAMMA_RAMP_SIZE * 4];
-    int dst_x = 0, dst_y = 0;
-    BOOL letterbox = FALSE;
+    POINT origin = {0, 0};
+    BOOL blit;
+#ifdef __SWITCH__
+    struct opengl_drawable *target = framebuffer_from_opengl_drawable( drawable )->target;
+    EGLint screen_width = 0, screen_height = 0;
+    RECT screen_rect;
+#endif
 
     TRACE( "%s src %s dst %s fbo %u\n", debugstr_opengl_drawable( drawable ), wine_dbgstr_point( (POINT *)&src ),
            wine_dbgstr_point( (POINT *)&dst ), drawable->read_fbo );
 
-#ifdef __SWITCH__
-    {
-        extern BOOL wine_nx_picture_rect( RECT, RECT * );
-        extern int wine_nx_screen_width( void );
-        extern int wine_nx_screen_height( void );
-        extern void wine_nx_say( const char * );
-        static int told_cx, told_cy, told_x, told_y, told_w, told_h, told_dw;
-        int desktop_w = NtUserGetSystemMetrics( SM_CXSCREEN ), desktop_h = NtUserGetSystemMetrics( SM_CYSCREEN );
-        RECT pane;
-
-        /* A program that took the whole desktop -- a game in a mode of its own
-         * -- is drawn into the rectangle the desktop occupies on the screen,
-         * the one the driver maps the pointer and the cursor clip through
-         * (`wine_nx_picture_rect()`), not into the screen's corner: the
-         * picture is scaled to the height and the rest of the screen is black.
-         * A window that is not the whole desktop is drawn where it stands. */
-        if (src.cx == desktop_w && src.cy == desktop_h &&
-            wine_nx_picture_rect( (RECT){0, 0, desktop_w, desktop_h}, &pane ))
-        {
-            dst.cx = pane.right - pane.left;
-            dst.cy = pane.bottom - pane.top;
-            /* GL's origin is the bottom left of the drawing buffer. */
-            dst_x = pane.left;
-            dst_y = wine_nx_screen_height() - pane.top - dst.cy;
-            letterbox = pane.left > 0 || pane.top > 0 || pane.right < wine_nx_screen_width() ||
-                        pane.bottom < wine_nx_screen_height();
-        }
-
-        /* Said once per change, so a picture in the wrong place is a number in
-         * the log rather than a guess. */
-        if (told_cx != src.cx || told_cy != src.cy || told_x != dst_x || told_y != dst_y ||
-            told_w != dst.cx || told_h != dst.cy || told_dw != desktop_w)
-        {
-            char line[192];
-
-            told_cx = src.cx;
-            told_cy = src.cy;
-            told_x = dst_x;
-            told_y = dst_y;
-            told_w = dst.cx;
-            told_h = dst.cy;
-            told_dw = desktop_w;
-            snprintf( line, sizeof(line), "[NXGL] the %dx%d picture is drawn at %d,%d %dx%d of the %dx%d screen, "
-                      "desktop %dx%d%s", src.cx, src.cy, dst_x, dst_y, dst.cx, dst.cy,
-                      wine_nx_screen_width(), wine_nx_screen_height(), desktop_w, desktop_h,
-                      letterbox ? ", bars" : "" );
-            wine_nx_say( line );
-        }
-    }
-#endif
-
     funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, drawable->read_fbo );
     funcs->p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
     funcs->p_glDrawBuffer( GL_BACK );
+#ifdef __SWITCH__
+    if (drawable->client && target && target->surface &&
+        funcs->p_eglQuerySurface( display_egl.display, target->surface, EGL_WIDTH, &screen_width ) &&
+        funcs->p_eglQuerySurface( display_egl.display, target->surface, EGL_HEIGHT, &screen_height ) &&
+        client_surface_screen_rect( drawable->client, &screen_rect ))
+    {
+        dst.cx = screen_rect.right - screen_rect.left;
+        dst.cy = screen_rect.bottom - screen_rect.top;
+        origin.x = screen_rect.left;
+        origin.y = screen_height - screen_rect.bottom;
+        if (origin.x || origin.y || dst.cx != screen_width || dst.cy != screen_height)
+        {
+            funcs->p_glDisable( GL_SCISSOR_TEST );
+            funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+            funcs->p_glClear( GL_COLOR_BUFFER_BIT );
+        }
+    }
+#endif
     if (drawable->srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
 
-    /* What the picture does not cover is the bars, and the bars are black. */
-    if (letterbox)
-    {
-        funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
-        funcs->p_glClear( GL_COLOR_BUFFER_BIT );
-    }
-
-    if (drawable->read_fbo == drawable->draw_fbo && use_default_gamma_ramp())
+    blit = drawable->read_fbo == drawable->draw_fbo && use_default_gamma_ramp();
+#ifdef __SWITCH__
+    if (dst.cx != src.cx || dst.cy != src.cy) blit = FALSE;
+#endif
+    if (blit)
     {
         funcs->p_glReadBuffer( GL_COLOR_ATTACHMENT0 );
-        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, dst_x, dst_y, dst_x + dst.cx, dst_y + dst.cy,
+        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, origin.x, origin.y, origin.x + dst.cx, origin.y + dst.cy,
                                     GL_COLOR_BUFFER_BIT, GL_LINEAR );
     }
     else
@@ -987,7 +968,7 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
         funcs->p_glWaitSync( gamma_sync, 0, GL_TIMEOUT_IGNORED );
         pthread_mutex_unlock( &gamma_lock );
 
-        funcs->p_glViewport( dst_x, dst_y, dst.cx, dst.cy );
+        funcs->p_glViewport( origin.x, origin.y, dst.cx, dst.cy );
 
         /* macOS OpenGL requires a VAO for glDrawArrays */
         funcs->p_glGenVertexArrays( 1, &vao );

@@ -7397,15 +7397,65 @@ static int horizon_server_handle_set_process_winstation( struct horizon_server_c
     return horizon_server_write_status( connection->reply_fd, status );
 }
 
+struct horizon_monitor_info
+{
+    struct horizon_rectangle raw;
+    struct horizon_rectangle virt;
+    unsigned int flags;
+    unsigned short dpi_num, dpi_den;
+    unsigned short raw_dpi_num, raw_dpi_den;
+};
+
+#define HORIZON_MAX_MONITORS 8
+
+static struct horizon_monitor_info horizon_monitors[HORIZON_MAX_MONITORS];
+static unsigned int horizon_monitor_count;
+
+static void horizon_server_map_point_raw_to_virt_locked( int *x, int *y )
+{
+    const struct horizon_monitor_info *monitor = NULL;
+    int width_from, height_from, width_to, height_to;
+    unsigned int i;
+
+    for (i = 0; i < horizon_monitor_count && !monitor; i++)
+    {
+        const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+        if (*x >= raw->left && *x < raw->right && *y >= raw->top && *y < raw->bottom) monitor = &horizon_monitors[i];
+    }
+    if (!monitor && horizon_monitor_count) monitor = &horizon_monitors[0];
+    if (!monitor) return;
+    width_from = monitor->raw.right - monitor->raw.left;
+    height_from = monitor->raw.bottom - monitor->raw.top;
+    width_to = monitor->virt.right - monitor->virt.left;
+    height_to = monitor->virt.bottom - monitor->virt.top;
+    if (width_from <= 0 || height_from <= 0) return;
+
+    *x = *x * 2 - (monitor->raw.left * 2 + width_from);
+    *x = (*x * width_to * 2 + width_from) / (width_from * 2);
+    *x = (*x + monitor->virt.left * 2 + width_to) / 2;
+
+    *y = *y * 2 - (monitor->raw.top * 2 + height_from);
+    *y = (*y * height_to * 2 + height_from) / (height_from * 2);
+    *y = (*y + monitor->virt.top * 2 + height_to) / 2;
+}
+
 static int horizon_server_handle_set_winstation_monitors( struct horizon_server_connection *connection,
-                                                          const unsigned char *message )
+                                                          const unsigned char *message,
+                                                          const void *data, unsigned int data_size )
 {
     const struct horizon_set_winstation_monitors_request *request = (const void *)message;
     struct horizon_set_winstation_monitors_reply reply;
     struct horizon_server_object *winstation;
+    unsigned int count = data_size / sizeof(struct horizon_monitor_info);
 
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (count > HORIZON_MAX_MONITORS) count = HORIZON_MAX_MONITORS;
+    if (data && count)
+    {
+        memcpy( horizon_monitors, data, count * sizeof(struct horizon_monitor_info) );
+        horizon_monitor_count = count;
+    }
     if (!(winstation = horizon_server_find_handle_object_locked( horizon_process_winstation,
                                                                  HORIZON_SERVER_OBJECT_WINSTATION )))
         reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
@@ -8950,6 +9000,7 @@ static struct horizon_user_window *horizon_server_shallow_window_from_point_lock
 {
     struct horizon_user_window *window;
 
+    horizon_server_map_point_raw_to_virt_locked( &x, &y );
     for (window = horizon_windows; window; window = window->next)
     {
         struct horizon_rectangle rect, client;
@@ -17126,7 +17177,8 @@ static void *horizon_server_thread( void *param )
             status = horizon_server_handle_close_handle( connection, message );
             break;
         case HORIZON_REQ_SET_WINSTATION_MONITORS:
-            status = horizon_server_handle_set_winstation_monitors( connection, message );
+            status = horizon_server_handle_set_winstation_monitors( connection, message, request_data,
+                                                                    header->request_size );
             break;
         case HORIZON_REQ_GET_PROCESS_WINSTATION:
             status = horizon_server_handle_get_process_winstation( connection );

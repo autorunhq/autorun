@@ -165,7 +165,11 @@ static INT64 last_query_display_time;
 static UINT64 monitor_update_serial;
 static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef __SWITCH__
+BOOL emulate_modeset = TRUE;
+#else
 BOOL emulate_modeset = FALSE;
+#endif
 BOOL decorated_mode = TRUE;
 UINT64 thunk_lock_callback = 0;
 
@@ -4631,6 +4635,26 @@ LONG WINAPI NtUserChangeDisplaySettings( UNICODE_STRING *devname, DEVMODEW *devm
     if (ret) ERR( "Changing %s display settings returned %d.\n", debugstr_us(devname), ret );
     return ret;
 }
+
+#ifdef __SWITCH__
+LONG wine_nx_fit_screen( UINT width, UINT height )
+{
+    DEVMODEW mode = {.dmSize = sizeof(DEVMODEW)};
+    struct source *source;
+    LONG ret;
+
+    if (!(source = find_source( NULL ))) return DISP_CHANGE_BADPARAM;
+    source_get_current_settings( source, &mode );
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
+    mode.dmPosition.x = 0;
+    mode.dmPosition.y = 0;
+    ret = apply_display_settings( source, &mode, NULL, CDS_FULLSCREEN, NULL );
+    source_release( source );
+    return ret;
+}
+#endif
 
 static BOOL source_enum_display_settings( const struct source *source, UINT index, DEVMODEW *devmode, UINT flags )
 {

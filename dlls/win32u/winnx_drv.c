@@ -1144,6 +1144,136 @@ static void wine_nx_update_cursor( void )
     wine_nx_cursor_show( wine_nx_cursor_visible_for( cursor, count, &seen ) );
 }
 
+/**********************************************************************
+ *           the screen follows the game's window
+ *
+ * Wine fits an emulated mode into the console's screen -- proportions kept,
+ * centred, the mouse mapped for the program -- but it cannot know that a game
+ * asking for 640x480 still means to fill the screen, and a game in a window
+ * means it just the same.  So the screen takes the size of the game's main
+ * window, the largest visible window of the program that has no owner, and the
+ * window moves so its client area is in the corner.  The program's picture is
+ * then the screen, and the fit does the rest.
+ *
+ * From Carafe (carafe-nx/carafe), runtime/patches/autorun/0017 and its
+ * docs/decisions/0027, which checked it on three games.
+ */
+#define WINE_NX_GAME_WINDOW_MIN_W 640
+#define WINE_NX_GAME_WINDOW_MIN_H 400
+
+extern LONG wine_nx_fit_screen( UINT width, UINT height );
+
+static LONG wine_nx_fit_pending;
+static DWORD wine_nx_fit_thread;
+
+static BOOL wine_nx_game_window( HWND hwnd, RECT *client )
+{
+    struct ratio dpi = get_thread_dpi();
+    DWORD style = get_window_long( hwnd, GWL_STYLE );
+    DWORD pid = 0;
+
+    if (!(style & WS_VISIBLE) || (style & (WS_CHILD | WS_MINIMIZE))) return FALSE;
+    if (get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_TOOLWINDOW) return FALSE;
+    if (get_window_relative( hwnd, GW_OWNER )) return FALSE;
+    if (!NtUserGetWindowThread( hwnd, &pid ) || pid != GetCurrentProcessId()) return FALSE;
+    if (!get_client_rect( hwnd, client, dpi )) return FALSE;
+    map_window_points( hwnd, 0, (POINT *)client, 2, dpi );
+    return client->right - client->left >= WINE_NX_GAME_WINDOW_MIN_W &&
+           client->bottom - client->top >= WINE_NX_GAME_WINDOW_MIN_H;
+}
+
+static void wine_nx_log_window( HWND hwnd, BOOL chosen )
+{
+    static unsigned int logged;
+    struct ratio dpi = get_thread_dpi();
+    RECT client = {0};
+    DWORD pid = 0;
+    char line[200];
+
+    if (logged >= 40) return;
+    logged++;
+    NtUserGetWindowThread( hwnd, &pid );
+    if (get_client_rect( hwnd, &client, dpi )) map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
+    snprintf( line, sizeof(line), "[NXSCREEN] window %p style %08x exstyle %08x owner %p pid %u client %d,%d %dx%d: %s",
+              hwnd, (unsigned int)get_window_long( hwnd, GWL_STYLE ), (unsigned int)get_window_long( hwnd, GWL_EXSTYLE ),
+              get_window_relative( hwnd, GW_OWNER ), (unsigned int)pid, (int)client.left, (int)client.top,
+              (int)(client.right - client.left), (int)(client.bottom - client.top), chosen ? "a candidate" : "skipped" );
+    nxdrv_say( line );
+}
+
+static HWND wine_nx_find_game_window( RECT *client )
+{
+    HWND *list, game = 0;
+    RECT rect;
+    LONGLONG area, best = 0;
+    unsigned int i;
+
+    if (!(list = list_window_children( NtUserGetDesktopWindow() ))) return 0;
+    for (i = 0; list[i]; i++)
+    {
+        BOOL candidate = wine_nx_game_window( list[i], &rect );
+
+        if (get_window_long( list[i], GWL_STYLE ) & WS_VISIBLE) wine_nx_log_window( list[i], candidate );
+        if (!candidate) continue;
+        area = (LONGLONG)(rect.right - rect.left) * (rect.bottom - rect.top);
+        if (area <= best) continue;
+        best = area;
+        game = list[i];
+        *client = rect;
+    }
+    free( list );
+    return game;
+}
+
+static void wine_nx_fit_screen_to_game( void )
+{
+    struct ratio dpi = get_thread_dpi();
+    int width, height, screen_width, screen_height;
+    RECT client, window;
+    HWND game;
+    DWORD thread;
+    UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    LONG ret;
+    char line[176];
+
+    /* Only the window's own thread moves it, and not while it waits for another
+     * thread's answer: a thread that reads another's messages -- DirectShow
+     * starts one while a game waits -- would move that game's window. Carafe's
+     * 0097 found this out the hard way. */
+    if (wine_nx_fit_thread && wine_nx_fit_thread != GetCurrentThreadId()) return;
+    if (!InterlockedExchange( &wine_nx_fit_pending, 0 )) return;
+    if (!(game = wine_nx_find_game_window( &client ))) return;
+    if ((thread = NtUserGetWindowThread( game, NULL )) != GetCurrentThreadId())
+    {
+        wine_nx_fit_thread = thread;
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+        return;
+    }
+    width = client.right - client.left;
+    height = client.bottom - client.top;
+    screen_width = get_system_metrics( SM_CXSCREEN );
+    screen_height = get_system_metrics( SM_CYSCREEN );
+    if (width != screen_width || height != screen_height)
+    {
+        ret = wine_nx_fit_screen( width, height );
+        snprintf( line, sizeof(line), "[NXSCREEN] the screen follows the game's window: %dx%d, was %dx%d, result %d",
+                  width, height, screen_width, screen_height, (int)ret );
+        nxdrv_say( line );
+        if (ret != DISP_CHANGE_SUCCESSFUL || !wine_nx_game_window( game, &client )) return;
+        flags |= SWP_FRAMECHANGED;
+    }
+    if (!client.left && !client.top) flags |= SWP_NOMOVE;
+    if ((flags & SWP_NOMOVE) && !(flags & SWP_FRAMECHANGED)) return;
+    if (!get_window_rect( game, &window, dpi )) return;
+    NtUserSetWindowPos( game, 0, window.left - client.left, window.top - client.top, 0, 0, flags );
+    if (!(flags & SWP_NOMOVE))
+    {
+        snprintf( line, sizeof(line), "[NXSCREEN] the game's window moved by %d,%d to the screen's corner",
+                  (int)-client.left, (int)-client.top );
+        nxdrv_say( line );
+    }
+}
+
 BOOL wine_nx_drv_ProcessEvents( DWORD mask )
 {
     static unsigned int delivering;
@@ -1159,6 +1289,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     int x, y, dx, dy;
 
     (void)mask;
+    wine_nx_fit_screen_to_game();
     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
     __atomic_add_fetch( &wine_nx_input_pumps, 1, __ATOMIC_RELAXED );
     wine_nx_fb_present();
@@ -1390,6 +1521,13 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
     BOOL has_old_screen_rect = wine_nx_get_cached_screen_rect( hwnd, &old_screen_rect );
 
     nxdrv_trace( "[NXDRV] WindowPosChanged surface=%d swp=%x", surface ? 1 : 0, swp_flags, 0, 0 );
+    /* A top-level window moved or showed itself: the screen may have to
+     * follow it at the next pass. */
+    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
+    {
+        wine_nx_fit_thread = NtUserGetWindowThread( hwnd, NULL );  /* it moves its own windows */
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+    }
     if (swp_flags & SWP_HIDEWINDOW)
     {
         wine_nx_note_surface_hidden( hwnd );
