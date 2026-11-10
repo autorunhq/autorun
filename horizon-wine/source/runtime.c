@@ -1165,15 +1165,54 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             wine_nx_compositor_redraw();
         }
     }
+    /* Said once: the profile in force decides whether the stick may move the
+     * cursor at all, and a finger is the one pointer that should always
+     * work. */
+    {
+        static int profile_told;
+
+        if (!profile_told)
+        {
+            profile_told = 1;
+            log_line( "[POINTER] input mode %d, mouse speed %d", profile->mode, profile->mouse_speed );
+        }
+    }
     emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
     if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
         wine_nx_pointer_placed |= moved;
         output.buttons |= WINE_NX_POINTER_LEFT;
+        /* A finger points at a place, so say where it went down and where the
+         * pointer went: a click that lands nowhere is then a number to read,
+         * not a guess. Once a second while it stays down. */
+        {
+            static u64 finger_told;
+
+            if (!finger_told || armTicksToNs( now - finger_told ) >= 1000000000ull)
+            {
+                finger_told = now;
+                log_line( "[TOUCH] finger %d,%d, pointer %d,%d", (int)touch.touches[0].x,
+                          (int)touch.touches[0].y, (int)wine_nx_pointer.x, (int)wine_nx_pointer.y );
+            }
+        }
+    }
+    else if (hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    {
+        /* The finger is there and something above the program has it: the
+         * keyboard, the controls panel or the task list. */
+        static u64 gated_told;
+
+        if (!gated_told || armTicksToNs( now - gated_told ) >= 1000000000ull)
+        {
+            gated_told = now;
+            log_line( "[TOUCH] finger %d,%d taken by the %s", (int)touch.touches[0].x, (int)touch.touches[0].y,
+                      on_keyboard ? "keyboard" : controls_open ? "controls panel" : "task list" );
+        }
     }
     if (emulate)
     {

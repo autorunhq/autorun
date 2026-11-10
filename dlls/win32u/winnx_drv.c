@@ -83,6 +83,11 @@ static pthread_t wine_nx_input_thread_id;
 static void nxdrv_trace( const char *fmt, int a, int b, int c, int d );
 static void nxdrv_trace_hot( const char *fmt, int a, int b, int c, int d );
 
+/* The screen the arrow is drawn on and the framebuffer's size: the monitor
+ * reported to win32u below, and what a finger's pixels mean. */
+#define WINE_NX_SCREEN_W 1280
+#define WINE_NX_SCREEN_H 720
+
 /* What the log is told whether or not verbose tracing is on: a few lines about
  * where the input goes, not the stream of every event. */
 static void nxdrv_say( const char *text )
@@ -371,6 +376,23 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         entry->layer = layer;
     }
     wine_nx_layer_place( layer, origin->x, origin->y, present->right, present->bottom );
+    {
+        /* The first picture the compositor draws and where: a window smaller
+         * than the screen shows there, and a point on the screen means what
+         * the window says only in that part of it. */
+        static int told;
+
+        if (!told)
+        {
+            char line[160];
+
+            told = 1;
+            snprintf( line, sizeof(line), "[NXCOMP] the first picture is drawn at %d,%d %dx%d of %dx%d",
+                      (int)origin->x, (int)origin->y, (int)present->right, (int)present->bottom,
+                      WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+            nxdrv_say( line );
+        }
+    }
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
@@ -620,8 +642,6 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
  * Report a single 1280x720 primary monitor so win32u has a real virtual
  * screen; without it the desktop is 0x0 and every window clips to nothing.
  */
-#define WINE_NX_SCREEN_W 1280
-#define WINE_NX_SCREEN_H 720
 
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
@@ -788,6 +808,52 @@ static void wine_nx_send_mouse_motion( int dx, int dy )
     NtUserSendHardwareInput( 0, 0, &input, 0 );
 }
 
+/* The point about to be handed over, and the window it is over. A finger that
+ * lands outside the program's window clicks the desktop instead of the
+ * program, and a window shown scaled up (a 640x480 game on the 1280x720
+ * screen) takes its clicks only in the part of the screen it really covers:
+ * the log gives both numbers, so the mapping can be read rather than
+ * guessed. Said for the first handful of points. */
+static void nxdrv_trace_pointer_target( int x, int y, DWORD flags )
+{
+    static unsigned int count;
+    char line[208];
+    HWND hwnd;
+    RECT rect, client;
+    POINT point = { x, y };
+    UINT dpi;
+
+    if (count >= 12) return;
+    if (!count++)
+    {
+        /* The screen the arrow is drawn on and the desktop the server holds:
+         * when they differ, a finger's point means something else to the
+         * program than it does on the panel. */
+        snprintf( line, sizeof(line),
+                  "[MOUSE] the screen is %dx%d, the desktop is %dx%d; a finger points at the screen in its pixels",
+                  WINE_NX_SCREEN_W, WINE_NX_SCREEN_H,
+                  (int)NtUserGetSystemMetrics( SM_CXSCREEN ), (int)NtUserGetSystemMetrics( SM_CYSCREEN ) );
+        nxdrv_say( line );
+    }
+    hwnd = NtUserWindowFromPoint( x, y );
+    if (!hwnd)
+    {
+        snprintf( line, sizeof(line), "[MOUSE] %d,%d (flags %x) is over no window", x, y, (int)flags );
+        nxdrv_say( line );
+        return;
+    }
+    dpi = NtUserGetDpiForWindow( hwnd );
+    if (!NtUserGetWindowRect( hwnd, &rect, dpi )) SetRectEmpty( &rect );
+    if (!NtUserGetClientRect( hwnd, &client, dpi )) SetRectEmpty( &client );
+    if (!NtUserScreenToClient( hwnd, &point )) point.x = point.y = -1;
+    snprintf( line, sizeof(line),
+              "[MOUSE] %d,%d (flags %x) is over hwnd %x rect %d,%d-%d,%d client %dx%d, at %d,%d of it",
+              x, y, (int)flags, (int)(ULONG_PTR)hwnd, (int)rect.left, (int)rect.top, (int)rect.right,
+              (int)rect.bottom, (int)(client.right - client.left), (int)(client.bottom - client.top),
+              (int)point.x, (int)point.y );
+    nxdrv_say( line );
+}
+
 static void wine_nx_flush_mouse(void)
 {
     static const INPUT input = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
@@ -950,7 +1016,13 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     while (key_after && !key_events[key_after - 1].down) key_after--;
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
-    if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
+    if (placed || first)
+    {
+        DWORD flags = (placed ? MOUSEEVENTF_MOVE : 0) | first;
+
+        nxdrv_trace_pointer_target( x, y, flags );
+        wine_nx_send_mouse( x, y, flags );
+    }
     if (stepped) wine_nx_send_mouse_motion( dx, dy );
     if (second) wine_nx_send_mouse( x, y, second );
     wine_nx_flush_mouse();
@@ -963,21 +1035,35 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
         /* The arrow belongs where the cursor is, which after movement is for
          * the server to say: it clips the cursor to the screen, and holds it
          * still for a program that has taken the mouse for itself. Nothing is
-         * lost by snapping to it, the movement having been sent already. */
-        if (wine_nx_cursor_pos( &pos ) && (pos.x != x || pos.y != y))
+         * lost by snapping to it, the movement having been sent already. What
+         * it answers is also the proof that the point arrived: the first few
+         * are said whether or not it agrees, and a disagreement is followed. */
+        if (wine_nx_cursor_pos( &pos ))
         {
-            static unsigned int followed;
+            static unsigned int told;
+            static int followed;
 
-            /* Quiet once it is plainly working, loud enough to see that it is. */
-            if (followed++ < 8 && &wine_nx_runtime_trace)
+            if (told++ < 8 && &wine_nx_runtime_trace)
             {
                 char line[128];
 
-                snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
-                          pos.x, pos.y, dx, dy );
+                snprintf( line, sizeof(line), "[MOUSE] handed over %d,%d, the cursor is at %d,%d",
+                          x, y, pos.x, pos.y );
                 wine_nx_runtime_trace( line );
             }
-            wine_nx_pointer_follow( pos.x, pos.y );
+            if (pos.x != x || pos.y != y)
+            {
+                /* Quiet once it is plainly working, loud enough to see that it is. */
+                if (followed++ < 8 && &wine_nx_runtime_trace)
+                {
+                    char line[128];
+
+                    snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
+                              pos.x, pos.y, dx, dy );
+                    wine_nx_runtime_trace( line );
+                }
+                wine_nx_pointer_follow( pos.x, pos.y );
+            }
         }
     }
     if (first) nxdrv_trace( "[NXINPUT] buttons=%x flags=%x,%x x=%d", buttons, first, second, x );

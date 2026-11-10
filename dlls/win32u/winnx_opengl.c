@@ -428,6 +428,20 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
 
     TRACE( "created drawable %s with EGL surface %p\n", debugstr_opengl_drawable( &gl->base ), gl->base.surface );
     {
+        /* The surface the program's picture is drawn into and the monitor it
+         * is shown on: a point on the screen means the same thing to both
+         * only when the two numbers agree. */
+        static int told;
+
+        if (!told)
+        {
+            told = 1;
+            nx_log( "[NXGL] the monitor is %dx%d, the window's surface is %dx%d",
+                    (int)gl->base.monitor_size.cx, (int)gl->base.monitor_size.cy,
+                    (int)gl->base.virtual_size.cx, (int)gl->base.virtual_size.cy );
+        }
+    }
+    {
         static BOOL logged;
         const char *vendor = funcs->p_eglQueryString( egl->display, EGL_VENDOR );
         const char *version = funcs->p_eglQueryString( egl->display, EGL_VERSION );
