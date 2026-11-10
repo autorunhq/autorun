@@ -75,19 +75,21 @@ runtime; the full package now ships the Mesa 26 one.
 - **Input.** The touchscreen, the controller as a mouse or as a keyboard with
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
   A program that asks for a display mode smaller than the screen (a 640x480
-  game on the 1280x720 panel) makes Wine's desktop that size while the screen
-  shows its picture scaled up, keeping its shape and centred: 640x480 lands at
-  160,0 960x720, which is the same fit `map_rect_virt_to_raw()` makes in
-  `sysparams.c` (a single ratio, both axes, about the centre). A finger's point
-  is on the screen and has to be said in the program's own pixels, which is
-  what `winnx_drv.c` does for touches, clicks and the stick alike, and the
-  server's answer comes back the other way for the arrow.
-  Everything between them -- the pointer, the clip, every window rect -- is in
-  the desktop's own pixels, so `NtUserSetCursorPos`, `NtUserGetCursorPos`,
+  game on the 1280x720 panel) makes Wine's desktop that size, and the screen
+  then shows that desktop's own pixels from the top left, one for one -- the
+  compositor and the framebuffer both copy a window's surface where the
+  window's own pixels say (`wine_nx_surface_flush` in `winnx_drv.c`), so a
+  finger at 640,360 is at 640,360 in the program. `nxdrv_screen_map_get()`
+  says exactly that and cuts the point to the picture's edge; it is also where
+  the fit (`map_rect_virt_to_raw()` in `sysparams.c`, a single ratio about the
+  centre, 640x480 landing at 160,0 960x720) belongs once the picture is scaled
+  up to the screen, which it is not yet.
+  Everything -- the pointer, the clip, every window rect -- is in the desktop's
+  own pixels, so `NtUserSetCursorPos`, `NtUserGetCursorPos`,
   `clip_fullscreen_window` and `NtUserClipCursor` hand the server the desktop's
-  numbers unchanged (`input.c`); converting them to the screen's made the clip
-  of a fullscreen program 160..1120 across, which clamped the pointer at the
-  left bar and made the left of the picture unreachable.
+  numbers unchanged (`input.c`). Converting them to the screen's made the clip
+  of a fullscreen program 160..1120 across, which clamped the pointer at 160
+  in a 640 wide desktop and made the left of the picture unreachable.
 - **Controls panel.** `-` and `A` together put up what the controller sends,
   over the program: `source/osk.c` draws it as a second view of its own
   surface, so the compositor and the three ways a frame reaches the screen
