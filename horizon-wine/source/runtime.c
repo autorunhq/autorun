@@ -1153,6 +1153,10 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             log_line( "[OSK] %s", up ? "up" : "down" );
         }
     }
+    /* One look at the screen for the whole poll: the keyboard, the fingers that
+     * scroll and the finger that presses all read the same sample, and the mouse
+     * in the dock can see whether a finger is on the glass. */
+    finger_down = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
     {
         const u64 osk = HidNpadButton_Minus | HidNpadButton_B;
         unsigned int bits = osk_buttons( held );
@@ -1165,7 +1169,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             /* Every finger, not only the first: the keyboard holds a key per
              * finger, so Shift can be held while another types. */
             struct wine_nx_osk_point fingers[WINE_NX_OSK_FINGERS];
-            int count = 0, i, touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+            int count = 0, i, touching = finger_down;
 
             for (i = 0; touching && i < (int)touch.count && count < WINE_NX_OSK_FINGERS; i++)
             {
@@ -1200,16 +1204,19 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         if (!profile_told)
         {
             profile_told = 1;
-            log_line( "[POINTER] input mode %d, mouse speed %d", profile->mode, profile->mouse_speed );
+            log_line( "[POINTER] input mode %d, mouse speed %d, deadzone %d/%d",
+                      profile->mode, profile->mouse_speed, profile->deadzone[0], profile->deadzone[1] );
         }
     }
     emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
     /* A mouse plugged into the dock points as a finger does -- it says where it
      * is rather than how far it went -- and turns the wheel the controller's
-     * stick does. Nothing above the program may take it, as with a finger.
-     * From YangStark/autorun's "Switch USB mouse" branch, which taught the
-     * runtime to read libnx's mouse; the position is absolute there. */
+     * stick does. Nothing above the program may take it, as with a finger, and
+     * a finger on the glass wins over it: the screen is the pointer the program
+     * was written for. From YangStark/autorun's "Switch USB mouse" branch,
+     * which taught the runtime to read libnx's mouse; the position is absolute
+     * there. */
     {
         static int mouse_was_connected;
         static u64 last_mouse_sample;
@@ -1253,8 +1260,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         static int scrolling, scroll_y, scroll_left;
         int two = 0, y = 0;
 
-        if (!on_keyboard && !controls_open && !tasks_open &&
-            hidGetTouchScreenStates( &touch, 1 ) && touch.count >= 2)
+        if (!on_keyboard && !controls_open && !tasks_open && touch.count >= 2)
         {
             two = 1;
             y = ((int)touch.touches[0].y + (int)touch.touches[1].y) / 2;
@@ -1283,7 +1289,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         else scrolling = 0;
     }
 
-    if (!on_keyboard && !controls_open && !tasks_open && hidGetTouchScreenStates( &touch, 1 ) &&
+    if (!on_keyboard && !controls_open && !tasks_open &&
         touch.count > 0 && (touch.count == 1 || touch_press))
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
@@ -1307,7 +1313,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             }
         }
     }
-    else if (hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    else if (finger_down)
     {
         /* The finger is there and something above the program has it: the
          * keyboard, the controls panel or the task list. */

@@ -187,7 +187,9 @@ Out of the box the controller works as a mouse and keyboard:
 |---|---|
 | Right stick, or a finger on the screen | Moves the mouse pointer |
 | **A** / **B** | Left / right mouse button |
-| D-pad, left stick | Arrow keys |
+| D-pad | Arrow keys |
+| Left stick | W A S D |
+| **ZL**, **ZR** | Arrow down, arrow up |
 | **+** | Esc |
 | **X**, **Y** | Space, F |
 | **L**, **R** | Tab, Shift |
@@ -196,7 +198,11 @@ Every button can be changed: **Settings -> Game defaults -> Controls** for all
 games, or a game's options (**Y**) -> **Controls** for that game alone. Each
 stick, the d-pad and the touchscreen can move the mouse or send the arrow keys
 or W A S D. Games with controller support see an Xbox 360 controller, through
-XInput or DirectInput.
+XInput or DirectInput, and in **Controller** mode that is all they see: the
+stick, the d-pad and the buttons reach the game untouched. A stick deadzone
+says how far the stick must travel before the game -- and, in **Keyboard /
+mouse** mode, the pointer -- takes any notice; **Mouse speed** says how fast it
+goes above that.
 
 **Hold + and − together for a second** to close a game.
 

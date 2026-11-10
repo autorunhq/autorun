@@ -56,7 +56,10 @@ void input_profile_defaults( struct input_profile *p, int keyboard_auto )
     static const unsigned short keys[] =
     {
         INPUT_MOUSE_LEFT, INPUT_MOUSE_RIGHT, 0x20, 0x46, 0x09, 0x10, 0x28, 0x26,
-        0x1b, 0x09, 0x11, 0x12, 0x31, 0x32, 0x33, 0x34,
+        /* The d-pad is the arrow keys, as the README says: it is the only
+         * direction pad a menu expects. The left stick keeps W A S D, and a
+         * stick direction left unassigned inherits the d-pad's (left_inherit). */
+        0x1b, 0x09, 0x11, 0x12, 0x26, 0x28, 0x25, 0x27,
         0x57, 0x53, 0x41, 0x44, INPUT_MOUSE_UP, INPUT_MOUSE_DOWN, INPUT_MOUSE_MOVE_LEFT, INPUT_MOUSE_MOVE_RIGHT,
     };
     memset( p, 0, sizeof(*p) );
@@ -278,7 +281,11 @@ void input_map_keys( const struct input_profile *profile, const struct input_pad
             unsigned int code = binding->code[j];
             if (code >= INPUT_MOUSE_UP && code < INPUT_MOUSE_END)
             {
-                int value = source_value( raw, i );
+                /* The pointer has a curve of its own (pointer_cursor.h). The
+                 * profile's deadzone is a gate in front of it: a stick the
+                 * program is told to ignore does not creep the pointer either,
+                 * and above the gate the pointer keeps its full travel. */
+                int value = strength ? source_value( raw, i ) : 0;
                 if (value > motion[code - INPUT_MOUSE_UP]) motion[code - INPUT_MOUSE_UP] = value;
                 continue;
             }
