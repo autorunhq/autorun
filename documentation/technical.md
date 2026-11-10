@@ -76,11 +76,18 @@ runtime; the full package now ships the Mesa 26 one.
   per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
   A program that asks for a display mode smaller than the screen (a 640x480
   game on the 1280x720 panel) makes Wine's desktop that size while the screen
-  shows its picture scaled up, keeping its shape and centred; a finger's point
-  is then the screen's and has to be said in the program's own pixels, which is
-  what `winnx_drv.c` does for touches, clicks and the stick alike. Without it a
-  touch mirrored the two axes the wrong way and, past the desktop's edge,
-  clicked nothing at all.
+  shows its picture scaled up, keeping its shape and centred: 640x480 lands at
+  160,0 960x720, which is the same fit `map_rect_virt_to_raw()` makes in
+  `sysparams.c` (a single ratio, both axes, about the centre). A finger's point
+  is on the screen and has to be said in the program's own pixels, which is
+  what `winnx_drv.c` does for touches, clicks and the stick alike, and the
+  server's answer comes back the other way for the arrow.
+  Everything between them -- the pointer, the clip, every window rect -- is in
+  the desktop's own pixels, so `NtUserSetCursorPos`, `NtUserGetCursorPos`,
+  `clip_fullscreen_window` and `NtUserClipCursor` hand the server the desktop's
+  numbers unchanged (`input.c`); converting them to the screen's made the clip
+  of a fullscreen program 160..1120 across, which clamped the pointer at the
+  left bar and made the left of the picture unreachable.
 - **Controls panel.** `-` and `A` together put up what the controller sends,
   over the program: `source/osk.c` draws it as a second view of its own
   surface, so the compositor and the three ways a frame reaches the screen

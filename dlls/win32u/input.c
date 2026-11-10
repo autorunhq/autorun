@@ -832,16 +832,16 @@ UINT WINAPI NtUserSendInput( UINT count, INPUT *inputs, int size )
  */
 BOOL WINAPI NtUserSetCursorPos( INT x, INT y )
 {
-    RECT rect = {x, y, x, y};
     BOOL ret;
     INT prev_x, prev_y, new_x, new_y;
 
-    rect = map_rect_virt_to_raw( rect, get_thread_dpi() );
+    /* The server keeps the pointer in the desktop's own pixels, the same ones
+     * its windows are in, and clamps one against the other. */
     SERVER_START_REQ( set_cursor )
     {
         req->flags = SET_CURSOR_POS;
-        req->x     = rect.left;
-        req->y     = rect.top;
+        req->x     = x;
+        req->y     = y;
         if ((ret = !wine_server_call( req )))
         {
             prev_x = reply->prev_x;
@@ -865,7 +865,6 @@ BOOL WINAPI NtUserGetCursorPos( POINT *pt )
     BOOL ret = TRUE;
     DWORD last_change = 0;
     NTSTATUS status;
-    RECT rect;
 
     if (!pt) return FALSE;
 
@@ -879,11 +878,6 @@ BOOL WINAPI NtUserGetCursorPos( POINT *pt )
 
     /* query new position from graphics driver if we haven't updated recently */
     if (NtGetTickCount() - last_change > 100) ret = user_driver->pGetCursorPos( pt );
-    if (!ret) return FALSE;
-
-    SetRect( &rect, pt->x, pt->y, pt->x, pt->y );
-    rect = map_rect_raw_to_virt( rect, get_thread_dpi() );
-    *pt = *(POINT *)&rect.left;
     return ret;
 }
 
@@ -2877,7 +2871,7 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
 {
     struct user_thread_info *thread_info = get_user_thread_info();
     MONITORINFO monitor_info = {.cbSize = sizeof(MONITORINFO)};
-    RECT monitor_rect, window_rect, virtual_rect;
+    RECT window_rect, virtual_rect;
     DWORD style;
     UINT ctx;
     BOOL ret;
@@ -2896,7 +2890,6 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
         ret = get_window_rect( hwnd, &window_rect, get_thread_dpi() );
     monitor_info = monitor_info_from_window( hwnd, MONITOR_DEFAULTTONEAREST );
     virtual_rect = get_virtual_screen_rect( get_thread_dpi(), MDT_DEFAULT );
-    monitor_rect = map_rect_virt_to_raw( monitor_info.rcMonitor, get_thread_dpi() );
     set_thread_dpi_awareness_context( ctx );
 
     if (!ret || !is_fullscreen( &monitor_info, &window_rect )) return FALSE;
@@ -2915,7 +2908,13 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
     SERVER_START_REQ( set_cursor )
     {
         req->flags = SET_CURSOR_CLIP | SET_CURSOR_FSCLIP;
-        req->clip  = wine_server_rectangle( monitor_rect );
+        /* The clip is the screen as the program lays it out, not as the driver
+         * paints it: the server keeps the pointer and every window rect in the
+         * desktop's own pixels, and clamps one against the other. A desktop
+         * shown scaled up (a 640x480 program on the 1280x720 panel) would
+         * otherwise be clipped to the picture's own pixels, 160..1120 across,
+         * and the left of the picture could not be pointed at at all. */
+        req->clip  = wine_server_rectangle( monitor_info.rcMonitor );
         ret = !wine_server_call( req );
     }
     SERVER_END_REQ;
@@ -2987,8 +2986,7 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
             rect = &new_rect;
         }
         if (rect->left > rect->right || rect->top > rect->bottom) return FALSE;
-        new_rect = map_rect_virt_to_raw( *rect, dpi );
-        rect = &new_rect;
+        /* As above: the server clips in the desktop's pixels. */
     }
 
     SERVER_START_REQ( set_cursor )

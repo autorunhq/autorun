@@ -834,10 +834,12 @@ static BOOL nxdrv_screen_map_get( struct nxdrv_screen_map *map )
     if (w <= 0 || h <= 0) return FALSE;
     map->desktop_w = w;
     map->desktop_h = h;
-    /* The whole desktop fits the screen, keeping its shape: the shorter side
-     * fills and the longer one takes bars, which are the same either way
-     * round. */
-    if ((long long)w * WINE_NX_SCREEN_H >= (long long)h * WINE_NX_SCREEN_W)
+    /* The whole desktop fits the screen, keeping its shape: whichever side
+     * runs out first fills, and the other takes bars. A 640x480 desktop on
+     * the 1280x720 screen is the taller one, so its height is the screen's
+     * and the bars are at the sides -- which is where the server's own cursor
+     * clip starts, at x=160, as the log showed. */
+    if ((long long)h * WINE_NX_SCREEN_W >= (long long)w * WINE_NX_SCREEN_H)
     {
         pane_h = WINE_NX_SCREEN_H;
         pane_w = ((long long)w * WINE_NX_SCREEN_H + h / 2) / h;
@@ -875,6 +877,15 @@ static void nxdrv_screen_point_to_desktop( const struct nxdrv_screen_map *map, i
 
     *x = dx < 0 ? 0 : dx >= map->desktop_w ? map->desktop_w - 1 : dx;
     *y = dy < 0 ? 0 : dy >= map->desktop_h ? map->desktop_h - 1 : dy;
+}
+
+/* The other way: a point of the desktop's own pixels, where the screen shows
+ * it. The server answers in the desktop's pixels, while the finger and the
+ * arrow live on the screen. */
+static void nxdrv_desktop_point_to_screen( const struct nxdrv_screen_map *map, int *x, int *y )
+{
+    *x = map->pane_x + nxdrv_scale( *x, map->desktop_w, map->pane_w );
+    *y = map->pane_y + nxdrv_scale( *y, map->desktop_h, map->pane_h );
 }
 
 /* Said once, and with the first few points: the two numbers the mapping is
@@ -1099,18 +1110,25 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
          * are said whether or not it agrees, and a disagreement is followed. */
         if (wine_nx_cursor_pos( &pos ))
         {
+            /* The server answers in the desktop's own pixels; the finger and
+             * the arrow are on the screen, so the answer is put there first --
+             * else a tap in a shrunken desktop would move the finger to the
+             * same numbers read as screen pixels, and the next tap would be
+             * measured from the wrong place. */
             static unsigned int told;
             static int followed;
+            int cursor_x = pos.x, cursor_y = pos.y;
 
+            if (map_scaled) nxdrv_desktop_point_to_screen( &map, &cursor_x, &cursor_y );
             if (told++ < 8 && &wine_nx_runtime_trace)
             {
                 char line[144];
 
                 snprintf( line, sizeof(line), "[MOUSE] the cursor is at %d,%d of the screen, the finger at %d,%d",
-                          pos.x, pos.y, x, y );
+                          cursor_x, cursor_y, x, y );
                 wine_nx_runtime_trace( line );
             }
-            if (pos.x != x || pos.y != y)
+            if (cursor_x != x || cursor_y != y)
             {
                 /* Quiet once it is plainly working, loud enough to see that it is. */
                 if (followed++ < 8 && &wine_nx_runtime_trace)
@@ -1118,10 +1136,10 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
                     char line[144];
 
                     snprintf( line, sizeof(line), "[NXINPUT] the cursor is at %d,%d, the stick moved %d,%d",
-                              pos.x, pos.y, dx, dy );
+                              cursor_x, cursor_y, dx, dy );
                     wine_nx_runtime_trace( line );
                 }
-                wine_nx_pointer_follow( pos.x, pos.y );
+                wine_nx_pointer_follow( cursor_x, cursor_y );
             }
         }
     }
@@ -1167,8 +1185,14 @@ BOOL wine_nx_drv_ShowSoftwareKeyboard( HWND hwnd )
  */
 BOOL wine_nx_drv_SetCursorPos( INT x, INT y )
 {
-    /* The point comes in the screen's own pixels, which is where the arrow
-     * lives: the desktop's shape is what the points going the other way need. */
+    struct nxdrv_screen_map map;
+
+    /* The point comes in the desktop's own pixels, which is what the server
+     * keeps; the arrow lives on the screen, so it goes where the desktop shows
+     * that point. The same when the two are alike. */
+    if (nxdrv_screen_map_get( &map ) &&
+        (map.desktop_w != WINE_NX_SCREEN_W || map.desktop_h != WINE_NX_SCREEN_H))
+        nxdrv_desktop_point_to_screen( &map, &x, &y );
     wine_nx_pointer_set_pos( x, y );
     return TRUE;
 }
