@@ -381,11 +381,32 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     static unsigned int told;
     int x = origin->x, y = origin->y;
     int w = present->right - present->left, h = present->bottom - present->top;
+    int source_w = w, source_h = h;
+    struct ratio dpi = get_dpi_for_window( hwnd ), raw_dpi;
+    RECT client;
 
     /* Where the picture goes on the screen: its desktop rectangle, fitted with
      * the desktop when a program asked for a mode of its own. Asked before the
      * mutex below, which is not worth holding the display devices for. */
     nxdrv_layer_rect( &x, &y, &w, &h );
+
+    /* How much of the surface is the picture. The layer is the window's whole
+     * surface allocation -- the client followed by padding, and after a display
+     * mode change possibly the whole screen's worth -- so fitting the visible
+     * rectangle would shrink the picture and displace it inside the very
+     * rectangle the pointer is mapped through. The picture is the client, said
+     * in the monitor's own pixels. From alonsohinojosa379-creator/autorun's GDI
+     * centring fix. */
+    get_win_monitor_dpi( hwnd, &raw_dpi );
+    if (get_client_rect( hwnd, &client, dpi ))
+    {
+        client = map_dpi_rect( client, dpi, raw_dpi );
+        if (client.right > client.left && client.bottom > client.top)
+        {
+            source_w = client.right - client.left;
+            source_h = client.bottom - client.top;
+        }
+    }
 
     /* Where a window's picture goes, whenever that changes. Said before the
      * mutex, since the log is not worth holding it for. */
@@ -397,6 +418,13 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         last_origin = *origin;
         last_present = *present;
         told++;
+        if (source_w != present->right - present->left || source_h != present->bottom - present->top)
+        {
+            snprintf( line, sizeof(line), "[NXCOMP] hwnd %x the picture is the client, %dx%d of the %dx%d it draws in",
+                      (int)(ULONG_PTR)hwnd, source_w, source_h,
+                      (int)(present->right - present->left), (int)(present->bottom - present->top) );
+            nxdrv_say( line );
+        }
         if (x != origin->x || y != origin->y || w != present->right - present->left ||
             h != present->bottom - present->top)
             snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d of the desktop, drawn at %d,%d %dx%d of the %dx%d screen",
@@ -420,7 +448,7 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
     }
     /* The rect's sides are coordinates, not sizes: a window away from the
      * corner would get a layer as large again as its own offset. */
-    wine_nx_layer_place( layer, x, y, w, h );
+    wine_nx_layer_place_scaled( layer, x, y, source_w, source_h, w, h );
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
