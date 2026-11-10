@@ -95,6 +95,13 @@ static void nxdrv_say( const char *text )
     if (&wine_nx_runtime_trace) wine_nx_runtime_trace( text );
 }
 
+/* The same, for the OpenGL path, which has its own idea of where the picture
+ * goes and should say so when it differs from the desktop's. */
+void wine_nx_say( const char *text )
+{
+    nxdrv_say( text );
+}
+
 /* Said from the threads of this driver only, and only for the reasons below. */
 static volatile unsigned int wine_nx_input_pumps;   /* calls to ProcessEvents */
 

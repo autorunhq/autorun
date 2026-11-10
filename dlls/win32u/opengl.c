@@ -901,6 +901,8 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
         extern BOOL wine_nx_picture_rect( RECT, RECT * );
         extern int wine_nx_screen_width( void );
         extern int wine_nx_screen_height( void );
+        extern void wine_nx_say( const char * );
+        static int told_cx, told_cy, told_x, told_y, told_w, told_h, told_dw;
         int desktop_w = NtUserGetSystemMetrics( SM_CXSCREEN ), desktop_h = NtUserGetSystemMetrics( SM_CYSCREEN );
         RECT pane;
 
@@ -920,6 +922,27 @@ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
             dst_y = wine_nx_screen_height() - pane.top - dst.cy;
             letterbox = pane.left > 0 || pane.top > 0 || pane.right < wine_nx_screen_width() ||
                         pane.bottom < wine_nx_screen_height();
+        }
+
+        /* Said once per change, so a picture in the wrong place is a number in
+         * the log rather than a guess. */
+        if (told_cx != src.cx || told_cy != src.cy || told_x != dst_x || told_y != dst_y ||
+            told_w != dst.cx || told_h != dst.cy || told_dw != desktop_w)
+        {
+            char line[192];
+
+            told_cx = src.cx;
+            told_cy = src.cy;
+            told_x = dst_x;
+            told_y = dst_y;
+            told_w = dst.cx;
+            told_h = dst.cy;
+            told_dw = desktop_w;
+            snprintf( line, sizeof(line), "[NXGL] the %dx%d picture is drawn at %d,%d %dx%d of the %dx%d screen, "
+                      "desktop %dx%d%s", src.cx, src.cy, dst_x, dst_y, dst.cx, dst.cy,
+                      wine_nx_screen_width(), wine_nx_screen_height(), desktop_w, desktop_h,
+                      letterbox ? ", bars" : "" );
+            wine_nx_say( line );
         }
     }
 #endif
