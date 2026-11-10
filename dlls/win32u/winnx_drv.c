@@ -790,6 +790,24 @@ static void wine_nx_send_vk( HKL layout, BYTE vk, BOOL up )
     input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
     if ((scan & 0xff00) == 0xe000) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    if (&wine_nx_runtime_trace)
+    {
+        BYTE state[256];
+        char line[80];
+
+        /* Where the key ended up, as the desktop holds it: a key the system
+         * kept reads 0x80 down or 0 up here, and a key a low-level hook took
+         * before the desktop saw it reads as nothing happened at all. This is
+         * what a game polling GetAsyncKeyState would be told, so a film it
+         * cannot skip says here whether the key was ever there to be read. */
+        if (get_async_keyboard_state( state ))
+            snprintf( line, sizeof(line), "[OSK] key %02x %s, system state %02x", vk,
+                      up ? "up" : "down", state[vk] );
+        else
+            snprintf( line, sizeof(line), "[OSK] key %02x %s, system state unknown", vk,
+                      up ? "up" : "down" );
+        wine_nx_runtime_trace( line );
+    }
     nxdrv_trace_key_target();
 }
 
@@ -813,13 +831,7 @@ static BOOL wine_nx_send_keyboard_keys( void )
     while (wine_nx_osk_next_key( now, &vk, &up ))
     {
         if (!sent) layout = NtUserGetKeyboardLayout( 0 );
-        wine_nx_send_vk( layout, vk, up );
-        if (&wine_nx_runtime_trace)
-        {
-            char line[48];
-            snprintf( line, sizeof(line), "[OSK] key %02x %s", vk, up ? "up" : "down" );
-            wine_nx_runtime_trace( line );
-        }
+        wine_nx_send_vk( layout, vk, up );   /* and says where it went */
         sent = TRUE;
         /* One key event per look at the program's messages: a key that went
          * down is down while the program is told anything else, so a program
