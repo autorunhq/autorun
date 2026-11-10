@@ -39,6 +39,11 @@ static const struct dinput_device_vtbl keyboard_vtbl;
 struct keyboard
 {
     struct dinput_device base;
+    /* What the system last said the keyboard was doing, and each virtual key's
+     * scan code, worked out once (as scan + 1, so zero means "not looked up
+     * yet" and one means "no scan code at all"). */
+    BYTE system_state[256];
+    WORD scans[256];
 };
 
 static inline struct keyboard *impl_from_IDirectInputDevice8W( IDirectInputDevice8W *iface )
@@ -229,9 +234,53 @@ failed:
     return hr;
 }
 
+/* The keyboard as the whole system holds it, rather than as this program's
+ * queue holds it. Hardware input -- the keys of the floating keyboard among
+ * them -- reaches the desktop's key state the moment the server takes it,
+ * while a program's own copy of that state catches up only when the program
+ * pumps its messages. A game that polls its keyboard once a frame through an
+ * intro video, and so pumps nothing, is told nothing by messages at all: on
+ * Windows it is reading a device its driver keeps up to date, and this is the
+ * same thing by another road. Only what the device holds down and the queue
+ * has not reported yet is reported here, so nothing arrives twice. */
+static void keyboard_sync_hardware_state( struct keyboard *impl )
+{
+    BYTE state[256];
+    DWORD vkey;
+
+    if (impl->base.status != STATUS_ACQUIRED) return;
+
+    /* The system's answer, which the server has just brought up to date for
+     * this thread whether or not the thread has read its queue. */
+    if (!GetKeyboardState( state )) return;
+    if (!memcmp( state, impl->system_state, sizeof(state) )) return;
+    memcpy( impl->system_state, state, sizeof(state) );
+
+    for (vkey = 1; vkey < 256; vkey++)
+    {
+        /* The generic modifiers are the left and right keys under one name;
+         * the specific ones say which of the two was pressed. */
+        if (vkey == VK_SHIFT || vkey == VK_CONTROL || vkey == VK_MENU) continue;
+        if (!impl->scans[vkey])
+        {
+            DWORD scan = MapVirtualKeyW( vkey, MAPVK_VK_TO_VSC_EX );
+
+            impl->scans[vkey] = scan ? ((scan & 0xff00) == 0xe000 ? ((scan & 0xff) | 0x100) : (scan & 0xff)) + 1 : 1;
+        }
+        if (impl->scans[vkey] == 1) continue;
+
+        /* `up` is the state the system holds, not the state this device was
+         * last told about: what a queue that is not being read leaves out. */
+        keyboard_handle_event( impl, vkey, impl->scans[vkey] - 1, !(state[vkey] & 0x80) );
+    }
+}
+
 static HRESULT keyboard_poll( IDirectInputDevice8W *iface )
 {
+    struct keyboard *impl = impl_from_IDirectInputDevice8W( iface );
+
     check_dinput_events();
+    keyboard_sync_hardware_state( impl );
     return DI_OK;
 }
 
@@ -244,6 +293,9 @@ static HRESULT keyboard_unacquire( IDirectInputDevice8W *iface )
 {
     struct keyboard *impl = impl_from_IDirectInputDevice8W( iface );
     memset( impl->base.device_state, 0, sizeof(impl->base.device_state) );
+    /* Nothing is left down from the last time it was acquired, and the system
+     * state is read again from scratch when it is. */
+    memset( impl->system_state, 0, sizeof(impl->system_state) );
     return DI_OK;
 }
 

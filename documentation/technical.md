@@ -108,6 +108,14 @@ runtime; the full package now ships the Mesa 26 one.
   the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
   into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
   the compositor's top layer; the controller is its while it is up.
+- **Keyboard without a message loop.** A program that polls its keyboard once
+  a frame and never pumps its own messages -- a game during its intro video --
+  is told nothing by messages, however they are delivered. The DirectInput
+  keyboard device therefore reads the system's key state as it polls
+  (`keyboard_sync_hardware_state()` in `dlls/dinput/keyboard.c`), and that
+  state is where hardware input lands the moment the server takes it, whether
+  or not a window of the program is there to be told. Keys the message queue
+  did report are already in the device's state, so none arrives twice.
 - **Memory.** Fixed-base games such as NFSU2 need an address space that is one
   four-gigabyte region from zero, with no alias region above it: the "32-bit,
   no alias" width the NPDM's address-space bits select. Autorun makes that
