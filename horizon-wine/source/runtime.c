@@ -119,6 +119,9 @@ u32 __nx_exception_ignoredebug = 1;
 #define MAX_RUNTIME_MODULES 64
 #define MAX_IMPORT_DEPTH 16
 
+extern BOOL wine_nx_make_virtual_desktop(void);
+extern int wine_nx_screen_width(void);
+extern int wine_nx_screen_height(void);
 extern void wine_nx_runtime_platform_init(void);
 extern void wine_nx_runtime_network_init(void);
 extern void wine_nx_runtime_network_fast( int fast );
@@ -4683,6 +4686,18 @@ int main( int argc, char **argv )
 
     wine_nx_runtime_environment_init();
     log_line( "[INIT] Wine NLS/environment ready" );
+    /* The desktop this program runs in: one, of the screen's size, marked
+     * virtual before the program's first call, so that a request for a display
+     * mode of its own is answered "done" and leaves the desktop alone. The
+     * program's window then stays inside it, one screen pixel to one desktop
+     * pixel, which is what the pointer is mapped by; without it the desktop
+     * shrinks with the mode, and the picture, the pointer and the server's idea
+     * of the window each go a different way. */
+    if (config_bool( "virtual-desktop", 1, "no-virtual-desktop.txt", 1 ) && wine_nx_make_virtual_desktop())
+        log_line( "[INIT] one desktop of %dx%d; a display mode change leaves it alone",
+                  wine_nx_screen_width(), wine_nx_screen_height() );
+    else
+        log_line( "[INIT] a display mode change takes the desktop with it" );
     status = map_pe_image( target, &module, &view_size );
     if (status || !runtime_describe_image( module, view_size, &entry ))
     {
