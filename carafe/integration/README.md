@@ -29,6 +29,11 @@ or regenerate a branch with:
 - `refresh_table.py` writes those numbers into PORTING.md; with `--check` it
   only says whether the table is out of date, which is what the `build`
   workflow runs.
+- `menu_texts.py CARAFE_CHECKOUT` writes Carafe's texts for the settings menu,
+  in its fifteen languages, to `horizon-wine/tools/carafe-menu-texts.json`
+  (GPL-3.0-or-later); with `--check` it fails when that file is not what the
+  checkout gives. Run it again to take newer translations from Carafe, then
+  `python3 horizon-wine/tests/check_menu_languages.py`.
 
 ## Status against this fork's branches
 

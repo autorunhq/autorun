@@ -132,6 +132,19 @@ jobs:
             tail -n 1 "$RUNNER_TEMP/$check.log"
           done
 
+      - name: The settings menu in fifteen languages
+        # Stage 7: the menu's catalog carries Carafe's texts for the settings
+        # both menus have. The menu's own reader shows it under each console
+        # language and the result is held against Carafe's texts; then the
+        # texts in this tree are made again from Carafe's commit they name.
+        run: |
+          python3 horizon-wine/tests/check_menu_languages.py
+          commit=$(python3 -c "import json; print(json.load(open('horizon-wine/tools/carafe-menu-texts.json'))['commit'])")
+          git init -q "$RUNNER_TEMP/carafe-source"
+          git -C "$RUNNER_TEMP/carafe-source" fetch -q --depth 1 https://github.com/carafe-nx/carafe.git "$commit"
+          git -C "$RUNNER_TEMP/carafe-source" checkout -q FETCH_HEAD
+          python3 carafe/integration/tools/menu_texts.py "$RUNNER_TEMP/carafe-source" --check
+
       - name: The patch ledger's numbers
         # carafe/integration/PORTING.md says, for each of Carafe's patches, how
         # much of it this tree holds. A commit that moves those lines measures

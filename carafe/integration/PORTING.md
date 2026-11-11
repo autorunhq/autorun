@@ -57,7 +57,10 @@ Compared trees:
    its files keep that licence, say so at their top and are named in the
    credits of `README.md` and `documentation/technical.md`. Where a few lines
    of data sufficed (the DirectShow filters), they were derived from Wine's own
-   sources instead and stay LGPL.
+   sources instead and stay LGPL. The settings menu's texts in fourteen
+   languages (stage 7) come from Carafe's app and are GPL-3.0-or-later too:
+   they are one file, `horizon-wine/tools/carafe-menu-texts.json`, which says
+   so in its first lines, and the menu's catalog built from it carries them.
 
 ## Stages
 
@@ -72,7 +75,7 @@ Each stage is one or a few commits, checked on the host and built by the
 | 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | **done**, as two settings of a program, both off by default |
 | 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
 | 6 | The server thread pool (`0023`): the program's threads share a few server threads instead of having one each | **done**, as a setting of a program, off by default |
-| 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | |
+| 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | The translations: **done**, for the settings both menus have. The graphics hunks are open |
 
 ### Stage 1, done
 
@@ -373,6 +376,134 @@ itself once per request, and `tests/launcher_settings.c` the setting.
 Not checked, because it needs a console: that a game runs with the pool, how
 many threads it saves there, and whether requests wait longer for a thread
 than they did for their own.
+
+### Stage 7: the menu in the console's language, done; the graphics hunks, open
+
+The settings menu over a running game is Carafe's, and its catalog
+(`/carafe/menu.txt`, built by `horizon-wine/tools/make-carafe-menu.py` and
+embedded in the runtime) has room for fifteen languages: Russian, English,
+Simplified Chinese, Japanese, Korean, Traditional Chinese, French, Canadian
+French, German, Italian, Spanish, Latin American Spanish, Dutch, Portuguese
+and Brazilian Portuguese. The menu's own words (buttons, messages) were in
+all of them already. The catalog was written in English only, so every
+setting, value and page showed in English whatever the console's language.
+
+What was done:
+
+- `carafe/integration/tools/menu_texts.py` reads Carafe's list of settings
+  (`app/crates/carafe-core/src/settings_catalog.rs`) and its translation files
+  (`app/ui/src/shared/i18n/locales/*.json`) from a checkout of Carafe and
+  writes `horizon-wine/tools/carafe-menu-texts.json`: 92 settings and 286
+  texts, each in the fifteen languages, keyed by what a setting is here (the
+  settings file, the key, and a value's text in that file). The file names
+  the Carafe commit it was made from; the `build` workflow fetches that
+  commit and fails when the file is not what the tool writes from it.
+- `make-carafe-menu.py` puts those texts beside Autorun's English. The
+  settings, their order, their pages, their values and their defaults are
+  untouched, and so is every English text but two (below).
+
+How a text of Carafe's is matched to a row here:
+
+| Row | Matched by | Rows that got the fourteen languages |
+|---|---|---|
+| A setting's name and hint | the same key in the same settings file | 91 of 137 |
+| A value | the same text in the settings file (DXVK's strings without their quotes) | 297 of 537, the next two rows included |
+| DXVK's "Default" and the frame limit's "Off" (rows that write nothing) | Carafe's row that writes nothing: "Default", "No limit" | |
+| Other rows that write nothing (`vsync`, `upscaling`, `upscaling-sharpness`, `dxvk-hud`, the three `lsfg` settings, `large-pages`, every FEX option) | Carafe's label for the value such a row stands for, which the generator names for each setting (`unset=`; for FEX the default in `fex_options.h`) | |
+| Sections, the two groups, the 24 controller outputs | the English is word for word the same; the generator stops if it is not | 4, 2, 24 |
+| Pages | by hand, see below | 8 of 8 |
+| Presets | the same three presets | 3 names, 2 hints |
+| "What to try" suggestions | the same kind of failure and the same setting | 5 of 11 |
+| Keys | the mouse's 13 actions, `0x100` to `0x10c` in both | 13 of 120 |
+
+Three things about the values were not obvious and are held by the check:
+
+- A row that writes nothing here often stands for a value Carafe writes.
+  "Enabled" of `vsync` is Carafe's `1`; "Off (Bilinear)" of `upscaling` is
+  Carafe's `off`, although Carafe's own default there is FSR.
+- Carafe names `FEX_DISABLEL2CACHE` "Second jump cache (L2)", so its `1` is
+  "Off" and its `0` is "On", the reverse of the English row "Disable L2
+  lookup cache". Name and values are taken together, so each language is
+  consistent in itself.
+- The English "Default (False / Auto)" of a DXVK option also says what the
+  default is. The other languages have Carafe's word alone: with the note
+  added, the longest rows of four languages (fr-CA, es, es-419, pt) no
+  longer fitted beside the setting's name.
+
+Pages. Autorun sorts DXVK's options into five pages by the option's name,
+Carafe into nine by hand, so a page here holds settings from several of
+Carafe's. Each page has the title of the Carafe page most of its settings
+come from:
+
+| Page here | Carafe's title |
+|---|---|
+| Memory | Memory (`dxvk-memory`) |
+| Frames & latency | Frames (`dxvk-frames`) |
+| Shaders & quality | Shaders & Quality (`dxvk-shaders` and `dxvk-quality`, joined) |
+| Display & GPU | Display modes (`dxvk-display`) |
+| Compatibility | Fixes (`dxvk-fixes`) |
+| Basic | General (`fex-general`, the same seven options) |
+| Ordering & precision | Memory ordering (`fex-memory`, the same six options) |
+| Cache & topology | Compatibility and caches (`fex-compat`) |
+
+What stays English in every language, and why:
+
+- The 45 settings Carafe's menu does not have: `button-layout`,
+  `mouse-speed`, `picture`, `d3d`, `dxvk-source`, `cpu`, `four-cores`,
+  `sync`, `lazy-file-views`, 26 DXVK options and 10 FEX options.
+- `dxvk.shaderCompilationMethod`. Carafe's hint says what "Default" does in
+  Carafe's DXVK build (`async`); here the option is DXVK-Sarek's too, where
+  the default is `dyasync`.
+- "Global setting" of `windows`, `verbose` and `profile`. Carafe has
+  "Automatic" for the first and nothing for the others, and neither means
+  "as the launcher's settings say".
+- The hint of the Fast preset. Carafe's Fast also turns the L1 cache's
+  sizing off and its hint says so; the preset here does not, and was left as
+  it is.
+- Labels that are numbers or names (`30 fps`, `FSR 1.0`, `1000`, `mtrack`),
+  six suggestions Carafe does not make, and the keyboard's key names.
+
+English reads as before. Two "Default" notes were wrong for options that
+two DXVK builds read with different defaults and now name both:
+`dxvk.shaderCompilationMethod` "Default (dyasync / async)" and
+`d3d9.deviceLocalConstantBuffers` "Default (False / Auto)". A console set to
+a language outside the fifteen gets English.
+
+Differences between the two menus that were seen and left alone: Carafe's
+dead zones also offer 2 % and 8 %; its upscaling defaults to FSR; its Fast
+preset turns the L1 cache's sizing off; its nine DXVK pages.
+
+The catalog grew from 55 KB to 277 KB, in the runtime's file and in memory
+while the menu holds it (the reader takes up to 1 MiB). The built runtime now
+carries GPL-3.0-or-later texts (point 5 above).
+
+Checked on the host: `tests/check_menu_languages.py` builds the catalog and
+has the menu's own reader (`carafe_settings.c`, through
+`tests/menu_languages.c`) show it under each of the fifteen console
+languages. What the reader shows is the catalog's text for that language,
+text for text; in English nothing is Carafe's wording; in the other
+languages every text is Autorun's English or one of Carafe's texts for that
+language; each matched setting has Carafe's name and hint, each value
+Carafe's label for the value it stands for, and a settings file that holds
+that value shows that row (the reader's own `valueIndex`). Fourteen mistakes
+made in the generator on purpose (a wrong value behind a "-" row, the
+languages shifted by one, a text taken for the excluded setting, quotes not
+stripped, and so on) each made it fail. With the fonts the menu embeds
+(M PLUS 1p, 16 px), the widest row of name and value is 603 of the list's
+640 pixels in the twelve languages those fonts cover (measured once with
+FreeType, not part of the check).
+
+Not checked, because it needs a console: how each script looks there
+(Chinese and Korean come from the console's own fonts, which were not
+measured), whether a long hint leaves room for every value on the card at
+the right, and the menu itself in any language but English.
+`tests/controls_menu.c`, when given the built catalog, stops at its
+registry editor part (line 716); it did so before this work too, with the
+catalog as it was, and is not run by the `build` workflow. Its count of
+settings was brought up to date (137).
+
+Open in this stage: the graphics hunks in `winnx_drv.c`, `winnx_opengl.c`
+and `win32u/vulkan.c`.
 
 ## Left out, and why
 

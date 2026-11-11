@@ -773,6 +773,11 @@ if(ELF2NSO AND NPDMTOOL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
                 "${CARAFE_MENU_TXT}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/carafe-menu-texts.json"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/dxvk_options.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/fex_options.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/input_profile.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/key_names.h"
         VERBATIM
     )
     add_custom_command(

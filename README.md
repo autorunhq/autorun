@@ -213,6 +213,18 @@ The log says which is in use in the line `[SYNC] server threads: ...`. The
 its threads, how many of them are idle and how many are waiting inside a
 request.
 
+### The settings menu in the console's language
+
+The settings menu over a running game follows the console's language. Its
+settings, values and pages used to be English only; they now carry Carafe's
+texts in Russian, Simplified and Traditional Chinese, Japanese, Korean,
+French, Canadian French, German, Italian, Spanish, Latin American Spanish,
+Dutch, Portuguese and Brazilian Portuguese, for the settings both menus have:
+91 of the 137, with their values. What only Autorun has stays English there
+(among it 26 DXVK and 10 FEX options), and English itself reads as before. A
+console set to any other language gets English. The launcher is English only.
+This has not been seen on a console yet.
+
 ### Frame generation
 
 LSFG-VK doubles the frame rate of Vulkan games (DXVK and VKD3D-Proton count) by
@@ -326,7 +338,7 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton) | LGPL-2.1-or-later | Direct3D 12 over Vulkan |
 | [Mesa](https://mesa3d.org) and [mesa-switch](https://github.com/danfromtico/mesa-switch) | MIT (mostly) | OpenGL and Vulkan on the Switch's GPU |
 | [LSFG-VK](https://git.lsfg-vk.dev/lsfg-vk-archive.git) | GPL-3.0-or-later | Frame generation |
-| [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches); GPL-3.0-or-later (the thread orchestrator, `horizon-wine/source/orchestrator*.c`) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg, the thread orchestrator and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
+| [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches); GPL-3.0-or-later (the thread orchestrator, `horizon-wine/source/orchestrator*.c`, and the settings menu's texts in fourteen languages, `horizon-wine/tools/carafe-menu-texts.json`) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg, the thread orchestrator and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
 | [libusbhsfs](https://github.com/ITotalJustice/libusbhsfs) | ISC | USB drives |
 | [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) and [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC) | GPL-2.0 | The boot changes Quick setup installs |
 | [libnx](https://github.com/switchbrew/libnx) and [devkitPro](https://devkitpro.org) | ISC, per component | The Switch system library and toolchain |

@@ -2,8 +2,16 @@
 """Generate Autorun's carafe-menu (version 2) catalog from Autorun's LGPL sources.
 
 Copyright: LGPL-2.1-or-later, matching the Autorun runtime files it reads.
+
+The settings, their order, their values and the English texts are Autorun's.
+The other fourteen languages are Carafe's texts for the same setting, read
+from carafe-menu-texts.json beside this file (GPL-3.0-or-later, as that file
+says; carafe/integration/tools/menu_texts.py writes it from a checkout of
+Carafe). The catalog this writes therefore carries GPL-3.0-or-later texts.
+What has no text in Carafe stays English in every language.
 """
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -25,6 +33,85 @@ def t15(en: str, overrides=None):
         else:
             out.append("")
     return "\t".join(out)
+
+
+# The row that writes nothing is, in Carafe's catalog too, a row that writes
+# nothing (DXVK's own default, no frame limit).
+ABSENT = object()
+
+# Settings Carafe has a text for that is not true here; they stay English.
+NOT_CARAFES = {
+    # Carafe's hint says what "Default" does in Carafe's DXVK build (async).
+    # Here the option is DXVK-Sarek's too, where the default is dyasync.
+    "dxvk.shaderCompilationMethod",
+}
+
+# Autorun's pages and the Carafe pages most of their settings are on there.
+CARAFE_PAGES = {
+    "memory": ["dxvk-memory"],
+    "frames": ["dxvk-frames"],
+    "shaders": ["dxvk-shaders", "dxvk-quality"],
+    "display": ["dxvk-display"],
+    "compat": ["dxvk-fixes"],
+    "basic": ["fex-general"],
+    "precision": ["fex-memory"],
+    "cache": ["fex-compat"],
+}
+
+
+class CarafeTexts:
+    """Carafe's texts by what a setting is here: its file, its key and a value's stored text."""
+
+    def __init__(self, path: Path):
+        self.data = json.loads(path.read_text(encoding="utf-8"))
+        if self.data["languages"] != LANGUAGES:
+            raise SystemExit(f"{path.name} is not in this catalog's languages")
+        self.texts = self.data["texts"]
+        self.used = set()
+        self.ids = {}
+
+    def english(self, key: str) -> str:
+        return self.texts[key][LANGUAGES.index("en")]
+
+    def of(self, label):
+        """The fourteen texts of a label: a key, or a key and the number that goes into it."""
+        if label is None:
+            return None
+        key, number = (label, None) if isinstance(label, str) else label
+        self.used.add(key)
+        return {
+            code: text if number is None else text.replace("{{value}}", number)
+            for code, text in zip(LANGUAGES, self.texts[key]) if code != "en"
+        }
+
+    def same(self, en: str, key: str):
+        """Carafe's other languages for a text whose English is word for word Autorun's."""
+        if self.english(key) != en:
+            raise SystemExit(f"Carafe's {key} is {self.english(key)!r}, not {en!r}")
+        return self.of(key)
+
+    def joined(self, keys):
+        parts = [self.of(key) for key in keys]
+        return {code: " & ".join(part[code] for part in parts) for code in parts[0]}
+
+    def setting(self, file_name: str, key: str):
+        return None if key in NOT_CARAFES else self.data["settings"].get(f"{file_name} {key}")
+
+    def value(self, entry, stored: str, unset):
+        """A value row's texts. `unset` says what the row that writes nothing stands for."""
+        if entry is None:
+            return None
+        if stored != "-":
+            return self.of(entry["values"].get(stored))
+        if unset is ABSENT:
+            # Carafe's word alone. English also says what the default is
+            # ("Default (False / Auto)"); with that added, the longest rows of
+            # four languages no longer fit beside the setting's name.
+            return self.of(entry.get("absent"))
+        return self.of(entry["values"].get(unset)) if unset is not None else None
+
+
+CARAFE = None
 
 
 def clean_id(prefix: str, key: str) -> str:
@@ -72,6 +159,11 @@ def parse_dxvk_options(dxvk_c: Path):
         if key in options_by_key:
             # Merge choices cleanly (e.g. d3d9.floatEmulation & d3d9.deviceLocalConstantBuffers).
             existing = options_by_key[key]
+            # One row serves every DXVK build that reads the option; where
+            # their defaults differ it names each (dxvk.shaderCompilationMethod).
+            if default_note not in existing["defaults"]:
+                existing["defaults"].append(default_note)
+                existing["choices"][0] = ("-", "Default (%s)" % " / ".join(existing["defaults"]))
             seen_vals = {v for v, _ in existing["choices"]}
             for val, lbl in choices:
                 if val not in seen_vals:
@@ -84,6 +176,7 @@ def parse_dxvk_options(dxvk_c: Path):
                 "key": key,
                 "help": help_text,
                 "choices": choices,
+                "defaults": [default_note],
             }
             order.append(key)
     return [options_by_key[k] for k in order]
@@ -217,12 +310,17 @@ def fex_nice_name(key: str) -> str:
     return mapping.get(key, key)
 
 
-def emit_setting(lines, sid, file_name, key, apply_mode, default_idx, when, api, name, hint, values):
+def emit_setting(lines, sid, file_name, key, apply_mode, default_idx, when, api, name, hint, values, unset=None):
+    """`unset` is what the "-" row stands for: ABSENT, or the value a file would hold for it."""
+    entry = CARAFE.setting(file_name, key)
+    CARAFE.ids[sid] = f"{file_name} {key}"
+    theirs = (CARAFE.of(entry["name"]), CARAFE.of(entry["hint"])) if entry else (None, None)
     lines.append(
-        f"setting\t{sid}\t{file_name}\t{key}\t{apply_mode}\t{default_idx}\t{when}\t{api}\t{t15(name)}\t{t15(hint)}"
+        f"setting\t{sid}\t{file_name}\t{key}\t{apply_mode}\t{default_idx}\t{when}\t{api}"
+        f"\t{t15(name, theirs[0])}\t{t15(hint, theirs[1])}"
     )
     for val, lbl in values:
-        lines.append(f"value\t{val}\t{t15(lbl)}")
+        lines.append(f"value\t{val}\t{t15(lbl, CARAFE.value(entry, val.strip(chr(34)), unset))}")
 
 
 def build_menu(horizon_wine: Path) -> str:
@@ -231,13 +329,17 @@ def build_menu(horizon_wine: Path) -> str:
     fex_opts = parse_fex_options(source / "fex_options.h")
     pad_labels, key_items = parse_input_data(source / "input_profile.c", source / "key_names.h")
 
+    global CARAFE
+    CARAFE = CarafeTexts(Path(__file__).resolve().parent / "carafe-menu-texts.json")
+    carafe = CARAFE.data
+
     lines = [
         "carafe-menu\t2",
         "languages\t" + "\t".join(LANGUAGES),
     ]
 
     # --- Section: Controls ---------------------------------------------------
-    lines.append(f"section\tcontrols\t{t15('Controls')}")
+    lines.append(f"section\tcontrols\t{t15('Controls', CARAFE.same('Controls', carafe['sections']['controls']))}")
     emit_setting(
         lines, "input-mode", "keys", "input-mode", "now", 0, "-", "-",
         "Input mode",
@@ -276,31 +378,35 @@ def build_menu(horizon_wine: Path) -> str:
     )
 
     # --- Section: Graphics ---------------------------------------------------
-    lines.append(f"section\tgraphics\t{t15('Graphics')}")
+    lines.append(f"section\tgraphics\t{t15('Graphics', CARAFE.same('Graphics', carafe['sections']['graphics']))}")
     emit_setting(
         lines, "frame-limit", "program", "frame-limit", "now", 0, "-", "-",
         "Frame limit",
         "Caps frames per second to stabilize pacing and reduce power draw. Takes effect immediately.",
         [("-", "Off"), ("30", "30 fps"), ("40", "40 fps"), ("45", "45 fps"),
          ("60", "60 fps"), ("75", "75 fps"), ("90", "90 fps"), ("120", "120 fps")],
+        unset=ABSENT,
     )
     emit_setting(
         lines, "vsync", "program", "vsync", "restart", 0, "-", "-",
         "Vertical sync",
         "Synchronizes Vulkan presentation with the display refresh to prevent tearing.",
         [("-", "Enabled"), ("0", "Disabled")],
+        unset="1",
     )
     emit_setting(
         lines, "upscaling", "program", "upscaling", "restart", 0, "-", "-",
         "Upscaling",
         "Scales lower game resolutions to the Switch screen using bilinear filtering, AMD FSR 1.0, or integer scaling.",
         [("-", "Off (Bilinear)"), ("fsr", "FSR 1.0"), ("integer", "Integer")],
+        unset="off",
     )
     emit_setting(
         lines, "upscaling-sharpness", "program", "upscaling-sharpness", "restart", 2, "on:upscaling=1", "-",
         "FSR sharpness",
         "Controls RCAS sharpening strength when FSR 1.0 upscaling is selected.",
         [("0%", "0%"), ("20%", "20%"), ("-", "40% (Default)"), ("60%", "60%"), ("80%", "80%"), ("100%", "100%")],
+        unset="40%",
     )
     emit_setting(
         lines, "picture", "program", "picture", "restart", 0, "-", "-",
@@ -321,6 +427,7 @@ def build_menu(horizon_wine: Path) -> str:
         "Displays live DXVK frame rate, GPU, and frame-time telemetry over the game.",
         [("-", "Disabled"), ("fps", "FPS"), ("api,fps,frametimes", "Compact"),
          ("version,api,devinfo,fps,memory,frametimes,compiler", "Full")],
+        unset="0",
     )
     emit_setting(
         lines, "d3d", "program", "d3d", "restart", 0, "-", "-",
@@ -339,22 +446,25 @@ def build_menu(horizon_wine: Path) -> str:
         "LSFG-VK frame generation",
         "Interpolates extra frames on Vulkan titles using LSFG-VK.",
         [("-", "Disabled"), ("1", "Enabled")],
+        unset="0",
     )
     emit_setting(
         lines, "lsfg-performance", "program", "lsfg-performance", "restart", 0, "show:lsfg=1", "-",
         "LSFG performance mode",
         "Uses a faster optical-flow pass at lower GPU cost.",
         [("-", "Enabled"), ("0", "Disabled")],
+        unset="1",
     )
     emit_setting(
         lines, "lsfg-flow", "program", "lsfg-flow", "restart", 1, "show:lsfg=1", "-",
         "LSFG flow scale",
         "Resolution scale for LSFG-VK motion estimation; lower values are faster.",
         [("0.125", "12.5%"), ("-", "25% (Default)"), ("0.5", "50%")],
+        unset="0.25",
     )
 
     # Group: DXVK options (all 74 options from dxvk_options.c organized into 5 pages)
-    lines.append(f"group\tdxvk\tshow:d3d=0,2\t{t15('DXVK options')}")
+    lines.append(f"group\tdxvk\tshow:d3d=0,2\t{t15('DXVK options', CARAFE.same('DXVK options', carafe['groups']['dxvk']))}")
     pages = [
         ("memory", "Memory", []),
         ("frames", "Frames & latency", []),
@@ -368,7 +478,7 @@ def build_menu(horizon_wine: Path) -> str:
     for pid, pname, opts in pages:
         if not opts:
             continue
-        lines.append(f"page\t{pid}\t{t15(pname)}")
+        lines.append(f"page\t{pid}\t{t15(pname, CARAFE.joined(carafe['pages'][p] for p in CARAFE_PAGES[pid]))}")
         for opt in opts:
             emit_setting(
                 lines,
@@ -382,11 +492,12 @@ def build_menu(horizon_wine: Path) -> str:
                 dxvk_nice_name(opt["key"]),
                 opt["help"],
                 opt["choices"],
+                unset=ABSENT,
             )
     lines.append("end")
 
     # --- Section: System -----------------------------------------------------
-    lines.append(f"section\tsystem\t{t15('System')}")
+    lines.append(f"section\tsystem\t{t15('System', CARAFE.same('System', carafe['sections']['system']))}")
     emit_setting(
         lines, "cpu", "program", "cpu", "restart", 0, "-", "-",
         "CPU translator",
@@ -425,7 +536,7 @@ def build_menu(horizon_wine: Path) -> str:
     )
 
     # Group: FEX options (all 19 options from fex_options.h)
-    lines.append(f"group\tfex\tshow:cpu=0\t{t15('FEX options')}")
+    lines.append(f"group\tfex\tshow:cpu=0\t{t15('FEX options', CARAFE.same('FEX options', carafe['groups']['fex']))}")
     fex_pages = [
         ("basic", "Basic", []),
         ("precision", "Ordering & precision", []),
@@ -440,7 +551,7 @@ def build_menu(horizon_wine: Path) -> str:
         else:
             fex_pages[2][2].append(opt)
     for pid, pname, opts in fex_pages:
-        lines.append(f"page\t{pid}\t{t15(pname)}")
+        lines.append(f"page\t{pid}\t{t15(pname, CARAFE.joined(carafe['pages'][p] for p in CARAFE_PAGES[pid]))}")
         for opt in opts:
             def_idx = opt["default_choice"]
             values = []
@@ -458,13 +569,18 @@ def build_menu(horizon_wine: Path) -> str:
                 fex_nice_name(opt["key"]),
                 opt["help"],
                 values,
+                unset=opt["choices"][def_idx][0],
             )
     lines.append("end")
 
     # FEX Presets on System tab
+    # The names are Carafe's words. So are two of the hints: those presets set
+    # what Carafe's do. Carafe's Fast also turns the L1 cache's sizing off and
+    # says so, which this one does not do; its hint stays English.
+    presets = carafe["presets"]
     lines.append(
-        f"preset\tbalanced\t{t15('Balanced (Default)')}\t"
-        f"{t15('Autorun defaults: TSO off, 1000-instruction blocks, dynamic L1 cache on.')}"
+        f"preset\tbalanced\t{t15('Balanced (Default)', CARAFE.of(presets['balanced']['name']))}\t"
+        f"{t15('Autorun defaults: TSO off, 1000-instruction blocks, dynamic L1 cache on.', CARAFE.of(presets['balanced']['hint']))}"
     )
     lines.append("set\tfex-fex-tsoenabled\t0")
     lines.append("set\tfex-fex-maxinst\t2")
@@ -472,8 +588,8 @@ def build_menu(horizon_wine: Path) -> str:
     lines.append("set\tfex-fex-x87reducedprecision\t1")
 
     lines.append(
-        f"preset\treliable\t{t15('Reliable')}\t"
-        f"{t15('Turns on TSO memory ordering, MTrack SMC checks, and full x87 precision for picky games.')}"
+        f"preset\treliable\t{t15('Reliable', CARAFE.same('Reliable', presets['reliable']['name']))}\t"
+        f"{t15('Turns on TSO memory ordering, MTrack SMC checks, and full x87 precision for picky games.', CARAFE.of(presets['reliable']['hint']))}"
     )
     lines.append("set\tfex-fex-tsoenabled\t1")
     lines.append("set\tfex-fex-maxinst\t2")
@@ -481,7 +597,7 @@ def build_menu(horizon_wine: Path) -> str:
     lines.append("set\tfex-fex-x87reducedprecision\t0")
 
     lines.append(
-        f"preset\tfast\t{t15('Fast')}\t"
+        f"preset\tfast\t{t15('Fast', CARAFE.same('Fast', presets['fast']['name']))}\t"
         f"{t15('Larger 5000-instruction JIT blocks with TSO off for higher throughput.')}"
     )
     lines.append("set\tfex-fex-tsoenabled\t0")
@@ -490,12 +606,13 @@ def build_menu(horizon_wine: Path) -> str:
     lines.append("set\tfex-fex-x87reducedprecision\t1")
 
     # --- Section: Experimental -----------------------------------------------
-    lines.append(f"section\texperimental\t{t15('Experimental')}")
+    lines.append(f"section\texperimental\t{t15('Experimental', CARAFE.same('Experimental', carafe['sections']['experimental']))}")
     emit_setting(
         lines, "large-pages", "program", "large-pages", "restart", 0, "-", "-",
         "2 MB guest view alignment",
         "Aligns guest virtual memory views >= 2 MB on 2 MB boundaries to reduce TLB pressure.",
         [("-", "Disabled"), ("1", "Enabled")],
+        unset="0",
     )
 
     # --- Error-screen suggestions ("What to try") ----------------------------
@@ -523,14 +640,18 @@ def build_menu(horizon_wine: Path) -> str:
         ("threads", "dxvk-dxvk-numcompilerthreads", 3,
          "Limit DXVK pipeline compiler threads to 2."),
     ]
+    # Carafe's reason for the same change of the same setting, where it has one.
+    reasons = {(item["kind"], item["setting"]): item["why"] for item in carafe["suggest"]}
     for kind, sid, val, why in suggestions:
-        lines.append(f"suggest\t{kind}\t{sid}\t{val}\t{t15(why)}")
+        lines.append(f"suggest\t{kind}\t{sid}\t{val}\t{t15(why, CARAFE.of(reasons.get((kind, CARAFE.ids[sid]))))}")
 
     # --- Pad outputs & keyboard keys ----------------------------------------
     for idx, label in enumerate(pad_labels, start=1):
-        lines.append(f"pad\t0x{idx:x}\t{t15(label)}")
+        lines.append(f"pad\t0x{idx:x}\t{t15(label, CARAFE.same(label, carafe['pads'][idx - 1]))}")
+    # The mouse's thirteen actions are 0x100 and up in both, in the same order.
+    mouse = dict(zip(range(0x100, 0x100 + len(carafe["mouse"])), carafe["mouse"]))
     for code, label in key_items:
-        lines.append(f"key\t0x{code:x}\t{t15(label)}")
+        lines.append(f"key\t0x{code:x}\t{t15(label, CARAFE.of(mouse.get(code)))}")
 
     return "\n".join(lines) + "\n"
 

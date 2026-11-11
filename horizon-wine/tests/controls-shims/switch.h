@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -62,7 +63,12 @@ typedef enum {
 static inline Result setInitialize( void ) { return 0; }
 static inline void setExit( void ) {}
 static inline Result setGetSystemLanguage( u64 *c ) { *c = 0; return 0; }
-static inline Result setMakeLanguage( u64 c, SetLanguage *l ) { (void)c; *l = SetLanguage_ENUS; return 0; }
+/* A test may name the console's language (tests/check_menu_languages.py). */
+static inline Result setMakeLanguage( u64 c, SetLanguage *l )
+{
+    const char *named = getenv( "CONTROLS_TEST_LANGUAGE" );
+    (void)c; *l = named ? (SetLanguage)atoi( named ) : SetLanguage_ENUS; return 0;
+}
 
 #define HidNpadButton_A      (1ULL << 0)
 #define HidNpadButton_B      (1ULL << 1)
