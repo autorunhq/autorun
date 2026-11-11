@@ -9,6 +9,11 @@ set(media_jobs "$ENV{WINE_NX_JOBS}")
 if(NOT media_jobs)
     set(media_jobs 8)
 endif()
+# The first decoder, demuxer, parser and filter lines are what Media Foundation
+# plays (winedmo). The lines after them are what DirectShow and the Windows
+# Media reader play through the parser in source/media_unix.c: the containers
+# and codecs of the videos and music that DirectX 7 to 9 games ship. That list
+# is Carafe's (runtime/media/configure.in).
 ExternalProject_Add(wine-media
     SOURCE_DIR "${WINE_NX_FFMPEG_SOURCE}"
     DOWNLOAD_COMMAND ""
@@ -25,6 +30,13 @@ ExternalProject_Add(wine-media
         --enable-avutil --enable-swresample --enable-swscale
         --enable-decoder=h264,aac,wmav1,wmav2,wmapro,wmalossless
         --enable-demuxer=mov --enable-parser=h264,aac --enable-bsf=h264_mp4toannexb
+        --enable-demuxer=asf,avi,mpegps,mpegvideo,mp3,wav,aiff,au
+        --enable-decoder=wmv1,wmv2,wmv3,vc1,msmpeg4v1,msmpeg4v2,msmpeg4v3,mpeg1video,mpeg2video,mpeg4,h263
+        --enable-decoder=cinepak,msvideo1,msrle,indeo3,indeo4,indeo5,rawvideo
+        --enable-decoder=mp1,mp2,mp3,pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_alaw,pcm_mulaw
+        --enable-decoder=adpcm_ms,adpcm_ima_wav,gsm_ms
+        --enable-parser=mpegvideo,mpegaudio,mpeg4video,vc1,h263
+        --enable-bsf=extract_extradata
         "--extra-cflags=-O2 -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffixed-x18 -ffunction-sections -fdata-sections -D__SWITCH__ -I${LIBNX}/include"
         "--extra-ldflags=-march=armv8-a+crc+crypto -mtp=soft -fPIE -specs=${LIBNX}/switch.specs -L${LIBNX}/lib"
         "--extra-libs=-lnx -lm"

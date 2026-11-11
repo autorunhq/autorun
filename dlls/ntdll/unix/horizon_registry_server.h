@@ -11,6 +11,7 @@
 #define HORIZON_REGISTRY_DIR WINE_NX_RUNTIME_ROOT "/"
 #endif
 #include "horizon_registry_paths.h"
+#include "horizon_directshow_reg.h"
 
 static long long horizon_registry_now(void)
 {
@@ -343,6 +344,16 @@ static unsigned int horizon_registry_init(void)
      * Loaded before system.reg, so anything a program has written for itself
      * since still wins. */
     horizon_registry_load_hive( machine, "horizon-dlls/classes.reg" );
+    /* The DirectShow filters behind those classes, which a filter graph looks
+     * up by category before it creates one. autorun-setup.exe has quartz.dll
+     * register its own once per card; the splitter that plays through the
+     * runtime's parser is winegstreamer.dll's, which nothing registers:
+     * horizon_directshow_reg.h. */
+    {
+        unsigned int errors = 0;
+        horizon_reg_load( &horizon_registry, machine, horizon_directshow_seed,
+                          sizeof(horizon_directshow_seed) - 1, &errors );
+    }
     horizon_registry_move_hives( HORIZON_REGISTRY_DIR );
     horizon_registry_load_hive( machine, HORIZON_REGISTRY_SUBDIR "system.reg" );
     horizon_registry_load_hive( user, HORIZON_REGISTRY_SUBDIR "user.reg" );
