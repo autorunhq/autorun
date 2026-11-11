@@ -75,7 +75,7 @@ Each stage is one or a few commits, checked on the host and built by the
 | 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | **done**, as two settings of a program, both off by default |
 | 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
 | 6 | The server thread pool (`0023`): the program's threads share a few server threads instead of having one each | **done**, as a setting of a program, off by default |
-| 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | The translations: **done**, for the settings both menus have. The graphics hunks are open |
+| 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | **Done.** The translations are in for the settings both menus have; the graphics hunks were read and none is missing here |
 
 ### Stage 1, done
 
@@ -377,7 +377,7 @@ Not checked, because it needs a console: that a game runs with the pool, how
 many threads it saves there, and whether requests wait longer for a thread
 than they did for their own.
 
-### Stage 7: the menu in the console's language, done; the graphics hunks, open
+### Stage 7: the menu in the console's language, and the graphics hunks: done
 
 The settings menu over a running game is Carafe's, and its catalog
 (`/carafe/menu.txt`, built by `horizon-wine/tools/make-carafe-menu.py` and
@@ -537,8 +537,29 @@ Fourteen mistakes made in the generator on purpose: twelve made it fail,
 and two change nothing with today's options (both are parts of the rule
 for DXVK-Sarek that no option needs at present).
 
-Open in this stage: the graphics hunks in `winnx_drv.c`, `winnx_opengl.c`
-and `win32u/vulkan.c`.
+The graphics hunks. Eight of Carafe's patches have lines in
+`dlls/win32u/winnx_drv.c`, `winnx_opengl.c` or `vulkan.c` that are not in
+the fork's files as written: 84 lines (`ledger.py --review -v` lists them).
+Each was read against the fork's code. None is a change the fork lacks; in
+every case the fork has the same thing in another form, and in five of them
+it has more:
+
+| Patch | Carafe's lines not found | What the fork has in their place |
+|---|---|---|
+| 0010 | 2, `vulkan.c` | the same call, through a weak symbol |
+| 0012 | 1, `winnx_drv.c` | the flush of mouse motion, made only after something was sent. The same reaches the server: win32u keeps motion per thread and an empty flush sends nothing (`accum_mouse_motion`, `send_mouse_motion` in `input.c`) |
+| 0014 | 6, `winnx_opengl.c` | the same counter with atomic loads and stores; a drawable that is not the screen swaps without it |
+| 0042 | 43, `vulkan.c` | the menu's Vulkan pass, grown to draw the pointer too: a second texture and descriptor set, a viewport set per draw, and a fence per image so a command buffer is recorded again only after its last use ended |
+| 0043 | 1, `winnx_opengl.c` | the viewport line, in a routine that takes any rectangle (it also draws the pointer) |
+| 0097 | 3, `winnx_drv.c` | the same, with atomic loads and stores |
+| 0107 | 20, `vulkan.c` | weak calls and an atomic `nx_acquired`; a present that is refused waits on all of the program's semaphores, not the first 16; and it gives the driver the driver's own fence. Carafe passes the program's fence handle, which in this Wine is a wrapper object (`vulkan_fence_from_handle`) |
+| 0108 | 8, `winnx_drv.c` | weak calls; the test for a lit pixel stays inside the picture's rows |
+
+Beyond those lines the fork's three files differ from Carafe's by the
+fork's own later work (a window's picture scaled to the screen, the pointer
+drawn over Vulkan and OpenGL, more log lines); nothing there comes from
+Carafe. No file changed for this part. It is a reading of the code: none of
+it was run, and what the 0107 fence does on a console is not known.
 
 ## Left out, and why
 
@@ -571,7 +592,7 @@ fork has it in its own form, which the last column names.
 | 0009 | winnx vulkan reserve screen | 2 | 100 % | in the fork |
 | 0010 | vulkan take screen at swapchain | 3 | 33 % | in the fork, with the call made weak |
 | 0011 | winnx opengl first frame | 22 | 100 % | in the fork |
-| 0012 | winnx flush mouse motion | 4 | 75 % | in the fork; the motion is flushed only when the pointer moved |
+| 0012 | winnx flush mouse motion | 4 | 75 % | in the fork; the flush is made only after a move or a button was sent, and an empty flush sends nothing, so the server sees the same |
 | 0013 | audio source rate frames | 30 | 100 % | in the fork |
 | 0014 | winnx opengl clear after loading screen | 29 | 79 % | in the fork, with atomic loads and stores |
 | 0015 | win32u screen size of a window | 15 | 100 % | in the fork |
@@ -657,8 +678,8 @@ fork has it in its own form, which the last column names.
 | 0104 | runtime the log is written out before the game closes | 6 | 100 % | in the fork |
 | 0105 | runtime the runtimes own dxvk is the system direct3d | 10 | 0 % | not taken: Carafe's DXVK is a release source here, in its own folder in front of system32 |
 | 0106 | runtime the screen follows what a window shows last | 35 | 100 % | in the fork |
-| 0107 | vulkan a swapchain gives the screen to gdi drawing | 152 | 86 % | in the fork, with the calls made weak and `nx_acquired` atomic |
-| 0108 | winnx a picture the program draws in a window is reported | 25 | 64 % | in the fork, with the calls made weak |
+| 0107 | vulkan a swapchain gives the screen to gdi drawing | 152 | 86 % | in the fork, with the calls made weak and `nx_acquired` atomic; a refused present waits on every semaphore and passes the driver's fence, not the program's handle |
+| 0108 | winnx a picture the program draws in a window is reported | 25 | 64 % | in the fork, with the calls made weak and the pixel test kept inside the picture |
 | 0111 | winnx a fullscreen window in a scaled mode is placed between the bars | 11 | 100 % | in the fork |
 | 0112 | win32u a window surface knows when the program drew into it | 15 | 86 % | in the fork: the hunk is in `dibdrv/dc.c`, the call weak |
 | 0113 | win32u the system paints backgrounds and frames as itself | 12 | 100 % | in the fork |
