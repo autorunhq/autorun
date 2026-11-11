@@ -1,0 +1,47 @@
+Carafe: Carafe can create a registry key that is never saved, for the devices it announces at every start, as
+the Plug and Play manager does on Windows. Only the key itself is volatile; parents it lacks are created as
+ordinary keys, unless they sit under a volatile key, so the programs that write their own keys beside it, such
+as win32u its monitors under DeviceClasses, still can.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon_registry_server.h
++++ b/dlls/ntdll/unix/horizon_registry_server.h
+@@ -667,6 +667,38 @@
+     return horizon_reg_set_value( &horizon_registry, key, name, name_len, type, data, size );
+ }
+ 
++unsigned int wine_nx_registry_create_volatile( int hive, const unsigned short *path, unsigned int path_len )
++{
++    struct horizon_reg_key *key;
++    unsigned int at = 0, len = path_len / 2;
++
++    if (hive < 0 || hive > 1 || !(key = horizon_registry_hives[hive])) return HORIZON_REG_INVALID_PARAMETER;
++    while (at < len)
++    {
++        struct horizon_reg_key *sub;
++        unsigned int end = at, index;
++
++        while (end < len && path[end] != '\\') end++;
++        if (end > at)
++        {
++            if (!(sub = horizon_reg_find_subkey( key, path + at, (end - at) * 2, &index )))
++            {
++                if (!(sub = horizon_reg_alloc_key( path + at, (end - at) * 2, horizon_registry.now() )))
++                    return HORIZON_REG_NO_MEMORY;
++                if (end >= len || (key->flags & HORIZON_REG_FLAG_VOLATILE)) sub->flags |= HORIZON_REG_FLAG_VOLATILE;
++                if (horizon_reg_link( key, sub, index ))
++                {
++                    horizon_reg_release( &horizon_registry, sub );
++                    return HORIZON_REG_NO_MEMORY;
++                }
++            }
++            key = sub;
++        }
++        at = end + 1;
++    }
++    return HORIZON_REG_SUCCESS;
++}
++
+ unsigned int wine_nx_registry_delete_value( int hive, const unsigned short *path, unsigned int path_len,
+                                             const unsigned short *name, unsigned int name_len )
+ {

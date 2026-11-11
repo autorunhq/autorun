@@ -1,0 +1,23 @@
+Carafe: a thread on its way out takes its address wait out of the process's table of address waits if it was
+ended in one (`0126`), before its stack can be freed.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1163,9 +1163,16 @@
+ /***********************************************************************
+  *           pthread_exit_wrapper
+  */
++#ifdef __SWITCH__
++extern void carafe_futex_exit_take_out( void );
++#endif
++
+ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
+ {
+     struct thread_data *data = get_thread_data();
++#ifdef __SWITCH__
++    carafe_futex_exit_take_out();
++#endif
+     close( data->alert_fd );
+     close( data->wait_fd[0] );
+     close( data->wait_fd[1] );

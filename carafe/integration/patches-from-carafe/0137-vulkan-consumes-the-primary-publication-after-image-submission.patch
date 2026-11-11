@@ -1,0 +1,55 @@
+Carafe: Vulkan acknowledges a ready primary after submitting its application image and before drawing the overlay.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -3674,6 +3674,13 @@ static void nx_vk_note_present( const VkSwapchainKHR *client_swapchains, uint32_
+ 
+ static LONG nx_scaled_presents;
+ 
++static void nx_window_picture_submitted(void)
++{
++    extern void wine_nx_window_picture_presented(void) __attribute__((weak));
++
++    if (wine_nx_window_picture_presented) wine_nx_window_picture_presented();
++}
++
+ /* Submits the scaling blit. On a few presents it also copies the scaled screen
+  * buffer back and logs what reaches the screen: the centre, a bar pixel, and
+  * how many samples are not black or are white (pe32-d3d9's triangle). */
+@@ -3703,7 +3710,8 @@ static void nx_submit_scaled( struct vulkan_queue *queue, VkSubmitInfo *submit_i
+ 
+     if (presents != 30 && presents != 90 && presents % 1800)
+     {
+-        device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, VK_NULL_HANDLE );
++        if (!device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, VK_NULL_HANDLE ))
++            nx_window_picture_submitted();
+         return;
+     }
+ 
+@@ -3757,6 +3765,7 @@ static void nx_submit_scaled( struct vulkan_queue *queue, VkSubmitInfo *submit_i
+     submit_info->pCommandBuffers = cmds;
+     submit_info->commandBufferCount++;
+     if ((res = device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, fence ))) goto done;
++    nx_window_picture_submitted();
+     if ((res = device->p_vkWaitForFences( device->host.device, 1, &fence, VK_TRUE, 5000000000ull )))
+     {
+         /* Still queued: leave its objects alive rather than free them under the GPU. */
+@@ -3782,7 +3791,8 @@ static void nx_submit_scaled( struct vulkan_queue *queue, VkSubmitInfo *submit_i
+     goto done;
+ 
+ failed:
+-    device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, VK_NULL_HANDLE );
++    if (!device->p_vkQueueSubmit( queue->host.queue, 1, submit_info, VK_NULL_HANDLE ))
++        nx_window_picture_submitted();
+ done:
+     if (res) nx_vk_trace( "[NXVK] scaled present %d read back failed: %d", (int)presents, res );
+     if (fence) device->p_vkDestroyFence( device->host.device, fence, NULL );
+@@ -4662,6 +4672,7 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+ 
+     pthread_mutex_lock( &present_lock );
+ #ifdef __SWITCH__
++    if (!blit_count && present_info->swapchainCount) nx_window_picture_submitted();
+     nx_osk_present( queue, present_info, client_swapchains, &pool );
+ #endif
+ #ifdef WINE_NX_MESA_SWITCH

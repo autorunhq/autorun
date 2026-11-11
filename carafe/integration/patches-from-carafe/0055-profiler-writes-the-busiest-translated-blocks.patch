@@ -1,0 +1,206 @@
+Carafe: the profiler writes the translated blocks a thread spends its time in, with their code.
+Where FEX's code for a game is slow is in the ARM64 it emits, not in the x86 address alone. While sampling, the
+profiler counts each FEX block and each host instruction it finds a thread in, and after 20000 such samples, then
+after three times as many each time, writes the 256 busiest blocks to logs/jit-blocks.txt: the guest address, the
+host-to-guest instruction map from the block's tail, the sampled host offsets, and the guest and host bytes.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.c
++++ b/horizon-wine/source/thread_profile.c
+@@ -49,6 +49,13 @@
+ #define NX_PROF_FEX_TAIL_ENTRIES      24
+ #define NX_PROF_FEX_TAIL_ENTRY_OFFSET 28
+ 
++#define NX_PROF_JIT_PCS       16384
++#define NX_PROF_JIT_BLOCKS    256
++#define NX_PROF_JIT_FIRST     20000
++#define NX_PROF_JIT_HOST_MAX  0x10000
++#define NX_PROF_JIT_GUEST_MAX 0x2000
++#define NX_PROF_JIT_FILE      "sdmc:/switch/wine/logs/jit-blocks.txt"
++
+ static size_t nx_prof_vl64pair_size( uint8_t type )
+ {
+     if (!(type & 0x80)) return 1;
+@@ -158,6 +165,9 @@
+ /* The runtime's image: __start__ is an absolute 0, so the base comes from the
+  * kernel's view of the code mapping. */
+ static uintptr_t runtime_base, runtime_end;
++static struct nx_prof_table jit_blocks;
++static struct nx_prof_bucket jit_pcs[NX_PROF_JIT_PCS];
++static uint32_t jit_samples, jit_next_dump = NX_PROF_JIT_FIRST;
+ 
+ __thread volatile int *wine_nx_stop_word;
+ 
+@@ -610,7 +620,7 @@
+     return nx_prof_x86_frames( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+ }
+ 
+-static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86 )
++static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86, uint64_t *start )
+ {
+     uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x, block, tail, host, guest, entry, end;
+     uint32_t entries, i;
+@@ -646,9 +656,25 @@
+         entry += size;
+     }
+     *x86 = guest;
++    *start = block;
+     return 1;
+ }
+ 
++static void jit_pc_add( uint64_t pc )
++{
++    unsigned int start = (unsigned int)((pc * 0x9e3779b97f4a7c15ull) >> 50), i;
++
++    for (i = 0; i < NX_PROF_PROBES; i++)
++    {
++        struct nx_prof_bucket *bucket = &jit_pcs[(start + i) & (NX_PROF_JIT_PCS - 1)];
++
++        if (bucket->count && bucket->key != pc) continue;
++        bucket->key = pc;
++        bucket->count++;
++        return;
++    }
++}
++
+ static void record( struct nx_prof_target *target, const ThreadContext *ctx, int translated, uintptr_t x86,
+                     const uint64_t *callers, unsigned int count, const uint32_t *x86_callers, unsigned int x86_count )
+ {
+@@ -703,6 +729,7 @@
+     uint32_t x86_callers[NX_PROF_DEPTH];
+     unsigned int i, tries, count, x86_count;
+     uintptr_t x86 = 0;
++    uint64_t block = 0;
+     int translated, fex;
+ 
+     (void)arg;
+@@ -734,7 +761,7 @@
+             {
+                 count = walk_callers( &ctx, callers );
+                 if (&wine_nx_box64_pc_to_x86) translated = wine_nx_box64_pc_to_x86( ctx.pc.x, &x86 );
+-                if (!translated) translated = fex = fex_pc_to_x86( &ctx, &x86 );
++                if (!translated) translated = fex = fex_pc_to_x86( &ctx, &x86, &block );
+                 x86_count = fex ? walk_x86_frames( &ctx, NX_PROF_FEX_ESP, NX_PROF_FEX_EBP, x86_callers ) :
+                             translated ? walk_x86_frames( &ctx, NX_PROF_BOX64_ESP, NX_PROF_BOX64_EBP, x86_callers ) :
+                                          walk_x86( target->teb, x86_callers );
+@@ -742,6 +769,12 @@
+             svcSetThreadActivity( target->handle, ThreadActivity_Runnable );
+             if (R_SUCCEEDED( rc )) record( target, &ctx, translated, x86, callers, count, x86_callers, x86_count );
+             else target->missed++;
++            if (R_SUCCEEDED( rc ) && fex)
++            {
++                nx_prof_add( &jit_blocks, block );
++                jit_pc_add( ctx.pc.x & ~3ull );
++                jit_samples++;
++            }
+         }
+         pthread_mutex_unlock( &profile_mutex );
+     }
+@@ -1070,6 +1103,99 @@
+     wine_nx_runtime_trace( line );
+ }
+ 
++static void jit_dump_hex( FILE *file, const char *label, uint64_t address, uint64_t size )
++{
++    static const char digits[] = "0123456789abcdef";
++    char chunk[512];
++    unsigned int n = 0;
++    MemoryInfo info;
++    uint64_t i;
++
++    fprintf( file, "%s %#llx %#llx ", label, (unsigned long long)address, (unsigned long long)size );
++    if (readable_size( address, size, &info ))
++        for (i = 0; i < size; i++)
++        {
++            uint8_t byte = ((const volatile uint8_t *)(uintptr_t)address)[i];
++
++            chunk[n++] = digits[byte >> 4];
++            chunk[n++] = digits[byte & 15];
++            if (n == sizeof(chunk))
++            {
++                fwrite( chunk, 1, n, file );
++                n = 0;
++            }
++        }
++    chunk[n++] = '\n';
++    fwrite( chunk, 1, n, file );
++}
++
++static void jit_dump_block( FILE *file, const struct nx_prof_bucket *bucket )
++{
++    uint64_t block = bucket->key, tail, size, host = 0, guest, low, high, entry;
++    uint32_t entries, i;
++    MemoryInfo info;
++
++    if (!readable_size( block, sizeof(uint32_t), &info )) return;
++    tail = block + read_word32( block );
++    if (!readable_size( tail, NX_PROF_FEX_TAIL_SIZE, &info )) return;
++    size = read_word( tail );
++    if (size > NX_PROF_JIT_HOST_MAX) size = NX_PROF_JIT_HOST_MAX;
++    guest = low = high = read_word( tail + NX_PROF_FEX_TAIL_RIP );
++    entries = read_word32( tail + NX_PROF_FEX_TAIL_ENTRIES );
++    entry = tail + read_word32( tail + NX_PROF_FEX_TAIL_ENTRY_OFFSET );
++    fprintf( file, "block %#llx samples %u rip %#llx size %#llx entries %u\nmap", (unsigned long long)block,
++             bucket->count, (unsigned long long)guest, (unsigned long long)size, entries );
++    for (i = 0; i < entries; i++)
++    {
++        uint64_t arm, rip;
++        size_t step;
++
++        if (!readable( entry, &info )) break;
++        step = nx_prof_vl64pair_size( *(const uint8_t *)(uintptr_t)entry );
++        if (!readable_size( entry, step, &info )) break;
++        nx_prof_vl64pair( (const uint8_t *)(uintptr_t)entry, &arm, &rip );
++        host += arm;
++        guest += rip;
++        entry += step;
++        if (guest < low) low = guest;
++        if (guest > high) high = guest;
++        fprintf( file, " %#llx:%#llx", (unsigned long long)host, (unsigned long long)guest );
++    }
++    fputs( "\nhot", file );
++    for (i = 0; i < NX_PROF_JIT_PCS; i++)
++        if (jit_pcs[i].count && jit_pcs[i].key - block < size)
++            fprintf( file, " %#llx:%u", (unsigned long long)(jit_pcs[i].key - block), jit_pcs[i].count );
++    fputc( '\n', file );
++    if (high - low + 16 > NX_PROF_JIT_GUEST_MAX) high = low + NX_PROF_JIT_GUEST_MAX - 16;
++    jit_dump_hex( file, "guest", low, high - low + 16 );
++    jit_dump_hex( file, "host", block, size );
++}
++
++static void jit_dump( void )
++{
++    static unsigned int top[NX_PROF_JIT_BLOCKS];
++    static struct nx_prof_bucket blocks[NX_PROF_JIT_BLOCKS];
++    unsigned int shown, i;
++    uint32_t samples, dropped;
++    char line[200];
++    FILE *file;
++
++    pthread_mutex_lock( &profile_mutex );
++    shown = nx_prof_top( &jit_blocks, top, NX_PROF_JIT_BLOCKS );
++    for (i = 0; i < shown; i++) blocks[i] = jit_blocks.buckets[top[i]];
++    samples = jit_samples;
++    dropped = jit_blocks.dropped;
++    jit_next_dump = samples * 3;
++    pthread_mutex_unlock( &profile_mutex );
++    if (!(file = fopen( NX_PROF_JIT_FILE, "w" ))) return;
++    fprintf( file, "jit-blocks 1 samples %u dropped %u blocks %u\n", samples, dropped, shown );
++    for (i = 0; i < shown; i++) jit_dump_block( file, &blocks[i] );
++    fclose( file );
++    snprintf( line, sizeof(line), "[PROF] jit: the %u busiest blocks of %u samples in logs/jit-blocks.txt", shown,
++              samples );
++    wine_nx_runtime_trace( line );
++}
++
+ void wine_nx_thread_report( void )
+ {
+     static u64 last;
+@@ -1112,6 +1238,7 @@
+     wine_nx_runtime_trace( line );
+     if (profiling) server_report();
+     if (profiling) profile_report( rows, count );
++    if (profiling && __atomic_load_n( &jit_samples, __ATOMIC_RELAXED ) >= jit_next_dump) jit_dump();
+ }
+ 
+ /* Names the threads that did not stop, so the wait they are in can be found. */

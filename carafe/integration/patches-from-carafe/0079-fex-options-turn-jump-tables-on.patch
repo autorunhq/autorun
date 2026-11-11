@@ -1,0 +1,15 @@
+Carafe: FEX_JUMPTABLES is on unless a program turns it off. On the console, Carbon's switch lookups fell from 3.2 % to
+0.2 % of the samples with it, and the main thread's time a frame from 17.6-18.7 ms to 16.9 ms.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/fex_options.h
++++ b/horizon-wine/source/fex_options.h
+@@ -142,7 +142,7 @@
+       1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+     { NX_FEX_JUMP_TABLES, "FEX_JUMPTABLES",
+       "A switch jumps straight to its cases inside the translated block instead of through the lookup table.",
+-      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
++      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+     { NX_FEX_COMPACT_RETURNS, "FEX_COMPACTRETURNS",
+       "Returns keep their rarely used lookup outside the hot code, so more of it fits the instruction cache.",
+       1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },

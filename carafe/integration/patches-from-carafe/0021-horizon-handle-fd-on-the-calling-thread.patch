@@ -1,0 +1,44 @@
+Carafe: the server answers GET_HANDLE_FD on the calling thread, as it does waits, with Horizon sync.
+Every file read and write asks for the descriptor behind its handle, and it is only a lookup: 83 % of
+OpenTTD's requests to the client threads in Carafe Lab. Served on the calling thread it saves two thread
+switches per read. The handler takes the objects lock the way the other direct handlers do and replies through
+horizon_server_sync_reply; on the direct path the descriptor is queued for the calling thread's own pipe, where
+wine_server_receive_fd looks for it. dlls/ntdll/unix/server.c sends the request this way (0022).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -11588,7 +11588,7 @@
+     struct horizon_server_handle_entry *entry;
+ 
+     memset( &reply, 0, sizeof(reply) );
+-    pthread_mutex_lock( &horizon_server_objects_mutex );
++    horizon_server_sync_lock( connection );
+     entry = horizon_server_find_handle_locked( request->handle );
+     if (!entry) reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
+     else if ((entry->object->type != HORIZON_SERVER_OBJECT_FILE &&
+@@ -11627,7 +11627,7 @@
+         horizon_server_queue_fd( entry->object->file_fd, request->handle );
+     }
+     pthread_mutex_unlock( &horizon_server_objects_mutex );
+-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
+ }
+ 
+ static char horizon_server_ascii_lower( char ch )
+@@ -16304,6 +16304,7 @@
+     case HORIZON_REQ_QUERY_MUTEX: handler = horizon_server_handle_query_mutex; break;
+     case HORIZON_REQ_RELEASE_SEMAPHORE: handler = horizon_server_handle_release_semaphore; break;
+     case HORIZON_REQ_QUERY_SEMAPHORE: handler = horizon_server_handle_query_semaphore; break;
++    case HORIZON_REQ_GET_HANDLE_FD: handler = horizon_server_handle_get_handle_fd; break;
+     default: return 0;
+     }
+     if (!horizon_sync_thread)
+@@ -16324,6 +16325,7 @@
+     connection.direct_reply = reply;
+     connection.direct_data = reply_data;
+     connection.direct_size = request->reply_size;
++    connection.request_pipe = (struct horizon_pipe *)horizon_fd_client_owner();
+     previous = horizon_server_current;
+     horizon_server_current = &connection;
+     if (handler) status = handler( &connection, message );

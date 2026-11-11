@@ -1,0 +1,86 @@
+Carafe: anonymous mappings can use backing pieces below an arena.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -20021,6 +20021,11 @@
+     return ret;
+ }
+ 
++#define HORIZON_ANONYMOUS_BACKING_MIN ((size_t)HORIZON_POOL_PAGE)
++#define HORIZON_ANONYMOUS_BACKING_UNIT ((size_t)64 * 1024)
++
++static int map_anonymous_backings( void *addr, size_t size, int prot, int flags, int map_errno );
++
+ /* Replaces the reservation over [start, start + size) with a mapping. A range
+  * asked for with PROT_NONE is left unmapped, a hole, unless map_range says to
+  * map it inaccessible: memory that is mapped can be committed later with a
+@@ -20064,7 +20069,7 @@
+     }
+ 
+     list_remove_mapping( mapping );
+-    if (map_range && map_backing_at( start, size, prot, -1, 0, MAP_PRIVATE | MAP_ANON, EINVAL ))
++    if (map_range && map_anonymous_backings( start, size, prot, MAP_PRIVATE | MAP_ANON, EINVAL ))
+     {
+         /* Keep the original reservation and tree entry on a failed commit.
+          * Releasing them here turns a retry into an unrecoverable hole. */
+@@ -20076,9 +20081,14 @@
+     if (right) { right->swap_managed = mapping->swap_managed; right->swap_excluded = mapping->swap_excluded; }
+     if (map_range)
+     {
+-        struct horizon_mapping *mapped = find_overlap_mapping( start, size );
+-        mapped->swap_managed = mapped->backing->swap_managed = mapping->swap_managed;
+-        mapped->swap_excluded = mapped->backing->swap_excluded = mapping->swap_excluded;
++        char *cursor = start;
++        while (cursor < end)
++        {
++            struct horizon_mapping *mapped = find_overlap_mapping( cursor, end - cursor );
++            mapped->swap_managed = mapped->backing->swap_managed = mapping->swap_managed;
++            mapped->swap_excluded = mapped->backing->swap_excluded = mapping->swap_excluded;
++            cursor = (char *)mapped->addr + mapped->size;
++        }
+     }
+ #endif
+     if (left) list_add_mapping( left );
+@@ -21154,10 +21164,11 @@
+         {
+             int saved_errno = errno;
+ 
+-            if (saved_errno == ENOMEM && chunk > HORIZON_POOL_ARENA)
++            if (saved_errno == ENOMEM && chunk > HORIZON_ANONYMOUS_BACKING_MIN)
+             {
+-                chunk = max( HORIZON_POOL_ARENA,
+-                             (chunk / 2) & ~(HORIZON_POOL_PAGE - 1) );
++                size_t granularity = chunk > HORIZON_ANONYMOUS_BACKING_UNIT ?
++                                     HORIZON_ANONYMOUS_BACKING_UNIT : HORIZON_ANONYMOUS_BACKING_MIN;
++                chunk = max( granularity, (chunk / 2) & ~(granularity - 1) );
+                 continue;
+             }
+             if (cursor != addr && unmap_range_locked( addr, cursor - (char *)addr ))
+@@ -21720,7 +21731,7 @@
+     else
+     {
+         stage = "map backing";
+-        if (anonymous && size > HORIZON_POOL_ARENA)
++        if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
+         {
+             stage = "map backing chunks";
+             if (map_anonymous_backings( start, size, prot, flags, EINVAL )) start = MAP_FAILED;
+@@ -21819,7 +21830,7 @@
+         if (add_lazy_mapping_locked( start, size, prot )) ret = MAP_FAILED;
+         virtmemUnlock();
+     }
+-    else if (anonymous && size > HORIZON_POOL_ARENA)
++    else if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
+     {
+         if (!(transition = reserve_fixed_range( start, size )) ||
+             map_anonymous_backings( start, size, prot, flags, EEXIST ))
+@@ -21864,7 +21875,7 @@
+     {
+         ret = add_lazy_mapping_locked( addr, size, prot );
+     }
+-    else if (anonymous && size > HORIZON_POOL_ARENA)
++    else if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
+     {
+         transition = reserve_fixed_range_locked( addr, size );
+         ret = transition ? 0 : -1;

@@ -1,0 +1,82 @@
+Carafe: the screen follows what a window shows last, as on Windows, where GDI drawing and a Direct3D present
+write into the same window. When a program draws a picture in a window while Vulkan holds the screen, the
+swapchain that shows it is taken off (wine_nx_vk_displace_screen, patch 0107) and the compositor shows the windows
+until the program makes its next swapchain. For the loading screen, wine_nx_window_picture_shown is set when a
+picture on the screen is drawn over with another one, as a video does, or when the thread of the window with the
+picture waits for input (wine_nx_screen_input_waits, patch 0116), as Windows takes a program to have started. The
+window driver reports pictures only while wine_nx_screen_wants_pictures asks for them (patch 0108).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -559,6 +559,9 @@
+ static int wine_nx_gl_window;  /* an OpenGL window surface owns the screen's NWindow */
+ static int wine_nx_screen_reserved;
+ static int wine_nx_vk_surfaces;
++static int wine_nx_vk_swapchains;
++int wine_nx_window_picture_shown;
++static unsigned int wine_nx_picture_thread;
+ /* Controller and touchscreen state, guarded by wine_nx_pointer_mutex. */
+ static pthread_mutex_t wine_nx_pointer_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static struct pointer_cursor wine_nx_pointer =
+@@ -763,6 +766,60 @@
+     log_line( "[NXVK] screen handed to the Vulkan swapchain" );
+ }
+ 
++void wine_nx_vk_swapchain_made(void)
++{
++    __atomic_add_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
++}
++
++void wine_nx_vk_swapchain_gone(void)
++{
++    __atomic_sub_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
++}
++
++int wine_nx_screen_wants_pictures(void)
++{
++    extern int wine_nx_watch_window_pictures(void) __attribute__((weak));
++
++    if (wine_nx_watch_window_pictures && !__atomic_load_n( &wine_nx_window_picture_shown, __ATOMIC_ACQUIRE ) &&
++        wine_nx_watch_window_pictures())
++        return 1;
++    return __atomic_load_n( &wine_nx_vk_surfaces, __ATOMIC_ACQUIRE ) &&
++           !__atomic_load_n( &wine_nx_screen_reserved, __ATOMIC_ACQUIRE );
++}
++
++void wine_nx_screen_input_waits(unsigned int thread)
++{
++    if (thread && __atomic_load_n( &wine_nx_picture_thread, __ATOMIC_ACQUIRE ) == thread)
++        __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
++}
++
++void wine_nx_screen_picture_drawn(unsigned int thread, int redrawn)
++{
++    extern void wine_nx_vk_displace_screen(void) __attribute__((weak));
++    int give, shown;
++
++    pthread_mutex_lock( &wine_nx_fb_mutex );
++    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved;
++    pthread_mutex_unlock( &wine_nx_fb_mutex );
++    if (give && wine_nx_vk_displace_screen) wine_nx_vk_displace_screen();
++
++    pthread_mutex_lock( &wine_nx_fb_mutex );
++    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved &&
++           !__atomic_load_n( &wine_nx_vk_swapchains, __ATOMIC_ACQUIRE );
++    if (give) wine_nx_screen_reserved = 1;
++    shown = !wine_nx_gl_window || wine_nx_screen_reserved;
++    pthread_mutex_unlock( &wine_nx_fb_mutex );
++    if (give)
++    {
++        wine_nx_compositor_resume();
++        log_line( "[NXVK] a window was drawn with GDI and no swapchain shows the screen; the compositor shows the "
++                  "windows until the next swapchain" );
++    }
++    if (!shown) return;
++    if (redrawn) __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
++    else __atomic_store_n( &wine_nx_picture_thread, thread, __ATOMIC_RELEASE );
++}
++
+ /* The OpenGL surface is destroyed; the framebuffer or the compositor may take
+  * the screen back. */
+ void wine_nx_gl_release_window(void)
