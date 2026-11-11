@@ -1412,8 +1412,11 @@ void carafeRegistryFormat(uint32_t type, const uint8_t* data, uint32_t size, cha
         return;
     }
     if (type == CARAFE_REG_SZ || type == CARAFE_REG_EXPAND_SZ || type == CARAFE_REG_MULTI_SZ) {
-        static uint16_t wide[CARAFE_REG_DATA / 2];
+        uint16_t wide[CARAFE_REG_DATA / 2];
         size_t count = size / 2;
+        if (count > CARAFE_REG_DATA / 2) {
+            count = CARAFE_REG_DATA / 2;
+        }
         for (size_t i = 0; i < count; i++) {
             wide[i] = (uint16_t)(data[2 * i] | data[2 * i + 1] << 8);
         }

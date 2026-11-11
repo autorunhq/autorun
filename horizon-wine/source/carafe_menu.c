@@ -1962,10 +1962,7 @@ static CarafeMenuAction pressButton(int id) {
     case ButtonGame:
         return CarafeMenuBack;
     case ButtonBack:
-        if (g_reg) {
-            return pressRegistry(OSK_B);
-        }
-        return CarafeMenuBack;
+        return pressKeys(OSK_B);
     case ButtonEditDone:
         regEditCommit();
         return CarafeMenuStay;
@@ -2022,6 +2019,7 @@ static CarafeMenuAction tap(int x, int y) {
                 activateItem(&items[hit.value], 1);
             } else {
                 *focusRef() = hit.value;
+                g_reset_armed = false;
             }
         }
         break;
@@ -3319,7 +3317,7 @@ static void drawFooter(CarafeImage* picture) {
             snprintf(label, sizeof(label), "%s", s->restart);
         }
         x = drawButtonAt(picture, x, "+", label, pending > 0 ? 2 : 1, ButtonRestart);
-        drawButtonAt(picture, x, NULL, s->to_error, 0, ButtonBack);
+        drawButtonAt(picture, x, NULL, s->to_error, 0, ButtonGame);
     } else {
         if (pending > 0) {
             char label[TEXT_SIZE];

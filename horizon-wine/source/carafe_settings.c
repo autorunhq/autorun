@@ -427,13 +427,13 @@ static bool fileFromName(const char* name, CarafeFile* file) {
     return false;
 }
 
-static void parseChanges(const char* text) {
-    g_change_count = 0;
+static int parseChangesText(const char* text, Change* out, int max_changes) {
+    int count = 0;
     if (text == NULL || strncmp(text, "carafe-changes\t1", 16) != 0) {
-        return;
+        return 0;
     }
     const char* line = strchr(text, '\n');
-    while (line != NULL && *++line != '\0' && g_change_count < MAX_CHANGES) {
+    while (line != NULL && *++line != '\0' && count < max_changes) {
         const char* end = strchr(line, '\n');
         size_t length = end != NULL ? (size_t)(end - line) : strlen(line);
         char copy[KEY_SIZE + CARAFE_VALUE_SIZE + 16];
@@ -446,7 +446,7 @@ static void parseChanges(const char* text) {
             *key++ = '\0';
             *value++ = '\0';
             if (fileFromName(copy, &file) && key[0] != '\0') {
-                Change* change = &g_changes[g_change_count++];
+                Change* change = &out[count++];
                 change->file = file;
                 snprintf(change->key, sizeof(change->key), "%s", key);
                 snprintf(change->value, sizeof(change->value), "%s", value);
@@ -454,6 +454,11 @@ static void parseChanges(const char* text) {
         }
         line = end;
     }
+    return count;
+}
+
+static void parseChanges(const char* text) {
+    g_change_count = parseChangesText(text, g_changes, MAX_CHANGES);
 }
 
 static void loadChanges(void) {
@@ -777,6 +782,35 @@ void carafeSettingsSyncProgram(void) {
     }
 
     applyEnvironmentFromProgram();
+}
+
+void carafeSettingsPrepareError(void) {
+    g_start_tick = armGetSystemTick();
+    g_swkbd_auto_fallback = wine_nx_swkbd_auto_enabled;
+    g_changes_loaded = false;
+    g_change_count = 0;
+    g_restart = false;
+    g_trial_done = false;
+    free(g_start_changes);
+    g_start_changes = NULL;
+    for (int f = 0; f < CarafeFileCount; f++) {
+        free(g_snapshot_disk[f]);
+        g_snapshot_disk[f] = NULL;
+    }
+
+    char trial[PATH_SIZE];
+    volatilePath("trial.txt", trial, sizeof(trial));
+    struct stat st;
+    g_trial_active = stat(trial, &st) == 0;
+
+    /* Capture disk texts without applying or deleting changes.txt so deferred
+     * changes stay visible and become part of any trial restart. */
+    for (int f = 0; f < CarafeFileCount; f++) {
+        char p[PATH_SIZE];
+        if (filePath((CarafeFile)f, p, sizeof(p))) {
+            g_snapshot_disk[f] = readWhole(p, FILE_LIMIT);
+        }
+    }
 }
 
 bool carafeOptionsSummary(char* out, size_t size) {
@@ -1654,6 +1688,35 @@ int carafePresetCurrent(const CarafeCatalog* catalog, const CarafeSection* secti
 
 bool carafePresetApply(CarafeCatalog* catalog, const CarafePreset* preset) {
     bool ok = true;
+    const CarafeSection* section = NULL;
+    for (int s = 0; s < catalog->section_count && section == NULL; s++) {
+        for (int p = 0; p < catalog->sections[s].preset_count; p++) {
+            if (&catalog->sections[s].presets[p] == preset) {
+                section = &catalog->sections[s];
+                break;
+            }
+        }
+    }
+    if (section != NULL) {
+        for (int q = 0; q < section->preset_count; q++) {
+            const CarafePreset* other = &section->presets[q];
+            for (int i = 0; i < other->set_count; i++) {
+                int setting = other->sets[i].setting;
+                bool listed = false;
+                for (int j = 0; j < preset->set_count; j++) {
+                    if (preset->sets[j].setting == setting) {
+                        listed = true;
+                        break;
+                    }
+                }
+                if (!listed) {
+                    const CarafeSetting* st = &catalog->settings[setting];
+                    int def = st->default_index >= 0 && st->default_index < st->value_count ? st->default_index : 0;
+                    ok &= carafeSettingSet(catalog, setting, def);
+                }
+            }
+        }
+    }
     for (int i = 0; i < preset->set_count; i++) {
         ok &= carafeSettingSet(catalog, preset->sets[i].setting, preset->sets[i].value);
     }
@@ -1806,6 +1869,10 @@ bool carafeResetAll(CarafeCatalog* catalog, bool live) {
                 recordChange(s->file, s->key, "-");
                 s->current = def;
                 s->current_text[0] = '\0';
+                if (!live) {
+                    s->start = def;
+                    s->start_text[0] = '\0';
+                }
             }
         }
     }
@@ -1833,25 +1900,51 @@ bool carafeRestartRequested(void) {
     return g_restart;
 }
 
+static bool hasTrialEntry(const Change* list, int count, CarafeFile file, const char* key) {
+    for (int i = 0; i < count; i++) {
+        if (list[i].file == file && strcasecmp(list[i].key, key) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void carafeTrialWrite(bool trial) {
     char path[PATH_SIZE];
     volatilePath("trial.txt", path, sizeof(path));
     if (trial) {
-        FILE* file = fopen(path, "wb");
-        if (file != NULL) {
-            fprintf(file, "carafe-changes\t1\n");
-            for (int i = 0; i < g_change_count; i++) {
+        loadChanges();
+        Change* prevs = calloc(MAX_CHANGES, sizeof(Change));
+        int prev_count = 0;
+        if (prevs != NULL) {
+            char* existing = readWhole(path, FILE_LIMIT);
+            if (existing != NULL) {
+                prev_count = parseChangesText(existing, prevs, MAX_CHANGES);
+                free(existing);
+            }
+            for (int i = 0; i < g_change_count && prev_count < MAX_CHANGES; i++) {
+                if (hasTrialEntry(prevs, prev_count, g_changes[i].file, g_changes[i].key)) {
+                    continue;
+                }
                 char prev[CARAFE_VALUE_SIZE] = "";
                 const char* src = g_snapshot_disk[g_changes[i].file];
                 bool had = src != NULL && textValue(src, g_changes[i].key, prev, sizeof(prev));
-                fprintf(file, "%s\t%s\t%s\n", FILE_NAMES[g_changes[i].file], g_changes[i].key,
+                prevs[prev_count].file = g_changes[i].file;
+                snprintf(prevs[prev_count].key, sizeof(prevs[prev_count].key), "%s", g_changes[i].key);
+                snprintf(prevs[prev_count].value, sizeof(prevs[prev_count].value), "%s",
                     (had && prev[0] != '\0') ? prev : "-");
+                prev_count++;
             }
-            if (g_start_changes != NULL && strncmp(g_start_changes, "carafe-changes\t1\n", 17) == 0) {
-                fputs(g_start_changes + 17, file);
+        }
+        FILE* file = fopen(path, "wb");
+        if (file != NULL) {
+            fprintf(file, "carafe-changes\t1\n");
+            for (int i = 0; i < prev_count; i++) {
+                fprintf(file, "%s\t%s\t%s\n", FILE_NAMES[prevs[i].file], prevs[i].key, prevs[i].value);
             }
             fclose(file);
         }
+        free(prevs);
     } else {
         remove(path);
     }

@@ -1312,6 +1312,7 @@ bool carafeErrorRelaunch(const char* own_nro, unsigned int exit_code) {
 
 bool carafeErrorRestart(unsigned int exit_code) {
     if (!carafeRestartRequested() && !writeReport(exit_code)) {
+        carafeFailuresClear();
         return false;
     }
     bool pushed = false;
@@ -1626,10 +1627,6 @@ static bool settingsLoop(Framebuffer* framebuffer, CarafeImage* picture, PadStat
     if (!carafeMenuOpenError(failureOf(report->kind))) {
         return false;
     }
-    char* before = calloc(1, CHANGES_SIZE);
-    if (before != NULL) {
-        carafeReadChangesText(before, CHANGES_SIZE);
-    }
     unsigned int drawn = 0;
     bool restart = false;
     while (appletMainLoop()) {
@@ -1666,13 +1663,6 @@ static bool settingsLoop(Framebuffer* framebuffer, CarafeImage* picture, PadStat
         present(framebuffer, picture);
     }
     carafeMenuClose();
-    char* after = calloc(1, CHANGES_SIZE);
-    if (restart && before != NULL && after != NULL) {
-        carafeReadChangesText(after, CHANGES_SIZE);
-        carafeTrialWrite(strcmp(before, after) != 0);
-    }
-    free(before);
-    free(after);
     return restart;
 }
 
@@ -1688,6 +1678,12 @@ static Choice waitForChoice(Framebuffer* framebuffer, CarafeImage* picture, cons
     padInitializeDefault(&pad);
     hidInitializeTouchScreen();
 
+    char* initial_changes = calloc(1, CHANGES_SIZE);
+    if (initial_changes != NULL) {
+        carafeReadChangesText(initial_changes, CHANGES_SIZE);
+    }
+
+    Choice result = ChoiceExit;
     while (appletMainLoop()) {
         padUpdate(&pad);
         u64 down = padGetButtonsDown(&pad);
@@ -1696,7 +1692,8 @@ static Choice waitForChoice(Framebuffer* framebuffer, CarafeImage* picture, cons
             chosen = buttons[focus].choice;
         }
         if (down & (HidNpadButton_B | HidNpadButton_Plus)) {
-            return ChoiceExit;
+            result = ChoiceExit;
+            break;
         }
         if ((down & HidNpadButton_AnyLeft) && focus > 0) {
             focus--;
@@ -1715,14 +1712,16 @@ static Choice waitForChoice(Framebuffer* framebuffer, CarafeImage* picture, cons
         touching = touched;
         if (chosen == ChoiceSettings) {
             if (settingsLoop(framebuffer, picture, &pad, report)) {
-                return ChoiceRestart;
+                result = ChoiceRestart;
+                break;
             }
             drawn = -1;
             touching = true;
             continue;
         }
         if (chosen != ChoiceNone) {
-            return chosen;
+            result = chosen;
+            break;
         }
         if (drawn != focus) {
             render(picture, report, buttons, count, focus);
@@ -1734,7 +1733,19 @@ static Choice waitForChoice(Framebuffer* framebuffer, CarafeImage* picture, cons
             notified = true;
         }
     }
-    return ChoiceExit;
+
+    if (result == ChoiceRestart && initial_changes != NULL && carafeChangesExist()) {
+        char* after = calloc(1, CHANGES_SIZE);
+        if (after != NULL) {
+            carafeReadChangesText(after, CHANGES_SIZE);
+            if (strcmp(initial_changes, after) != 0) {
+                carafeTrialWrite(true);
+            }
+            free(after);
+        }
+    }
+    free(initial_changes);
+    return result;
 }
 
 static void restartGame(void) {
@@ -1751,9 +1762,7 @@ static void restartGame(void) {
         }
     }
 
-    if (target[0] != '\0') {
-        pushRunNext(target);
-    }
+    bool pushed = target[0] != '\0' && pushRunNext(target);
     carafeOverlayCommit("before starting the game again");
     if (envHasNextLoad() && own_nro[0] != '\0' && R_SUCCEEDED(envSetNextLoad(own_nro, own_nro))) {
         return;
@@ -1761,6 +1770,9 @@ static void restartGame(void) {
     if (R_SUCCEEDED(appletRestartProgram(NULL, 0))) {
         __nx_applet_exit_mode = 1;
         return;
+    }
+    if (pushed) {
+        popRunNextIfMatches(target);
     }
     carafeOverlayLog("error screen: the game cannot be started again; going back to the menu");
     __nx_applet_exit_mode = 1;
@@ -1885,7 +1897,9 @@ int __wrap_main(int argc, char** argv) {
     if (wine_nx_runtime_open_error_log != NULL) {
         wine_nx_runtime_open_error_log();
     }
-    if (carafeSettingsSyncProgram != NULL) {
+    if (carafeSettingsPrepareError != NULL) {
+        carafeSettingsPrepareError();
+    } else if (carafeSettingsSyncProgram != NULL) {
         carafeSettingsSyncProgram();
     }
     if (carafeRegistrySyncProgram != NULL) {

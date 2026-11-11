@@ -143,7 +143,11 @@ static const char TEST_MENU[] =
     "value\t30\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\t30 FPS\n"
     "setting\tvsync\tprogram\tvsync\trestart\t0\t-\t-\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\tSync frames\n"
     "value\t1\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\n"
-    "value\t0\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\n";
+    "value\t0\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\n"
+    "preset\tp1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tP1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\tH1\n"
+    "set\tvsync\t1\n"
+    "preset\tp2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tP2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\tH2\n"
+    "set\tframe-limit\t1\n";
 
 static const char TEST_REGISTRY[] =
     "carafe-registry\t1\n"
@@ -275,6 +279,32 @@ int main( int argc, char **argv )
     assert( carafePendingCount( catalog ) == 1 );
     carafeUndoPending( catalog );
     assert( carafePendingCount( catalog ) == 0 );
+
+    if (!g_custom_menu)
+    {
+        /* Asymmetric presets: applying p2 must reset p1-only settings to default. */
+        assert( carafePresetApply( catalog, &catalog->sections[0].presets[0] ) );
+        assert( carafePresetCurrent( catalog, &catalog->sections[0] ) == 0 );
+        assert( carafePresetApply( catalog, &catalog->sections[0].presets[1] ) );
+        assert( carafePresetCurrent( catalog, &catalog->sections[0] ) == 1 );
+        assert( catalog->settings[vs_idx].current == catalog->settings[vs_idx].default_index );
+        carafeUndoPending( catalog );
+        assert( carafeSettingSet( catalog, fl_idx, 0 ) );
+    }
+
+    /* Oversized registry string must clamp cleanly without overflowing internal wide buffer. */
+    {
+        uint8_t oversized[CARAFE_REG_DATA + 64];
+        char formatted[256] = "";
+        for (size_t i = 0; i + 1 < sizeof(oversized); i += 2)
+        {
+            oversized[i] = 'A';
+            oversized[i + 1] = 0;
+        }
+        carafeRegistryFormat( CARAFE_REG_SZ, oversized, sizeof(oversized), formatted, sizeof(formatted) );
+        assert( formatted[0] == 'A' );
+    }
+
     carafeCatalogFree( catalog );
     assert( carafeResetAll( NULL, true ) );
 
@@ -396,6 +426,85 @@ int main( int argc, char **argv )
         fclose( f );
         assert( strstr( buf, "button-layout" ) == NULL );
         assert( fopen( "sdmc:/switch/wine/drive_c/Games/test.keys.txt", "rb" ) == NULL );
+
+        /* Test 1: deferred "Later" changes flushed at startup must NOT leak into trial.txt. */
+        assert( carafeWriteChangesText( "carafe-changes\t1\nprogram\tvsync\t0\n" ) );
+        assert( carafeChangesExist() );
+        carafeSettingsSyncProgram();
+        assert( !carafeChangesExist() );
+
+        carafeCatalogFree( disk_cat );
+        disk_cat = carafeCatalogLoad();
+        assert( disk_cat != NULL );
+        int hud_idx = carafeCatalogFind( disk_cat, "dxvk-hud" );
+        int vs2_idx = carafeCatalogFind( disk_cat, "vsync" );
+        assert( hud_idx >= 0 && vs2_idx >= 0 );
+        assert( carafeSettingSet( disk_cat, hud_idx, 1 ) );
+        carafeTrialWrite( true );
+
+        char trial_buf[512] = "";
+        assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+        assert( strstr( trial_buf, "program\tdxvk-hud\t-" ) != NULL );
+        assert( strstr( trial_buf, "vsync" ) == NULL );
+
+        /* Test 2: error-screen preparation leaves changes.txt intact and preserves prior trial entries. */
+        assert( carafeWriteChangesText( "carafe-changes\t1\nprogram\tvsync\t1\n" ) );
+        carafeSettingsPrepareError();
+        assert( carafeChangesExist() );
+
+        carafeCatalogFree( disk_cat );
+        disk_cat = carafeCatalogLoad();
+        assert( disk_cat != NULL );
+        /* Modify the key that was already in trial.txt -> original value "-" must stay preserved. */
+        assert( carafeSettingSet( disk_cat, hud_idx, 0 ) );
+        carafeTrialWrite( true );
+
+        memset( trial_buf, 0, sizeof(trial_buf) );
+        assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+        assert( strstr( trial_buf, "program\tdxvk-hud\t-" ) != NULL );
+        assert( strstr( trial_buf, "program\tvsync\t0" ) != NULL );
+
+        /* Test 3: carafeResetAll(..., false) resets both current AND start to default_index. */
+        assert( carafeSettingSet( disk_cat, vs2_idx, 1 ) );
+        assert( carafeResetAll( disk_cat, false ) );
+        assert( disk_cat->settings[vs2_idx].current == disk_cat->settings[vs2_idx].default_index );
+        assert( disk_cat->settings[vs2_idx].start == disk_cat->settings[vs2_idx].default_index );
+        assert( !carafeChangesExist() );
+
+        /* Test 4: tapping header [B] Back in error mode sub-group steps up instead of exiting menu. */
+        assert( carafeMenuOpenError( CarafeKindNone ) );
+        /* Switch from Graphics (tab 0) to Controls (tab 3), then enter button picker via OSK_A. */
+        assert( carafeMenuInput( OSK_DOWN, false, 0, 0, 100000000ULL ) == CarafeMenuStay );
+        for (int t = 0; t < 3; t++)
+        {
+            assert( carafeMenuInput( OSK_R, false, 0, 0, 200000000ULL + (u64)t * 100000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 250000000ULL + (u64)t * 100000000ULL ) == CarafeMenuStay );
+        }
+        assert( carafeMenuInput( OSK_A, false, 0, 0, 600000000ULL ) == CarafeMenuStay );
+        assert( carafeMenuInput( 0, false, 0, 0, 650000000ULL ) == CarafeMenuStay );
+        uint32_t *menu_px = calloc( 1280 * 720, 4 );
+        assert( menu_px != NULL );
+        CarafeImage menu_img = { menu_px, 1280, 720 };
+        carafeMenuRender( &menu_img );
+        /* Find header [B] Back pill on y=75 between x=550..1200. */
+        uint32_t header_bg = menu_px[75 * 1280 + 550];
+        int back_x = -1;
+        for (int x = 550; x < 1200; x++)
+        {
+            if (menu_px[75 * 1280 + x] != header_bg)
+            {
+                back_x = x + 10;
+                break;
+            }
+        }
+        assert( back_x > 0 );
+        /* Tapping header [B] Back must close picker and stay in menu, NOT return CarafeMenuBack. */
+        assert( carafeMenuInput( 0, true, back_x, 60, 700000000ULL ) == CarafeMenuStay );
+        assert( carafeMenuInput( 0, false, 0, 0, 750000000ULL ) == CarafeMenuStay );
+        /* Now pressing B at root of error menu exits back to error screen. */
+        assert( carafeMenuInput( OSK_B, false, 0, 0, 800000000ULL ) == CarafeMenuBack );
+        free( menu_px );
+        carafeMenuClose();
 
         carafeCatalogFree( disk_cat );
         assert( chdir( orig_cwd ) == 0 );

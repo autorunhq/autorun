@@ -4627,11 +4627,17 @@ static BOOL nx_menu_present( struct vulkan_queue *queue, VkPresentInfoKHR *prese
         if (want_mode == 2) menu->cursor_uploaded = TRUE;
         if (device->p_vkResetFences( device->host.device, 1, &menu->draw_fences[index] ) ||
             device->p_vkQueueSubmit( queue->host.queue, 1, &submits[1], menu->draw_fences[index] ))
+        {
+            menu->failed = TRUE;
             return FALSE;
+        }
     }
     else if (device->p_vkResetFences( device->host.device, 1, &menu->draw_fences[index] ) ||
              device->p_vkQueueSubmit( queue->host.queue, 1, &submits[0], menu->draw_fences[index] ))
+    {
+        menu->failed = TRUE;
         return FALSE;
+    }
     present_info->waitSemaphoreCount = 1;
     present_info->pWaitSemaphores = &menu->done[index];
     return TRUE;
@@ -5839,6 +5845,7 @@ static void nx_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR cli
                                       const VkAllocationCallbacks *allocator )
 {
     pthread_mutex_lock( &nx_screen_lock );
+    while (nx_screen_waiting) pthread_cond_wait( &nx_screen_idle, &nx_screen_lock );
     if (client_swapchain && nx_screen_swapchain == swapchain_from_handle( client_swapchain ))
         nx_screen_swapchain = NULL;
     pthread_mutex_unlock( &nx_screen_lock );
@@ -5885,12 +5892,25 @@ static VkResult nx_present_refused( VkQueue client_queue, const VkPresentInfoKHR
     struct vulkan_queue *queue = vulkan_queue_from_handle( client_queue );
     struct vulkan_device *device = queue->device;
     VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    VkPipelineStageFlags stages[16];
-    VkSemaphore waits[16];
+    VkPipelineStageFlags stack_stages[16], *stages = stack_stages;
+    VkSemaphore stack_waits[16], *waits = stack_waits;
+    uint32_t count = present_info->waitSemaphoreCount;
 
-    submit.waitSemaphoreCount = present_info->waitSemaphoreCount < ARRAY_SIZE(waits) ? present_info->waitSemaphoreCount
-                                                                                    : ARRAY_SIZE(waits);
-    for (uint32_t i = 0; i < submit.waitSemaphoreCount; ++i)
+    if (count > ARRAY_SIZE(stack_waits))
+    {
+        waits = malloc( count * sizeof(*waits) );
+        stages = malloc( count * sizeof(*stages) );
+        if (!waits || !stages)
+        {
+            free( waits );
+            free( stages );
+            count = 0;
+            waits = stack_waits;
+            stages = stack_stages;
+        }
+    }
+    submit.waitSemaphoreCount = count;
+    for (uint32_t i = 0; i < count; ++i)
     {
         waits[i] = vulkan_semaphore_from_handle( present_info->pWaitSemaphores[i] )->host.semaphore;
         stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -5898,9 +5918,17 @@ static VkResult nx_present_refused( VkQueue client_queue, const VkPresentInfoKHR
     submit.pWaitSemaphores = waits;
     submit.pWaitDstStageMask = stages;
     device->p_vkQueueSubmit( queue->host.queue, 1, &submit,
-                             fences && fences->swapchainCount ? fences->pFences[0] : VK_NULL_HANDLE );
+                             fences && fences->swapchainCount && fences->pFences[0]
+                             ? vulkan_fence_from_handle( fences->pFences[0] )->host.fence : VK_NULL_HANDLE );
+    if (waits != stack_waits)
+    {
+        free( waits );
+        free( stages );
+    }
     for (uint32_t i = 1; fences && i < fences->swapchainCount; ++i)
-        if (fences->pFences[i]) device->p_vkQueueSubmit( queue->host.queue, 0, NULL, fences->pFences[i] );
+        if (fences->pFences[i])
+            device->p_vkQueueSubmit( queue->host.queue, 0, NULL,
+                                     vulkan_fence_from_handle( fences->pFences[i] )->host.fence );
     return VK_ERROR_OUT_OF_DATE_KHR;
 }
 

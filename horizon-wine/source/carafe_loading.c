@@ -784,7 +784,7 @@ static void drawGame(Picture* picture) {
     y += (line != 0 ? line : w * 24 / 1280) + w * 14 / 1280;
 
     if (g_status.stall[0] != '\0') {
-        line = drawText(picture, g_strings->stall, w * 18 / 1280, text_x, y, max_width, COLOR_WARN);
+        line = drawText(picture, g_status.stall, w * 18 / 1280, text_x, y, max_width, COLOR_WARN);
         y += (line != 0 ? line : w * 24 / 1280) + w * 4 / 1280;
         drawText(picture, g_strings->hint, w * 16 / 1280, text_x, y, max_width, COLOR_TEXT);
     }
@@ -820,7 +820,7 @@ static bool renderPicture(Picture* picture, int width, int height) {
 
 static bool pictureStale(const Picture* picture, int width, int height) {
     return picture->pixels == NULL || picture->width != width || picture->height != height
-        || picture->static_generation != g_static_generation || g_movie.count > 1;
+        || picture->static_generation != g_static_generation || picture->generation != g_generation;
 }
 
 static void copyPicture(const Picture* picture, void* pixels, int stride, bool rgba) {
