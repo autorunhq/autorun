@@ -1863,6 +1863,13 @@ static void pressPad(unsigned int down) {
     int right_count = columnSources(1, right);
     int column = index >= left_count ? 1 : 0;
     int position = column ? index - left_count : index;
+    int limit = column ? right_count : left_count;
+    if (down & OSK_Y) {
+        if (position >= 0 && position < limit) {
+            carafeBindingSet(g_catalog, column != 0, column ? right[position] : left[position], NULL);
+        }
+        return;
+    }
     if (down & OSK_UP) {
         if (position == 0) {
             g_pad_focus = 0;
@@ -1877,7 +1884,6 @@ static void pressPad(unsigned int down) {
         openPicker(column ? right[position] : left[position]);
         return;
     }
-    int limit = column ? right_count : left_count;
     if (position >= limit) {
         position = limit - 1;
     }

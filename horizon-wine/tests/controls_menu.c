@@ -386,10 +386,12 @@ int main( int argc, char **argv )
         mkdir( "sdmc:/switch/wine/carafe", 0777 );
         mkdir( "sdmc:/switch/wine/drive_c", 0777 );
         mkdir( "sdmc:/switch/wine/drive_c/Games", 0777 );
+        char program_dir[512];
+        assert( carafeOverlayProgramDir( program_dir, sizeof(program_dir) ) );
 
         FILE *f = fopen( "sdmc:/switch/wine/config/keys.txt", "wb" );
         assert( f != NULL );
-        fputs( "button-layout=1\n", f );
+        fputs( "button-layout=1\nUP=0x27\nLUP=0\n", f );
         fclose( f );
 
         f = fopen( "sdmc:/switch/wine/drive_c/Games/test.wine-nx.txt", "wb" );
@@ -399,7 +401,7 @@ int main( int argc, char **argv )
 
         f = fopen( "sdmc:/switch/wine/drive_c/Games/test.keys.txt", "wb" );
         assert( f != NULL );
-        fputs( "keyboard-auto=0\n", f );
+        fputs( "keyboard-auto=0\nUP=0x28\n", f );
         fclose( f );
 
         wine_nx_swkbd_auto_enabled = 1;
@@ -410,6 +412,14 @@ int main( int argc, char **argv )
         int kb_idx = carafeCatalogFind( disk_cat, "keyboard-auto" );
         assert( bl_idx >= 0 && kb_idx >= 0 );
         assert( disk_cat->settings[bl_idx].base == 1 );
+        assert( disk_cat->pad_start[0].count == 1 && disk_cat->pad_start[0].code[0] == 1 );
+        assert( disk_cat->pad_start[1].count == 1 && disk_cat->pad_start[1].code[0] == 2 );
+        assert( disk_cat->key_start[0].count == 1 && disk_cat->key_start[0].code[0] == 0x100 );
+        assert( disk_cat->key_start[1].count == 1 && disk_cat->key_start[1].code[0] == 0x101 );
+        assert( disk_cat->key_start[2].count == 1 && disk_cat->key_start[2].code[0] == 0x20 );
+        assert( disk_cat->key_start[3].count == 1 && disk_cat->key_start[3].code[0] == 0x46 );
+        assert( disk_cat->key_start[12].count == 1 && disk_cat->key_start[12].code[0] == 0x28 );
+        assert( disk_cat->key_start[16].count == 1 && disk_cat->key_start[16].code[0] == 0x28 );
 
         assert( carafeSettingSet( disk_cat, kb_idx, 0 ) );
         assert( wine_nx_swkbd_auto_enabled == 0 );
@@ -418,8 +428,13 @@ int main( int argc, char **argv )
         assert( disk_cat->settings[bl_idx].current == 1 );
         assert( disk_cat->settings[bl_idx].start == 1 );
         assert( wine_nx_swkbd_auto_enabled == 1 );
+        assert( disk_cat->pad_start[0].count == 1 && disk_cat->pad_start[0].code[0] == 2 );
+        assert( disk_cat->pad_start[1].count == 1 && disk_cat->pad_start[1].code[0] == 1 );
+        assert( disk_cat->pad_current[0].code[0] == 2 );
+        assert( disk_cat->key_start[12].count == 1 && disk_cat->key_start[12].code[0] == 0x27 );
+        assert( disk_cat->key_start[16].count == 1 && disk_cat->key_start[16].code[0] == 0x27 );
 
-        /* Legacy button-layout key was stripped from .wine-nx.txt too. */
+        /* Reset removes key overrides from both per-game layers. */
         f = fopen( "sdmc:/switch/wine/drive_c/Games/test.wine-nx.txt", "rb" );
         assert( f != NULL );
         char buf[256] = "";
@@ -428,6 +443,22 @@ int main( int argc, char **argv )
         fclose( f );
         assert( strstr( buf, "button-layout" ) == NULL );
         assert( fopen( "sdmc:/switch/wine/drive_c/Games/test.keys.txt", "rb" ) == NULL );
+
+        /* Live layout changes remap default face buttons immediately. */
+        assert( carafeSettingSet( disk_cat, bl_idx, 0 ) );
+        assert( disk_cat->pad_current[0].count == 1 && disk_cat->pad_current[0].code[0] == 1 );
+        assert( carafeSettingSet( disk_cat, bl_idx, 1 ) );
+        assert( disk_cat->pad_current[0].count == 1 && disk_cat->pad_current[0].code[0] == 2 );
+
+        /* A custom chord can be cleared, explicitly disabled, or reset to its inherited default. */
+        CarafeChord custom_pad = { .code = { 4 }, .count = 1 };
+        CarafeChord no_pad = { .count = 0 };
+        assert( carafeBindingSet( disk_cat, true, 0, &custom_pad ) );
+        assert( disk_cat->pad_current[0].count == 1 && disk_cat->pad_current[0].code[0] == 4 );
+        assert( carafeBindingSet( disk_cat, true, 0, &no_pad ) );
+        assert( disk_cat->pad_current[0].count == 0 );
+        assert( carafeBindingSet( disk_cat, true, 0, NULL ) );
+        assert( disk_cat->pad_current[0].count == 1 && disk_cat->pad_current[0].code[0] == 2 );
 
         /* Test 1: deferred "Later" changes flushed at startup must NOT leak into trial.txt. */
         assert( carafeWriteChangesText( "carafe-changes\t1\nprogram\tvsync\t0\n" ) );
@@ -519,7 +550,9 @@ int main( int argc, char **argv )
         /* Test 6: carafeRegistryBringBack reloads pending for carafeRegistryPendingLine / carafeRegistryList,
          * and CRLF in registry-removed.txt is stripped cleanly. */
         {
-            FILE *rb = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-rollback.txt", "wb" );
+            char registry_file[600];
+            snprintf( registry_file, sizeof(registry_file), "%s/registry-rollback.txt", program_dir );
+            FILE *rb = fopen( registry_file, "wb" );
             assert( rb != NULL );
             fputs( "carafe-registry-pending\t1\nset\tHKCU\tSoftware\\Test\tRestored\t4\t2a000000\n", rb );
             fclose( rb );
@@ -531,7 +564,7 @@ int main( int argc, char **argv )
             assert( strstr( pto, "42" ) != NULL );
 
             /* BringBack again, then test carafeRegistryList directly without calling PendingCount first. */
-            rb = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-rollback.txt", "wb" );
+            rb = fopen( registry_file, "wb" );
             assert( rb != NULL );
             fputs( "carafe-registry-pending\t1\nset\tHKCU\tSoftware\\Test\tListed\t4\t07000000\n", rb );
             fclose( rb );
@@ -546,7 +579,8 @@ int main( int argc, char **argv )
             g_mock_reg_ok = 0;
 
             /* CRLF registry-removed.txt must still match REMOVED_HEADER. */
-            FILE *rem = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-removed.txt", "wb" );
+            snprintf( registry_file, sizeof(registry_file), "%s/registry-removed.txt", program_dir );
+            FILE *rem = fopen( registry_file, "wb" );
             assert( rem != NULL );
             fputs( "carafe-registry-removed\t1\r\ndelete\tHKCU\tSoftware\\Test\tEnabled\r\n", rem );
             fclose( rem );

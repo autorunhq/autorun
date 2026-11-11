@@ -265,6 +265,9 @@ static bool filePath(CarafeFile file, char* out, size_t size) {
     if (!gameTarget(target, sizeof(target))) {
         return false;
     }
+    if (target[0] != '\0' && target[1] == ':') {
+        return false;
+    }
     if (file == CarafeFileProgram) {
         return launcher_program_settings_path(RUNTIME_ROOT, target, out, size) != 0;
     }
@@ -919,18 +922,24 @@ static char* mergeTextLayers(const char* base, const char* over) {
 }
 
 static char* effectiveText(CarafeFile file) {
-    char path[PATH_SIZE];
-    if (!filePath(file, path, sizeof(path))) {
-        return NULL;
-    }
+    char path[PATH_SIZE] = "";
+    bool has_path = filePath(file, path, sizeof(path));
     if (file == CarafeFileKeys) {
+        char* legacy_keys = readWhole(RUNTIME_ROOT "/keys.txt", FILE_LIMIT);
         char* global_keys = readWhole(RUNTIME_ROOT "/config/keys.txt", FILE_LIMIT);
-        char* keys_file = readWhole(path, FILE_LIMIT);
-        char* merged = mergeTextLayers(global_keys, keys_file);
+        char* merged = mergeTextLayers(legacy_keys, global_keys);
+        free(legacy_keys);
         free(global_keys);
-        free(keys_file);
-        char prog_path[PATH_SIZE];
-        if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path)) && strcmp(prog_path, path) != 0) {
+        if (has_path) {
+            char* keys_file = readWhole(path, FILE_LIMIT);
+            char* next = mergeTextLayers(merged, keys_file);
+            free(merged);
+            free(keys_file);
+            merged = next;
+        }
+        char prog_path[PATH_SIZE] = "";
+        if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path))
+            && (!has_path || strcmp(prog_path, path) != 0)) {
             char* prog = readWhole(prog_path, FILE_LIMIT);
             if (prog != NULL) {
                 char* next = mergeTextLayers(merged, prog);
@@ -939,7 +948,14 @@ static char* effectiveText(CarafeFile file) {
                 free(prog);
             }
         }
+        if (merged != NULL && merged[0] == '\0') {
+            free(merged);
+            merged = romfsText(file);
+        }
         return merged;
+    }
+    if (!has_path) {
+        return NULL;
     }
     return readWhole(path, FILE_LIMIT);
 }
@@ -1151,56 +1167,203 @@ static void settingValue(const CarafeCatalog* catalog, CarafeSetting* setting, c
     }
 }
 
-static bool parseChord(const char* text, CarafeChord* chord) {
-    chord->count = 0;
-    if (text == NULL || strcasecmp(text, "none") == 0 || text[0] == '\0') {
-        return true;
-    }
-    for (const char* at = text; *at != '\0' && chord->count < CARAFE_CHORD_MAX;) {
-        char* end = NULL;
-        unsigned long code = strtoul(at, &end, 0);
-        if (end == at) {
-            return false;
-        }
-        chord->code[chord->count++] = (uint16_t)code;
-        while (*end == ' ' || *end == '+') {
-            end++;
-        }
-        at = end;
-    }
-    return true;
-}
-
 static void chordText(const CarafeChord* chord, char* out, size_t size) {
-    if (chord->count == 0) {
+    if (chord->count <= 0) {
         snprintf(out, size, "none");
         return;
     }
     size_t used = 0;
     out[0] = '\0';
-    for (int i = 0; i < chord->count && used < size; i++) {
+    for (int i = 0; i < chord->count && i < CARAFE_CHORD_MAX && used < size; i++) {
         used += (size_t)snprintf(out + used, size - used, "%s0x%x", i ? "+" : "", chord->code[i]);
     }
 }
 
-static void loadBindings(CarafeCatalog* catalog, const char* keys) {
-    for (int i = 0; i < CARAFE_SOURCES; i++) {
-        for (int pad = 0; pad < 2; pad++) {
-            char key[KEY_SIZE];
-            char value[CARAFE_VALUE_SIZE] = "";
-            snprintf(key, sizeof(key), "%s.%s", pad ? "pad" : "key", carafe_source_names[i]);
-            CarafeChord* start = pad ? &catalog->pad_start[i] : &catalog->key_start[i];
-            CarafeChord* current = pad ? &catalog->pad_current[i] : &catalog->key_current[i];
-            if (!textValue(keys, key, value, sizeof(value)) || !parseChord(value, start)) {
-                start->count = 0;
+static void copyBindingToChord(const struct input_binding* binding, CarafeChord* chord) {
+    int count = (int)binding->count;
+    if (count > CARAFE_CHORD_MAX) {
+        count = CARAFE_CHORD_MAX;
+    }
+    chord->count = count;
+    for (int i = 0; i < count; i++) {
+        chord->code[i] = binding->code[i];
+    }
+}
+
+static void applyTextToProfile(struct input_profile* p, const char* text) {
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    char name[KEY_SIZE];
+    char value[CARAFE_VALUE_SIZE];
+
+    for (unsigned int i = 0; i < INPUT_SOURCE_COUNT; i++) {
+        if (textValue(text, input_sources[i].name, value, sizeof(value))) {
+            struct input_binding parsed;
+            if (!input_binding_parse(&parsed, value, 0)) {
+                continue;
             }
-            *current = *start;
-            Change* change = findChange(CarafeFileKeys, key);
-            if (change != NULL && !parseChord(change->value, current)) {
-                *current = *start;
+            if (i >= 16 && i < 20) {
+                if (!parsed.count) {
+                    p->left_inherit |= 1u << (i - 16);
+                } else {
+                    p->left_inherit &= ~(1u << (i - 16));
+                }
+            }
+            if ((i == 0 || i == 1) && !parsed.count) {
+                parsed = (struct input_binding){ { INPUT_MOUSE_LEFT + i }, 1 };
+            }
+            p->keys[i] = parsed;
+        }
+    }
+    for (unsigned int i = 0; i < INPUT_SOURCE_COUNT; i++) {
+        snprintf(name, sizeof(name), "pad.%s", input_sources[i].name);
+        if (textValue(text, name, value, sizeof(value))
+            && input_binding_parse(&p->pad[i], value, 1) && i < 4) {
+            p->pad_custom |= 1u << i;
+        }
+        snprintf(name, sizeof(name), "key.%s", input_sources[i].name);
+        if (textValue(text, name, value, sizeof(value))
+            && input_binding_parse(&p->keys[i], value, 0) && i >= 16 && i < 20) {
+            p->left_inherit &= ~(1u << (i - 16));
+        }
+    }
+    for (unsigned int i = 0; i < 4; i++) {
+        if (p->left_inherit & (1u << i)) {
+            p->keys[16 + i] = p->keys[12 + i];
+        }
+    }
+    if (textValue(text, "button-layout", value, sizeof(value))) {
+        if (!strcasecmp(value, "switch") || !strcasecmp(value, "nintendo") || !strcasecmp(value, "bayx")) {
+            p->face_layout = 1;
+        } else if (!strcasecmp(value, "xbox") || !strcasecmp(value, "abxy")) {
+            p->face_layout = 0;
+        } else {
+            char* end = NULL;
+            long n = strtol(value, &end, 10);
+            if (end != value && *end == '\0' && (n == 0 || n == 1)) {
+                p->face_layout = (int)n;
             }
         }
     }
+    for (unsigned int i = 0; i < 4; i++) {
+        if (p->pad_custom & (1u << i)) {
+            continue;
+        }
+        p->pad[i] = (struct input_binding){
+            { p->face_layout ? (uint16_t)((i ^ 1) + 1) : (uint16_t)(i + 1) }, 1
+        };
+    }
+}
+
+static void stripPendingRemovalsFromLayer(char** layer) {
+    if (*layer == NULL) {
+        return;
+    }
+    for (int i = 0; i < g_change_count; i++) {
+        if (g_changes[i].file != CarafeFileKeys || strcmp(g_changes[i].value, "-") != 0) {
+            continue;
+        }
+        char* next = textSet(*layer, g_changes[i].key, NULL);
+        if (next != NULL) {
+            free(*layer);
+            *layer = next;
+        }
+    }
+}
+
+static void loadInputProfileLayers(struct input_profile* p, const char* fallback_keys, bool apply_pending) {
+    input_profile_defaults(p, g_swkbd_auto_fallback);
+    static const char* const GLOBAL_FILES[] = {
+        RUNTIME_ROOT "/keys.txt",
+        RUNTIME_ROOT "/config/keys.txt",
+    };
+    bool any_layer = false;
+    for (size_t i = 0; i < sizeof(GLOBAL_FILES) / sizeof(GLOBAL_FILES[0]); i++) {
+        char* layer = readWhole(GLOBAL_FILES[i], FILE_LIMIT);
+        if (layer != NULL) {
+            applyTextToProfile(p, layer);
+            free(layer);
+            any_layer = true;
+        }
+    }
+    char keys_path[PATH_SIZE] = "";
+    bool has_keys_path = filePath(CarafeFileKeys, keys_path, sizeof(keys_path));
+    if (has_keys_path) {
+        char* layer = readWhole(keys_path, FILE_LIMIT);
+        if (layer != NULL) {
+            if (apply_pending) {
+                stripPendingRemovalsFromLayer(&layer);
+            }
+            applyTextToProfile(p, layer);
+            free(layer);
+            any_layer = true;
+        }
+    }
+    char prog_path[PATH_SIZE] = "";
+    bool has_prog_path = filePath(CarafeFileProgram, prog_path, sizeof(prog_path));
+    if (has_prog_path && strcmp(prog_path, keys_path) != 0) {
+        char* layer = readWhole(prog_path, FILE_LIMIT);
+        if (layer != NULL) {
+            if (apply_pending) {
+                stripPendingRemovalsFromLayer(&layer);
+            }
+            applyTextToProfile(p, layer);
+            free(layer);
+            any_layer = true;
+        }
+    }
+    if ((!any_layer || (!has_keys_path && !has_prog_path)) && fallback_keys != NULL) {
+        applyTextToProfile(p, fallback_keys);
+    }
+    if (apply_pending) {
+        char* pending_text = NULL;
+        for (int i = 0; i < g_change_count; i++) {
+            if (g_changes[i].file != CarafeFileKeys || strcmp(g_changes[i].value, "-") == 0) {
+                continue;
+            }
+            char* next = textSet(pending_text, g_changes[i].key, g_changes[i].value);
+            if (next != NULL) {
+                free(pending_text);
+                pending_text = next;
+            }
+        }
+        if (pending_text != NULL) {
+            applyTextToProfile(p, pending_text);
+            free(pending_text);
+        }
+    }
+}
+
+static void loadBindings(CarafeCatalog* catalog, const char* keys) {
+    struct input_profile* base = calloc(1, sizeof(*base));
+    struct input_profile* current = calloc(1, sizeof(*current));
+    if (base == NULL || current == NULL) {
+        free(base);
+        free(current);
+        return;
+    }
+    loadInputProfileLayers(base, keys, false);
+    bool has_pending = false;
+    for (int i = 0; i < g_change_count; i++) {
+        if (g_changes[i].file == CarafeFileKeys) {
+            has_pending = true;
+            break;
+        }
+    }
+    if (has_pending) {
+        loadInputProfileLayers(current, keys, true);
+    } else {
+        *current = *base;
+    }
+    for (int i = 0; i < CARAFE_SOURCES; i++) {
+        copyBindingToChord(&base->pad[i], &catalog->pad_start[i]);
+        copyBindingToChord(&current->pad[i], &catalog->pad_current[i]);
+        copyBindingToChord(&base->keys[i], &catalog->key_start[i]);
+        copyBindingToChord(&current->keys[i], &catalog->key_current[i]);
+    }
+    free(base);
+    free(current);
 }
 
 static void* grow(void* array, int count, size_t size, int capacity) {
@@ -1482,7 +1645,11 @@ CarafeCatalog* carafeCatalogLoad(void) {
     char* package[CarafeFileCount];
     for (int f = 0; f < CarafeFileCount; f++) {
         if (f == CarafeFileKeys) {
-            package[f] = readWhole(RUNTIME_ROOT "/config/keys.txt", FILE_LIMIT);
+            char* legacy = readWhole(RUNTIME_ROOT "/keys.txt", FILE_LIMIT);
+            char* global = readWhole(RUNTIME_ROOT "/config/keys.txt", FILE_LIMIT);
+            package[f] = mergeTextLayers(legacy, global);
+            free(legacy);
+            free(global);
             if (package[f] == NULL) {
                 package[f] = romfsText((CarafeFile)f);
             }
@@ -1563,22 +1730,17 @@ const char* carafeValueLabel(const CarafeSetting* setting) {
     return setting->current_text;
 }
 
-static void applyKeysLive(void) {
-    char* keys = g_effective[CarafeFileKeys];
-    char* merged = mergedText(CarafeFileKeys, keys);
-    if (merged == NULL) {
-        return;
-    }
+static void applyKeysLive(CarafeCatalog* catalog) {
+    char* pending = mergedText(CarafeFileKeys, g_effective[CarafeFileKeys]);
     char path[PATH_SIZE];
-    if (filePath(CarafeFileKeys, path, sizeof(path))) {
+    bool writable = filePath(CarafeFileKeys, path, sizeof(path));
+    if (writable) {
         for (int i = 0; i < g_change_count; i++) {
             if (g_changes[i].file == CarafeFileKeys) {
                 applyOneKeyToDisk(CarafeFileKeys, g_changes[i].key, g_changes[i].value);
             }
         }
     }
-    free(g_effective[CarafeFileKeys]);
-    g_effective[CarafeFileKeys] = merged;
     for (int i = g_change_count - 1; i >= 0; i--) {
         if (g_changes[i].file == CarafeFileKeys) {
             if (i + 1 < g_change_count) {
@@ -1588,6 +1750,17 @@ static void applyKeysLive(void) {
         }
     }
     carafeSaveChanges();
+    free(g_effective[CarafeFileKeys]);
+    g_effective[CarafeFileKeys] = writable ? effectiveText(CarafeFileKeys) : pending;
+    if (writable || g_effective[CarafeFileKeys] != pending) {
+        free(pending);
+    }
+    if (g_effective[CarafeFileKeys] == NULL) {
+        g_effective[CarafeFileKeys] = romfsText(CarafeFileKeys);
+    }
+    if (catalog != NULL) {
+        loadBindings(catalog, g_effective[CarafeFileKeys]);
+    }
 
     char target[PATH_SIZE];
     if (!gameTarget(target, sizeof(target))) {
@@ -1595,8 +1768,14 @@ static void applyKeysLive(void) {
     }
     struct input_profile* profile = calloc(1, sizeof(*profile));
     struct launcher_kv* kv = calloc(1, sizeof(*kv));
-    if (profile != NULL && kv != NULL
-        && input_profile_program(RUNTIME_ROOT, target, g_swkbd_auto_fallback, profile, kv, path, sizeof(path))) {
+    bool windows_target = target[0] != '\0' && target[1] == ':';
+    bool loaded = false;
+    if (profile != NULL && kv != NULL) {
+        loaded = windows_target
+            ? input_profile_global(RUNTIME_ROOT, g_swkbd_auto_fallback, profile, kv, path, sizeof(path))
+            : input_profile_program(RUNTIME_ROOT, target, g_swkbd_auto_fallback, profile, kv, path, sizeof(path));
+    }
+    if (loaded) {
         if (wine_nx_input_profile_set != NULL) {
             wine_nx_input_profile_set(profile);
         } else {
@@ -1611,7 +1790,7 @@ static void applyKeysLive(void) {
 
 static void applyLive(CarafeCatalog* catalog, const CarafeSetting* setting) {
     if (setting->file == CarafeFileKeys) {
-        applyKeysLive();
+        applyKeysLive(catalog);
         return;
     }
     if (strcasecmp(setting->key, "frame-limit") == 0) {
@@ -1741,23 +1920,22 @@ bool carafePresetApply(CarafeCatalog* catalog, const CarafePreset* preset) {
 }
 
 bool carafeBindingSet(CarafeCatalog* catalog, bool pad, int source, const CarafeChord* chord) {
-    if (source < 0 || source >= CARAFE_SOURCES) {
+    if (catalog == NULL || source < 0 || source >= CARAFE_SOURCES) {
         return false;
     }
     char key[KEY_SIZE];
     char value[CARAFE_VALUE_SIZE];
     snprintf(key, sizeof(key), "%s.%s", pad ? "pad" : "key", carafe_source_names[source]);
-    chordText(chord, value, sizeof(value));
+    if (chord == NULL) {
+        snprintf(value, sizeof(value), "-");
+    } else {
+        chordText(chord, value, sizeof(value));
+    }
     if (!recordChange(CarafeFileKeys, key, value)) {
         return false;
     }
-    if (pad) {
-        catalog->pad_current[source] = *chord;
-    } else {
-        catalog->key_current[source] = *chord;
-    }
     carafeSaveChanges();
-    applyKeysLive();
+    applyKeysLive(catalog);
     return true;
 }
 
@@ -1820,6 +1998,12 @@ static void stripKeysFromFile(const CarafeCatalog* catalog, const char* path) {
     }
     for (int s = 0; s < CARAFE_SOURCES; s++) {
         char k[KEY_SIZE];
+        snprintf(k, sizeof(k), "%s", carafe_source_names[s]);
+        char* legacy = textSet(disk, k, NULL);
+        if (legacy != NULL) {
+            free(disk);
+            disk = legacy;
+        }
         snprintf(k, sizeof(k), "key.%s", carafe_source_names[s]);
         char* next = textSet(disk, k, NULL);
         if (next != NULL) {
@@ -1902,7 +2086,7 @@ bool carafeResetAll(CarafeCatalog* catalog, bool live) {
     g_effective[CarafeFileKeys] = effectiveText(CarafeFileKeys);
     loadBindings(catalog, g_effective[CarafeFileKeys]);
     if (live) {
-        applyKeysLive();
+        applyKeysLive(catalog);
         if (wine_nx_graphics_configure != NULL) {
             wine_nx_graphics_configure(0, 1);
         }
