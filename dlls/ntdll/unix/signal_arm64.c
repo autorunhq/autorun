@@ -154,15 +154,15 @@ static NTSTATUS wow64_context_thread( HANDLE handle, ACCESS_MASK access, struct 
     return STATUS_SUCCESS;
 }
 
-static void wow64_wait_stopped( HANDLE handle, struct thread_data *data )
+static NTSTATUS wow64_wait_stopped( HANDLE handle, struct thread_data *data )
 {
     CONTEXT context;
     BOOL self;
 
-    if (data == get_thread_data()) return;
+    if (data == get_thread_data()) return STATUS_SUCCESS;
     memset( &context, 0, sizeof(context) );
     context.ContextFlags = CONTEXT_ARM64_CONTROL;
-    get_thread_context( handle, &context, &self, IMAGE_FILE_MACHINE_ARM64 );
+    return get_thread_context( handle, &context, &self, IMAGE_FILE_MACHINE_ARM64 );
 }
 
 NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
@@ -173,7 +173,7 @@ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
 
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
     if ((status = wow64_context_thread( handle, THREAD_SET_CONTEXT, &data ))) return status;
-    wow64_wait_stopped( handle, data );
+    if ((status = wow64_wait_stopped( handle, data ))) return status;
     if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
     return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ),
                                           (I386_CONTEXT *)ctx, TRUE );
@@ -187,7 +187,7 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
 
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
     if ((status = wow64_context_thread( handle, THREAD_GET_CONTEXT, &data ))) return status;
-    wow64_wait_stopped( handle, data );
+    if ((status = wow64_wait_stopped( handle, data ))) return status;
     if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
     return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
 }

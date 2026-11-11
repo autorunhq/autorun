@@ -176,6 +176,8 @@ static void nxdrv_say( const char *line )
 
 extern unsigned int wine_nx_keys_taken;
 
+static pthread_mutex_t nxdrv_key_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static struct
 {
     BOOL pending;
@@ -188,33 +190,48 @@ static struct
 
 static void nxdrv_note_key_sent( WORD vk, BOOL up )
 {
-    if (nxdrv_key_watch.pending || nxdrv_key_watch.reported >= 24) return;
-    nxdrv_key_watch.pending = TRUE;
-    nxdrv_key_watch.tick = NtGetTickCount();
-    nxdrv_key_watch.taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
-    nxdrv_key_watch.vk = vk;
-    nxdrv_key_watch.up = up;
+    pthread_mutex_lock( &nxdrv_key_watch_lock );
+    if (!nxdrv_key_watch.pending && nxdrv_key_watch.reported < 24)
+    {
+        nxdrv_key_watch.pending = TRUE;
+        nxdrv_key_watch.tick = NtGetTickCount();
+        nxdrv_key_watch.taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+        nxdrv_key_watch.vk = vk;
+        nxdrv_key_watch.up = up;
+    }
+    pthread_mutex_unlock( &nxdrv_key_watch_lock );
 }
 
 static void nxdrv_check_key_taken( void )
 {
     unsigned int taken;
     DWORD elapsed;
+    WORD vk;
+    BOOL up, report = FALSE;
     char line[160];
 
-    if (!nxdrv_key_watch.pending) return;
-    elapsed = NtGetTickCount() - nxdrv_key_watch.tick;
-    taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
-    if (taken != nxdrv_key_watch.taken)
+    pthread_mutex_lock( &nxdrv_key_watch_lock );
+    if (nxdrv_key_watch.pending)
     {
-        nxdrv_key_watch.pending = FALSE;
-        return;
+        elapsed = NtGetTickCount() - nxdrv_key_watch.tick;
+        taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+        if (taken != nxdrv_key_watch.taken)
+        {
+            nxdrv_key_watch.pending = FALSE;
+        }
+        else if (elapsed >= 400)
+        {
+            nxdrv_key_watch.pending = FALSE;
+            nxdrv_key_watch.reported++;
+            vk = nxdrv_key_watch.vk;
+            up = nxdrv_key_watch.up;
+            report = TRUE;
+        }
     }
-    if (elapsed < 400) return;
-    nxdrv_key_watch.pending = FALSE;
-    nxdrv_key_watch.reported++;
+    pthread_mutex_unlock( &nxdrv_key_watch_lock );
+    if (!report) return;
     snprintf( line, sizeof(line), "[KEY] the key %x %s sent %u ms ago was not taken from the queue yet",
-              nxdrv_key_watch.vk, nxdrv_key_watch.up ? "up" : "down", (unsigned int)elapsed );
+              vk, up ? "up" : "down", (unsigned int)elapsed );
     nxdrv_say( line );
 }
 

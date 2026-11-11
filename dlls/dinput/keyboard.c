@@ -88,23 +88,29 @@ static BYTE map_dik_code(DWORD scanCode, DWORD vkCode, DWORD subType, DWORD vers
     return (BYTE)scanCode;
 }
 
-static void keyboard_handle_event( struct keyboard *impl, DWORD vkey, DWORD scan_code, BOOL up )
+static BYTE keyboard_dik_code( struct keyboard *impl, DWORD vkey, DWORD scan_code )
 {
-    BYTE new_diks, subtype = GET_DIDEVICE_SUBTYPE( impl->base.instance.dwDevType );
-    IDirectInputDevice8W *iface = &impl->base.IDirectInputDevice8W_iface;
-    int dik_code, index;
+    BYTE subtype = GET_DIDEVICE_SUBTYPE( impl->base.instance.dwDevType );
 
     switch (vkey)
     {
         /* R-Shift is special - it is an extended key with separate scan code */
-        case VK_RSHIFT  : dik_code = DIK_RSHIFT; break;
-        case VK_PAUSE   : dik_code = DIK_PAUSE; break;
-        case VK_NUMLOCK : dik_code = DIK_NUMLOCK; break;
-        case VK_SUBTRACT: dik_code = DIK_SUBTRACT; break;
+        case VK_RSHIFT  : return DIK_RSHIFT;
+        case VK_PAUSE   : return DIK_PAUSE;
+        case VK_NUMLOCK : return DIK_NUMLOCK;
+        case VK_SUBTRACT: return DIK_SUBTRACT;
         default:
-            dik_code = map_dik_code( scan_code, vkey, subtype, impl->base.dinput->dwVersion );
-            break;
+            return map_dik_code( scan_code, vkey, subtype, impl->base.dinput->dwVersion );
     }
+}
+
+static void keyboard_handle_event( struct keyboard *impl, DWORD vkey, DWORD scan_code, BOOL up )
+{
+    BYTE new_diks;
+    IDirectInputDevice8W *iface = &impl->base.IDirectInputDevice8W_iface;
+    int dik_code, index;
+
+    dik_code = keyboard_dik_code( impl, vkey, scan_code );
     new_diks = (up ? 0 : 0x80);
 
     /* returns now if key event already known */
@@ -247,8 +253,9 @@ static HRESULT keyboard_acquire( IDirectInputDevice8W *iface );
  * has not reported yet is reported here, so nothing arrives twice. */
 static void keyboard_sync_hardware_state( struct keyboard *impl )
 {
-    BYTE state[256];
-    DWORD vkey;
+    BYTE state[256], down[256] = {0};
+    DWORD rep_vkey[256] = {0}, rep_scan[256] = {0};
+    DWORD vkey, dik;
 
     if (impl->base.status != STATUS_ACQUIRED) return;
 
@@ -260,6 +267,9 @@ static void keyboard_sync_hardware_state( struct keyboard *impl )
 
     for (vkey = 1; vkey < 256; vkey++)
     {
+        DWORD scan_code;
+        BYTE code;
+
         /* The generic modifiers are the left and right keys under one name;
          * the specific ones say which of the two was pressed. */
         if (vkey == VK_SHIFT || vkey == VK_CONTROL || vkey == VK_MENU) continue;
@@ -271,9 +281,28 @@ static void keyboard_sync_hardware_state( struct keyboard *impl )
         }
         if (impl->scans[vkey] == 1) continue;
 
+        scan_code = impl->scans[vkey] - 1;
+        code = keyboard_dik_code( impl, vkey, scan_code );
+        if (!code) continue;
+        if (state[vkey] & 0x80)
+        {
+            down[code] = 1;
+            rep_vkey[code] = vkey;
+            rep_scan[code] = scan_code;
+        }
+        else if (!rep_vkey[code])
+        {
+            rep_vkey[code] = vkey;
+            rep_scan[code] = scan_code;
+        }
+    }
+
+    for (dik = 1; dik < 256; dik++)
+    {
+        if (!rep_vkey[dik]) continue;
         /* `up` is the state the system holds, not the state this device was
          * last told about: what a queue that is not being read leaves out. */
-        keyboard_handle_event( impl, vkey, impl->scans[vkey] - 1, !(state[vkey] & 0x80) );
+        keyboard_handle_event( impl, rep_vkey[dik], rep_scan[dik], !down[dik] );
     }
 }
 

@@ -941,11 +941,6 @@ static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, un
     now = armGetSystemTick();
     interval = rows_last ? now - rows_last : 0;
     rows_last = now;
-    if (!interval)
-    {
-        pthread_mutex_unlock( &registry_mutex );
-        return 0;
-    }
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
         struct nx_prof_thread *thread = &registry[i];
@@ -953,6 +948,11 @@ static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, un
 
         if (!thread->handle) continue;
         ticks = thread_ticks( thread->handle );
+        if (!interval)
+        {
+            thread->last_ticks = ticks;
+            continue;
+        }
         row.handle = thread->handle;
         row.tid = thread->tid;
         row.kind = thread->kind;
@@ -964,6 +964,11 @@ static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, un
         for (j = count++; j > 0 && rows_all[j - 1].permille < row.permille; j--) rows_all[j] = rows_all[j - 1];
         rows_all[j] = row;
         *total += row.permille;
+    }
+    if (!interval)
+    {
+        pthread_mutex_unlock( &registry_mutex );
+        return 0;
     }
     if (count > max) count = max;
     memcpy( rows, rows_all, count * sizeof(*rows) );
