@@ -1,0 +1,194 @@
+Carafe: the profiler finds the x86 code a thread runs under FEX, not only under Box64.
+FEX keeps its thread state in x28, and the state's first word is the header of the block being run. When the
+sampled PC lies inside that block, the block's RIP entries give the guest address, the way FEX's own
+RestoreRIPFromHostPC does; the x86 frames then start from FEX's ESP and EBP (x8, x9). Only memory reads, so
+the paused thread holds nothing up. ARM64 PE time is split by module too, with FEX's code buffer outside any
+block shown as "jit".
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.c
++++ b/horizon-wine/source/thread_profile.c
+@@ -37,6 +37,55 @@
+ #define NX_PROF_LINE         1000
+ #define NX_PROF_MAX_REQUESTS 1024
+ 
++#define NX_PROF_BOX64_ESP 14
++#define NX_PROF_BOX64_EBP 15
++
++#define NX_PROF_FEX_STATE             28
++#define NX_PROF_FEX_ESP               8
++#define NX_PROF_FEX_EBP               9
++#define NX_PROF_FEX_BLOCK_MAX         0x1000000
++#define NX_PROF_FEX_TAIL_SIZE         32
++#define NX_PROF_FEX_TAIL_RIP          8
++#define NX_PROF_FEX_TAIL_ENTRIES      24
++#define NX_PROF_FEX_TAIL_ENTRY_OFFSET 28
++
++static size_t nx_prof_vl64pair_size( uint8_t type )
++{
++    if (!(type & 0x80)) return 1;
++    if ((type & 0xc0) == 0x80) return 2;
++    return type == 0xc0 ? 9 : 17;
++}
++
++static size_t nx_prof_vl64pair( const uint8_t *data, uint64_t *arm, uint64_t *rip )
++{
++    uint8_t type = data[0];
++    int32_t arm32, rip32;
++
++    if (!(type & 0x80))
++    {
++        *arm = (uint64_t)((type & 0xf) + 1) << 2;
++        *rip = ((type >> 4) & 7) + 1;
++        return 1;
++    }
++    if ((type & 0xc0) == 0x80)
++    {
++        *arm = (uint64_t)((int64_t)(int8_t)data[1] * 4);
++        *rip = (uint64_t)(int64_t)((int8_t)(uint8_t)(type << 2) >> 2);
++        return 2;
++    }
++    if (type == 0xc0)
++    {
++        memcpy( &arm32, data + 1, sizeof(arm32) );
++        memcpy( &rip32, data + 5, sizeof(rip32) );
++        *arm = (uint64_t)(int64_t)arm32;
++        *rip = (uint64_t)(int64_t)rip32;
++        return 9;
++    }
++    memcpy( arm, data + 1, sizeof(*arm) );
++    memcpy( rip, data + 9, sizeof(*rip) );
++    return 17;
++}
++
+ extern void wine_nx_runtime_trace( const char *msg );
+ extern int wine_nx_box64_pc_to_x86( uintptr_t pc, uintptr_t *x86 ) __attribute__((weak));
+ extern int wine_nx_image_at( const void *addr, void **base, char *name, size_t size ) __attribute__((weak));
+@@ -551,15 +600,55 @@
+ }
+ 
+ /* Inside translated code, the x86 frame chain from the guest's EBP and ESP. */
+-static unsigned int walk_x86_frames( const ThreadContext *ctx, uint32_t *callers )
++static unsigned int walk_x86_frames( const ThreadContext *ctx, unsigned int esp_reg, unsigned int ebp_reg,
++                                     uint32_t *callers )
+ {
+-    uint32_t esp = (uint32_t)ctx->cpu_gprs[14].x, ebp = (uint32_t)ctx->cpu_gprs[15].x;
++    uint32_t esp = (uint32_t)ctx->cpu_gprs[esp_reg].x, ebp = (uint32_t)ctx->cpu_gprs[ebp_reg].x;
+     MemoryInfo info;
+ 
+     if (!readable( esp, &info )) return 0;
+     return nx_prof_x86_frames( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+ }
+ 
++static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86 )
++{
++    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x, block, tail, host, guest, entry, end;
++    uint32_t entries, i;
++    MemoryInfo info;
++
++    if (in_runtime( pc ) || !readable_size( state, sizeof(uint64_t), &info )) return 0;
++    block = read_word( state );
++    if (pc < block || pc - block >= NX_PROF_FEX_BLOCK_MAX || !readable_size( block, sizeof(uint32_t), &info ))
++        return 0;
++    tail = block + read_word32( block );
++    if (!readable_size( tail, NX_PROF_FEX_TAIL_SIZE, &info ) || pc - block >= read_word( tail )) return 0;
++    host = block;
++    guest = read_word( tail + NX_PROF_FEX_TAIL_RIP );
++    entries = read_word32( tail + NX_PROF_FEX_TAIL_ENTRIES );
++    entry = tail + read_word32( tail + NX_PROF_FEX_TAIL_ENTRY_OFFSET );
++    end = entry;
++    for (i = 0; i < entries; i++)
++    {
++        uint64_t arm, rip;
++        size_t size;
++
++        if (entry >= end)
++        {
++            if (!readable( entry, &info )) return 0;
++            end = info.addr + info.size;
++        }
++        size = nx_prof_vl64pair_size( *(const uint8_t *)(uintptr_t)entry );
++        if (end - entry < size) return 0;
++        nx_prof_vl64pair( (const uint8_t *)(uintptr_t)entry, &arm, &rip );
++        if (pc < host + arm) break;
++        host += arm;
++        guest += rip;
++        entry += size;
++    }
++    *x86 = guest;
++    return 1;
++}
++
+ static void record( struct nx_prof_target *target, const ThreadContext *ctx, int translated, uintptr_t x86,
+                     const uint64_t *callers, unsigned int count, const uint32_t *x86_callers, unsigned int x86_count )
+ {
+@@ -614,7 +703,7 @@
+     uint32_t x86_callers[NX_PROF_DEPTH];
+     unsigned int i, tries, count, x86_count;
+     uintptr_t x86 = 0;
+-    int translated;
++    int translated, fex;
+ 
+     (void)arg;
+     for (;;)
+@@ -640,13 +729,15 @@
+             for (tries = 0; R_FAILED( rc = svcGetThreadContext3( &ctx, target->handle ) ) && tries < 4; tries++)
+                 svcSleepThread( 0 );
+             count = x86_count = 0;
+-            translated = 0;
++            translated = fex = 0;
+             if (R_SUCCEEDED( rc ))
+             {
+                 count = walk_callers( &ctx, callers );
+                 if (&wine_nx_box64_pc_to_x86) translated = wine_nx_box64_pc_to_x86( ctx.pc.x, &x86 );
+-                x86_count = translated ? walk_x86_frames( &ctx, x86_callers ) :
+-                                          walk_x86( target->teb, x86_callers );
++                if (!translated) translated = fex = fex_pc_to_x86( &ctx, &x86 );
++                x86_count = fex ? walk_x86_frames( &ctx, NX_PROF_FEX_ESP, NX_PROF_FEX_EBP, x86_callers ) :
++                            translated ? walk_x86_frames( &ctx, NX_PROF_BOX64_ESP, NX_PROF_BOX64_EBP, x86_callers ) :
++                                         walk_x86( target->teb, x86_callers );
+             }
+             svcSetThreadActivity( target->handle, ThreadActivity_Runnable );
+             if (R_SUCCEEDED( rc )) record( target, &ctx, translated, x86, callers, count, x86_callers, x86_count );
+@@ -817,10 +908,11 @@
+ }
+ 
+ /* Translated code by module, busiest first. */
+-static void report_modules( const struct nx_prof_target *target, char *line )
++static void report_modules( const struct nx_prof_target *target, enum nx_prof_kind kind, const char *label,
++                            const char *outside, char *line )
+ {
+     struct { void *base; char name[48]; uint32_t count; } modules[16], swap;
+-    const struct nx_prof_table *table = &target->tables[NX_PROF_X86];
++    const struct nx_prof_table *table = &target->tables[kind];
+     unsigned int count = 0, i, j;
+     uint32_t unknown = 0;
+     int len;
+@@ -859,12 +951,15 @@
+             modules[j - 1] = modules[j];
+             modules[j] = swap;
+         }
+-    len = appendf( line, 0, "[PROF] %u%c x86 by module:", target->tid, target->kind );
++    len = appendf( line, 0, "[PROF] %u%c %s by module:", target->tid, target->kind, label );
+     for (i = 0; i < count && i < 8; i++)
+         len = appendf( line, len, " %s %u.%u%%", modules[i].name, share( modules[i].count, target->samples ) / 10,
+                        share( modules[i].count, target->samples ) % 10 );
+-    if (unknown) len = appendf( line, len, " unknown %u.%u%%", share( unknown, target->samples ) / 10,
++    if (unknown) len = appendf( line, len, " %s %u.%u%%", outside, share( unknown, target->samples ) / 10,
+                                 share( unknown, target->samples ) % 10 );
++    if (table->dropped)
++        len = appendf( line, len, " unbucketed %u.%u%%", share( table->dropped, target->samples ) / 10,
++                       share( table->dropped, target->samples ) % 10 );
+     wine_nx_runtime_trace( line );
+ }
+ 
+@@ -888,7 +983,8 @@
+             len = appendf( line, len, " %s=%u.%u%%", table_names[k], share( target->kinds[k], target->samples ) / 10,
+                            share( target->kinds[k], target->samples ) % 10 );
+         wine_nx_runtime_trace( line );
+-        if (target->kinds[NX_PROF_X86]) report_modules( target, line );
++        if (target->kinds[NX_PROF_X86]) report_modules( target, NX_PROF_X86, "x86", "unknown", line );
++        if (target->kinds[NX_PROF_IMAGE]) report_modules( target, NX_PROF_IMAGE, "pe", "jit", line );
+         for (k = 0; k < NX_PROF_TABLES; k++)
+         {
+             const struct nx_prof_table *table = &target->tables[k];

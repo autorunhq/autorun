@@ -1,0 +1,28 @@
+Carafe: a read or write the Horizon server completes at once, with no wait handle, fills the status block,
+as the Switch branch already does for ioctls, so ReadFile on a device reports how many bytes it read.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -6148,6 +6148,10 @@
+         options     = reply->options;
+         if (wait_handle && status != STATUS_PENDING)
+             set_sync_iosb( io, status, wine_server_reply_size( reply ), options );
++#ifdef __SWITCH__
++        else if (!wait_handle && status != STATUS_PENDING && !NT_ERROR(status))
++            set_sync_iosb( io, status, wine_server_reply_size( reply ), options );
++#endif
+     }
+     SERVER_END_REQ;
+ 
+@@ -6183,6 +6187,10 @@
+         options     = reply->options;
+         if (wait_handle && status != STATUS_PENDING)
+             set_sync_iosb( io, status, reply->size, options );
++#ifdef __SWITCH__
++        else if (!wait_handle && status != STATUS_PENDING && !NT_ERROR(status))
++            set_sync_iosb( io, status, reply->size, options );
++#endif
+     }
+     SERVER_END_REQ;
+ 

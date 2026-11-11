@@ -1,0 +1,35 @@
+Carafe: a thread that waits for messages, where Wine sets the process's input-idle event, or that polls for them
+in GetMessage on the Switch, is reported with wine_nx_screen_input_waits (patch 0106).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -45,6 +45,10 @@
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ 
+ #ifdef __SWITCH__
++extern void wine_nx_screen_input_waits( unsigned int thread );
++#endif
++
++#ifdef __SWITCH__
+ extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+ extern int wine_nx_runtime_verbose __attribute__((weak));
+ 
+@@ -3501,6 +3505,9 @@
+ 
+     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
+     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
++#ifdef __SWITCH__
++    if (!(changed_mask & QS_SMRESULT)) wine_nx_screen_input_waits( GetCurrentThreadId() );
++#endif
+ 
+ #ifdef __SWITCH__
+     /* The Switch display driver polls controller and touch input from the
+@@ -3735,6 +3742,7 @@
+     {
+ #ifdef __SWITCH__
+         LARGE_INTEGER delay = {.QuadPart = -100000}; /* poll every 10 ms until Horizon queues are event-backed */
++        wine_nx_screen_input_waits( GetCurrentThreadId() );
+         NtDelayExecution( FALSE, &delay );
+         check_for_driver_events();
+ #else

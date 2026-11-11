@@ -1,0 +1,41 @@
+Carafe: reading or writing another thread's x86 context under WoW64 first waits, through the server,
+until that thread has stopped, as GetThreadContext does on Windows. The context was taken from the thread's
+CPU area at once, while a thread just suspended could still run its x86 code.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -154,6 +154,17 @@
+     return STATUS_SUCCESS;
+ }
+ 
++static void wow64_wait_stopped( HANDLE handle, struct thread_data *data )
++{
++    CONTEXT context;
++    BOOL self;
++
++    if (data == get_thread_data()) return;
++    memset( &context, 0, sizeof(context) );
++    context.ContextFlags = CONTEXT_ARM64_CONTROL;
++    get_thread_context( handle, &context, &self, IMAGE_FILE_MACHINE_ARM64 );
++}
++
+ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
+ {
+     struct thread_data *data;
+@@ -162,6 +173,7 @@
+ 
+     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
+     if ((status = wow64_context_thread( handle, THREAD_SET_CONTEXT, &data ))) return status;
++    wow64_wait_stopped( handle, data );
+     if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
+     return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ),
+                                           (I386_CONTEXT *)ctx, TRUE );
+@@ -175,6 +187,7 @@
+ 
+     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
+     if ((status = wow64_context_thread( handle, THREAD_GET_CONTEXT, &data ))) return status;
++    wow64_wait_stopped( handle, data );
+     if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
+     return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
+ }

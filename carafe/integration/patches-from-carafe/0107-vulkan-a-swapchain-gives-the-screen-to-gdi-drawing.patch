@@ -1,0 +1,331 @@
+Carafe: the swapchain that shows the screen can be taken off it when a window is drawn with GDI
+(wine_nx_vk_displace_screen, patch 0106): its host swapchain is destroyed behind a gate that acquire and present
+pass, and its next acquire or present returns VK_ERROR_OUT_OF_DATE_KHR, so the program makes a new swapchain,
+which takes the screen back. Programs that wait for presents keep their swapchain. Host swapchains are counted
+with wine_nx_vk_swapchain_made and wine_nx_vk_swapchain_gone.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -302,6 +302,9 @@
+     BOOL nx_osk_usable;
+     BOOL nx_menu_drawable;
+     struct nx_osk_overlay *nx_osk;
++    struct vulkan_device *nx_device;
++    BOOL nx_displaced;
++    uint64_t nx_acquired;
+ #endif
+ #ifdef WINE_NX_MESA_SWITCH
+     uint64_t nx_last_present;
+@@ -3033,6 +3036,30 @@
+ #endif
+ }
+ 
++#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
++extern void wine_nx_vk_swapchain_made(void);
++extern void wine_nx_vk_swapchain_gone(void);
++
++static void nx_swapchain_gone(void)
++{
++    wine_nx_vk_swapchain_gone();
++}
++
++static BOOL nx_swapchain_displaced( const struct swapchain *swapchain )
++{
++    return swapchain->nx_displaced;
++}
++#else
++static void nx_swapchain_gone(void)
++{
++}
++
++static BOOL nx_swapchain_displaced( const struct swapchain *swapchain )
++{
++    return FALSE;
++}
++#endif
++
+ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwapchainCreateInfoKHR *create_info,
+                                              const VkAllocationCallbacks *allocator, VkSwapchainKHR *ret )
+ {
+@@ -3062,6 +3089,7 @@
+ 
+     if (surface) create_info_host.surface = surface->obj.host.surface;
+     if (old_swapchain) create_info_host.oldSwapchain = old_swapchain->obj.host.swapchain;
++    if (old_swapchain && nx_swapchain_displaced( old_swapchain )) create_info_host.oldSwapchain = VK_NULL_HANDLE;
+ 
+     /* Windows allows client rect to be empty, but host Vulkan often doesn't, adjust extents back to the host capabilities */
+     res = instance->p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( physical_device->host.physical_device, surface->obj.host.surface, &capabilities );
+@@ -3176,11 +3204,13 @@
+ #if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
+     {
+         extern void wine_nx_vk_take_window(void);
++        wine_nx_vk_swapchain_made();
+         wine_nx_vk_take_window();
+     }
+ #endif
+     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
+     {
++        nx_swapchain_gone();
+         free( swapchain );
+         return res;
+     }
+@@ -3200,6 +3230,7 @@
+         {
+             ERR( "creating fs hack images failed: %d\n", res );
+             device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++            nx_swapchain_gone();
+             free( swapchain );
+             return res;
+         }
+@@ -3208,6 +3239,7 @@
+         {
+             ERR( "creating blit images failed: %d\n", res );
+             device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++            nx_swapchain_gone();
+             free( swapchain );
+             return res;
+         }
+@@ -3268,7 +3300,11 @@
+         nx_osk_free( device, swapchain->nx_osk );
+     }
+ #endif
+-    device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++    if (!nx_swapchain_displaced( swapchain ))
++    {
++        device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++        nx_swapchain_gone();
++    }
+     instance->p_remove_object( instance, &swapchain->obj.obj );
+ 
+     free( swapchain );
+@@ -5546,10 +5582,201 @@
+     get_physical_device_external_fence_properties( physical_device, fence_info, fence_properties, instance->p_vkGetPhysicalDeviceExternalFencePropertiesKHR );
+ }
+ 
++#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
++static pthread_mutex_t nx_screen_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t nx_screen_idle = PTHREAD_COND_INITIALIZER;
++static unsigned int nx_screen_users;
++static BOOL nx_screen_waiting;
++static struct swapchain *nx_screen_swapchain;
++
++static BOOL nx_screen_enter( struct swapchain *swapchain )
++{
++    BOOL usable;
++
++    pthread_mutex_lock( &nx_screen_lock );
++    while (nx_screen_waiting) pthread_cond_wait( &nx_screen_idle, &nx_screen_lock );
++    if ((usable = !swapchain->nx_displaced)) nx_screen_users++;
++    pthread_mutex_unlock( &nx_screen_lock );
++    return usable;
++}
++
++static void nx_screen_leave( void )
++{
++    pthread_mutex_lock( &nx_screen_lock );
++    if (!--nx_screen_users) pthread_cond_broadcast( &nx_screen_idle );
++    pthread_mutex_unlock( &nx_screen_lock );
++}
++
++static void nx_displace_swapchain( struct swapchain *swapchain )
++{
++    struct vulkan_device *device = swapchain->nx_device;
++
++    nx_screen_waiting = TRUE;
++    while (nx_screen_users) pthread_cond_wait( &nx_screen_idle, &nx_screen_lock );
++    if (swapchain->nx_acquired && device->p_vkReleaseSwapchainImagesEXT)
++    {
++        VkReleaseSwapchainImagesInfoEXT release = { .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT };
++        uint32_t indices[64], count = 0;
++
++        for (uint32_t i = 0; i < 64; ++i)
++            if (swapchain->nx_acquired & (1ull << i)) indices[count++] = i;
++        release.swapchain = swapchain->obj.host.swapchain;
++        release.imageIndexCount = count;
++        release.pImageIndices = indices;
++        device->p_vkReleaseSwapchainImagesEXT( device->host.device, &release );
++    }
++    if (swapchain->fs_hack_images)
++    {
++        for (uint32_t i = 0; i < swapchain->n_images; ++i)
++        {
++            device->p_vkDestroyImageView( device->host.device, swapchain->fs_hack_images[i].blit_view, NULL );
++            swapchain->fs_hack_images[i].blit_view = VK_NULL_HANDLE;
++        }
++    }
++    device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++    swapchain->nx_displaced = TRUE;
++    nx_swapchain_gone();
++    nx_screen_waiting = FALSE;
++    pthread_cond_broadcast( &nx_screen_idle );
++}
++
++void wine_nx_vk_displace_screen(void)
++{
++    struct swapchain *swapchain;
++    BOOL displaced = FALSE;
++
++    pthread_mutex_lock( &nx_screen_lock );
++    swapchain = nx_screen_swapchain;
++    if (swapchain && !swapchain->nx_displaced && !swapchain->nx_device->extensions.has_VK_KHR_present_wait &&
++        !swapchain->nx_device->extensions.has_VK_KHR_present_wait2)
++    {
++        nx_displace_swapchain( swapchain );
++        displaced = TRUE;
++    }
++    pthread_mutex_unlock( &nx_screen_lock );
++    if (displaced)
++        nx_vk_trace( "[NXVK] a window was drawn with GDI over the Vulkan swapchain; the compositor shows the windows "
++                     "until the program presents again" );
++}
++
++static VkResult nx_vkCreateSwapchainKHR( VkDevice client_device, const VkSwapchainCreateInfoKHR *create_info,
++                                         const VkAllocationCallbacks *allocator, VkSwapchainKHR *ret )
++{
++    struct swapchain *swapchain;
++    VkResult res;
++
++    pthread_mutex_lock( &nx_screen_lock );
++    if (!(res = win32u_vkCreateSwapchainKHR( client_device, create_info, allocator, ret )))
++    {
++        swapchain = swapchain_from_handle( *ret );
++        swapchain->nx_device = vulkan_device_from_handle( client_device );
++        nx_screen_swapchain = swapchain;
++    }
++    pthread_mutex_unlock( &nx_screen_lock );
++    return res;
++}
++
++static void nx_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR client_swapchain,
++                                      const VkAllocationCallbacks *allocator )
++{
++    pthread_mutex_lock( &nx_screen_lock );
++    if (client_swapchain && nx_screen_swapchain == swapchain_from_handle( client_swapchain ))
++        nx_screen_swapchain = NULL;
++    pthread_mutex_unlock( &nx_screen_lock );
++    win32u_vkDestroySwapchainKHR( client_device, client_swapchain, allocator );
++}
++
++static void nx_note_acquired( struct swapchain *swapchain, VkResult res, uint32_t image_index )
++{
++    if ((res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) && image_index < 64)
++        swapchain->nx_acquired |= 1ull << image_index;
++}
++
++static VkResult nx_vkAcquireNextImageKHR( VkDevice client_device, VkSwapchainKHR client_swapchain, uint64_t timeout,
++                                          VkSemaphore client_semaphore, VkFence client_fence, uint32_t *image_index )
++{
++    struct swapchain *swapchain = swapchain_from_handle( client_swapchain );
++    VkResult res;
++
++    if (!nx_screen_enter( swapchain )) return VK_ERROR_OUT_OF_DATE_KHR;
++    res = win32u_vkAcquireNextImageKHR( client_device, client_swapchain, timeout, client_semaphore, client_fence,
++                                        image_index );
++    nx_note_acquired( swapchain, res, *image_index );
++    nx_screen_leave();
++    return res;
++}
++
++static VkResult nx_vkAcquireNextImage2KHR( VkDevice client_device, const VkAcquireNextImageInfoKHR *acquire_info,
++                                           uint32_t *image_index )
++{
++    struct swapchain *swapchain = swapchain_from_handle( acquire_info->swapchain );
++    VkResult res;
++
++    if (!nx_screen_enter( swapchain )) return VK_ERROR_OUT_OF_DATE_KHR;
++    res = win32u_vkAcquireNextImage2KHR( client_device, acquire_info, image_index );
++    nx_note_acquired( swapchain, res, *image_index );
++    nx_screen_leave();
++    return res;
++}
++
++static VkResult nx_present_refused( VkQueue client_queue, const VkPresentInfoKHR *present_info )
++{
++    const VkSwapchainPresentFenceInfoKHR *fences = find_next_struct( (const void *)present_info,
++                                                                     VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR );
++    struct vulkan_queue *queue = vulkan_queue_from_handle( client_queue );
++    struct vulkan_device *device = queue->device;
++    VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
++    VkPipelineStageFlags stages[16];
++    VkSemaphore waits[16];
++
++    submit.waitSemaphoreCount = present_info->waitSemaphoreCount < ARRAY_SIZE(waits) ? present_info->waitSemaphoreCount
++                                                                                    : ARRAY_SIZE(waits);
++    for (uint32_t i = 0; i < submit.waitSemaphoreCount; ++i)
++    {
++        waits[i] = vulkan_semaphore_from_handle( present_info->pWaitSemaphores[i] )->host.semaphore;
++        stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    }
++    submit.pWaitSemaphores = waits;
++    submit.pWaitDstStageMask = stages;
++    device->p_vkQueueSubmit( queue->host.queue, 1, &submit,
++                             fences && fences->swapchainCount ? fences->pFences[0] : VK_NULL_HANDLE );
++    for (uint32_t i = 1; fences && i < fences->swapchainCount; ++i)
++        if (fences->pFences[i]) device->p_vkQueueSubmit( queue->host.queue, 0, NULL, fences->pFences[i] );
++    return VK_ERROR_OUT_OF_DATE_KHR;
++}
++
++static VkResult nx_vkQueuePresentKHR( VkQueue client_queue, const VkPresentInfoKHR *present_info )
++{
++    uint32_t entered = 0;
++    VkResult res;
++
++    while (entered < present_info->swapchainCount &&
++           nx_screen_enter( swapchain_from_handle( present_info->pSwapchains[entered] ) ))
++        entered++;
++    if (entered == present_info->swapchainCount)
++    {
++        for (uint32_t i = 0; i < present_info->swapchainCount; ++i)
++            if (present_info->pImageIndices[i] < 64)
++                swapchain_from_handle( present_info->pSwapchains[i] )->nx_acquired &=
++                    ~(1ull << present_info->pImageIndices[i]);
++        res = win32u_vkQueuePresentKHR( client_queue, present_info );
++    }
++    else res = nx_present_refused( client_queue, present_info );
++    while (entered--) nx_screen_leave();
++    return res;
++}
++#else
++#define nx_vkAcquireNextImage2KHR win32u_vkAcquireNextImage2KHR
++#define nx_vkAcquireNextImageKHR win32u_vkAcquireNextImageKHR
++#define nx_vkCreateSwapchainKHR win32u_vkCreateSwapchainKHR
++#define nx_vkDestroySwapchainKHR win32u_vkDestroySwapchainKHR
++#define nx_vkQueuePresentKHR win32u_vkQueuePresentKHR
++#endif
++
+ static struct vulkan_funcs vulkan_funcs =
+ {
+-    .p_vkAcquireNextImage2KHR = win32u_vkAcquireNextImage2KHR,
+-    .p_vkAcquireNextImageKHR = win32u_vkAcquireNextImageKHR,
++    .p_vkAcquireNextImage2KHR = nx_vkAcquireNextImage2KHR,
++    .p_vkAcquireNextImageKHR = nx_vkAcquireNextImageKHR,
+     .p_vkAllocateMemory = win32u_vkAllocateMemory,
+     .p_vkCreateBuffer = win32u_vkCreateBuffer,
+     .p_vkCreateDevice = win32u_vkCreateDevice,
+@@ -5557,14 +5784,14 @@
+     .p_vkCreateImage = win32u_vkCreateImage,
+     .p_vkCreateInstance = win32u_vkCreateInstance,
+     .p_vkCreateSemaphore = win32u_vkCreateSemaphore,
+-    .p_vkCreateSwapchainKHR = win32u_vkCreateSwapchainKHR,
++    .p_vkCreateSwapchainKHR = nx_vkCreateSwapchainKHR,
+     .p_vkCreateWin32SurfaceKHR = win32u_vkCreateWin32SurfaceKHR,
+     .p_vkDestroyDevice = win32u_vkDestroyDevice,
+     .p_vkDestroyFence = win32u_vkDestroyFence,
+     .p_vkDestroyInstance = win32u_vkDestroyInstance,
+     .p_vkDestroySemaphore = win32u_vkDestroySemaphore,
+     .p_vkDestroySurfaceKHR = win32u_vkDestroySurfaceKHR,
+-    .p_vkDestroySwapchainKHR = win32u_vkDestroySwapchainKHR,
++    .p_vkDestroySwapchainKHR = nx_vkDestroySwapchainKHR,
+     .p_vkFreeMemory = win32u_vkFreeMemory,
+     .p_vkGetDeviceBufferMemoryRequirements = win32u_vkGetDeviceBufferMemoryRequirements,
+     .p_vkGetDeviceBufferMemoryRequirementsKHR = win32u_vkGetDeviceBufferMemoryRequirements,
+@@ -5597,7 +5824,7 @@
+     .p_vkImportSemaphoreWin32HandleKHR = win32u_vkImportSemaphoreWin32HandleKHR,
+     .p_vkMapMemory = win32u_vkMapMemory,
+     .p_vkMapMemory2KHR = win32u_vkMapMemory2KHR,
+-    .p_vkQueuePresentKHR = win32u_vkQueuePresentKHR,
++    .p_vkQueuePresentKHR = nx_vkQueuePresentKHR,
+     .p_vkQueueSubmit = win32u_vkQueueSubmit,
+     .p_vkQueueSubmit2 = win32u_vkQueueSubmit2,
+     .p_vkQueueSubmit2KHR = win32u_vkQueueSubmit2KHR,

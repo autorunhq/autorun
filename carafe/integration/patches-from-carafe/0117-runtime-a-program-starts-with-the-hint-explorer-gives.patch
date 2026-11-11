@@ -1,0 +1,16 @@
+Carafe: a program starts with the window hint Explorer gives, to show its window as it is, not maximized. A game
+that shows its window maximized by the hint and then restores it lands at the size and place it was created with,
+after Direct3D had already fitted it to the display mode.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -1961,7 +1961,7 @@
+      * the standard Win32 startup hint so applications maximize their own
+      * top-level window while dialogs and child windows keep normal sizing. */
+     params->dwFlags = STARTF_USESHOWWINDOW;
+-    params->wShowWindow = SW_SHOWMAXIMIZED;
++    params->wShowWindow = SW_SHOWNORMAL;
+     params->ProcessGroupId = GetCurrentProcessId();
+ 
+     cursor = (WCHAR *)(params + 1);

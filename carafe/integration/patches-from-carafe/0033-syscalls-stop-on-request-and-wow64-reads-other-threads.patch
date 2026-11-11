@@ -1,0 +1,113 @@
+Carafe: a thread stops at a system call when it is asked to, and WoW64 reads another thread's x86 context.
+wine_nx_do_syscall checks the stop request (0031) on the way in and out: a suspend waits in the server
+until it is resumed, an end request ends the thread. The x86 context of another thread is read and
+written in its CPU area, which FEX needs to suspend a thread.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -135,29 +135,48 @@
+     return (info.GrantedAccess & access) == access ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+ }
+ 
++static NTSTATUS wow64_context_thread( HANDLE handle, ACCESS_MASK access, struct thread_data **data )
++{
++    NTSTATUS status = check_current_thread_context_access( handle, access );
++    TEB *teb = NULL;
++
++    *data = get_thread_data();
++    if (status != STATUS_NOT_IMPLEMENTED) return status;
++    SERVER_START_REQ( get_thread_info )
++    {
++        req->handle = wine_server_obj_handle( handle );
++        req->access = access;
++        if (!(status = wine_server_call( req ))) teb = wine_server_get_ptr( reply->teb );
++    }
++    SERVER_END_REQ;
++    if (status) return status;
++    if (!teb || !(*data = ((struct teb_data *)&teb->GdiTebBatch)->thread)) return STATUS_INVALID_PARAMETER;
++    return STATUS_SUCCESS;
++}
++
+ NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
+ {
+-    WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
++    struct thread_data *data;
++    WOW64_CPURESERVED *cpu;
+     NTSTATUS status;
+ 
+     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
+-    if ((status = check_current_thread_context_access( handle, THREAD_SET_CONTEXT ))) return status;
+-    if (!cpu) return STATUS_INVALID_PARAMETER;
+-    return horizon_transfer_i386_context( cpu,
+-                                          get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ),
++    if ((status = wow64_context_thread( handle, THREAD_SET_CONTEXT, &data ))) return status;
++    if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
++    return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ),
+                                           (I386_CONTEXT *)ctx, TRUE );
+ }
+ 
+ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
+ {
+-    WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
++    struct thread_data *data;
++    WOW64_CPURESERVED *cpu;
+     NTSTATUS status;
+ 
+     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
+-    if ((status = check_current_thread_context_access( handle, THREAD_GET_CONTEXT ))) return status;
+-    if (!cpu) return STATUS_INVALID_PARAMETER;
+-    return horizon_transfer_i386_context( cpu,
+-                                          get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
++    if ((status = wow64_context_thread( handle, THREAD_GET_CONTEXT, &data ))) return status;
++    if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
++    return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
+ }
+ 
+ extern void wine_nx_call_pe_apc( PNTAPCFUNC func, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
+@@ -548,6 +567,29 @@
+ static __thread unsigned int wine_nx_syscall_sample;
+ void *wine_nx_arm64ec_dispatch_ret;
+ 
++extern __thread volatile int *wine_nx_stop_word;
++
++void wine_nx_stop_point( void )
++{
++    volatile int *word = wine_nx_stop_word;
++    CONTEXT context;
++    int stop;
++
++    if (!word || !(stop = __atomic_load_n( word, __ATOMIC_ACQUIRE ))) return;
++    if (stop & 1)
++    {
++        memset( &context, 0, sizeof(context) );
++        if (!horizon_capture_context( &context )) wait_suspend( &context );
++        stop = __atomic_load_n( word, __ATOMIC_ACQUIRE );
++    }
++    if (stop & 2) NtTerminateThread( GetCurrentThread(), word[1] );
++}
++
++void wine_nx_stop_end( void )
++{
++    for (;;) wine_nx_stop_point();
++}
++
+ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
+                               ULONG_PTR x0, ULONG_PTR x1,
+                               ULONG_PTR x2, ULONG_PTR x3,
+@@ -566,6 +608,7 @@
+ 
+         if (&wine_nx_quit_requested && wine_nx_quit_requested && &wine_nx_quit_point) wine_nx_quit_point();
+     }
++    if (wine_nx_stop_word && *wine_nx_stop_word) wine_nx_stop_point();
+ #endif
+     SYSTEM_SERVICE_TABLE *table = &KeServiceDescriptorTable[table_idx];
+     ULONG_PTR *handler;
+@@ -646,6 +689,7 @@
+         wine_nx_runtime_trace( buf );
+     }
+ 
++    if (wine_nx_stop_word && *wine_nx_stop_word) wine_nx_stop_point();
+     return result;
+ }
+ 

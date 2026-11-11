@@ -1,0 +1,52 @@
+Carafe: the controller behind XInput and DirectInput writes to the runtime log once when a game first reads
+player 1 and once when the first press reaches it, so a game that does not answer the pad shows whether it
+reads the pad at all.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/xinput_unix.c
++++ b/horizon-wine/source/xinput_unix.c
+@@ -2,6 +2,7 @@
+  * The Switch controller behind Wine's XInput DLLs: player 1's pad, handheld
+  * or docked. */
+ #include <pthread.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <switch.h>
+ #include "ntstatus.h"
+@@ -34,6 +35,28 @@
+ static XINPUT_GAMEPAD last_gamepad;
+ static DWORD packet;
+ 
++static void nx_xinput_note( const struct nx_xinput_state_params *params )
++{
++    extern void wine_nx_runtime_trace( const char *msg );
++    static int read_noted, press_noted;
++    char message[96];
++
++    if (!__atomic_load_n( &read_noted, __ATOMIC_RELAXED ) &&
++        !__atomic_exchange_n( &read_noted, 1, __ATOMIC_RELAXED ))
++    {
++        snprintf( message, sizeof(message), "[XINPUT] the game reads player 1: %s",
++                  params->connected ? "the pad is there" : "no pad" );
++        wine_nx_runtime_trace( message );
++    }
++    if (params->connected && params->state.Gamepad.wButtons && !__atomic_load_n( &press_noted, __ATOMIC_RELAXED ) &&
++        !__atomic_exchange_n( &press_noted, 1, __ATOMIC_RELAXED ))
++    {
++        snprintf( message, sizeof(message), "[XINPUT] the first press reaches the game: buttons %#x",
++                  params->state.Gamepad.wButtons );
++        wine_nx_runtime_trace( message );
++    }
++}
++
+ static NTSTATUS nx_xinput_get_state_unix( void *args )
+ {
+     struct nx_xinput_state_params *params = args;
+@@ -73,6 +96,7 @@
+         params->state.Gamepad = gamepad;
+     }
+     pthread_mutex_unlock( &pad_mutex );
++    nx_xinput_note( params );
+     return STATUS_SUCCESS;
+ }
+ 

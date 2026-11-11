@@ -1,0 +1,46 @@
+Carafe: the runtime's own DXVK is the system Direct3D. Its d3d8, d3d9, d3d10core, d3d11 and dxgi sit in
+syswow64 and system32 in place of Wine's, which draw through OpenGL that the Switch does not give games, and
+dxwrapper's ddraw sits in syswow64 in place of Wine's ddraw. A DXVK folder goes in front of system32 only when
+it exists, so for that DXVK the search path is as on Windows: the game's folder first, then the system folder, and
+a DLL loaded by its system path, as mod loaders do, is Carafe's too. A DXVK release installed beside it still
+comes from its own folder, and VKD3D-Proton still comes from C:\vkd3d64.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -1857,8 +1857,9 @@
+     size_t chars, size, i, fex_environment_size;
+     WCHAR *cursor;
+     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
+-    char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "";
++    char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "", dxvk_folder[256];
+     struct dxvk_version dxvk = {0}, vkd3d = {0};
++    struct stat dxvk_folder_stat;
+ 
+     if (runtime_d3d != LAUNCHER_D3D_WINE)
+     {
+@@ -1882,7 +1883,10 @@
+     if (dxvk.installed &&
+         launcher_dxvk_version_directory( main_image_info.Machine, runtime_dxvk_source,
+                                          dxvk.bundled ? "" : dxvk.version,
+-                                         dxvk_dir, sizeof(dxvk_dir) ))
++                                         dxvk_dir, sizeof(dxvk_dir) ) &&
++        (size_t)snprintf( dxvk_folder, sizeof(dxvk_folder), "%s/drive_c/%s", RUNTIME_DIR, dxvk_dir ) <
++            sizeof(dxvk_folder) &&
++        !stat( dxvk_folder, &dxvk_folder_stat ) && S_ISDIR( dxvk_folder_stat.st_mode ))
+     {
+         snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
+         if (dxvk.version[0])
+@@ -1892,6 +1896,12 @@
+             log_line( "[DXVK] %s bundled payload C:\\%s; application-local DLLs take priority",
+                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir );
+     }
++    else if (dxvk.installed)
++    {
++        snprintf( graphics_path, sizeof(graphics_path), "%s", vkd3d_path );
++        log_line( "[DXVK] %s DXVK %s in the system folder; application-local DLLs take priority",
++                  main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk.version );
++    }
+     else if (runtime_d3d != LAUNCHER_D3D_WINE)
+         log_line( "[DXVK] selected payload is not installed; using Wine Direct3D" );
+     snprintf( dll_path, sizeof(dll_path), "%s;%sC:\\windows\\system32;C:\\windows;C:\\",

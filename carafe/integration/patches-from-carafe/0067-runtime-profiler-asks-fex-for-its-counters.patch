@@ -1,0 +1,22 @@
+Carafe: with the profiler on, FEX also gets FEX_PROFILESTATS=1 and keeps its per-thread counters in the area the
+runtime gave it, where the runtime's report reads them.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -1743,11 +1743,14 @@
+     }
+     if (runtime_profile)
+     {
+-        static const char stats[] = "CARAFE_D3D9_STATS=1";
++        static const char stats[] = "CARAFE_D3D9_STATS=1", counters[] = "FEX_PROFILESTATS=1";
+ 
+         if (sizeof(stats) > size - used) return 0;
+         memcpy( buffer + used, stats, sizeof(stats) );
+         used += sizeof(stats);
++        if (sizeof(counters) > size - used) return 0;
++        memcpy( buffer + used, counters, sizeof(counters) );
++        used += sizeof(counters);
+     }
+     log_line( "[FEX] TSO=%s multiblock=%s maxinst=%s", tso, multiblock, maxinst );
+     return used;

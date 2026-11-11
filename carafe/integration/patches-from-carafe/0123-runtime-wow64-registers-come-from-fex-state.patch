@@ -1,0 +1,133 @@
+Carafe: the profiler and the stall report read a WoW64 thread's x86 registers from FEX's own state.
+FEX writes the WoW64 CPU area only when asked, so a thread waiting in a system call showed its start-up
+registers there. Outside translated code, unless the CPU area is newer, the state's eip, esp and ebp are
+exact. The stall report now names the x86 code each thread waits in, and only WoW64 threads are read so.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.c
++++ b/horizon-wine/source/thread_profile.c
+@@ -799,16 +799,50 @@
+     return picked;
+ }
+ 
+-static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
++static int fex_x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
++{
++    MemoryInfo info;
++    uint64_t thread, frame;
++    uint32_t control;
++
++    if (!readable_size( teb + NX_PROF_TEB_FEX_THREAD, 2 * sizeof(uint64_t), &info )) return 0;
++    thread = read_word( teb + NX_PROF_TEB_FEX_THREAD );
++    control = read_word32( teb + NX_PROF_TEB_FEX_CONTROL );
++    if (!thread || (control & (NX_PROF_FEX_IN_JIT | NX_PROF_FEX_AREA_DIRTY))) return 0;
++    if (!readable_size( thread, sizeof(uint64_t), &info )) return 0;
++    frame = read_word( thread );
++    if (frame <= thread || frame >= thread + NX_PROF_FEX_THREAD_SPAN) return 0;
++    if (!readable_size( frame, NX_PROF_FEX_GREGS + (NX_PROF_FEX_REG_EBP + 1) * sizeof(uint64_t), &info )) return 0;
++    *eip = (uint32_t)read_word( frame + NX_PROF_FEX_RIP );
++    *esp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_ESP * sizeof(uint64_t) );
++    *ebp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_EBP * sizeof(uint64_t) );
++    return read_word32( teb + NX_PROF_TEB_FEX_CONTROL ) == control;
++}
++
++static int x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
+ {
+     MemoryInfo info;
+     uint64_t cpu, context;
+ 
+-    if (!teb || !(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
++    if (!teb || !readable_size( teb + NX_PROF_TEB_CPU_AREA, sizeof(uint64_t), &info )) return 0;
++    if (!(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
+     context = cpu + NX_PROF_CPU_CONTEXT;
+-    if (!readable( read_word32( context + NX_PROF_I386_ESP ), &info )) return 0;
+-    return nx_prof_x86_callers( read_word32( context + NX_PROF_I386_ESP ), read_word32( context + NX_PROF_I386_EBP ),
+-                                info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
++    if (!readable_size( cpu, NX_PROF_CPU_CONTEXT + NX_PROF_I386_ESP + sizeof(uint32_t), &info )) return 0;
++    if (*(const uint16_t *)(uintptr_t)(cpu + NX_PROF_CPU_MACHINE) != NX_PROF_MACHINE_I386) return 0;
++    if (fex_x86_registers( teb, eip, esp, ebp )) return 1;
++    *eip = 0;
++    *esp = read_word32( context + NX_PROF_I386_ESP );
++    *ebp = read_word32( context + NX_PROF_I386_EBP );
++    return 1;
++}
++
++static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
++{
++    MemoryInfo info;
++    uint32_t eip, esp, ebp;
++
++    if (!x86_registers( teb, &eip, &esp, &ebp ) || !readable( esp, &info )) return 0;
++    return nx_prof_x86_callers( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+ }
+ 
+ /* Inside translated code, the x86 frame chain from the guest's EBP and ESP. */
+@@ -851,8 +885,7 @@
+ static unsigned int stage_chain( const struct nx_prof_target *target, const ThreadContext *ctx, int translated,
+                                  int fex, uint32_t *chain )
+ {
+-    uint32_t esp, ebp;
+-    uint64_t cpu, context;
++    uint32_t eip, esp, ebp;
+     unsigned int n;
+     int rooted;
+ 
+@@ -866,13 +899,7 @@
+         esp = (uint32_t)ctx->cpu_gprs[NX_PROF_BOX64_ESP].x;
+         ebp = (uint32_t)ctx->cpu_gprs[NX_PROF_BOX64_EBP].x;
+     }
+-    else
+-    {
+-        if (!target->teb || !(cpu = read_word( target->teb + NX_PROF_TEB_CPU_AREA ))) return 0;
+-        context = cpu + NX_PROF_CPU_CONTEXT;
+-        esp = read_word32( context + NX_PROF_I386_ESP );
+-        ebp = read_word32( context + NX_PROF_I386_EBP );
+-    }
++    else if (!x86_registers( target->teb, &eip, &esp, &ebp )) return 0;
+     n = walk_x86_root( esp, ebp, chain, &rooted );
+     return rooted ? n : 0;
+ }
+@@ -1279,9 +1306,11 @@
+     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+     {
+         uint64_t callers[NX_PROF_DEPTH], native[NX_PROF_DEPTH], words[CARAFE_SCAN_WORDS];
++        uint32_t x86_callers[NX_PROF_DEPTH], eip = 0, esp, ebp;
+         char line[NX_PROF_LINE], where[96], kind;
+         Handle handle = registry[i].handle;
+-        unsigned int frames, copied = 0, natives, f, tid;
++        unsigned int frames, copied = 0, natives, f, tid, x86_frames = 0;
++        int x86 = 0;
+         ThreadContext ctx;
+         Result rc;
+         int tries, len;
+@@ -1298,7 +1327,12 @@
+         frames = R_SUCCEEDED( rc ) ? walk_callers( &ctx, callers ) : 0;
+         tid = registry[i].tid;
+         kind = registry[i].kind;
+-        if (R_SUCCEEDED( rc ) && kind == 'w') copied = copy_stack( &ctx, words );
++        if (R_SUCCEEDED( rc ) && kind == 'w')
++        {
++            copied = copy_stack( &ctx, words );
++            if ((x86 = x86_registers( registry[i].teb, &eip, &esp, &ebp )))
++                x86_frames = walk_x86( registry[i].teb, x86_callers );
++        }
+         svcSetThreadActivity( handle, ThreadActivity_Runnable );
+         pthread_mutex_unlock( &profile_mutex );
+         if (R_FAILED( rc )) continue;
+@@ -1318,6 +1352,16 @@
+             name_address( native[f], where, sizeof(where) );
+             len = appendf( line, len, " < %s", where );
+         }
++        if (x86)
++        {
++            name_address( eip, where, sizeof(where) );
++            len = appendf( line, len, " | x86 at %s esp=%#x ebp=%#x", where, esp, ebp );
++        }
++        for (f = 0; f < x86_frames; f++)
++        {
++            name_address( x86_callers[f], where, sizeof(where) );
++            len = appendf( line, len, " < %s", where );
++        }
+         wine_nx_runtime_trace( line );
+         reported++;
+     }
