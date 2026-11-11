@@ -612,6 +612,23 @@ static int runtime_fex_carafe;
 static char runtime_fex_version[32];
 static int runtime_fex_carafe_active;
 static int runtime_four_cores;
+/* Carafe's reports and its orchestrator run on the log's thread, which starts
+ * before the launcher: they ask here, and hear "not yet" (-1) until the
+ * settings of the program that is about to start have been read. */
+static int runtime_program_settings_read, runtime_orchestrator;
+extern int carafe_lock_boost_enabled __attribute__((weak));  /* carafe_lock_boost.c */
+
+int wine_nx_program_profiling( void )
+{
+    if (!__atomic_load_n( &runtime_program_settings_read, __ATOMIC_ACQUIRE )) return -1;
+    return runtime_profile != 0;
+}
+
+int wine_nx_program_orchestrating( void )
+{
+    if (!__atomic_load_n( &runtime_program_settings_read, __ATOMIC_ACQUIRE )) return -1;
+    return runtime_orchestrator != 0;
+}
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
 static char runtime_dxvk_version[32];
@@ -5041,6 +5058,8 @@ int main( int argc, char **argv )
         runtime_fex = 0;
 #endif
         runtime_four_cores = 1;
+        runtime_orchestrator = 0;
+        if (&carafe_lock_boost_enabled) __atomic_store_n( &carafe_lock_boost_enabled, 0, __ATOMIC_RELAXED );
         horizon_fast_sync_enabled = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
@@ -5065,6 +5084,9 @@ int main( int argc, char **argv )
             memcpy( runtime_fex_version, settings.fex_version, sizeof(runtime_fex_version) );
 #endif
             runtime_four_cores = settings.four_cores;
+            runtime_orchestrator = settings.orchestrator;
+            if (&carafe_lock_boost_enabled)
+                __atomic_store_n( &carafe_lock_boost_enabled, settings.lock_boost, __ATOMIC_RELAXED );
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
@@ -5169,6 +5191,9 @@ int main( int argc, char **argv )
         log_line( "[INIT] views of files read on demand (lazy-file-views): only the parts a program touches come from the card" );
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );
     log_line( "[INIT] profiler %s (profile.txt)", runtime_profile ? "on" : "off" );
+    log_line( "[INIT] thread orchestrator %s, lock wait boost %s", runtime_orchestrator ? "on" : "off",
+              &carafe_lock_boost_enabled && carafe_lock_boost_enabled ? "on" : "off" );
+    __atomic_store_n( &runtime_program_settings_read, 1, __ATOMIC_RELEASE );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
     log_line( "[TARGET] %s", target );
 

@@ -30,6 +30,7 @@ void carafe_diag_dump(void) __attribute__((weak));
 void carafe_alert_dump(void) __attribute__((weak));
 void wine_nx_runtime_trace(const char* msg) __attribute__((weak));
 extern unsigned int wine_nx_vk_presents __attribute__((weak));
+int wine_nx_program_profiling(void) __attribute__((weak));
 
 static uintptr_t g_native_starts[NATIVE_KINDS];
 static unsigned int g_native_counts[NATIVE_KINDS];
@@ -368,12 +369,10 @@ static void startBenches(unsigned int mhz) {
     }
 }
 
+/* Asked every time: the profiler is a program's setting, and the first
+ * reports are made while the launcher is still on the screen. */
 static bool measuring(void) {
-    static int known = -1;
-    if (known < 0) {
-        known = carafeMeasuring() ? 1 : 0;
-    }
-    return known == 1;
+    return carafeMeasuring();
 }
 
 static bool idleTicksOn(unsigned int core, u64* ticks) {
@@ -434,6 +433,11 @@ void __wrap_wine_nx_thread_report(void) {
     static unsigned int reports;
     __real_wine_nx_thread_report();
     if (wine_nx_runtime_trace == NULL) {
+        return;
+    }
+    /* Nothing of the program's is known while the launcher is on the screen:
+     * the reports, their counting and the services they open start with it. */
+    if (wine_nx_program_profiling && wine_nx_program_profiling() < 0) {
         return;
     }
     reportFrames();

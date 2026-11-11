@@ -181,6 +181,22 @@ They are built by the `carafe dlls` workflow from `carafe/dlls`; a fork that
 builds its own has to name itself in `WINE_NX_CARAFE_DLLS_REPO`
 (`horizon-wine/source/dxvk_releases.h`).
 
+### Carafe's thread placement
+
+Two more switches under **Emulation** in a game's options come from Carafe, and
+both are off until you turn them on:
+
+- **Thread orchestrator** watches how busy each core is. When one core is full
+  it gives the busiest thread a core to itself and spreads the other busy
+  threads by their load; the rest of the time Autorun's own balancer places
+  threads, as it does with the switch off.
+- **Lock wait boost** lets a game thread that waits for one of the runtime's
+  locks wait one priority higher.
+
+Neither has been measured on a console in this fork yet, so try them per game
+and compare. The log says what the orchestrator did in lines that start with
+`[ORCHESTRATOR]`.
+
 ### Frame generation
 
 LSFG-VK doubles the frame rate of Vulkan games (DXVK and VKD3D-Proton count) by
@@ -294,7 +310,7 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton) | LGPL-2.1-or-later | Direct3D 12 over Vulkan |
 | [Mesa](https://mesa3d.org) and [mesa-switch](https://github.com/danfromtico/mesa-switch) | MIT (mostly) | OpenGL and Vulkan on the Switch's GPU |
 | [LSFG-VK](https://git.lsfg-vk.dev/lsfg-vk-archive.git) | GPL-3.0-or-later | Frame generation |
-| [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
+| [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches); GPL-3.0-or-later (the thread orchestrator, `horizon-wine/source/orchestrator*.c`) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg, the thread orchestrator and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
 | [libusbhsfs](https://github.com/ITotalJustice/libusbhsfs) | ISC | USB drives |
 | [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) and [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC) | GPL-2.0 | The boot changes Quick setup installs |
 | [libnx](https://github.com/switchbrew/libnx) and [devkitPro](https://devkitpro.org) | ISC, per component | The Switch system library and toolchain |

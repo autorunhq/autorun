@@ -100,7 +100,7 @@ jobs:
             ./$test || { echo "::error::horizon-wine/tests/$test.c failed"; exit 1; }
           done
 
-      - name: Reports and thread waits
+      - name: Reports, thread waits and the orchestrator
         # Carafe's diagnostics (PORTING.md, stages 2 and 3): what the [WAITS]
         # and [FEX] lines say, what a thread creation at the limit counts, the
         # fd queue's report, and the profiler's parts that need no kernel.
@@ -111,8 +111,18 @@ jobs:
           cc $flags -I source tests/thread_profile.c -o "$RUNNER_TEMP/thread_profile"
           "$RUNNER_TEMP/carafe_reports"
           "$RUNNER_TEMP/thread_profile"
+          # Stage 4: what the orchestrator decides (Carafe's own test), that it
+          # does nothing behind its switch, and how the two settings reach it.
+          cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c \
+             -o "$RUNNER_TEMP/orchestrator"
+          cc $flags -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c \
+             source/orchestrator_policy.c -o "$RUNNER_TEMP/orchestrator_switch"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -I source tools/orchestrator_replay.c source/orchestrator_policy.c \
+             -o "$RUNNER_TEMP/orchestrator_replay"
+          "$RUNNER_TEMP/orchestrator"
+          "$RUNNER_TEMP/orchestrator_switch"
           for check in check_thread_creation_wait check_horizon_thread_tls check_horizon_fd_owner \
-                       check_shader_affinity check_futex_exit; do
+                       check_shader_affinity check_futex_exit check_orchestrator_setting; do
             python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
               echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
               exit 1

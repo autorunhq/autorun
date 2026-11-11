@@ -1761,7 +1761,7 @@ enum program_row
     ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
     ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
 };
 
@@ -2526,6 +2526,22 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.four_cores;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
+        ADD_ROW( ROW_ORCHESTRATOR, SECTION_EMULATION, "Thread orchestrator",
+                 "Carafe's thread placement. When one core is full it gives the busiest thread a core "
+                 "of its own and spreads the others by their load; otherwise Autorun's balancer places threads." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.orchestrator;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.orchestrator ? "Enabled" : "Disabled" );
+
+#ifndef WINE_NX_SWAP_POC  /* that build takes the lock call for itself (CMakeLists.txt) */
+        ADD_ROW( ROW_LOCK_BOOST, SECTION_EMULATION, "Lock wait boost",
+                 "Carafe's lock waits. A game thread that waits for one of the runtime's locks waits one "
+                 "priority higher, so it runs as soon as the lock is free." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.lock_boost;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.lock_boost ? "Enabled" : "Disabled" );
+#endif
+
         ADD_ROW( ROW_LAZY_FILE_VIEWS, SECTION_EMULATION, "Fast file loading",
                  "Reads only the parts of the game's files it uses. Faster loading for games with large "
                  "data files; turn it off if the game misbehaves." );
@@ -2952,6 +2968,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
             else if (p->settings.four_cores) p->settings.four_cores = 0;
             else if (l->options->four_cores_available) p->settings.four_cores = 1;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_ORCHESTRATOR:
+            p->settings.orchestrator = action == UI_ACTION_RESET ? 0 : !p->settings.orchestrator;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_LOCK_BOOST:
+            p->settings.lock_boost = action == UI_ACTION_RESET ? 0 : !p->settings.lock_boost;
             save_program_settings( l, p );
             break;
 

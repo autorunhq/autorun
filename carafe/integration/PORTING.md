@@ -54,7 +54,8 @@ Compared trees:
    including `runtime/orchestrator`, `runtime/dshow` and `runtime/media`, is
    under Carafe's own GPL-3.0-or-later. The runtime already links
    GPL-3.0-or-later code (LSFG-VK), so the orchestrator can be linked in, but
-   its files keep that licence and are named in the notices. Where a few lines
+   its files keep that licence, say so at their top and are named in the
+   credits of `README.md` and `documentation/technical.md`. Where a few lines
    of data sufficed (the DirectShow filters), they were derived from Wine's own
    sources instead and stay LGPL.
 
@@ -68,7 +69,7 @@ Each stage is one or a few commits, checked on the host and built by the
 | 1 | Videos through DirectShow and the Windows Media reader; small log and profiler fixes | **done** |
 | 2 | Diagnostics: `carafe_diag.c`, the event ring and connection table in `horizon.c`, `[BUDGET]` and `[SERVED]`, the alert table in `sync.c`, the stall report on request, `carafe_waits.c`, `carafe_mesa.c`, the fd queue report, FEX's counters | **done** |
 | 3 | The profiler: x86 names of the code FEX runs, the busiest translated blocks, FEX time outside blocks, stages by call chain (`thread_profile.c`, +536 lines) | **done** |
-| 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | |
+| 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | **done**, as two settings of a program, both off by default |
 | 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
 | 6 | The server thread pool (`0023`): one thread per Windows thread instead of two | after an audit of every wait inside a server request |
 | 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | |
@@ -128,16 +129,17 @@ reads; Carafe's side everywhere else. The merge had also written one block
 twice, which was removed. What is left of Carafe's file that is not in the
 fork's is 13 lines, all of them those two places.
 
-The merge also brings what the orchestrator will call (`wine_nx_thread_views`,
+The merge also brings what the orchestrator calls (`wine_nx_thread_views`,
 `wine_nx_thread_place`, `wine_nx_thread_reserve_core`,
-`wine_nx_thread_side_cores`, patches `0064` and `0072`). Nothing calls them
-before stage 4, and no core is reserved until something does.
+`wine_nx_thread_side_cores`, patches `0064` and `0072`). Only the orchestrator
+calls them (stage 4), and no core is reserved while it is off.
 
 What differs from Carafe:
 
 - `carafe_lock_boost.c` times a wait for a libnx mutex, and in Carafe also
   raises the waiting thread's priority by one. Here that second half is off
-  (`carafe_lock_boost_enabled` starts at 0) until stage 4 gives it a setting.
+  (`carafe_lock_boost_enabled` starts at 0) unless a program's settings turn it
+  on (stage 4).
 - `[BUDGET]` has no `pool=` field: that is the server thread pool, stage 6.
 - The stock FEX is asked for its counters too. Its record has the same size as
   Carafe's, with padding where Carafe's counts returns that miss the
@@ -157,6 +159,65 @@ and newlib's headers; the `build` workflow.
 
 Not checked, because it needs a console: any of these lines in a real log, the
 clock and GPU services answering, and that FEX fills the area.
+
+### Stage 4: the orchestrator, done
+
+| Change | From | Files |
+|---|---|---|
+| The orchestrator. Every two seconds it reads each core's idle time and each thread's load. While no core is full it only watches and the runtime's balancer places threads. When one is, it lays the busy threads out itself: the busiest gets a core that the balancer is then kept away from, the others are spread by their load, and with **4-core support** on a thread may be sent to core 3 and back | `runtime/orchestrator`, taken whole; the link option as in Carafe's `carafe-overlay.cmake` | `horizon-wine/source/orchestrator.c`, `orchestrator_policy.c`, `orchestrator_policy.h`, `horizon-wine/CMakeLists.txt` (`--wrap=wine_nx_thread_balance`) |
+| Its tests and the tool that replays the decisions of a log on the host | `runtime/orchestrator/test` | `horizon-wine/tests/orchestrator.c`, `horizon-wine/tools/orchestrator_replay.c` |
+| Two switches in a program's settings, **Thread orchestrator** (`orchestrator=1`) and **Lock wait boost** (`lock-boost=1`), under Emulation | new here; Carafe has the first as a key of its own program file and the second always on | `horizon-wine/source/launcher_settings.h`, `launcher.c`, `runtime.c` |
+| Carafe's code asks the runtime whether the profiler and the orchestrator are on, instead of reading the program's file itself | new here | `runtime.c` (`wine_nx_program_profiling`, `wine_nx_program_orchestrating`), `carafe_settings.c`, `carafe_diag.c` |
+
+What differs from Carafe:
+
+- Both are off unless a program's settings turn them on. Carafe's orchestrator
+  is on wherever the file does not say `orchestrator=0`, and its lock wait
+  always raises the priority. Neither has run on a console in this fork, and
+  the fork's balancer and its stop-and-hold code differ from Carafe's, so a
+  default has to wait for measurements.
+- The orchestrator asks whether it is on at every period. Carafe's asks once;
+  here the first period comes while the launcher is on the screen, before any
+  program is chosen. Until a program's settings have been read the runtime
+  answers "not yet", and the orchestrator reads and moves nothing.
+- If the switch goes from on to off, the orchestrator gives its reserved core
+  back to the balancer. A program's settings do not change while it runs, so
+  nothing does this today.
+- The orchestrator does not ask whether core balancing was turned off
+  (`no-balance.txt`), as in Carafe: with balancing off and the orchestrator on,
+  only the orchestrator moves threads.
+- The **Lock wait boost** row is not shown in a build with
+  `WINE_NX_SWAP_POC`, which wraps the same kernel call for itself.
+
+This stage also corrects stage 2. `carafe_diag.c` asked Carafe's
+`carafeMeasuring()` once and kept the answer. The log's thread makes its first
+report 10 to 30 s after the runtime starts, which is while the launcher is on
+the screen unless a program is picked sooner; no program is known then, so the
+answer was "off" and stayed so, and the reports that need the profiler
+(`[WAITS]`, `[FEX]`, each core's load, the A57 timings) were not written for
+the program picked afterwards. It also read only the program's `profile=1`, not
+`profile.txt`. Now it asks `runtime_profile` every time, and the reports and
+the services they open (clocks, GPU load) wait until a program starts.
+
+Checked: `tests/orchestrator.c`, Carafe's own test of the decisions, also under
+the address and undefined-behaviour sanitizers; `tests/orchestrator_switch.c`,
+the orchestrator with its policy on made-up cores and threads (before the
+settings are read and with the switch off it calls only the balancer and reads
+nothing; on, it says so once, measures, puts its own thread back where it was,
+places the threads after the policy's two periods, reserves the busiest
+thread's core, stops calling the balancer, and gives all of it back when turned
+off), with five errors put into the orchestrator to see each one fail;
+`tests/check_orchestrator_setting.py`, which compiles the runtime's two answers
+with Carafe's two questions and checks the strings of the settings, with six
+errors put into the code to see each one fail; `tests/launcher_settings.c` for
+the two keys; the host suite, 83 passing (the 82 of before and the new check)
+with the same 30 failing as before; the changed C files and the launcher
+compiled for AArch64; the `build` workflow.
+
+Not checked, because it needs a console: that the orchestrator's layouts make
+any game faster here, that the kernel's idle counters read as the code expects,
+how it behaves next to this fork's stop-and-hold code, and whether the lock
+wait's priority helps or starves other threads.
 
 ### Stage 5: FEX and DXVK, done
 
@@ -296,7 +357,7 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0061 | horizon aslr region traced once | 5 | 100 % | ported in stage 1 |
 | 0062 | runtime vulkan surfaces share a reserved screen | 18 | 100 % | in the fork |
 | 0063 | runtime profiler asks direct3d 9 for call counts | 5 | 80 % | taken (stage 3); the counts come from Carafe's DXVK |
-| 0064 | runtime threads placed by the orchestrator | 68 | 95 % | the profiler's half taken with stage 3; nothing calls it before stage 4 (orchestrator) |
+| 0064 | runtime threads placed by the orchestrator | 68 | 95 % | taken (stages 3 and 4); the three lines not found were rewritten by `0072` |
 | 0065 | profiler counts time by the calls near a threads start | 90 | 95 % | taken (stage 3); the lines not found were replaced by later patches |
 | 0066 | fex gets an area for its thread counters | 24 | 100 % | taken (stage 2) |
 | 0067 | runtime profiler asks fex for its counters | 4 | 100 % | taken (stage 2) |
@@ -304,7 +365,7 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0069 | dxvk options carry the effect thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0070 | dxvk options carry the effect pass merge | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0071 | dxvk options carry the managed buffer copies | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
-| 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 100 % | the profiler's half taken with stage 3; nothing calls it before stage 4 (orchestrator) |
+| 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 100 % | taken (stages 3 and 4) |
 | 0073 | fex options carry the call cache and the bridge return | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0074 | fex options carry the jump tables | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0075 | fex options carry compact returns | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |

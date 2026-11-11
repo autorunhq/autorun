@@ -713,7 +713,15 @@ static char* programText(void) {
     return text != NULL ? text : romfsText(CarafeFileProgram);
 }
 
+/* The runtime has read the program's settings together with the shared ones
+ * (runtime.c); the file is only asked where there is no such runtime. */
+int wine_nx_program_profiling(void) __attribute__((weak));
+int wine_nx_program_orchestrating(void) __attribute__((weak));
+
 bool carafeMeasuring(void) {
+    if (wine_nx_program_profiling) {
+        return wine_nx_program_profiling() > 0;
+    }
     char* text = programText();
     char value[16] = "";
     bool profiling = textValue(text, "profile", value, sizeof(value)) && strcmp(value, "1") == 0;
@@ -722,6 +730,9 @@ bool carafeMeasuring(void) {
 }
 
 bool carafeOrchestrating(void) {
+    if (wine_nx_program_orchestrating) {
+        return wine_nx_program_orchestrating() > 0;
+    }
     char* text = programText();
     char value[16] = "";
     bool on = !textValue(text, "orchestrator", value, sizeof(value)) || strcmp(value, "0") != 0;

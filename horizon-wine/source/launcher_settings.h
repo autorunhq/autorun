@@ -192,6 +192,12 @@ struct launcher_settings
     char fex_version[32];
     int four_cores;
     int lazy_file_views;  /* views of files read from the card on demand */
+    /* Carafe's two ways with threads, off unless asked for: its orchestrator
+     * lays the busy threads out over the cores (source/orchestrator.c), and a
+     * program thread waits for a runtime lock one priority higher
+     * (source/carafe_lock_boost.c). */
+    int orchestrator;
+    int lock_boost;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     /* A display mode of the program's own: -1 the shared setting, 0 the whole
      * picture with black bars, 1 filling the screen with its edges cropped,
@@ -419,6 +425,8 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         memcpy( settings->fex_version, value, strlen( value ) + 1 );
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
+    settings->orchestrator = launcher_setting_state( kv, "orchestrator" ) == 1;
+    settings->lock_boost = launcher_setting_state( kv, "lock-boost" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
     {
@@ -516,6 +524,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                             settings->fex_version : NULL ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
+           launcher_kv_set( kv, "orchestrator", settings->orchestrator ? "1" : NULL ) &&
+           launcher_kv_set( kv, "lock-boost", settings->lock_boost ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
            launcher_kv_set( kv, "picture", settings->picture_mode < 0 ? NULL :

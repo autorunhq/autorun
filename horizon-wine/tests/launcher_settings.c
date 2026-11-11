@@ -103,6 +103,27 @@ static void test_settings( const char *dir )
     load_text( &kv, "fex-build=carafe\nfex-version=../../x\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.fex_carafe && !settings.fex_version[0] );
+    /* Carafe's thread orchestrator and its lock wait boost: off unless a
+     * program's settings say 1, each on its own, and no line when off. */
+    load_text( &kv, "" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.orchestrator && !settings.lock_boost );
+    load_text( &kv, "orchestrator=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.orchestrator && !settings.lock_boost );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "orchestrator=1\n" ) && !strstr( kv.text, "lock-boost" ) );
+    settings.orchestrator = 0;
+    settings.lock_boost = 1;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "orchestrator" ) && strstr( kv.text, "lock-boost=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( !back.orchestrator && back.lock_boost );
+    load_text( &kv, "orchestrator=0\nlock-boost=yes\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.orchestrator && !settings.lock_boost );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "lock-boost" ) );
     load_text( &kv, "cpu=box64\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.fex );
