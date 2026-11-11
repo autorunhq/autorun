@@ -345,8 +345,9 @@ their client's order and never by two threads at once, by the same two
 threads; two waits inside a request start a third thread and the other clients
 are served meanwhile; a thread that cannot be started is not counted, its
 request stays in the pipe and the next request starts one; the extra threads
-end; clients that end are finished once, after their last request; and at a
-quit the idle threads end. The idle wait has no time limit in the test, so a
+end; clients that end are finished once, after their last request; at a
+quit the idle threads end; and every thread the pool started has been joined
+once, by the pool's own reaping or as the runtime joins the ones a quit ends. The idle wait has no time limit in the test, so a
 thread that is not told of work shows as a request never served. Twelve
 changes made to the pool's code on purpose (no wake-up, no requeue, no third
 thread, no retiring, a plain store, and so on) each made it fail.

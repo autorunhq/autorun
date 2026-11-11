@@ -136,8 +136,11 @@ static __thread int horizon_server_pool_worker, horizon_server_pool_blocked;
 static int horizon_fast_sync_enabled, horizon_server_pool_wanted;
 static int release_blocked, waiting_inside, overlaps, empty_serves, finishes, live_workers, started_workers;
 static int refuse_threads;
-static pthread_t worker_threads[64];
-static unsigned int worker_count;
+/* As the runtime's quit_joinable: a thread that ends at a quit leaves itself
+ * here to be joined. One that ends because the pool has too many leaves itself
+ * on horizon_server_zombies, as in horizon.c. Each is joined once. */
+static pthread_t quit_joinable[64];
+static int quit_joinable_count;
 
 static void horizon_server_pool_blocking_locked( void );
 
@@ -153,18 +156,11 @@ static int svcSetThreadPriority( int handle, int priority ) { (void)handle; (voi
 void wine_nx_thread_register( char kind, unsigned int tid, const char *name ) __attribute__((weak));
 void wine_nx_thread_unregister( void ) __attribute__((weak));
 
-/* Every thread the pool starts is joined at the end; one may be refused. */
+/* A thread the pool asks for may be refused. */
 static int test_pthread_create( pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg )
 {
-    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    int ret;
-
     if (__atomic_load_n( &refuse_threads, __ATOMIC_SEQ_CST )) return EAGAIN;
-    pthread_mutex_lock( &lock );
-    assert( worker_count < 64 );
-    if (!(ret = pthread_create( thread, attr, entry, arg ))) worker_threads[worker_count++] = *thread;
-    pthread_mutex_unlock( &lock );
-    return ret;
+    return pthread_create( thread, attr, entry, arg );
 }
 #define pthread_create test_pthread_create
 
@@ -229,12 +225,17 @@ static void horizon_server_finish_connection( struct horizon_server_connection *
 '''
 tests = r'''
 #undef pthread_cond_timedwait
+#undef pthread_create
 /* The runtime's two, which horizon_cond_wait_quit reaches through weak
  * references: a thread that is told to quit ends where it stands. */
 volatile int wine_nx_quit_requested;
 
 void wine_nx_quit_point( void )
 {
+    int slot = __atomic_fetch_add( &quit_joinable_count, 1, __ATOMIC_SEQ_CST );
+
+    assert( slot < 64 );
+    quit_joinable[slot] = pthread_self();
     wine_nx_thread_unregister();
     pthread_exit( NULL );
 }
@@ -362,7 +363,6 @@ int main( void )
      * once, in order, never by two threads at a time, by the same two threads. */
     for (i = 0; i < 3; i++) pthread_create( &writers[i], NULL, writer, (void *)(size_t)(2 + 2 * i) );
     for (i = 0; i < 3; i++) pthread_join( writers[i], NULL );
-    worker_count -= 3;  /* the writers are not the pool's */
     for (i = 2; i < CLIENTS; i++) WAIT_FOR( served_of( i ) == 1500 );
     for (i = 2; i < CLIENTS; i++)
     {
@@ -441,14 +441,16 @@ int main( void )
     wine_nx_quit_requested = 1;
     pthread_cond_broadcast( &horizon_server_pool.cond );
     pthread_mutex_unlock( &horizon_server_pool.mutex );
-    for (i = 0; i < worker_count; i++) pthread_join( worker_threads[i], NULL );
-    assert( !__atomic_load_n( &live_workers, __ATOMIC_SEQ_CST ) );
-    while (horizon_server_zombies.head)
-    {
-        struct horizon_zombie *next = horizon_server_zombies.head->next;
-        free( horizon_server_zombies.head );
-        horizon_server_zombies.head = next;
-    }
+    WAIT_FOR( !__atomic_load_n( &live_workers, __ATOMIC_SEQ_CST ) );
+    assert( __atomic_load_n( &quit_joinable_count, __ATOMIC_SEQ_CST ) == HORIZON_SERVER_POOL_SPARE );
+    for (i = 0; i < HORIZON_SERVER_POOL_SPARE; i++) pthread_join( quit_joinable[i], NULL );
+    /* The ones that ended earlier are joined by whoever reaps next, each once:
+     * every thread the pool started has now been joined. */
+    horizon_zombie_reap( &horizon_server_zombies );
+    assert( !horizon_server_zombies.head && !horizon_server_zombies.pending );
+    assert( horizon_server_zombies.reaped + HORIZON_SERVER_POOL_SPARE ==
+            (unsigned int)__atomic_load_n( &started_workers, __ATOMIC_SEQ_CST ) );
+    assert( __atomic_load_n( &started_workers, __ATOMIC_SEQ_CST ) == 5 );
     puts( "server pool: shared threads, order, blocked threads, retiring, ending clients and quit passed" );
     return 0;
 }
