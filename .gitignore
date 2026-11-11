@@ -1,9 +1,1 @@
-/horizon-wine/build-*/
-/horizon-wine/toolchains/
-/horizon-wine/vendor/
-/horizon-wine/**/__pycache__/
-.DS_Store
-
-debug
-/autom4te.cache/
-*~
+*.bundle
