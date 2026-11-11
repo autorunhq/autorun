@@ -209,7 +209,7 @@ meant for games that start many threads. It has not been tried on a console in
 this fork yet.
 
 The log says which is in use in the line `[SYNC] server threads: ...`. The
-`[BUDGET]` line, written every 30 seconds, has the pool in its `pool=` field:
+`[BUDGET]` line, written about every 30 seconds, has the pool in its `pool=` field:
 its threads, how many of them are idle and how many are waiting inside a
 request.
 

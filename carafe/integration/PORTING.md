@@ -330,12 +330,26 @@ Why it was safe to take, as far as reading can tell:
   connection's structure is identical, and so are the thread-local variables
   apart from the fork's `wine_nx_stop_word`, which `horizon.c` reads only in
   its exception handler (through `wine_nx_stop_state()`).
-- Leaving a program: pool threads are registered with the runtime as server
-  threads (`'s'`), so the quit sequence counts them. An idle one looks for a
-  quit every quarter of a second (`horizon_cond_wait_quit`), one inside a
-  request stops where the per-client threads stop, and each then ends and is
-  joined like them. The next program starts from a freshly loaded runtime
-  (`envSetNextLoad`), so the pool's counters do not carry over.
+- Leaving a program, as read in the code:
+  - Pool threads are registered with the runtime as server threads (`'s'`),
+    and `wine_nx_threads_program()` counts every registered thread but the
+    presenter, so the quit waits for them like for any other thread; if one
+    did not stop within five seconds the quit would be called off and the
+    program would go on (`wine_nx_quit_point`, `runtime.c`).
+  - An idle pool thread looks for a quit every quarter of a second
+    (`horizon_cond_wait_quit`) and stops with the pool's lock released. One
+    inside a request waits in the same three places a per-client thread waits
+    in (`horizon_server_sleep_locked`, `horizon_server_wait_thread_locked`,
+    `horizon_sync_sleep_locked`), which already stop for a quit.
+  - A thread that stopped ends itself and leaves its handle in
+    `quit_joinable[]`, which `return_to_launcher` joins; a pool thread that
+    retired earlier is on `horizon_server_zombies`, joined by the next thread
+    that ends and at the latest by `horizon_release_thread_stacks()`.
+  - The pool's counters are not put back, and need not be: `main` runs one
+    program and returns, the loader maps the runtime's file again
+    (`envSetNextLoad`; `hbl/source/main.c` reads it from the card) and libnx
+    clears its `.bss` before `main` (`__nx_dynamic`). When the loader cannot
+    take the process back, the application closes instead.
 
 Tests: `tests/check_server_pool.py` (new, in the `build` workflow) builds the
 pool's own functions from `horizon.c`, with `horizon_cond_wait_quit`, and runs

@@ -207,8 +207,9 @@ operations (`[ASYNC]`), user APCs (`[APC]`) and x86 faults (`[BOX64]`).
 `[SYNC] server threads:` says whether each of the program's threads has a
 server thread of its own or they share a few (the program's `server-pool=1`
 setting, Carafe's server thread pool, which needs `sync=horizon`), and
-`[BUDGET]`, every 30 s, counts the threads in use against the limit, with the
-pool as `pool=threads/idle/waiting`.
+`[BUDGET]`, at the first server request after each 30 s, counts the threads
+in use against the limit, with the pool as `pool=threads/idle/waiting`; it
+does not need the profiler.
 
 ## Building
 
