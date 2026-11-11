@@ -4,7 +4,8 @@ name: build
 # built the way build.sh builds it: in the switch-dev image named in
 # horizon-wine/switch-dev.txt. Beside it, the floating keyboard's host test,
 # which needs SDL2 and no toolchain at all, so it says at once whether the
-# keyboard still does what it should.
+# keyboard still does what it should, and the one of the Carafe DLLs, which
+# downloads them from this repository's releases the way a card does.
 #
 # Run it from the Actions tab, or push to a branch. The build is Linux only:
 # build.sh has no toolchain download for other machines, and this is where the
@@ -71,6 +72,44 @@ jobs:
           path: ${{ runner.temp }}/shots
           if-no-files-found: error
           retention-days: 14
+
+  carafe:
+    name: Carafe DLLs (host test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: curl, zstd and zlib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libzstd-dev zlib1g-dev
+
+      - name: Settings, options and installed versions
+        # What the Carafe builds added to: a program's settings file, the DXVK
+        # and FEX options and which version on the card a program gets.
+        run: |
+          flags="-std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          cd horizon-wine
+          cc $flags -I source tests/launcher_settings.c -o "$RUNNER_TEMP/launcher_settings"
+          cc $flags tests/fex_options.c -o "$RUNNER_TEMP/fex_options"
+          cc $flags tests/dxvk_options.c source/dxvk_options.c -o "$RUNNER_TEMP/dxvk_options"
+          cc $flags -I tests/graphics-shims tests/dxvk_releases.c -lcurl -lzstd -lz -o "$RUNNER_TEMP/dxvk_releases"
+          cd "$RUNNER_TEMP"
+          for test in launcher_settings fex_options dxvk_options dxvk_releases; do
+            ./$test || { echo "::error::horizon-wine/tests/$test.c failed"; exit 1; }
+          done
+
+      - name: Release list, archives and system32, made here
+        # What the launcher does with the Carafe builds of DXVK and FEX
+        # (carafe/dlls), on a release list and archives the test makes itself.
+        run: python3 horizon-wine/tests/check_carafe_dlls.py
+
+      - name: The releases a card would download today
+        # The same code against this repository's real releases: listed,
+        # downloaded, checked against GitHub's digest, unpacked and installed.
+        # What it took is in the run's annotations.
+        run: python3 horizon-wine/tests/check_carafe_dlls.py --live
 
   runtime:
     name: card archive

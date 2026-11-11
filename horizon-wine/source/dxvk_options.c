@@ -200,6 +200,23 @@ static const struct dxvk_option_choice refresh[] =
     { "120", "120" },
 };
 
+static const struct dxvk_option_choice frame_rate_method[] =
+{
+    { NULL, "Default" },
+    { "\"timeline\"", "timeline" },
+    { "\"deviation\"", "deviation" },
+    { "\"reactive\"", "reactive" },
+};
+
+static const struct dxvk_option_choice frame_rate_pacing[] =
+{
+    { NULL, "Default" },
+    { "\"precise\"", "precise" },
+    { "\"sleep\"", "sleep" },
+    { "\"sliced\"", "sliced" },
+    { "\"spin\"", "spin" },
+};
+
 #define OPTION(name, help, values, first, end, sarek_first, sarek_end, advanced, gpl, default_value) \
     { name, help, default_value, values, sizeof(values) / sizeof(values[0]), { first, end }, { sarek_first, sarek_end }, advanced, gpl }
 
@@ -428,6 +445,38 @@ const struct dxvk_option dxvk_options[] =
     OPTION( "dxvk.gplAsyncCache",
             "GPLAsync's legacy state-cache integration. Available here for 2.3 through 2.6; removed in 2.7 and newer.",
             boolean, 20300, 20700, 0, 0, 1, 1, "False" ),
+    /* What only Carafe's DXVK build reads (carafe/dlls/dxvk). The defaults
+     * are the ones its patches give the options, read from the patches. */
+    OPTION( "dxvk.shaderCompilationMethod",
+            "Carafe's DXVK build: async builds pipelines in the background while the frame goes on, which can leave an effect out for a moment; none waits for them.",
+            compilation, 30101, 0, 0, 0, 0, 2, "async" ),
+    OPTION( "dxvk.allCompilerWorkers",
+            "Carafe's DXVK build: every shader compiler worker takes every job, as DXVK-Sarek's DXVK_ALL_CORES does.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
+    OPTION( "dxvk.skipRedundantPipelineBinds",
+            "Carafe's DXVK build: a graphics pipeline already bound is not bound again, as DXVK-Sarek does.",
+            boolean, 30101, 0, 0, 0, 1, 2, "False" ),
+    OPTION( "dxvk.frameRateMethod",
+            "Carafe's DXVK build: how the frame rate limiter keeps time, DXVK-Sarek's choices.",
+            frame_rate_method, 30101, 0, 0, 0, 1, 2, "timeline" ),
+    OPTION( "dxvk.frameRatePacing",
+            "Carafe's DXVK build: how the frame rate limiter waits, DXVK-Sarek's choices.",
+            frame_rate_pacing, 30101, 0, 0, 0, 1, 2, "precise" ),
+    OPTION( "d3d9.unchangedStateFastPath",
+            "Carafe's DXVK build: a state set to the value it already has returns before the device lock.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
+    OPTION( "d3d9.frontEndThread",
+            "Carafe's DXVK build: the Direct3D 9 front end runs on a thread of its own. Turn it off if a game misbehaves with it.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
+    OPTION( "d3d9.effectThread",
+            "Carafe's DXVK build: the game's linked effect library runs on a thread of its own.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
+    OPTION( "d3d9.effectPassMerge",
+            "Carafe's DXVK build: the effect thread keeps a pass open when the game begins the same pass again.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
+    OPTION( "d3d9.managedBufferCopies",
+            "Carafe's DXVK build: locks of managed buffers use a copy instead of waiting for the front end thread.",
+            boolean, 30101, 0, 0, 0, 1, 2, "True" ),
 };
 #undef OPTION
 
@@ -469,7 +518,8 @@ int dxvk_option_supported( const struct dxvk_option *option, enum dxvk_source so
     const struct dxvk_option_range *range;
 
     if (!version || source < 0 || source >= DXVK_SOURCE_COUNT ||
-        (option->gpl_only && source != DXVK_SOURCE_GPLASYNC)) return 0;
+        (option->gpl_only == 1 && source != DXVK_SOURCE_GPLASYNC) ||
+        (option->gpl_only == 2 && source != DXVK_SOURCE_CARAFE)) return 0;
     range = source == DXVK_SOURCE_SAREK && version >= 11003 ? &option->sarek : &option->official;
     return range->first && version >= range->first && (!range->end || version < range->end);
 }

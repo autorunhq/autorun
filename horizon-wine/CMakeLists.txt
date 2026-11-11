@@ -627,6 +627,7 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 add_executable(wine-nx-runtime
     source/runtime.c
     source/dxvk_releases.c
+    source/fex_build.c
     source/runtime_platform.c
     source/sd_cache.c
     source/wow64_box64_bridge.c

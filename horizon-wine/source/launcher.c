@@ -56,6 +56,7 @@
 #include "dxvk_releases.h"
 #include "box64_options.h"
 #include "fex_options.h"
+#include "fex_build.h"
 #ifdef WINE_NX_SWAP_POC
 #include "launcher_swap.h"
 #include "swap_store.h"
@@ -1760,7 +1761,7 @@ enum program_row
     ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
     ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
 };
 
@@ -2069,6 +2070,18 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
             (api == 12 && p->settings.dxvk_source == DXVK_SOURCE_SAREK)) return 0;
     }
     if (p->settings.d3d != LAUNCHER_D3D_WINE && !prepare_program_graphics( l, p )) return 0;
+#ifdef WINE_NX_FEX
+    /* A program set to Carafe's FEX build with none on the card gets the
+     * newest release, as one set to a DXVK that is not installed does. The
+     * runtime puts it in system32 when the program starts (fex_build.h). */
+    if (p->machine == 0x014c && p->settings.fex && p->settings.fex_carafe)
+    {
+        char fex[32];
+
+        strcpy( fex, p->settings.fex_version );
+        if (!launcher_graphics_ensure_fex( l->graphics, fex )) return 0;
+    }
+#endif
     p->missing = 0;
     p->launched_order = l->catalog.next_order++;
     save_library( l );
@@ -2244,18 +2257,20 @@ static void box64_options_menu( struct launcher *l, struct program *p )
     }
 }
 
-static int fex_configured_count( const struct launcher_kv *kv, int advanced )
+/* carafe: the program runs on the FEX build with Carafe's patches, the only
+ * one that is given the options marked as its own. */
+static int fex_configured_count( const struct launcher_kv *kv, int advanced, int carafe )
 {
     char value[64];
     int count = 0, i;
 
     for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
-        if (nx_fex_options[i].advanced == advanced &&
+        if (nx_fex_options[i].advanced == advanced && (carafe || !nx_fex_option_carafe( nx_fex_options + i )) &&
             launcher_kv_get( kv, nx_fex_options[i].name, value, sizeof(value) )) count++;
     return count;
 }
 
-static void fex_options_status( const char *path, char *value, size_t size )
+static void fex_options_status( const char *path, int carafe, char *value, size_t size )
 {
     struct launcher_kv kv;
     int count;
@@ -2265,7 +2280,7 @@ static void fex_options_status( const char *path, char *value, size_t size )
         snprintf( value, size, "File too large" );
         return;
     }
-    count = fex_configured_count( &kv, 0 ) + fex_configured_count( &kv, 1 );
+    count = fex_configured_count( &kv, 0, carafe ) + fex_configured_count( &kv, 1, carafe );
     if (count) snprintf( value, size, "%d flag%s set", count, count == 1 ? "" : "s" );
     else snprintf( value, size, "Default" );
 }
@@ -2288,13 +2303,13 @@ static int fex_option_value( const struct launcher_kv *kv, const struct nx_fex_o
 }
 
 static int fex_option_rows( struct ui_row *rows, int *ids, int count,
-                            const struct launcher_kv *kv, int advanced )
+                            const struct launcher_kv *kv, int advanced, int carafe )
 {
     int i;
 
     for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
     {
-        if (nx_fex_options[i].advanced != advanced) continue;
+        if (nx_fex_options[i].advanced != advanced || (!carafe && nx_fex_option_carafe( nx_fex_options + i ))) continue;
         ids[count] = i;
         snprintf( rows[count].label, sizeof(rows[count].label), "%s", nx_fex_options[i].name );
         fex_option_value( kv, nx_fex_options + i, rows[count].value, sizeof(rows[count].value) );
@@ -2314,6 +2329,7 @@ static void fex_options_menu( struct launcher *l, struct program *p )
     struct launcher_kv kv;
     char path[768];
     int count, expanded = 0, i;
+    const int carafe = p->machine == 0x014c && p->settings.fex_carafe;
 
     if (!launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) ||
         !launcher_kv_load( &kv, path ))
@@ -2329,8 +2345,8 @@ static void fex_options_menu( struct launcher *l, struct program *p )
         int current, next, set;
 
         memset( rows, 0, sizeof(rows) );
-        count = fex_option_rows( rows, ids, 0, &kv, 0 );
-        set = fex_configured_count( &kv, 1 );
+        count = fex_option_rows( rows, ids, 0, &kv, 0, carafe );
+        set = fex_configured_count( &kv, 1, carafe );
         ids[count] = -1;
         snprintf( rows[count].label, sizeof(rows[count].label), "Advanced flags" );
         snprintf( rows[count].value, sizeof(rows[count].value), expanded ? "Hide (%d set)" : "Show (%d set)", set );
@@ -2338,7 +2354,7 @@ static void fex_options_menu( struct launcher *l, struct program *p )
         rows[count].kind = UI_ROW_DROPDOWN;
         rows[count].on = expanded;
         count++;
-        if (expanded) count = fex_option_rows( rows, ids, count, &kv, 1 );
+        if (expanded) count = fex_option_rows( rows, ids, count, &kv, 1, carafe );
         action = ui_list_run( &l->ui, &list, "FEX options", p->title, rows, count, 1 );
         if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return;
         i = ids[list.selection];
@@ -2483,6 +2499,23 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             row->choices = 2;
             snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
         }
+        /* Only the FEX of 32-bit programs has a Carafe build (carafe/dlls). */
+        if (x86 && p->settings.fex)
+        {
+            struct dxvk_version fex = {0};
+
+            if (p->settings.fex_carafe)
+                dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, l->options->runtime_dir, p->machine,
+                                      p->settings.fex_version, &fex );
+            ADD_ROW( ROW_FEX_BUILD, SECTION_EMULATION, "FEX build",
+                     "Autorun is the FEX that comes with the Windows DLLs. Carafe is the same FEX with Carafe's "
+                     "patches, downloaded from this Autorun's releases; FEX options then lists what only it reads." );
+            row->kind = UI_ROW_DROPDOWN;
+            row->download = p->settings.fex_carafe && !fex.installed;
+            if (!p->settings.fex_carafe) snprintf( row->value, sizeof(row->value), "Autorun" );
+            else snprintf( row->value, sizeof(row->value), "Carafe %s",
+                           fex.installed ? fex.version : "Not installed" );
+        }
 #endif
         ADD_ROW( ROW_FOUR_CORES, SECTION_EMULATION, "4-core support",
                  l->options->four_cores_available
@@ -2567,13 +2600,15 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             {
                 ADD_ROW( ROW_DXVK_VERSION, SECTION_GRAPHICS, "DXVK version",
                          p->settings.d3d == LAUNCHER_D3D_DXVK_VKD3D ?
-                         "Choose an Official or GPLAsync release, version 2.1 or newer." :
-                         "Choose an Official, Sarek or GPLAsync release." );
+                         "Choose an Official, GPLAsync or Carafe release, version 2.1 or newer." :
+                         "Choose an Official, Sarek, GPLAsync or Carafe release. Carafe is DXVK with Carafe's "
+                         "patches, downloaded from this Autorun's releases." );
                 row->kind = UI_ROW_DROPDOWN;
                 row->download = !dxvk_ready;
                 snprintf( row->value, sizeof(row->value), "%s %s",
                           p->settings.dxvk_source == DXVK_SOURCE_SAREK ? "Sarek" :
-                          p->settings.dxvk_source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" : "Official",
+                          p->settings.dxvk_source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" :
+                          p->settings.dxvk_source == DXVK_SOURCE_CARAFE ? "Carafe" : "Official",
                           !dxvk_ready ? "Not installed" : dxvk.version[0] ? dxvk.version : "Bundled" );
                 ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "DXVK HUD",
                          "FPS shows only the frame rate. Compact shows the DirectX version, FPS and frame times. "
@@ -2688,7 +2723,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             ADD_ROW( ROW_FEX, SECTION_EMULATION, "FEX options",
                      "Per-game performance and compatibility flags for the FEX translator." );
             if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ))
-                fex_options_status( path, row->value, sizeof(row->value) );
+                fex_options_status( path, x86 && p->settings.fex_carafe, row->value, sizeof(row->value) );
             else snprintf( row->value, sizeof(row->value), "Unavailable" );
         }
 
@@ -2899,6 +2934,19 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             save_program_settings( l, p );
             break;
         }
+
+        case ROW_FEX_BUILD:
+            if (action == UI_ACTION_RESET)
+            {
+                p->settings.fex_carafe = 0;
+                p->settings.fex_version[0] = 0;
+                save_program_settings( l, p );
+            }
+            else if (action == UI_ACTION_CHOOSE &&
+                     launcher_graphics_select_fex( l->graphics, &list, &p->settings.fex_carafe,
+                                                   p->settings.fex_version ))
+                save_program_settings( l, p );
+            break;
 #endif
         case ROW_FOUR_CORES:
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
@@ -4466,6 +4514,21 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     if (!autorun_install_finish( options->runtime_dir ))
         ui_toast( &l->ui, "The update recovery files could not be cleared.", 5000 );
     l->update = launcher_update_create( &l->ui, options->runtime_dir, options->schedule_restart );
+    /* A program on Carafe's FEX build left that build in system32, where the
+     * Windows DLLs check that starts next would take it for a file to replace:
+     * the DLL repository's goes back first, and the next such program puts its
+     * own there again. */
+    switch (wine_nx_fex_build_select( options->runtime_dir, NULL, NULL ))
+    {
+    case FEX_BUILD_NO_STOCK:
+        launcher_log( "[LAUNCHER] system32 holds Carafe's FEX build and no copy of the stock one is kept; "
+                      "Settings > System > Windows DLLs brings it back" );
+        break;
+    case FEX_BUILD_IO:
+        launcher_log( "[LAUNCHER] the stock FEX could not be put back in system32" );
+        break;
+    default: break;
+    }
     l->dlls = launcher_dlls_create( &l->ui, options->runtime_dir );
     l->fixes = launcher_fixes_create( &l->ui, options->runtime_dir );
     l->graphics = launcher_graphics_create( &l->ui, options->runtime_dir );

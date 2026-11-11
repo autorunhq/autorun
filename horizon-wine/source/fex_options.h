@@ -27,6 +27,21 @@ enum nx_fex_option_id
     NX_FEX_HIDE_HYBRID,
     NX_FEX_L1_INCREASE,
     NX_FEX_L1_DECREASE,
+    /* From here on, what only the FEX build with Carafe's patches reads, or
+     * what only it makes work here (carafe/dlls/fex). */
+    NX_FEX_DISK_CACHE,
+    NX_FEX_CARAFE_FIRST = NX_FEX_DISK_CACHE,
+    NX_FEX_DISK_CACHE_MAPPING,
+    NX_FEX_X87_CONVERSION_ROUNDING,
+    NX_FEX_X87_FAST_STACK,
+    NX_FEX_X87_SINGLE_PRECISION,
+    NX_FEX_GDB_SYMBOLS,
+    NX_FEX_FLAGS_WITHOUT_FLAGM,
+    NX_FEX_INDIRECT_CALL_CACHE,
+    NX_FEX_BRIDGE_RETURN,
+    NX_FEX_JUMP_TABLES,
+    NX_FEX_COMPACT_RETURNS,
+    NX_FEX_SLIM_RETURN_POINTS,
     NX_FEX_OPTION_COUNT
 };
 
@@ -102,6 +117,43 @@ static const struct nx_fex_option nx_fex_options[NX_FEX_OPTION_COUNT] =
     { NX_FEX_L1_DECREASE, "FEX_DYNAMICL1CACHEDECREASECOUNTHEURISTIC",
       "Lookup-rate threshold for shrinking the dynamic L1 cache. Higher values reclaim memory more aggressively.",
       1, 2, 5, { "10", "25", "50", "100", "200" }, { "10", "25", "50", "100", "200" } },
+    /* The defaults are Carafe's: FEX itself has each of its own options off. */
+    { NX_FEX_DISK_CACHE, "FEX_DISKCACHE",
+      "Keeps translated code on disk and reuses it on the next start instead of translating it again.",
+      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_DISK_CACHE_MAPPING, "FEX_DISKCACHEFILEMAPPING",
+      "Maps disk cache files into memory instead of reading them. Horizon's unix side has no file mapping.",
+      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_X87_CONVERSION_ROUNDING, "FEX_X87CONVERSIONROUNDING",
+      "With reduced x87 precision, rounding mode changes apply only to float to integer conversions, without touching the host rounding mode.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_X87_FAST_STACK, "FEX_X87FASTSTACK",
+      "Keeps x87 registers of earlier blocks out of the slow path and writes back only what a block changed.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_X87_SINGLE_PRECISION, "FEX_X87SINGLEPRECISION",
+      "With reduced x87 precision, computes x87 math in 32-bit floats, as Direct3D 9 games set the precision to.",
+      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_GDB_SYMBOLS, "FEX_GDBSYMBOLS",
+      "Records every x86 instruction in each translated block's address map, so the profiler names each one. The code is the same.",
+      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_FLAGS_WITHOUT_FLAGM, "FEX_FLAGSWITHOUTFLAGM",
+      "On CPUs without FlagM, spends fewer instructions on x86 flags.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_INDIRECT_CALL_CACHE, "FEX_INDIRECTCALLCACHE",
+      "Each indirect call keeps the first target it reaches, so calls to it skip the lookup table.",
+      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_BRIDGE_RETURN, "FEX_BRIDGERETURN",
+      "The system-call and unix-call bridge leaves as a return, so the call-return stack stays in step.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_JUMP_TABLES, "FEX_JUMPTABLES",
+      "A switch jumps straight to its cases inside the translated block instead of through the lookup table.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_COMPACT_RETURNS, "FEX_COMPACTRETURNS",
+      "Returns keep their rarely used lookup outside the hot code, so more of it fits the instruction cache.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+    { NX_FEX_SLIM_RETURN_POINTS, "FEX_SLIMRETURNPOINTS",
+      "The code after a call skips storing its block's header; faults and the profiler find the block themselves.",
+      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
 };
 
 static inline int nx_fex_option_choice( const struct nx_fex_option *option, const char *value )
@@ -112,6 +164,13 @@ static inline int nx_fex_option_choice( const struct nx_fex_option *option, cons
     for (i = 0; i < option->value_count; i++)
         if (!strcasecmp( option->values[i], value )) return i;
     return -1;
+}
+
+/* A program on the stock FEX is neither shown nor given these: it knows three
+ * of them by name and has none of the code behind them here. */
+static inline int nx_fex_option_carafe( const struct nx_fex_option *option )
+{
+    return option->id >= NX_FEX_CARAFE_FIRST;
 }
 
 static inline const char *nx_fex_option_default( const struct nx_fex_option *option )

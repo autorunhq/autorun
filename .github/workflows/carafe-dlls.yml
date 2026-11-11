@@ -8,8 +8,11 @@ name: carafe dlls
 # in carafe/dlls/versions.txt.
 #
 # It runs when what it builds from changes, or from the Actions tab. A version
-# that is already released has its archive replaced, so raise the version in
-# versions.txt for a card to see that there is something new.
+# that is already released keeps its archive: a card may hold that release's
+# digest from the last time it looked, and would refuse another file under the
+# same name. So raise the version in versions.txt for a new build to be
+# published. Only a run started by hand with "replace" swaps the archive of a
+# released version.
 
 on:
   push:
@@ -21,6 +24,11 @@ on:
       - 'horizon-wine/fex/**'
       - '.github/workflows/carafe-dlls.yml'
   workflow_dispatch:
+    inputs:
+      replace:
+        description: Replace the archive of a version that is already released
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -90,12 +98,17 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPLACE: ${{ inputs.replace }}
         run: |
           version="$(python3 carafe/dlls/package.py fex-version)"
           tag="fex-carafe-$version"
           asset="$RUNNER_TEMP/out/$tag.tar.gz"
-          notes="FEX-2609 for 32-bit programs with Carafe's patches (carafe/dlls/fex), built from $GITHUB_SHA. Autorun's launcher downloads it: a game's settings, CPU, FEX build."
+          notes="FEX-2609 for 32-bit programs with Carafe's patches (carafe/dlls/fex), built from $GITHUB_SHA. Autorun's launcher downloads it: Game Settings, Emulation, FEX build, Carafe (32-bit programs on FEX)."
           if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$REPLACE" != true ]; then
+              echo "::notice::$tag is already released and keeps its archive; raise the version in carafe/dlls/versions.txt to publish this build"
+              exit 0
+            fi
             gh release upload "$tag" "$asset" --clobber
             gh release edit "$tag" --notes "$notes"
           else
@@ -161,12 +174,17 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPLACE: ${{ inputs.replace }}
         run: |
           version="$(python3 carafe/dlls/package.py dxvk-version)"
           tag="dxvk-carafe-$version"
           asset="$RUNNER_TEMP/out/$tag.tar.gz"
-          notes="DXVK 3.1.1 with Carafe's patches (carafe/dlls/dxvk), built from $GITHUB_SHA. Autorun's launcher downloads it: a game's settings, DXVK source, Carafe."
+          notes="DXVK 3.1.1 with Carafe's patches (carafe/dlls/dxvk), built from $GITHUB_SHA. Autorun's launcher downloads it: Game Settings, Graphics, DXVK version, DXVK Carafe."
           if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$REPLACE" != true ]; then
+              echo "::notice::$tag is already released and keeps its archive; raise the version in carafe/dlls/versions.txt to publish this build"
+              exit 0
+            fi
             gh release upload "$tag" "$asset" --clobber
             gh release edit "$tag" --notes "$notes"
           else
@@ -174,3 +192,23 @@ jobs:
               --title "DXVK, Carafe build $version" --notes "$notes"
           fi
           echo "::notice::released $tag"
+
+  launcher:
+    name: the launcher takes them
+    # What was just released, listed, downloaded and installed by the
+    # launcher's own code (horizon-wine/tests/carafe_dlls.c): the release list
+    # it reads, the names it looks for, GitHub's digest, the archive's layout
+    # and the machine of each DLL.
+    needs: [fex, dxvk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: curl, zstd and zlib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libzstd-dev zlib1g-dev
+
+      - name: Download and install
+        run: python3 horizon-wine/tests/check_carafe_dlls.py --live

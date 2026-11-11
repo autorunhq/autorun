@@ -82,6 +82,27 @@ static void test_settings( const char *dir )
     load_text( &kv, "four-cores=unknown\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.four_cores );
+    /* The FEX build of 32-bit programs: Autorun's unless the file says Carafe's. */
+    assert( !settings.fex_carafe && !settings.fex_version[0] );
+    load_text( &kv, "fex-build=carafe\nfex-version=2609-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex && settings.fex_carafe && !strcmp( settings.fex_version, "2609-1" ) );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=carafe\n" ) && strstr( kv.text, "fex-version=2609-1\n" ) );
+    settings.fex_version[0] = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=carafe\n" ) && !strstr( kv.text, "fex-version" ) );
+    settings.fex_carafe = 0;
+    strcpy( settings.fex_version, "2609-1" );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "fex-build" ) && !strstr( kv.text, "fex-version" ) );
+    /* A version without the build, or one that is not a version, is not kept. */
+    load_text( &kv, "fex-version=2609-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fex_carafe && !settings.fex_version[0] );
+    load_text( &kv, "fex-build=carafe\nfex-version=../../x\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe && !settings.fex_version[0] );
     load_text( &kv, "cpu=box64\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.fex );
@@ -149,6 +170,11 @@ static void test_settings( const char *dir )
     launcher_settings_read( &kv, &settings );
     assert( settings.dxvk_source == DXVK_SOURCE_GPLASYNC && !strcmp( settings.dxvk_version, "3.1.1-1" ) );
     assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "dxvk-source=gplasync\n" ) );
+    load_text( &kv, "d3d=dxvk+vkd3d\ndxvk-source=carafe\ndxvk-version=3.1.1-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.d3d == LAUNCHER_D3D_DXVK_VKD3D && settings.dxvk_source == DXVK_SOURCE_CARAFE &&
+            !strcmp( settings.dxvk_version, "3.1.1-1" ) );
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "dxvk-source=carafe\n" ) );
     load_text( &kv, "dxvk-source=sarek\ndxvk-version=1.13.0\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.d3d == LAUNCHER_D3D_DXVK && settings.dxvk_source == DXVK_SOURCE_SAREK &&
@@ -173,6 +199,9 @@ static void test_settings( const char *dir )
     assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_OFFICIAL ), "dxvk64" ) );
     assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_SAREK ), "dxvk-sarek" ) );
     assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_GPLASYNC ), "dxvk-gplasync64" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_CARAFE ), "dxvk-carafe" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_CARAFE ), "dxvk-carafe64" ) );
+    assert( launcher_dxvk_vkd3d_compatible( DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
     assert( !launcher_dxvk_directory( 0xaa64, DXVK_SOURCE_OFFICIAL ) &&
             !launcher_dxvk_directory( 0, DXVK_SOURCE_OFFICIAL ) );
     assert( LAUNCHER_HUD_COUNT == 4 );

@@ -162,6 +162,25 @@ The touchscreen works everywhere too.
 a [SteamGridDB](https://www.steamgriddb.com) API key for artwork, returning to
 Autorun when a game ends, updates, the Windows DLLs, and the credits.
 
+### Carafe's builds of DXVK and FEX
+
+Two downloads come from this repository's own releases instead of the projects
+that make them: DXVK and FEX with [Carafe](https://github.com/carafe-nx/carafe)'s
+patches. Both are in a game's options and neither is on by default.
+
+- **Graphics, DXVK version, DXVK Carafe** lists the releases and installs the
+  one you pick, as the other DXVK sources do. **DXVK options** then also shows
+  what only this build reads (background pipeline compilation, the Direct3D 9
+  front end and effect threads, the frame limiter's methods).
+- **Emulation, FEX build, Carafe** does the same for FEX. It is there for 32-bit
+  games set to FEX; 64-bit games keep Autorun's FEX. **FEX options** then also
+  shows what only this build reads. Choosing **Autorun** again, or pressing the
+  reset button on the row, goes back.
+
+They are built by the `carafe dlls` workflow from `carafe/dlls`; a fork that
+builds its own has to name itself in `WINE_NX_CARAFE_DLLS_REPO`
+(`horizon-wine/source/dxvk_releases.h`).
+
 ### Frame generation
 
 LSFG-VK doubles the frame rate of Vulkan games (DXVK and VKD3D-Proton count) by

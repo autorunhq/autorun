@@ -39,6 +39,7 @@
 #include "games/left4dead.h"
 #include "games/ff7remake.h"
 #include "fex_options.h"
+#include "fex_build.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
 #include "config_json.h"
@@ -593,6 +594,11 @@ int wine_nx_runtime_verbose;
 static enum launcher_d3d_renderer runtime_d3d;
 static enum dxvk_source runtime_dxvk_source;
 static int runtime_fex;
+/* The program asked for the FEX build with Carafe's patches, of this version
+ * or the newest on the card; and whether it is the one in system32. */
+static int runtime_fex_carafe;
+static char runtime_fex_version[32];
+static int runtime_fex_carafe_active;
 static int runtime_four_cores;
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
@@ -2418,6 +2424,7 @@ static size_t runtime_fex_environment( const char *target, char *buffer, size_t 
         const char *value = nx_fex_option_default( option );
         int length;
 
+        if (nx_fex_option_carafe( option ) && !runtime_fex_carafe_active) continue;
         if (launcher_kv_get( &kv, option->name, configured, sizeof(configured) ) &&
             nx_fex_option_choice( option, configured ) >= 0) value = configured;
         length = snprintf( buffer + used, size - used, "%s=%s", option->name, value );
@@ -5002,6 +5009,8 @@ int main( int argc, char **argv )
         runtime_d3d = LAUNCHER_D3D_DXVK;
         runtime_dxvk_source = DXVK_SOURCE_OFFICIAL;
         runtime_dxvk_hud = 0;
+        runtime_fex_carafe = runtime_fex_carafe_active = 0;
+        runtime_fex_version[0] = 0;
 #ifdef WINE_NX_FEX
         runtime_fex = 1;
 #else
@@ -5028,6 +5037,8 @@ int main( int argc, char **argv )
             wine_nx_lazy_file_views = settings.lazy_file_views;
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
+            runtime_fex_carafe = settings.fex_carafe;
+            memcpy( runtime_fex_version, settings.fex_version, sizeof(runtime_fex_version) );
 #endif
             runtime_four_cores = settings.four_cores;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
@@ -5156,6 +5167,51 @@ int main( int argc, char **argv )
                                  WINE_SYSTEM_DIR "/libarm64ecfex.dll" :
                                  WINE_SYSTEM_DIR "/libwow64fex.dll";
 
+        /* wow64.dll loads its CPU module by name from system32, so the build
+         * this program is set to has to be the file there before it starts.
+         * Carafe's build is for 32-bit programs; a 64-bit one gets the stock
+         * file back, which is what a 32-bit program it starts will load. */
+        {
+            struct dxvk_version fex = {0};
+            char carafe[896] = "";
+            int changed = 0;
+
+            if (runtime_fex_carafe && target_machine == IMAGE_FILE_MACHINE_I386)
+            {
+                dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, RUNTIME_DIR, target_machine, runtime_fex_version, &fex );
+                if (!fex.installed ||
+                    !dxvk_release_path( DXVK_BACKEND_FEX_CARAFE, RUNTIME_DIR, target_machine, fex.version,
+                                        carafe, sizeof(carafe) - sizeof("/libwow64fex.dll") ))
+                {
+                    log_line( "[FEX] Carafe build %s is not installed; using the stock FEX",
+                              runtime_fex_version[0] ? runtime_fex_version : "(newest)" );
+                    carafe[0] = 0;
+                }
+                else strcat( carafe, "/libwow64fex.dll" );
+            }
+            switch (wine_nx_fex_build_select( RUNTIME_DIR, carafe[0] ? carafe : NULL, &changed ))
+            {
+            case FEX_BUILD_CARAFE:
+                runtime_fex_carafe_active = 1;
+                log_line( "[FEX] Carafe build %s%s", fex.version, changed ? " put in system32" : "" );
+                break;
+            case FEX_BUILD_STOCK:
+                if (changed) log_line( "[FEX] stock build put back in system32" );
+                break;
+            case FEX_BUILD_NO_CARAFE:
+                log_line( "[FEX] Carafe build %s cannot be read; system32's FEX is used as it is", fex.version );
+                break;
+            case FEX_BUILD_NO_STOCK:
+                /* The options that are Carafe's stay off: which Carafe build
+                 * this is was not this program's choice. */
+                log_line( "[FEX] no copy of the stock FEX is kept; a Carafe build stays in system32. "
+                          "Settings > System > Windows DLLs brings the stock one back" );
+                break;
+            case FEX_BUILD_IO:
+                log_line( "[FEX] the FEX build in system32 could not be changed; it is used as it is" );
+                break;
+            }
+        }
         if ((target_machine != IMAGE_FILE_MACHINE_AMD64 && target_machine != IMAGE_FILE_MACHINE_I386) ||
             access( cpu_module, R_OK ))
         {
@@ -5181,7 +5237,7 @@ int main( int argc, char **argv )
 #endif
     }
     log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
-                         runtime_fex ? "FEX-2609" : "Box64" );
+                         !runtime_fex ? "Box64" : runtime_fex_carafe_active ? "FEX-2609 (Carafe)" : "FEX-2609" );
 #ifdef WINE_NX_AMD64
     if (target_machine == IMAGE_FILE_MACHINE_AMD64)
     {

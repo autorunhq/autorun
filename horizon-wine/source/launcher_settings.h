@@ -186,6 +186,10 @@ struct launcher_settings
     int profile;      /* the sampling profiler */
     int fast_sync;
     int fex;
+    /* Which FEX a 32-bit program runs on: 0 the DLL repository's, 1 the one
+     * with Carafe's patches, of fex_version or the newest installed. */
+    int fex_carafe;
+    char fex_version[32];
     int four_cores;
     int lazy_file_views;  /* views of files read from the card on demand */
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
@@ -282,7 +286,8 @@ static inline const char *launcher_dxvk_directory( unsigned short machine, enum 
     {
         { "dxvk", "dxvk64" },
         { "dxvk-sarek", "dxvk-sarek64" },
-        { "dxvk-gplasync", "dxvk-gplasync64" }
+        { "dxvk-gplasync", "dxvk-gplasync64" },
+        { "dxvk-carafe", "dxvk-carafe64" }
     };
 
     if (source < 0 || source >= DXVK_SOURCE_COUNT) return NULL;
@@ -316,7 +321,7 @@ static inline int launcher_dxvk_vkd3d_compatible( enum dxvk_source source, const
     char *end, *minor_start;
     unsigned long major, minor;
 
-    if ((source != DXVK_SOURCE_OFFICIAL && source != DXVK_SOURCE_GPLASYNC) ||
+    if ((source != DXVK_SOURCE_OFFICIAL && source != DXVK_SOURCE_GPLASYNC && source != DXVK_SOURCE_CARAFE) ||
         !launcher_dxvk_version_valid( version )) return 0;
     major = strtoul( version, &end, 10 );
     if (end == version || *end != '.') return 0;
@@ -407,6 +412,11 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->profile = launcher_setting_state( kv, "profile" );
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = !launcher_kv_get( kv, "cpu", value, sizeof(value) ) || strcasecmp( value, "box64" );
+    settings->fex_carafe = launcher_kv_get( kv, "fex-build", value, sizeof(value) ) && !strcasecmp( value, "carafe" );
+    settings->fex_version[0] = 0;
+    if (settings->fex_carafe && launcher_kv_get( kv, "fex-version", value, sizeof(value) ) &&
+        launcher_dxvk_version_valid( value ))
+        memcpy( settings->fex_version, value, strlen( value ) + 1 );
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
     settings->framebuffer = -1;
@@ -433,6 +443,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     {
         if (!strcasecmp( value, "sarek" )) settings->dxvk_source = DXVK_SOURCE_SAREK;
         else if (!strcasecmp( value, "gplasync" )) settings->dxvk_source = DXVK_SOURCE_GPLASYNC;
+        else if (!strcasecmp( value, "carafe" )) settings->dxvk_source = DXVK_SOURCE_CARAFE;
     }
     settings->vkd3d_version[0] = 0;
     if (launcher_kv_get( kv, "vkd3d-version", value, sizeof(value) ) && launcher_dxvk_version_valid( value ))
@@ -500,6 +511,9 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "profile", states[settings->profile + 1] ) &&
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
+           launcher_kv_set( kv, "fex-build", settings->fex_carafe ? "carafe" : NULL ) &&
+           launcher_kv_set( kv, "fex-version", settings->fex_carafe && settings->fex_version[0] ?
+                            settings->fex_version : NULL ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
@@ -512,7 +526,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "d3d", settings->d3d == LAUNCHER_D3D_WINE ? "wine" :
                             settings->d3d == LAUNCHER_D3D_DXVK_VKD3D ? "dxvk+vkd3d" : NULL ) &&
            launcher_kv_set( kv, "dxvk-source", settings->dxvk_source == DXVK_SOURCE_SAREK ? "sarek" :
-                            settings->dxvk_source == DXVK_SOURCE_GPLASYNC ? "gplasync" : NULL ) &&
+                            settings->dxvk_source == DXVK_SOURCE_GPLASYNC ? "gplasync" :
+                            settings->dxvk_source == DXVK_SOURCE_CARAFE ? "carafe" : NULL ) &&
            launcher_kv_set( kv, "vkd3d-version", settings->vkd3d_version[0] ? settings->vkd3d_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-version", settings->dxvk_version[0] ? settings->dxvk_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-hud", settings->dxvk_hud ? launcher_hud_values[settings->dxvk_hud] : NULL ) &&

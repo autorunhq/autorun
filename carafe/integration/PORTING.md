@@ -69,7 +69,7 @@ Each stage is one or a few commits, checked on the host and built by the
 | 2 | Diagnostics: `carafe_diag.c`, the event ring and connection table in `horizon.c`, `[BUDGET]` and `[SERVED]`, the alert table in `sync.c`, the stall report on request, `carafe_waits.c`, `carafe_mesa.c`, the fd queue report | next |
 | 3 | The profiler: x86 names of the code FEX runs, the busiest translated blocks, FEX time outside blocks, stages by call chain (`thread_profile.c`, +536 lines) | |
 | 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | |
-| 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | needs a DLL repository of this fork |
+| 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
 | 6 | The server thread pool (`0023`): one thread per Windows thread instead of two | after an audit of every wait inside a server request |
 | 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | |
 
@@ -103,17 +103,66 @@ unix calls in `media_unix.c` is indexed by the names in
 `dlls/winegstreamer/unixlib.h`, which is the same file here as at Carafe's base,
 so the two halves agree as long as that DLL was built from this header.
 
-### Stage 5, looked at ahead
+### Stage 5: FEX and DXVK, done
 
-FEX is pinned to the same revision (`395b132`, FEX-2609) by Carafe, by this
-repository's `horizon-wine/fex/horizon.patch` and by the DLL repository. On that
-revision with this repository's `horizon.patch` applied, 23 of Carafe's 25 FEX
-patches apply cleanly. The other two, `0023` (thread state in virtual memory)
-and `0024` (locked instructions are full barriers), are already inside
-`horizon.patch`: `git apply -R --check` accepts both. So no FEX patch needs
-porting by hand; what stage 5 needs is somewhere to build and publish the
-result. DXVK is pinned to the same revision (`b1a1c99`) by Carafe and by the DLL
-repository; Carafe's 22 DXVK patches were not applied here.
+Carafe builds two Windows modules differently from the DLL repository: FEX and
+DXVK. Neither is in the card archive. The `carafe dlls` workflow builds them
+from `carafe/dlls` and publishes each as a release of this repository, and the
+launcher lists, downloads and installs those releases with the code that
+already does it for DXVK, Sarek, GPLAsync and VKD3D-Proton.
+
+| What | Where |
+|---|---|
+| Carafe's 25 FEX and 22 DXVK patches, the pins, the build scripts and the packer | `carafe/dlls/` |
+| The build and the releases `fex-carafe-<version>` and `dxvk-carafe-<version>`, each holding `<tag>.tar.gz`; then the launcher's own code downloads and installs what was released | `.github/workflows/carafe-dlls.yml` |
+| Two more release sources, in the repository named by `WINE_NX_CARAFE_DLLS_REPO`. Its releases are told apart by what their tags begin with. FEX's archive has one folder, and its DLL is an ARM64 one | `horizon-wine/source/dxvk_releases.c`, `.h` |
+| **Game Settings, Graphics, DXVK version, DXVK Carafe**; `dxvk-source=carafe` in a program's settings; installed in `drive_c/dxvk-carafe` and `dxvk-carafe64` | `launcher_graphics.c`, `launcher_settings.h`, `launcher.c` |
+| **Game Settings, Emulation, FEX build** (32-bit programs on FEX): Autorun or Carafe; `fex-build=carafe` and `fex-version=`; installed in `drive_c/fex-carafe/versions` | `launcher_graphics.c`, `launcher_settings.h`, `launcher.c` |
+| The FEX a program is set to is the file in system32 when it starts, and the stock one is back when the launcher opens | `horizon-wine/source/fex_build.c`, `runtime.c`, `launcher.c` |
+| The ten DXVK options only Carafe's build reads (patches `0060`, `0068`–`0071`, `0082`), shown and written for that source only | `horizon-wine/source/dxvk_options.c` |
+| The twelve FEX options (patches `0051`, `0054`, `0056`, `0057`, `0059`, `0073`–`0075`, `0077`), the same rows and defaults as Carafe's, shown and passed only to Carafe's build | `horizon-wine/source/fex_options.h` |
+
+How the FEX build gets used. `wow64.dll` loads its CPU module by one name from
+one place, `system32\libwow64fex.dll`, and that file is the DLL repository's.
+So when a 32-bit program starts on FEX, the runtime makes system32 hold the
+build that program is set to: the first time a Carafe build goes in, the stock
+DLL is copied to `drive_c/fex-carafe/stock-libwow64fex.dll`, and
+`drive_c/fex-carafe/in-system32.txt` records which Carafe DLL stands in. When
+the launcher opens, the stock DLL goes back before the Windows DLLs check runs,
+so that check never finds a file it would want to replace. If a DLL update
+replaces the file anyway, what is in system32 no longer matches the record and
+is taken for the stock DLL, which it is.
+
+The options. FEX has each of Carafe's nine switches off unless told otherwise,
+and three more (`DiskCache`, `DiskCacheFileMapping`, `GDBSymbols`) exist in
+stock FEX by name without the code behind them here. A program on the stock FEX
+is therefore neither shown nor given any of the twelve. DXVK's
+`dxvk.shaderCompilationMethod` is a second row beside Sarek's of the same name,
+with Carafe's default (`async`); Sarek's keeps its own (`dyasync`).
+
+Checked on the host: `tests/carafe_dlls.c` (the release list in the shape
+GitHub gives for this repository, an archive packed as `package.py` packs one,
+which versions count as installed, and every way system32 changes hands:
+first use, another Carafe build, back to stock, a DLL update in between, a
+removed release, no stock copy), `tests/dxvk_releases.c`,
+`tests/dxvk_options.c`, `tests/fex_options.c`, `tests/launcher_settings.c`.
+`launcher.c` and `launcher_graphics.c` compile against SDL's headers.
+Checked by the workflows: both DLL sets build; `package.py` refuses a FEX that
+imports anything but `ntdll.dll` and `wow64.dll` or lacks a `BTCpu` export that
+`dlls/wow64/syscall.c` asks for; and `tests/carafe_dlls.c live` downloads and
+installs the real releases with the launcher's code.
+
+Not checked, because it needs a console: that a game runs on either build, the
+menu rows on the screen, and what the options do to a game.
+
+Still open in stage 5:
+
+| What | Why not yet |
+|---|---|
+| FEX for 64-bit programs (`libarm64ecfex.dll`) | Carafe's patch set is built here for `wow64fex` only; the ARM64EC target was not tried |
+| `carafe_fex_stats.c` and the area FEX keeps its counters in (`0066`, `0067`) | The reader belongs to the diagnostics of stage 2. Without it the two unix calls answer "not supported", as they do for the stock FEX |
+| Carafe's DXVK as the system Direct3D (`0105`, `0133`) | Here it is a source like the others, in a folder put in front of system32, which is what this fork does for every DXVK |
+| dxwrapper, Wine Mono, the WinRT classes, patch `0006` | Each needs Windows DLLs other than these two |
 
 ## Left out, and why
 
@@ -180,38 +229,38 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0046 | compositor menu layer blends | 3 | 100 % | in the fork |
 | 0049 | registry tells carafe when loaded and can be changed | 77 | 100 % | in the fork |
 | 0050 | profiler names the x86 code fex runs | 71 | 2 % | stage 3 (profiler) |
-| 0051 | fex options carry the disk cache | 8 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
+| 0051 | fex options carry the disk cache | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0052 | horizon server grants file locks | 15 | 80 % | in the fork: upstream has its own file locks (HORIZON_REQ_LOCK_FILE 53, UNLOCK_FILE 54) |
 | 0053 | profiler tables hold more addresses | 3 | 100 % | ported in stage 1 |
-| 0054 | fex options carry x87 conversion rounding | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
+| 0054 | fex options carry x87 conversion rounding | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0055 | profiler writes the busiest translated blocks | 91 | 6 % | stage 3 (profiler) |
-| 0056 | fex options carry x87 fast stack and single precision | 8 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
-| 0057 | fex options carry gdb symbols | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
+| 0056 | fex options carry x87 fast stack and single precision | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0057 | fex options carry gdb symbols | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0058 | profiler splits fex time outside blocks | 79 | 6 % | stage 3 (profiler) |
-| 0059 | fex options carry the flag option | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
-| 0060 | dxvk options carry the unchanged state path | 3 | 0 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
+| 0059 | fex options carry the flag option | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0060 | dxvk options carry the unchanged state path | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0061 | horizon aslr region traced once | 5 | 100 % | ported in stage 1 |
 | 0062 | runtime vulkan surfaces share a reserved screen | 18 | 100 % | in the fork |
 | 0063 | runtime profiler asks direct3d 9 for call counts | 5 | 20 % | stage 3 (profiler); the counts come from Carafe's DXVK (stage 5) |
 | 0064 | runtime threads placed by the orchestrator | 68 | 44 % | stage 4 (orchestrator) |
 | 0065 | profiler counts time by the calls near a threads start | 90 | 13 % | stage 3 (profiler) |
-| 0066 | fex gets an area for its thread counters | 24 | 12 % | stage 5 (needs Carafe's FEX build) |
-| 0067 | runtime profiler asks fex for its counters | 4 | 0 % | stage 5 (needs Carafe's FEX build) |
-| 0068 | dxvk options carry the front end thread | 3 | 0 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
-| 0069 | dxvk options carry the effect thread | 3 | 0 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
-| 0070 | dxvk options carry the effect pass merge | 3 | 0 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
-| 0071 | dxvk options carry the managed buffer copies | 3 | 0 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
+| 0066 | fex gets an area for its thread counters | 24 | 12 % | open: stage 2 (the counters' reader is `carafe_fex_stats.c`) |
+| 0067 | runtime profiler asks fex for its counters | 4 | 0 % | open: stage 2 (the counters' reader is `carafe_fex_stats.c`) |
+| 0068 | dxvk options carry the front end thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0069 | dxvk options carry the effect thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0070 | dxvk options carry the effect pass merge | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0071 | dxvk options carry the managed buffer copies | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 0 % | stage 4 (orchestrator) |
-| 0073 | fex options carry the call cache and the bridge return | 8 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
-| 0074 | fex options carry the jump tables | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
-| 0075 | fex options carry compact returns | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
+| 0073 | fex options carry the call cache and the bridge return | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0074 | fex options carry the jump tables | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0075 | fex options carry compact returns | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0076 | profiler finds the block of a pc after a return point | 18 | 5 % | stage 3 (profiler) |
-| 0077 | fex options carry slim return points | 4 | 25 % | stage 5 (FEX options; to be checked one by one against stock FEX and Carafe's FEX patches) |
+| 0077 | fex options carry slim return points | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0078 | virtual large views start on 2mb | 10 | 100 % | in the fork |
 | 0079 | fex options turn jump tables on | 1 | 100 % | in the fork |
 | 0080 | fex options turn compact and slim returns on | 2 | 100 % | in the fork |
 | 0081 | runtime profiler turns fex gdb symbols on | 1 | 0 % | stage 3 (profiler) |
-| 0082 | dxvk options carry sarek choices | 24 | 8 % | stage 5 (DXVK options; to be checked one by one against stock DXVK and Carafe's DXVK patches) |
+| 0082 | dxvk options carry sarek choices | 24 | 8 % | done in stage 5 for the DXVK Carafe source: the two frame limiter rows, the two compiler rows, and `dxvk.shaderCompilationMethod` as a row of its own. Sarek's row keeps its default |
 | 0085 | horizon server window hooks | 277 | 98 % | in the fork but for a few lines; to review |
 | 0087 | wow64 context of another thread waits until it stops | 8 | 37 % | to review |
 | 0088 | win32u counts shown dialogs | 5 | 100 % | in the fork |
@@ -228,7 +277,7 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0100 | win32u the cursor stays on the programs screen | 3 | 100 % | in the fork |
 | 0101 | horizon server clipping moves the cursor inside | 12 | 75 % | in the fork, in upstream's wider form (also after a move); the automatic merge would have added it twice |
 | 0104 | runtime the log is written out before the game closes | 6 | 100 % | in the fork |
-| 0105 | runtime the runtimes own dxvk is the system direct3d | 10 | 0 % | stage 5 (needs Carafe's DXVK build) |
+| 0105 | runtime the runtimes own dxvk is the system direct3d | 10 | 0 % | not taken: Carafe's DXVK is a release source here, in its own folder in front of system32 |
 | 0106 | runtime the screen follows what a window shows last | 35 | 100 % | in the fork |
 | 0107 | vulkan a swapchain gives the screen to gdi drawing | 152 | 86 % | to review |
 | 0108 | winnx a picture the program draws in a window is reported | 25 | 64 % | to review |
@@ -254,7 +303,7 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0130 | xinput the pad state is shared with the hid gamepad | 12 | 83 % | to review |
 | 0131 | runtime the input poll feeds the hid gamepad | 2 | 100 % | in the fork |
 | 0132 | registry volatile keys for devices | 16 | 100 % | in the fork |
-| 0133 | dxvk the build manifest names the system dxvk | 11 | 9 % | stage 5 (needs Carafe's DXVK build) |
+| 0133 | dxvk the build manifest names the system dxvk | 11 | 9 % | not taken: there is no system DXVK to name; an installed release carries its version in its folder |
 | 0135 | runtime a window picture publication event | 20 | 90 % | in the fork but for a few lines; to review |
 | 0136 | horizon sections use separate backing blocks | 73 | 100 % | in the fork |
 | 0136 | sync window picture publication notifies the runtime | 12 | 100 % | in the fork |

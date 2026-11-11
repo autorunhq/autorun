@@ -280,6 +280,7 @@ sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scr
 sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the horizon-dlls checkout: install, resume, verify, update
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
+python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
 ```
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by

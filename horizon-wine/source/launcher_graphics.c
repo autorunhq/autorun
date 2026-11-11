@@ -22,11 +22,11 @@ struct launcher_graphics
 {
     struct ui *ui;
     char root[768];
-    struct graphics_catalog *catalogs[DXVK_SOURCE_COUNT + 1];
+    struct graphics_catalog *catalogs[DXVK_BACKEND_COUNT + 1];
 };
 
-static const char *const source_names[DXVK_SOURCE_COUNT] =
-    { "Official DXVK", "DXVK Sarek", "DXVK Async" };
+static const char *const source_names[DXVK_BACKEND_COUNT] =
+    { "Official DXVK", "DXVK Sarek", "DXVK Async", "DXVK Carafe", "FEX Carafe" };
 
 static const char *backend_name( int vkd3d, enum dxvk_source source )
 {
@@ -84,8 +84,8 @@ static void poll_catalog( struct graphics_catalog *c )
 
 static struct graphics_catalog *open_catalog( struct launcher_graphics *g, int vkd3d, enum dxvk_source source )
 {
-    if (!vkd3d && (source < 0 || source >= DXVK_SOURCE_COUNT)) return NULL;
-    int index = vkd3d ? DXVK_SOURCE_COUNT : source;
+    if (!vkd3d && (source < 0 || source >= DXVK_BACKEND_COUNT)) return NULL;
+    int index = vkd3d ? DXVK_BACKEND_COUNT : source;
     struct graphics_catalog *c = g->catalogs[index];
 
     if (!c)
@@ -124,9 +124,9 @@ void launcher_graphics_destroy( struct launcher_graphics *g )
     int i;
 
     if (!g) return;
-    for (i = 0; i < DXVK_SOURCE_COUNT + 1; i++)
+    for (i = 0; i < DXVK_BACKEND_COUNT + 1; i++)
         if (g->catalogs[i]) SDL_AtomicSet( &g->catalogs[i]->cancel, 1 );
-    for (i = 0; i < DXVK_SOURCE_COUNT + 1; i++)
+    for (i = 0; i < DXVK_BACKEND_COUNT + 1; i++)
     {
         if (!g->catalogs[i]) continue;
         if (g->catalogs[i]->thread) SDL_WaitThread( g->catalogs[i]->thread, NULL );
@@ -141,6 +141,7 @@ struct install_progress
     const struct dxvk_release *release;
     const char *name;
     const char *host;
+    const char *installing;
     enum dxvk_progress_stage stage;
     Uint32 last_draw;
     int started;
@@ -161,7 +162,7 @@ static int install_progress( void *opaque, enum dxvk_progress_stage stage,
     {
     case DXVK_PROGRESS_DOWNLOAD: status = p->host; break;
     case DXVK_PROGRESS_VERIFY: status = "Verifying download..."; current = total = 0; break;
-    default: status = "Installing x86 and x64 files..."; current = total = 0; break;
+    default: status = p->installing; current = total = 0; break;
     }
     snprintf( title, sizeof(title), "Installing %s %s", p->name, p->release->version );
     ui_progress_update( p->ui, title, status, current, total );
@@ -176,6 +177,8 @@ static int install_release( struct launcher_graphics *g, int vkd3d, enum dxvk_so
 {
     struct install_progress progress = { .ui = g->ui, .release = release,
         .name = backend_name( vkd3d, source ),
+        .installing = !vkd3d && source == DXVK_BACKEND_FEX_CARAFE ? "Installing the file..." :
+                      "Installing x86 and x64 files...",
         .host = source == DXVK_SOURCE_GPLASYNC && !vkd3d ? "Downloading from GitLab..." : "Downloading from GitHub..." };
     enum dxvk_result result;
 
@@ -264,15 +267,44 @@ static int update_menu( void *opaque, int *selection )
     return m->count;
 }
 
+/* The releases of one source, as a list that fills in as they arrive: 1 with
+ * the chosen version in version, installed, or 0 when nothing was chosen. */
+static int select_release( struct launcher_graphics *g, const struct ui_list *anchor,
+                           unsigned short machine, int vkd3d, int combined,
+                           enum dxvk_source source, const char *current, char version[32] )
+{
+    struct release_menu *m;
+    int chosen, ok = 0;
+
+    if (!(m = calloc( 1, sizeof(*m) ))) return 0;
+    m->machine = machine;
+    m->source = source;
+    m->combined = combined && !vkd3d;
+    if (!(m->catalog = open_catalog( g, vkd3d, m->source ))) { free( m ); return 0; }
+    resolve_version( g, machine, vkd3d, m->source, current, &m->selected );
+    chosen = ui_settings_dropdown_live( g->ui, anchor, m->rows, 0, update_menu, m );
+    if (chosen >= 0)
+    {
+        int id = m->ids[chosen];
+        const struct dxvk_release *release = id >= 0 ? m->catalog->releases + id : NULL;
+        if (!m->rows[chosen].download || (release && install_release( g, vkd3d, m->source, release )))
+        {
+            strcpy( version, release ? release->version : m->selected.version );
+            ok = 1;
+        }
+    }
+    free( m );
+    return ok;
+}
+
 int launcher_graphics_select( struct launcher_graphics *g, const struct ui_list *anchor,
                               unsigned short machine, int vkd3d, int combined,
                               enum dxvk_source *source, char version[32] )
 {
     struct ui_row sources[DXVK_SOURCE_COUNT] = {0};
     enum dxvk_source source_ids[DXVK_SOURCE_COUNT];
-    struct release_menu *m;
     enum dxvk_source selected_source = DXVK_SOURCE_OFFICIAL;
-    int chosen, i, count = 0, selected = 0, ok = 0;
+    int chosen, i, count = 0, selected = 0;
 
     if (!g) return 0;
     if (!vkd3d)
@@ -289,27 +321,33 @@ int launcher_graphics_select( struct launcher_graphics *g, const struct ui_list 
         if (chosen < 0) return 0;
         selected_source = source_ids[chosen];
     }
-    if (!(m = calloc( 1, sizeof(*m) ))) return 0;
-    m->machine = machine;
-    m->source = selected_source;
-    m->combined = combined && !vkd3d;
-    if (!(m->catalog = open_catalog( g, vkd3d, m->source ))) { free( m ); return 0; }
-    resolve_version( g, machine, vkd3d, m->source,
-                     vkd3d || selected_source == *source ? version : "", &m->selected );
-    chosen = ui_settings_dropdown_live( g->ui, anchor, m->rows, 0, update_menu, m );
-    if (chosen >= 0)
+    if (!select_release( g, anchor, machine, vkd3d, combined, selected_source,
+                         vkd3d || selected_source == *source ? version : "", version )) return 0;
+    if (!vkd3d) *source = selected_source;
+    return 1;
+}
+
+int launcher_graphics_select_fex( struct launcher_graphics *g, const struct ui_list *anchor,
+                                  int *carafe, char version[32] )
+{
+    struct ui_row builds[2] = {0};
+    int chosen;
+
+    if (!g) return 0;
+    snprintf( builds[0].label, sizeof(builds[0].label), "Autorun" );
+    snprintf( builds[1].label, sizeof(builds[1].label), "Carafe" );
+    chosen = ui_settings_dropdown( g->ui, anchor, builds, 2, *carafe != 0 );
+    if (chosen < 0) return 0;
+    if (!chosen)
     {
-        int id = m->ids[chosen];
-        const struct dxvk_release *release = id >= 0 ? m->catalog->releases + id : NULL;
-        if (!m->rows[chosen].download || (release && install_release( g, vkd3d, m->source, release )))
-        {
-            strcpy( version, release ? release->version : m->selected.version );
-            if (!vkd3d) *source = m->source;
-            ok = 1;
-        }
+        *carafe = 0;
+        version[0] = 0;
+        return 1;
     }
-    free( m );
-    return ok;
+    if (!select_release( g, anchor, 0x014c, 0, 0, DXVK_BACKEND_FEX_CARAFE, *carafe ? version : "", version ))
+        return 0;
+    *carafe = 1;
+    return 1;
 }
 
 static const struct dxvk_release *find_release( struct graphics_catalog *c, const char *version, int combined )
@@ -390,5 +428,16 @@ int launcher_graphics_ensure( struct launcher_graphics *g, unsigned short machin
         (combined && !ensure_backend( g, machine, 1, 0, DXVK_SOURCE_OFFICIAL, vkd3d ))) return 0;
     strcpy( dxvk_version, dxvk );
     strcpy( vkd3d_version, vkd3d );
+    return 1;
+}
+
+int launcher_graphics_ensure_fex( struct launcher_graphics *g, char version[32] )
+{
+    char fex[32];
+
+    if (!g) return 0;
+    strcpy( fex, version );
+    if (!ensure_backend( g, 0x014c, 0, 0, DXVK_BACKEND_FEX_CARAFE, fex )) return 0;
+    strcpy( version, fex );
     return 1;
 }
