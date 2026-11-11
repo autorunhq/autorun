@@ -119,6 +119,36 @@ def clean_id(prefix: str, key: str) -> str:
     return f"{prefix}-{slug}" if prefix else slug
 
 
+# The rows of the "DXVK build" setting, in its order.
+DXVK_BUILDS = ["official", "sarek", "gplasync", "carafe"]
+
+
+def dxvk_sources(first, end, sarek_first, sarek_end, gpl_only):
+    """The DXVK builds of which some version reads an option (dxvk_option_supported in dxvk_options.c).
+
+    Sarek goes up to 1.13 and reads its own range from 1.10.3 on, DXVK Async
+    starts at 2.1, and the newest version of any build is 3.1.1.
+    """
+    newest = first and first <= 30101
+    found = set()
+    if gpl_only == 0 and newest:
+        found.add("official")
+    if gpl_only in (0, 1) and newest and (not end or end > 20100):
+        found.add("gplasync")
+    if gpl_only in (0, 2) and newest:
+        found.add("carafe")
+    if gpl_only == 0 and ((sarek_first and sarek_first <= 11300) or (first and first < 11003)):
+        found.add("sarek")
+    return found
+
+
+def dxvk_when(sources) -> str:
+    """Shown while the "DXVK build" row is on a build that reads the option."""
+    if len(sources) == len(DXVK_BUILDS):
+        return "-"
+    return "show:dxvk-source=" + ",".join(str(i) for i, build in enumerate(DXVK_BUILDS) if build in sources)
+
+
 def parse_dxvk_options(dxvk_c: Path):
     text = dxvk_c.read_text(encoding="utf-8")
 
@@ -153,6 +183,7 @@ def parse_dxvk_options(dxvk_c: Path):
         arr_name = m.group(3)
         choices = list(choice_arrays[arr_name])
         default_note = m.group(10)
+        sources = dxvk_sources(*(int(m.group(i)) for i in (4, 5, 6, 7, 9)))
         # First entry is Default ("-"); annotate default value cleanly.
         if choices and choices[0][0] == "-":
             choices[0] = ("-", f"Default ({default_note})")
@@ -161,6 +192,7 @@ def parse_dxvk_options(dxvk_c: Path):
             existing = options_by_key[key]
             # One row serves every DXVK build that reads the option; where
             # their defaults differ it names each (dxvk.shaderCompilationMethod).
+            existing["sources"] |= sources
             if default_note not in existing["defaults"]:
                 existing["defaults"].append(default_note)
                 existing["choices"][0] = ("-", "Default (%s)" % " / ".join(existing["defaults"]))
@@ -177,6 +209,7 @@ def parse_dxvk_options(dxvk_c: Path):
                 "help": help_text,
                 "choices": choices,
                 "defaults": [default_note],
+                "sources": sources,
             }
             order.append(key)
     return [options_by_key[k] for k in order]
@@ -190,6 +223,8 @@ def parse_fex_options(fex_h: Path):
         r'\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*\{([^}]*)\}\s*,\s*\{([^}]*)\}\s*\}',
         re.S,
     )
+    order = re.findall(r"^\s*(NX_FEX_\w+)\s*,", text, re.M)
+    carafe_first = re.search(r"NX_FEX_CARAFE_FIRST\s*=\s*(NX_FEX_\w+)", text).group(1)
     options = []
     for m in entry_re.finditer(text):
         macro_id = m.group(1)
@@ -201,6 +236,8 @@ def parse_fex_options(fex_h: Path):
         labels = re.findall(r'"([^"]*)"', m.group(8))
         options.append({
             "macro": macro_id,
+            # nx_fex_option_carafe(): the options from NX_FEX_CARAFE_FIRST on.
+            "carafe": order.index(macro_id) >= order.index(carafe_first),
             "key": key,
             "help": help_text,
             "advanced": advanced,
@@ -439,7 +476,7 @@ def build_menu(horizon_wine: Path) -> str:
         lines, "dxvk-source", "program", "dxvk-source", "restart", 0, "on:d3d=0,2", "-",
         "DXVK build",
         "Chooses which DXVK build series is mapped into the prefix for this game.",
-        [("-", "Official DXVK"), ("sarek", "DXVK Sarek"), ("gplasync", "DXVK Async")],
+        [("-", "Official DXVK"), ("sarek", "DXVK Sarek"), ("gplasync", "DXVK Async"), ("carafe", "DXVK Carafe")],
     )
     emit_setting(
         lines, "lsfg", "program", "lsfg", "restart", 0, "-", "-",
@@ -463,7 +500,8 @@ def build_menu(horizon_wine: Path) -> str:
         unset="0.25",
     )
 
-    # Group: DXVK options (all 74 options from dxvk_options.c organized into 5 pages)
+    # Group: DXVK options (every option of dxvk_options.c on 5 pages; an option
+    # shows while the "DXVK build" row above is on a build that reads it)
     lines.append(f"group\tdxvk\tshow:d3d=0,2\t{t15('DXVK options', CARAFE.same('DXVK options', carafe['groups']['dxvk']))}")
     pages = [
         ("memory", "Memory", []),
@@ -487,7 +525,7 @@ def build_menu(horizon_wine: Path) -> str:
                 opt["key"],
                 "restart",
                 0,
-                "-",
+                dxvk_when(opt["sources"]),
                 dxvk_api(opt["key"]),
                 dxvk_nice_name(opt["key"]),
                 opt["help"],
@@ -505,6 +543,14 @@ def build_menu(horizon_wine: Path) -> str:
         [("-", "FEX"), ("box64", "Box64")],
     )
     emit_setting(
+        lines, "fex-build", "program", "fex-build", "restart", 0, "show:cpu=0", "-",
+        "FEX build",
+        "Autorun is the FEX that comes with the Windows DLLs. Carafe is the same FEX with Carafe's patches, "
+        "for 32-bit programs. If it is not on the card, the launcher downloads it the next time it starts the "
+        "program, and the program runs on Autorun's until then. FEX options then lists what only it reads.",
+        [("-", "Autorun"), ("carafe", "Carafe")],
+    )
+    emit_setting(
         lines, "four-cores", "program", "four-cores", "restart", 0, "-", "-",
         "Allow 4th CPU core",
         "Allows background/graphics workers to run across all four Horizon cores (3 program + 1 worker).",
@@ -515,6 +561,27 @@ def build_menu(horizon_wine: Path) -> str:
         "Thread synchronization",
         "Standard uses Wine's synchronization; Horizon uses queued kernel waits which can cut overhead.",
         [("-", "Standard"), ("horizon", "Horizon queued waits")],
+    )
+    emit_setting(
+        lines, "server-pool", "program", "server-pool", "restart", 0, "on:sync=1", "-",
+        "Shared server threads",
+        "Carafe's server thread pool. The game's threads share a few server threads instead of having one each, "
+        "which leaves more of the console's threads to the game. Needs Horizon thread synchronization.",
+        [("-", "Disabled"), ("1", "Enabled")],
+    )
+    emit_setting(
+        lines, "orchestrator", "program", "orchestrator", "restart", 0, "-", "-",
+        "Thread orchestrator",
+        "Carafe's thread placement. When one core is full it gives the busiest thread a core of its own and "
+        "spreads the others by their load; otherwise Autorun's balancer places threads.",
+        [("-", "Disabled"), ("1", "Enabled")],
+    )
+    emit_setting(
+        lines, "lock-boost", "program", "lock-boost", "restart", 0, "-", "-",
+        "Lock wait boost",
+        "Carafe's lock waits. A game thread that waits for one of the runtime's locks waits one priority higher, "
+        "so it runs as soon as the lock is free.",
+        [("-", "Disabled"), ("1", "Enabled")],
     )
     emit_setting(
         lines, "lazy-file-views", "program", "lazy-file-views", "restart", 0, "-", "-",
@@ -535,7 +602,8 @@ def build_menu(horizon_wine: Path) -> str:
         [("-", "Global setting"), ("1", "Enabled"), ("0", "Disabled")],
     )
 
-    # Group: FEX options (all 19 options from fex_options.h)
+    # Group: FEX options (every option of fex_options.h; what only the build
+    # with Carafe's patches reads shows while "FEX build" is on Carafe)
     lines.append(f"group\tfex\tshow:cpu=0\t{t15('FEX options', CARAFE.same('FEX options', carafe['groups']['fex']))}")
     fex_pages = [
         ("basic", "Basic", []),
@@ -564,7 +632,7 @@ def build_menu(horizon_wine: Path) -> str:
                 opt["key"],
                 "restart",
                 def_idx,
-                "-",
+                "show:fex-build=1" if opt["carafe"] else "-",
                 "-",
                 fex_nice_name(opt["key"]),
                 opt["help"],

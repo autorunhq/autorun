@@ -3,12 +3,16 @@
  * reader (source/carafe_settings.c, built in here so its static functions
  * can be asked) and every text is printed as the menu would draw it.
  *
- *   menu_languages CATALOG [KEY=TEXT ...]
+ *   menu_languages CATALOG [KEY=TEXT ...] [set:KEY=TEXT ...]
  *
  * CONTROLS_TEST_LANGUAGE in the environment names the console's language
  * (tests/controls-shims/switch.h). Each KEY=TEXT asks which value row a
- * settings file holding that text for the key would select. */
+ * settings file holding that text for the key would select. Each
+ * set:KEY=TEXT puts the menu's row on that value; the rows the menu then
+ * shows and the ones it greys out are listed after them
+ * (tests/check_menu_builds.py). */
 #include "../source/carafe_settings.c"
+#include "../source/dxvk_options.h"
 
 #include <assert.h>
 
@@ -94,19 +98,74 @@ int main( int argc, char **argv )
     for (k = 0; k < (int)NX_FEX_OPTION_COUNT; k++)
         printf( "fex\t%s\t%s\n", nx_fex_options[k].name, nx_fex_option_default( &nx_fex_options[k] ) );
 
+    /* Which of FEX's options only the build with Carafe's patches reads, and
+     * for each DXVK option and each DXVK build whether some version of the
+     * build reads it, as the launcher and the runtime decide it. */
+    for (k = 0; k < (int)NX_FEX_OPTION_COUNT; k++)
+        printf( "fexcarafe\t%s\t%d\n", nx_fex_options[k].name, nx_fex_option_carafe( &nx_fex_options[k] ) );
+    for (k = 0; k < (int)dxvk_option_count; k++)
+    {
+        static const char *const builds[DXVK_SOURCE_COUNT] =
+        {
+            [DXVK_SOURCE_OFFICIAL] = "-", [DXVK_SOURCE_SAREK] = "sarek",
+            [DXVK_SOURCE_GPLASYNC] = "gplasync", [DXVK_SOURCE_CARAFE] = "carafe",
+        };
+        int source;
+
+        for (source = 0; source < DXVK_SOURCE_COUNT; source++)
+        {
+            unsigned int version, read = 0;
+
+            /* Every version a release can have: 1.0.0 to 3.1.1. */
+            for (version = 10000; version <= 30101 && !read; version++)
+            {
+                if (source == DXVK_SOURCE_SAREK && version > 11300) break;
+                if (source == DXVK_SOURCE_GPLASYNC && version < 20100) continue;
+                read = dxvk_option_supported( &dxvk_options[k], source, version );
+            }
+            printf( "dxvkreads\t%s\t%s\t%u\n", dxvk_options[k].name, builds[source], read );
+        }
+    }
+
     for (k = 2; k < argc; k++)
     {
         char key[KEY_SIZE];
-        const char *equals = strchr( argv[k], '=' );
+        const char *pair = strncmp( argv[k], "set:", 4 ) ? argv[k] : argv[k] + 4;
+        const char *equals = strchr( pair, '=' );
         int index;
 
-        assert( equals != NULL && (size_t)(equals - argv[k]) < sizeof(key) );
-        snprintf( key, sizeof(key), "%.*s", (int)(equals - argv[k]), argv[k] );
+        assert( equals != NULL && (size_t)(equals - pair) < sizeof(key) );
+        snprintf( key, sizeof(key), "%.*s", (int)(equals - pair), pair );
         index = carafeCatalogFindKey( catalog, CarafeFileProgram, key );
         assert( index >= 0 );
         j = valueIndex( &catalog->settings[index], equals + 1, true );
-        printf( "stored\t%s\t%s\t%s\n", key, equals + 1, j < 0 ? "?" : catalog->settings[index].values[j].text );
+        if (pair == argv[k])
+        {
+            /* The row the menu shows for it, and what the launcher and the
+             * runtime make of a program's file that holds just this. */
+            struct launcher_kv *kv = calloc( 1, sizeof(*kv) );
+            struct launcher_settings settings;
+
+            assert( kv != NULL && launcher_kv_set( kv, key, equals + 1 ) );
+            launcher_settings_read( kv, &settings );
+            printf( "stored\t%s\t%s\t%s\n", key, equals + 1, j < 0 ? "?" : catalog->settings[index].values[j].text );
+            printf( "launcher\t%s\t%s\t%d\t%d\t%d\t%d\t%d\n", key, equals + 1, settings.orchestrator,
+                    settings.lock_boost, settings.server_pool, settings.fex_carafe, (int)settings.dxvk_source );
+            free( kv );
+        }
+        else
+        {
+            assert( j >= 0 );
+            catalog->settings[index].current = j;
+        }
     }
+    for (i = 0; i < catalog->setting_count; i++)
+        printf( "row\t%s\t%d\t%d\n", catalog->settings[i].key,
+                carafeSettingVisible( catalog, &catalog->settings[i] ),
+                carafeWhenHolds( catalog, &catalog->settings[i].when, CarafeWhenOn ) );
+    for (i = 0; i < catalog->group_count; i++)
+        printf( "grouprow\t%s\t%d\n", catalog->groups[i].id,
+                carafeWhenHolds( catalog, &catalog->groups[i].when, CarafeWhenShow ) );
     carafeCatalogFree( catalog );
     return 0;
 }

@@ -220,10 +220,15 @@ settings, values and pages used to be English only; they now carry Carafe's
 texts in Russian, Simplified and Traditional Chinese, Japanese, Korean,
 French, Canadian French, German, Italian, Spanish, Latin American Spanish,
 Dutch, Portuguese and Brazilian Portuguese, for the settings both menus have:
-91 of the 137, with their values. What only Autorun has stays English there
+91 of the 141, with their values. What only Autorun has stays English there
 (among it 26 DXVK and 10 FEX options), and English itself reads as before. A
 console set to any other language gets English. The launcher is English only.
-This has not been seen on a console yet.
+
+The menu also has the rows that came with Carafe's parts: **DXVK build** offers
+**DXVK Carafe**, **FEX build** chooses between Autorun's and Carafe's, and
+**Shared server threads**, **Thread orchestrator** and **Lock wait boost** are
+there as in a game's options. An option of DXVK or FEX is listed only while the
+build chosen in the menu reads it. None of this has been seen on a console yet.
 
 ### Frame generation
 

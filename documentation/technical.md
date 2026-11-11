@@ -289,6 +289,7 @@ for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces r
 python3 horizon-wine/tests/check_server_pool.py   # Carafe's server thread pool with real threads, under the address and thread sanitizers
 python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
 python3 horizon-wine/tests/check_menu_languages.py   # the settings menu's catalog, shown by the menu's own reader under each of the fifteen console languages and held against Carafe's texts
+python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu shows for each DXVK and FEX build, against the launcher's own rules
 (cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/carafe-shims -I source tests/carafe_reports.c -o /tmp/carafe_reports && /tmp/carafe_reports)   # Carafe's reports: waits by kind, the lock wait's priority, FEX's counters
 (cd horizon-wine && cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator && /tmp/orchestrator)   # Carafe's orchestrator: what it decides, on made-up loads
 (cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator_switch && /tmp/orchestrator_switch)   # the orchestrator behind its switch: off it leaves everything to the balancer

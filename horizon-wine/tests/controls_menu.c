@@ -239,7 +239,7 @@ int main( int argc, char **argv )
     if (g_custom_menu)
     {
         assert( catalog->section_count == 4 );
-        assert( catalog->setting_count == 137 );
+        assert( catalog->setting_count == 141 );
         assert( catalog->group_count == 2 );
         assert( catalog->suggest_count == 11 );
         assert( catalog->pad_count == 24 );

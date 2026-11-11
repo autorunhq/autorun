@@ -406,8 +406,8 @@ How a text of Carafe's is matched to a row here:
 
 | Row | Matched by | Rows that got the fourteen languages |
 |---|---|---|
-| A setting's name and hint | the same key in the same settings file | 91 of 137 |
-| A value | the same text in the settings file (DXVK's strings without their quotes) | 297 of 537, the next two rows included |
+| A setting's name and hint | the same key in the same settings file | 91 of 141 |
+| A value | the same text in the settings file (DXVK's strings without their quotes) | 297 of 546, the next two rows included |
 | DXVK's "Default" and the frame limit's "Off" (rows that write nothing) | Carafe's row that writes nothing: "Default", "No limit" | |
 | Other rows that write nothing (`vsync`, `upscaling`, `upscaling-sharpness`, `dxvk-hud`, the three `lsfg` settings, `large-pages`, every FEX option) | Carafe's label for the value such a row stands for, which the generator names for each setting (`unset=`; for FEX the default in `fex_options.h`) | |
 | Sections, the two groups, the 24 controller outputs | the English is word for word the same; the generator stops if it is not | 4, 2, 24 |
@@ -448,7 +448,8 @@ come from:
 
 What stays English in every language, and why:
 
-- The 45 settings Carafe's menu does not have: `button-layout`,
+- The 49 settings Carafe's menu does not have: the four rows of the next
+  part, `button-layout`,
   `mouse-speed`, `picture`, `d3d`, `dxvk-source`, `cpu`, `four-cores`,
   `sync`, `lazy-file-views`, 26 DXVK options and 10 FEX options.
 - `dxvk.shaderCompilationMethod`. Carafe's hint says what "Default" does in
@@ -473,7 +474,7 @@ Differences between the two menus that were seen and left alone: Carafe's
 dead zones also offer 2 % and 8 %; its upscaling defaults to FSR; its Fast
 preset turns the L1 cache's sizing off; its nine DXVK pages.
 
-The catalog grew from 55 KB to 277 KB, in the runtime's file and in memory
+The catalog grew from 55 KB to 279 KB, in the runtime's file and in memory
 while the menu holds it (the reader takes up to 1 MiB). The built runtime now
 carries GPL-3.0-or-later texts (point 5 above).
 
@@ -500,7 +501,41 @@ the right, and the menu itself in any language but English.
 `tests/controls_menu.c`, when given the built catalog, stops at its
 registry editor part (line 716); it did so before this work too, with the
 catalog as it was, and is not run by the `build` workflow. Its count of
-settings was brought up to date (137).
+settings was brought up to date (141).
+
+The menu and Carafe's builds. Stages 4 to 6 gave the launcher new rows for a
+program; the menu over the running game writes the same file and did not
+have them. It showed a program set to Carafe's DXVK as the bare word
+`carafe`, with no way back to it once the row was moved, and it listed every
+DXVK and FEX option whatever build the program ran on. Now:
+
+| In the menu | What it does |
+|---|---|
+| **DXVK build** has **DXVK Carafe** | writes `dxvk-source=carafe` |
+| **FEX build**: Autorun, Carafe (System, shown while the CPU translator is FEX) | writes `fex-build=carafe`; the version stays the launcher's choice (`fex-version`) |
+| A DXVK option | shown while **DXVK build** is on a build of which some version reads the option: 66 options for official DXVK, 50 for Sarek, 64 for DXVK Async, 76 for Carafe's |
+| The 12 FEX options only Carafe's build reads | shown while **FEX build** is on Carafe |
+| **Shared server threads** | `server-pool=1`; greyed out unless thread synchronization is Horizon |
+| **Thread orchestrator**, **Lock wait boost** | `orchestrator=1`, `lock-boost=1` |
+
+All take effect at the next start, like the rows beside them. A build that
+is not on the card is downloaded when the launcher next starts the program;
+a start that does not go through the launcher runs on the stock FEX, or on
+Wine's Direct3D, as it already did for a missing DXVK (`runtime.c`). The
+menu does not know whether the program is 32-bit, so **FEX build** shows for
+64-bit programs too, where the runtime keeps the stock FEX; the row's text
+says it is for 32-bit programs. The menu lists options by build, not by the
+installed version, which the launcher also looks at. These rows have no
+text in Carafe and are English in every language.
+
+`tests/check_menu_builds.py` asks the menu's reader which rows it shows for
+each choice and holds that against the code the launcher and the runtime
+use: `dxvk_option_supported` over every version a release can have, for
+each of the 81 options and four builds; `nx_fex_option_carafe`; and the
+launcher's reader of a program's file for what each new value turns on.
+Fourteen mistakes made in the generator on purpose: twelve made it fail,
+and two change nothing with today's options (both are parts of the rule
+for DXVK-Sarek that no option needs at present).
 
 Open in this stage: the graphics hunks in `winnx_drv.c`, `winnx_opengl.c`
 and `win32u/vulkan.c`.

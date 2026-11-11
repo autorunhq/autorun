@@ -139,6 +139,9 @@ jobs:
         # texts in this tree are made again from Carafe's commit they name.
         run: |
           python3 horizon-wine/tests/check_menu_languages.py
+          # The rows for Carafe's builds: what the menu shows for each DXVK
+          # and FEX build, against the launcher's and the runtime's own rules.
+          python3 horizon-wine/tests/check_menu_builds.py
           commit=$(python3 -c "import json; print(json.load(open('horizon-wine/tools/carafe-menu-texts.json'))['commit'])")
           git init -q "$RUNNER_TEMP/carafe-source"
           git -C "$RUNNER_TEMP/carafe-source" fetch -q --depth 1 https://github.com/carafe-nx/carafe.git "$commit"

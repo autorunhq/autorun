@@ -89,7 +89,8 @@ with tempfile.TemporaryDirectory() as temp:
                     '-Werror', '-g', '-O1', '-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',
                     '-I', str(wine / 'source'), '-I', str(wine / 'tests/controls-shims'),
                     '-I', str(wine / 'tests/controls-shims/SDL2'), str(wine / 'tests/menu_languages.c'),
-                    str(wine / 'source/input_profile.c'), '-lm', '-o', str(exe)], check=True)
+                    str(wine / 'source/input_profile.c'), str(wine / 'source/dxvk_options.c'), '-lm',
+                    '-o', str(exe)], check=True)
 
     # The text a program's file would hold for what each "-" row stands for.
     UNWRITTEN = {'vsync': '1', 'upscaling': 'off', 'upscaling-sharpness': '40%', 'dxvk-hud': '0', 'lsfg': '0',
@@ -127,7 +128,7 @@ with tempfile.TemporaryDirectory() as temp:
     settings = {(file, key): texts for (file, key, _), texts in by_kind['setting'].items()}
     ids = {(file, key): sid for (file, key, sid) in by_kind['setting']}
     values = by_kind['value']
-    assert len(settings) == 137, len(settings)
+    assert len(settings) == 141, len(settings)
 
     # English is Autorun's own: an option of DXVK is called what dxvk.conf calls it.
     dxvk = [key for (_, key) in settings if re.match(r'(dxvk|dxgi|d3d9|d3d11)\.', key)]
@@ -293,5 +294,5 @@ with tempfile.TemporaryDirectory() as temp:
     assert by_kind['key'][('0x100',)][0][EN] == 'Left click' and text(carafe['mouse'][0], EN) == 'Left mouse button'
     assert by_kind['key'][('0x10c',)][0][EN] == 'Mouse right' and text(carafe['mouse'][12], EN) == 'Cursor right'
 
-print('settings menu: 137 settings, 91 of them and %d value rows in fifteen languages'
+print('settings menu: 141 settings, 91 of them and %d value rows in fifteen languages'
       % sum(1 for texts in values.values() if texts[0][0]))
