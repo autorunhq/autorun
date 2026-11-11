@@ -132,6 +132,12 @@ jobs:
             tail -n 1 "$RUNNER_TEMP/$check.log"
           done
 
+      - name: The patch ledger's numbers
+        # carafe/integration/PORTING.md says, for each of Carafe's patches, how
+        # much of it this tree holds. A commit that moves those lines measures
+        # them again (carafe/integration/tools/refresh_table.py).
+        run: python3 carafe/integration/tools/refresh_table.py --check
+
       - name: Release list, archives and system32, made here
         # What the launcher does with the Carafe builds of DXVK and FEX
         # (carafe/dlls), on a release list and archives the test makes itself.

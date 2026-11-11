@@ -18,6 +18,18 @@ or regenerate a branch with:
     git checkout -b carafe-patches 636913ca
     for p in .../*.patch; do git apply --3way "$p" && git commit -aqm "carafe-patch: $p"; done
 
+## tools/
+
+- `ledger.py` measures, for each patch above, how many of the lines it adds
+  are in this tree today: the two numbers of the patch table in PORTING.md.
+  `ledger.py --review -v 0023` lists the lines of a patch that are not here
+  and says which of them Carafe itself rewrote in a later patch; that needs
+  Carafe's patched tree as a git ref
+  (`git fetch origin carafe-patches:refs/carafe/patches`).
+- `refresh_table.py` writes those numbers into PORTING.md; with `--check` it
+  only says whether the table is out of date, which is what the `build`
+  workflow runs.
+
 ## Status against this fork's branches
 
 | Source | State |

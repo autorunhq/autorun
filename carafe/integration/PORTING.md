@@ -379,7 +379,7 @@ fork has it in its own form, which the last column names.
 
 | Patch | Subject | Lines added | Lines found | State |
 |---|---|---|---|---|
-| 0001 | horizon hang diagnostics | 122 | 100 % | taken (stage 2) |
+| 0001 | horizon hang diagnostics | 122 | 98 % | taken (stage 2); two of its lines were rewritten by `0023` (stage 6) |
 | 0002 | horizon fd owner | 37 | 97 % | owner matching was in the fork; the two report lines taken (stage 2) |
 | 0003 | horizon alias region | 31 | 90 % | in the fork; upstream renamed the log tag to [HMAP] and guards the overflow |
 | 0004 | sync alert diagnostics | 54 | 100 % | taken (stage 2) |
@@ -397,7 +397,7 @@ fork has it in its own form, which the last column names.
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |
 | 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork; it falls back to the first active monitor instead of the first |
 | 0019 | horizon thread budget and server requests | 91 | 96 % | taken (stage 2); its `[BUDGET]` line is now the one of `0023`, with `pool=` |
-| 0020 | horizon thread creation waits for a place | 42 | 59 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
+| 0020 | horizon thread creation waits for a place | 42 | 57 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
 | 0021 | horizon handle fd on the calling thread | 4 | 100 % | in the fork |
 | 0022 | server handle fd on the calling thread | 1 | 100 % | in the fork |
 | 0023 | horizon server thread pool | 180 | 98 % | taken (stage 6), behind a program's setting; the pipe's count and writer's end are stored atomically |
@@ -425,16 +425,16 @@ fork has it in its own form, which the last column names.
 | 0046 | compositor menu layer blends | 3 | 100 % | in the fork |
 | 0049 | registry tells carafe when loaded and can be changed | 77 | 100 % | in the fork |
 | 0050 | profiler names the x86 code fex runs | 71 | 92 % | taken (stage 3); the lines not found were replaced by later patches |
-| 0051 | fex options carry the disk cache | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0051 | fex options carry the disk cache | 8 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0052 | horizon server grants file locks | 15 | 80 % | in the fork: upstream has its own file locks (HORIZON_REQ_LOCK_FILE 53, UNLOCK_FILE 54) |
 | 0053 | profiler tables hold more addresses | 3 | 100 % | ported in stage 1 |
-| 0054 | fex options carry x87 conversion rounding | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0054 | fex options carry x87 conversion rounding | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0055 | profiler writes the busiest translated blocks | 91 | 98 % | taken (stage 3) |
-| 0056 | fex options carry x87 fast stack and single precision | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0057 | fex options carry gdb symbols | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0056 | fex options carry x87 fast stack and single precision | 8 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0057 | fex options carry gdb symbols | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0058 | profiler splits fex time outside blocks | 79 | 100 % | taken (stage 3) |
-| 0059 | fex options carry the flag option | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0060 | dxvk options carry the unchanged state path | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0059 | fex options carry the flag option | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0060 | dxvk options carry the unchanged state path | 3 | 66 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0061 | horizon aslr region traced once | 5 | 100 % | ported in stage 1 |
 | 0062 | runtime vulkan surfaces share a reserved screen | 18 | 100 % | in the fork |
 | 0063 | runtime profiler asks direct3d 9 for call counts | 5 | 80 % | taken (stage 3); the counts come from Carafe's DXVK |
@@ -442,21 +442,21 @@ fork has it in its own form, which the last column names.
 | 0065 | profiler counts time by the calls near a threads start | 90 | 95 % | taken (stage 3); the lines not found were replaced by later patches |
 | 0066 | fex gets an area for its thread counters | 24 | 100 % | taken (stage 2) |
 | 0067 | runtime profiler asks fex for its counters | 4 | 100 % | taken (stage 2) |
-| 0068 | dxvk options carry the front end thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
-| 0069 | dxvk options carry the effect thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
-| 0070 | dxvk options carry the effect pass merge | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
-| 0071 | dxvk options carry the managed buffer copies | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0068 | dxvk options carry the front end thread | 3 | 33 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0069 | dxvk options carry the effect thread | 3 | 66 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0070 | dxvk options carry the effect pass merge | 3 | 66 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
+| 0071 | dxvk options carry the managed buffer copies | 3 | 66 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 100 % | taken (stages 3 and 4) |
-| 0073 | fex options carry the call cache and the bridge return | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0074 | fex options carry the jump tables | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0075 | fex options carry compact returns | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0073 | fex options carry the call cache and the bridge return | 8 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0074 | fex options carry the jump tables | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0075 | fex options carry compact returns | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0076 | profiler finds the block of a pc after a return point | 18 | 100 % | taken (stage 3) |
-| 0077 | fex options carry slim return points | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
+| 0077 | fex options carry slim return points | 4 | 100 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0078 | virtual large views start on 2mb | 10 | 100 % | in the fork |
 | 0079 | fex options turn jump tables on | 1 | 100 % | in the fork |
 | 0080 | fex options turn compact and slim returns on | 2 | 100 % | in the fork |
 | 0081 | runtime profiler turns fex gdb symbols on | 1 | 100 % | taken (stage 3); only Carafe's FEX is given the option |
-| 0082 | dxvk options carry sarek choices | 24 | 8 % | done in stage 5 for the DXVK Carafe source: the two frame limiter rows, the two compiler rows, and `dxvk.shaderCompilationMethod` as a row of its own. Sarek's row keeps its default |
+| 0082 | dxvk options carry sarek choices | 24 | 79 % | done in stage 5 for the DXVK Carafe source: the two frame limiter rows, the two compiler rows, and `dxvk.shaderCompilationMethod` as a row of its own. Sarek's row keeps its default |
 | 0085 | horizon server window hooks | 277 | 98 % | in the fork; taking a hook out of its chain is a function of its own |
 | 0087 | wow64 context of another thread waits until it stops | 8 | 37 % | in the fork; `wow64_wait_stopped` returns a status |
 | 0088 | win32u counts shown dialogs | 5 | 100 % | in the fork |
@@ -515,6 +515,12 @@ fork has it in its own form, which the last column names.
 - Missing features: the functions, macros, types and file-scope variables each
   file defines at `b785476` that it defines neither at `636913ca` nor in the
   fork (224 names in 11 files before stage 1).
+- The table's two numbers come from `carafe/integration/tools/ledger.py`, which
+  reads the patches in `carafe/integration/patches-from-carafe`; they are
+  measured again whenever a stage changes the files a patch touches
+  (`tools/refresh_table.py`; the `build` workflow fails when a row is out of
+  date). `ledger.py --review -v` lists, for a patch, the lines the next point
+  is about.
 - The reading of a patch that is not found whole: each line it adds that the
   fork's file lacks is looked up in Carafe's file at `b785476`. A line that is
   not there either was rewritten by a later Carafe patch. A line that is there
