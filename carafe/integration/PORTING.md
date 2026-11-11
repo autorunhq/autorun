@@ -340,7 +340,9 @@ Why it was safe to take, as far as reading can tell:
     (`horizon_cond_wait_quit`) and stops with the pool's lock released. One
     inside a request waits in the same three places a per-client thread waits
     in (`horizon_server_sleep_locked`, `horizon_server_wait_thread_locked`,
-    `horizon_sync_sleep_locked`), which already stop for a quit.
+    `horizon_sync_sleep_locked`); every call of the three is followed by
+    `horizon_server_quit_check_locked`, which stops the thread with the
+    objects' lock released.
   - A thread that stopped ends itself and leaves its handle in
     `quit_joinable[]`, which `return_to_launcher` joins; a pool thread that
     retired earlier is on `horizon_server_zombies`, joined by the next thread
