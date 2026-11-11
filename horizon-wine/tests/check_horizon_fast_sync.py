@@ -117,6 +117,10 @@ static int count_cond_signal(pthread_cond_t *cond) {
 #define pthread_cond_signal count_cond_signal
 static int horizon_fast_sync_enabled = 1, pipe_replies;
 typedef uint64_t u64;
+/* The server thread pool: a pool thread that is about to wait says so. */
+static __thread int horizon_server_pool_worker, horizon_server_pool_blocked;
+static unsigned pool_blocking_marks;
+static void horizon_server_pool_blocking_locked(void) { horizon_server_pool_blocked = 1; pool_blocking_marks++; }
 volatile int wine_nx_quit_requested;
 static long long clock_ticks(void) {
     struct timespec ts; assert(!clock_gettime(CLOCK_REALTIME, &ts));
@@ -583,6 +587,18 @@ int main(void) {
     long long start = clock_ticks();
     assert(wait_for(4, 1, -(start + 200000), 0) == HORIZON_STATUS_TIMEOUT);
     assert(clock_ticks() - start >= 200000);
+    /* A wait on the calling thread is the client's own; a pool thread that
+     * waits counts as blocked, once for the request it is serving. */
+    assert(!pool_blocking_marks);
+    horizon_server_pool_worker = 1;
+    start = clock_ticks();
+    assert(wait_for(4, 1, -(start + 50000), 0) == HORIZON_STATUS_TIMEOUT);
+    assert(pool_blocking_marks == 1 && horizon_server_pool_blocked);
+    start = clock_ticks();
+    assert(wait_for(4, 1, -(start + 50000), 0) == HORIZON_STATUS_TIMEOUT);
+    assert(pool_blocking_marks == 1);
+    assert(wait_for(4, 1, 0, 0) == HORIZON_STATUS_TIMEOUT);
+    horizon_server_pool_worker = horizon_server_pool_blocked = 0;
     struct horizon_select_request select = { .header = { .req = HORIZON_REQ_SELECT, .reply_size = 64 },
         .timeout = 0, .size = 12 };
     struct { unsigned char apc[HORIZON_APC_RESULT_SIZE]; unsigned op, handles[2]; } multi = {0};

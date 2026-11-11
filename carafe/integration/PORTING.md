@@ -71,7 +71,7 @@ Each stage is one or a few commits, checked on the host and built by the
 | 3 | The profiler: x86 names of the code FEX runs, the busiest translated blocks, FEX time outside blocks, stages by call chain (`thread_profile.c`, +536 lines) | **done** |
 | 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | **done**, as two settings of a program, both off by default |
 | 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
-| 6 | The server thread pool (`0023`): one thread per Windows thread instead of two | after an audit of every wait inside a server request |
+| 6 | The server thread pool (`0023`): the program's threads share a few server threads instead of having one each | **done**, as a setting of a program, off by default |
 | 7 | The menu's translations (Carafe has 15 languages), the remaining graphics hunks in `winnx_drv.c`, `winnx_opengl.c` and `win32u/vulkan.c`, read one by one | |
 
 ### Stage 1, done
@@ -113,7 +113,7 @@ Nothing here changes what a game does; it changes what the log says about it.
 | The server keeps its last 512 thread events (new, suspend, resume, terminate, a wait on a suspended thread) and a table of its connections; the stall report prints the newest 96 and where each connection stands | patch `0001`, applied | `dlls/ntdll/unix/horizon.c` |
 | A handle taken from the fd queue that had to skip other owners' entries says so, and whether it found its own | the two report lines of `0002`; the owner matching was already here | `horizon.c` |
 | A table of the alertable waits in progress, printed with the stall report | patch `0004`, applied; the hunk at the wait's two returns by hand, before the fork's own `carafe_futex_wait_left()` | `dlls/ntdll/unix/sync.c` |
-| `[BUDGET]`: threads used and their peak, windows, server threads, refusals, how many creations waited for a place, how many of those got none and the time waited. `[SERVED]`: the ten requests the server answered most often and the time spent in each, every 30 s | patch `0019`, applied; the counters of `0020` and `0028` by hand, because the wait itself is the fork's `horizon_thread_may_wait` loop | `horizon.c` |
+| `[BUDGET]`: threads used and their peak, windows, server threads, the pool's threads with how many are idle and how many wait inside a request (stage 6), refusals, how many creations waited for a place, how many of those got none and the time waited. `[SERVED]`: the ten requests the server answered most often and the time spent in each, every 30 s | patch `0019`, applied; the counters of `0020` and `0028` by hand, because the wait itself is the fork's `horizon_thread_may_wait` loop | `horizon.c` |
 | A creation that has waited 5 s writes where it was called from and asks the stall watch for every thread's place, instead of reading them itself | `0028`'s report, `0030` | `horizon.c`, `horizon-wine/source/runtime.c` |
 | The stall report names the native callers of a Windows thread from its stack | patch `0029` | `horizon-wine/source/thread_profile.c` |
 | With the profiler on: the x86 address of the code FEX runs, the busiest translated blocks written to `logs/jit-blocks.txt`, FEX's time outside blocks split by part, time counted by the calls near a thread's start, the block of a pc after a return point | patches `0050`, `0055`, `0058`, `0065`, `0076` | `thread_profile.c` |
@@ -140,7 +140,7 @@ What differs from Carafe:
   raises the waiting thread's priority by one. Here that second half is off
   (`carafe_lock_boost_enabled` starts at 0) unless a program's settings turn it
   on (stage 4).
-- `[BUDGET]` has no `pool=` field: that is the server thread pool, stage 6.
+- `[BUDGET]` had no `pool=` field until stage 6 brought the server thread pool.
 - The stock FEX is asked for its counters too. Its record has the same size as
   Carafe's, with padding where Carafe's counts returns that miss the
   call-return stack, so that one number reads 0.
@@ -279,6 +279,84 @@ Still open in stage 5:
 | Carafe's DXVK as the system Direct3D (`0105`, `0133`) | Here it is a source like the others, in a folder put in front of system32, which is what this fork does for every DXVK |
 | dxwrapper, Wine Mono, the WinRT classes, patch `0006` | Each needs Windows DLLs other than these two |
 
+### Stage 6: the server thread pool, done
+
+Wine's server runs inside the process here, and every thread of a program has
+a thread of the server that answers its requests: two of the console's threads
+for each Windows thread. Carafe's patch `0023` lets the program's threads
+share a few server threads. A request pipe tells the pool when it holds a
+request; a pool thread takes one request of one client at a time; two threads
+stay ready (`HORIZON_SERVER_POOL_SPARE`); a thread that is about to wait inside
+a request says so, and another is started when none is left free; the threads
+above the two end when they come back and find the two idle.
+
+| Change | From | Files |
+|---|---|---|
+| The pool, and `pool=workers/idle/blocked` in `[BUDGET]` | patch `0023`, applied with `patch` (21 hunks, none rejected) | `dlls/ntdll/unix/horizon.c` |
+| The mark before a wait for another thread to change state | one line of `0121`, by hand | `horizon.c` (`horizon_server_wait_thread_locked`) |
+| A switch in a program's settings, **Shared server threads** (`server-pool=1`), under Emulation | new here; Carafe has the pool on wherever Horizon synchronization is | `horizon_private.h`, `horizon-wine/source/launcher_settings.h`, `launcher.c`, `runtime.c` |
+| A pipe's byte count and its writer's end are stored atomically | new here | `horizon.c` (`horizon_pipe_write_r`, `horizon_pipe_read_r`, `horizon_pipe_close_r`) |
+
+What differs from Carafe:
+
+- The pool is off unless a program's settings turn it on, and it needs
+  **Synchronization** set to Horizon, as in Carafe, whose patch says only that
+  standard synchronization keeps a thread per client. As read here, the reason
+  is that with standard synchronization every wait is made inside the server
+  and would hold a pool thread for as long as it lasts.
+  `horizon_server_pool_enabled()` is
+  `horizon_fast_sync_enabled && horizon_server_pool_wanted`; Carafe's is the
+  first half only. The log says which it is: `[SYNC] server threads: ...`. It
+  has not run on a console in this fork, so a default has to wait for that.
+- Carafe's pool thread reads a pipe's count and whether its writer is gone
+  without the pipe's lock, with an atomic load, while the pipe writes both
+  with plain stores. The order of the two locks makes the outcome right either
+  way (the writer tells the pool after it has stored, and the pool thread reads
+  under the pool's lock), but the thread sanitizer reports it, so the stores
+  are atomic here. The three counters `[BUDGET]` prints are read the same way
+  by the log's thread and were left as they are: they only feed that line.
+
+Why it was safe to take, as far as reading can tell:
+
+- A pool thread that waits without the mark holds one of two threads, and two
+  such waits would stop every request. So every wait in the server was
+  compared between the two trees. Carafe's `horizon.c` has 24 places that
+  wait, the fork's 25. The one more is the wait in `horizon_poll_pipe`; its
+  callers that pass a time limit are on the client's side (`file.c`), and the
+  server's only call passes 0. The marks are in the same three places as in
+  Carafe: `horizon_server_sleep_locked`, `horizon_sync_sleep_locked` and
+  `horizon_server_wait_thread_locked`.
+- What a server thread knows about itself is the same in both trees: the
+  connection's structure is identical, and so are the thread-local variables
+  apart from the fork's `wine_nx_stop_word`, which `horizon.c` reads only in
+  its exception handler (through `wine_nx_stop_state()`).
+- Leaving a program: pool threads are registered with the runtime as server
+  threads (`'s'`), so the quit sequence counts them. An idle one looks for a
+  quit every quarter of a second (`horizon_cond_wait_quit`), one inside a
+  request stops where the per-client threads stop, and each then ends and is
+  joined like them. The next program starts from a freshly loaded runtime
+  (`envSetNextLoad`), so the pool's counters do not carry over.
+
+Tests: `tests/check_server_pool.py` (new, in the `build` workflow) builds the
+pool's own functions from `horizon.c`, with `horizon_cond_wait_quit`, and runs
+them with real threads under the address and the thread sanitizer: 9000
+requests of six clients written from three threads are each served once, in
+their client's order and never by two threads at once, by the same two
+threads; two waits inside a request start a third thread and the other clients
+are served meanwhile; a thread that cannot be started is not counted, its
+request stays in the pipe and the next request starts one; the extra threads
+end; clients that end are finished once, after their last request; and at a
+quit the idle threads end. The idle wait has no time limit in the test, so a
+thread that is not told of work shows as a request never served. Twelve
+changes made to the pool's code on purpose (no wake-up, no requeue, no third
+thread, no retiring, a plain store, and so on) each made it fail.
+`tests/check_horizon_fast_sync.py` now also checks that a pool thread marks
+itself once per request, and `tests/launcher_settings.c` the setting.
+
+Not checked, because it needs a console: that a game runs with the pool, how
+many threads it saves there, and whether requests wait longer for a thread
+than they did for their own.
+
 ## Left out, and why
 
 | Carafe part | Why it stays out |
@@ -317,11 +395,11 @@ fork has it in its own form, which the last column names.
 | 0016 | opengl present at window position | 31 | 100 % | in the fork |
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |
 | 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork; it falls back to the first active monitor instead of the first |
-| 0019 | horizon thread budget and server requests | 91 | 97 % | taken (stage 2); `[BUDGET]` without the `pool=` field of `0023` |
+| 0019 | horizon thread budget and server requests | 91 | 96 % | taken (stage 2); its `[BUDGET]` line is now the one of `0023`, with `pool=` |
 | 0020 | horizon thread creation waits for a place | 42 | 59 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
 | 0021 | horizon handle fd on the calling thread | 4 | 100 % | in the fork |
 | 0022 | server handle fd on the calling thread | 1 | 100 % | in the fork |
-| 0023 | horizon server thread pool | 180 | 17 % | stage 6 (server thread pool), after an audit of every wait inside a request |
+| 0023 | horizon server thread pool | 180 | 98 % | taken (stage 6), behind a program's setting; the pipe's count and writer's end are stored atomically |
 | 0024 | runtime tls holders give their place | 31 | 87 % | in the fork; the lines not found were rewritten by later Carafe patches |
 | 0025 | horizon thread creation takes a tls holders place | 6 | 33 % | in the fork as horizon_tls_give_place |
 | 0026 | thread join an ended thread without waiting | 23 | 100 % | in the fork |
@@ -386,7 +464,7 @@ fork has it in its own form, which the last column names.
 | 0091 | modules without unix calls are noted in the log | 9 | 100 % | ported in stage 1 |
 | 0092 | xinput notes the first read and press | 16 | 100 % | in the fork |
 | 0094 | winnx game window repainted after the screen follows it | 1 | 100 % | in the fork |
-| 0095 | ntdll system locale follows the console language | 9 | 66 % | in the fork, as `wine_nx_console_locale` |
+| 0095 | ntdll system locale follows the console language | 9 | 66 % | in the fork, as `wine_nx_console_locale` (`runtime.c`): the same table of languages, except that British English gives `en-GB` here and `en-US` in Carafe |
 | 0096 | media ffmpeg parser for directshow | 808 | 100 % | ported in stage 1 (parser, codecs, filter registration) |
 | 0097 | winnx screen follows the window on its own thread | 8 | 62 % | in the fork, with atomic loads and stores |
 | 0098 | win32u a thread counts its waits for a reply | 6 | 100 % | in the fork |
@@ -408,7 +486,7 @@ fork has it in its own form, which the last column names.
 | 0118 | ntdll a system call keeps its callers registers | 158 | 97 % | in the fork; the stop request is read through `wine_nx_stop_state()` |
 | 0119 | runtime a suspended thread is held in the kernel | 116 | 99 % | in the fork; a held thread looks again every 20 ms instead of waiting without end |
 | 0120 | ntdll the server turns registers into contexts | 9 | 100 % | in the fork |
-| 0121 | horizon suspending a thread works as on windows | 91 | 84 % | in the fork, with the runtime's calls made weak; one line belongs to the server thread pool (stage 6) |
+| 0121 | horizon suspending a thread works as on windows | 91 | 85 % | in the fork, with the runtime's calls made weak; the line that belongs to the server thread pool taken (stage 6) |
 | 0122 | runtime fex thread state offsets | 11 | 100 % | in the fork |
 | 0123 | runtime wow64 registers come from fex state | 42 | 100 % | in the fork (with the profiler's merge, stage 3) |
 | 0124 | runtime checks the fex state offsets | 4 | 100 % | in the fork |
@@ -441,9 +519,8 @@ fork has it in its own form, which the last column names.
   not there either was rewritten by a later Carafe patch. A line that is there
   is a difference, and the fork's code at that place was read to see whether it
   does the same in another form. Of the 127 patches, that left two differences
-  kept on purpose (`0105`, `0117`), two patches not needed here (`0006`,
-  `0133`), one waiting for stage 6 (`0023`, and with it one line of `0019` and
-  one of `0121`).
+  kept on purpose (`0105`, `0117`) and two patches not needed here (`0006`,
+  `0133`). The last one that was waiting, `0023`, came with stage 6.
 - The host tests are `horizon-wine/tests/check_*.py`. The sandbox they ran in
   has gcc but neither clang nor the Switch toolchain, so a full build is the
   `build` workflow's, and tests that need clang, an ARM64 host or the

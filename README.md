@@ -197,6 +197,22 @@ Neither has been measured on a console in this fork yet, so try them per game
 and compare. The log says what the orchestrator did in lines that start with
 `[ORCHESTRATOR]`.
 
+### Carafe's shared server threads
+
+Every thread of a game has a second thread behind it that answers its requests
+to Wine's server, and both count against the number of threads the console
+gives an application. **Emulation, Shared server threads** in a game's options
+lets the game's threads share a few of those instead, which is Carafe's server
+thread pool. It is off until you turn it on, and it works only with
+**Synchronization** set to **Horizon**; the row is greyed out otherwise. It is
+meant for games that start many threads. It has not been tried on a console in
+this fork yet.
+
+The log says which is in use in the line `[SYNC] server threads: ...`. The
+`[BUDGET]` line, written every 30 seconds, has the pool in its `pool=` field:
+its threads, how many of them are idle and how many are waiting inside a
+request.
+
 ### Frame generation
 
 LSFG-VK doubles the frame rate of Vulkan games (DXVK and VKD3D-Proton count) by

@@ -5061,6 +5061,7 @@ int main( int argc, char **argv )
         runtime_orchestrator = 0;
         if (&carafe_lock_boost_enabled) __atomic_store_n( &carafe_lock_boost_enabled, 0, __ATOMIC_RELAXED );
         horizon_fast_sync_enabled = 0;
+        horizon_server_pool_wanted = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
         wine_nx_upscaling_configure( 0, 0.4f );
@@ -5077,6 +5078,7 @@ int main( int argc, char **argv )
         {
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
+            horizon_server_pool_wanted = settings.server_pool;
             wine_nx_lazy_file_views = settings.lazy_file_views;
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
@@ -5184,6 +5186,10 @@ int main( int argc, char **argv )
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
     runtime_boost_thread_limit();
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
+    log_line( "[SYNC] server threads: %s",
+              !horizon_server_pool_wanted ? "one for each of the program's threads"
+              : horizon_fast_sync_enabled ? "shared (server-pool)"
+              : "one for each of the program's threads; sharing them needs Horizon synchronization" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
                                       : "no sdmc device; reads are not cached" );

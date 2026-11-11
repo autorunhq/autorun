@@ -124,6 +124,30 @@ static void test_settings( const char *dir )
     assert( !settings.orchestrator && !settings.lock_boost );
     assert( launcher_settings_write( &kv, &settings ) );
     assert( !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "lock-boost" ) );
+    /* The server's shared threads (Carafe's patch 0023): off unless a
+     * program's settings say 1, no line when off, and kept apart from the
+     * synchronization setting they depend on. */
+    load_text( &kv, "sync=horizon\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fast_sync && !settings.server_pool );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "server-pool" ) );
+    load_text( &kv, "server-pool=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.server_pool && !settings.fast_sync );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "server-pool=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.server_pool && !back.fast_sync );
+    settings.server_pool = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "server-pool" ) );
+    load_text( &kv, "server-pool=0\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.server_pool );
+    load_text( &kv, "server-pool=yes\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.server_pool );
     load_text( &kv, "cpu=box64\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.fex );

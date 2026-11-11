@@ -1761,7 +1761,7 @@ enum program_row
     ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
     ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
 };
 
@@ -2555,6 +2555,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->choices = 2;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
 
+        ADD_ROW( ROW_SERVER_POOL, SECTION_EMULATION, "Shared server threads",
+                 p->settings.fast_sync || p->settings.server_pool
+                 ? "Carafe's server thread pool. The game's threads share a few server threads instead of "
+                   "having one each, which leaves more of the console's threads to the game."
+                 : "Needs Synchronization set to Horizon." );
+        row->kind = UI_ROW_SWITCH;
+        row->disabled = !p->settings.fast_sync && !p->settings.server_pool;
+        row->on = p->settings.server_pool;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.server_pool ? "Enabled" : "Disabled" );
+
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
                  "Writes Wine's traces to autorun_runtime.log, which slows the program down. "
                  "Global follows the setting in Settings (X on the library)." );
@@ -2968,6 +2978,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
             else if (p->settings.four_cores) p->settings.four_cores = 0;
             else if (l->options->four_cores_available) p->settings.four_cores = 1;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_SERVER_POOL:
+            p->settings.server_pool = action == UI_ACTION_RESET ? 0 : !p->settings.server_pool;
             save_program_settings( l, p );
             break;
 

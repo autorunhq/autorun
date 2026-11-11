@@ -433,13 +433,16 @@ struct horizon_pipe
     pthread_cond_t can_write;
     unsigned int refs;
     int read_open;
-    int write_open;
+    int write_open;             /* written with the mutex held, as an atomic store: see used */
     size_t head;
     size_t tail;
-    size_t used;
+    size_t used;                /* written with the mutex held, as an atomic store: a pool thread
+                                 * reads it and write_open without this mutex */
     unsigned int read_waiters;  /* threads waiting in can_read, so only they are signaled */
     unsigned int write_waiters; /* threads waiting in can_write */
     unsigned int client_cores;  /* request pipes: the cores their client thread is pinned to */
+    int (*on_data)( void *context );
+    void *on_data_context;
     unsigned char buffer[HORIZON_PIPE_BUFFER_SIZE];
 };
 
@@ -448,6 +451,8 @@ struct horizon_pipe_file
     struct horizon_pipe *pipe;
     int write_end;
 };
+
+static void horizon_server_pool_start_worker( void );
 
 struct horizon_fd_message
 {
@@ -3335,6 +3340,11 @@ struct horizon_server_connection
     void *direct_reply;
     void *direct_data;
     size_t direct_size;
+    struct horizon_server_connection *pool_next;
+    int pooled;
+    int pool_queued;
+    unsigned int pool_served;
+    void *pool_diag;
 };
 
 struct horizon_sync_waiter
@@ -3470,6 +3480,16 @@ static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t horizon_server_objects_cond = PTHREAD_COND_INITIALIZER;
 static unsigned int horizon_server_sleepers;  /* guarded by horizon_server_objects_mutex */
 static struct horizon_sync_waiter *horizon_sync_waiters;
+
+#define HORIZON_SERVER_POOL_SPARE 2
+
+static struct
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    struct horizon_server_connection *head, *tail;
+    unsigned int workers, idle, blocked;
+} horizon_server_pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, 0, 0, 0 };
 
 #ifndef HORIZON_STANDALONE_SYNTAX
 #define CARAFE_DIAG_EVENTS 512
@@ -3629,10 +3649,14 @@ static void carafe_server_report( void )
         svcCloseHandle( resource );
     }
     snprintf( line, sizeof(line),
-              "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u refused=%u waits=%u/%u waited_ms=%llu",
+              "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u pool=%u/%u/%u refused=%u waits=%u/%u "
+              "waited_ms=%llu",
               (long long)used, (long long)limit, (long long)peak,
               (int)__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ),
               __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.workers, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.idle, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.blocked, __ATOMIC_RELAXED ),
               __atomic_load_n( &carafe_threads_refused, __ATOMIC_RELAXED ),
               __atomic_load_n( &carafe_threads_waits_lost, __ATOMIC_RELAXED ),
               __atomic_load_n( &carafe_threads_waits, __ATOMIC_RELAXED ),
@@ -3742,7 +3766,6 @@ static void carafe_server_client_ended( unsigned int requests )
     unsigned int bucket = requests <= 4 ? 0 : requests <= 50 ? 1 : requests <= 500 ? 2 : 3;
 
     __atomic_add_fetch( &carafe_server_ended[bucket], 1, __ATOMIC_RELAXED );
-    __atomic_sub_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED );
 }
 
 #define CARAFE_DIAG_EVENT( kind, actor, target, value ) carafe_diag_event( kind, actor, target, value )
@@ -3751,6 +3774,7 @@ static void carafe_server_client_ended( unsigned int requests )
 #define CARAFE_SERVER_DIRECT() __atomic_add_fetch( &carafe_server_direct, 1, __ATOMIC_RELAXED )
 #define CARAFE_SERVER_ENDED( requests ) carafe_server_client_ended( requests )
 #define CARAFE_SERVER_STARTED() __atomic_add_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_STOPPED() __atomic_sub_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
 #define CARAFE_THREAD_REFUSED() carafe_threads_refusal()
 #define CARAFE_THREAD_WAITED( ns, placed ) carafe_thread_waited( ns, placed )
 #define CARAFE_THREAD_WAITER_REPORT() carafe_thread_waiter_report()
@@ -3761,6 +3785,7 @@ static void carafe_server_client_ended( unsigned int requests )
 #define CARAFE_SERVER_DIRECT() do { } while (0)
 #define CARAFE_SERVER_ENDED( requests ) do { (void)(requests); } while (0)
 #define CARAFE_SERVER_STARTED() do { } while (0)
+#define CARAFE_SERVER_STOPPED() do { } while (0)
 #define CARAFE_THREAD_REFUSED() do { } while (0)
 #define CARAFE_THREAD_WAITED( ns, placed ) do { (void)(ns); (void)(placed); } while (0)
 #define CARAFE_THREAD_WAITER_REPORT() do { } while (0)
@@ -3802,10 +3827,19 @@ static void horizon_server_signal_changed_locked(void)
     for (waiter = horizon_sync_waiters; waiter; waiter = waiter->next) horizon_sync_notify_locked( waiter );
 }
 
+/* The server thread pool (Carafe's patch 0023): set on a pool thread, and
+ * while it waits inside a request. A pool thread that is about to wait says so
+ * first, so that another one is there for the other clients. */
+static __thread int horizon_server_pool_worker;
+static __thread int horizon_server_pool_blocked;
+static __thread unsigned int horizon_server_pool_core_mask;
+static void horizon_server_pool_blocking_locked( void );
+
 /* Sleeps with horizon_server_objects_mutex held until an object changes or
  * timeout (100ns, at most HORIZON_SERVER_WAIT_SLICE) passes. */
 static void horizon_server_sleep_locked( long long timeout )
 {
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
     if (timeout > HORIZON_SERVER_WAIT_SLICE) timeout = HORIZON_SERVER_WAIT_SLICE;
     horizon_server_sleepers++;
     /* libnx's relative wait: newlib's pthread_cond_timedwait reads the realtime
@@ -3839,6 +3873,9 @@ static unsigned int horizon_server_running_threads;
 /* Each client connection is served by its own pthread. */
 static __thread struct horizon_server_connection *horizon_server_current;
 int horizon_fast_sync_enabled;
+/* With Horizon sync, the clients share a few server threads instead of having
+ * one each. Off unless a program's settings ask for it (runtime.c). */
+int horizon_server_pool_wanted;
 static struct horizon_zombie_list horizon_server_zombies = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0 };
 struct horizon_lifecycle_counters horizon_lifecycle;
 static unsigned int horizon_process_winstation;
@@ -4570,17 +4607,23 @@ static int horizon_pipe_close_r( struct _reent *r, void *fdptr )
 {
     struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
     struct horizon_pipe *pipe;
+    int need_worker = 0;
 
     (void)r;
     if (!file) return 0;
 
     pipe = file->pipe;
     pthread_mutex_lock( &pipe->mutex );
-    if (file->write_end) pipe->write_open = 0;
+    if (file->write_end)
+    {
+        __atomic_store_n( &pipe->write_open, 0, __ATOMIC_RELEASE );
+        if (pipe->on_data) need_worker = pipe->on_data( pipe->on_data_context );
+    }
     else pipe->read_open = 0;
     pthread_cond_broadcast( &pipe->can_read );
     pthread_cond_broadcast( &pipe->can_write );
     pthread_mutex_unlock( &pipe->mutex );
+    if (need_worker) horizon_server_pool_start_worker();
 
     free( file );
     *(struct horizon_pipe_file **)fdptr = NULL;
@@ -4624,6 +4667,7 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
     struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
     struct horizon_pipe *pipe;
     unsigned int wake;
+    int need_worker;
     size_t total = 0;
 
     if (!file || !file->write_end)
@@ -4661,15 +4705,17 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
         chunk = min( chunk, HORIZON_PIPE_BUFFER_SIZE - pipe->tail );
         memcpy( pipe->buffer + pipe->tail, ptr + total, chunk );
         pipe->tail = (pipe->tail + chunk) % HORIZON_PIPE_BUFFER_SIZE;
-        pipe->used += chunk;
+        __atomic_store_n( &pipe->used, pipe->used + chunk, __ATOMIC_RELEASE );
         total += chunk;
     }
     wake = pipe->read_waiters;
+    need_worker = pipe->on_data ? pipe->on_data( pipe->on_data_context ) : 0;
     pthread_mutex_unlock( &pipe->mutex );
     /* A signal is a system call on Horizon, so only for a waiting reader, and
      * after unlocking, or the reader wakes straight into this thread's lock and
      * the unlock becomes a second system call (2% of NFSU2's main thread). */
     if (wake) pthread_cond_signal( &pipe->can_read );
+    if (need_worker) horizon_server_pool_start_worker();
     return total;
 }
 
@@ -4712,7 +4758,7 @@ static ssize_t horizon_pipe_read_r( struct _reent *r, void *fdptr, char *ptr, si
         chunk = min( chunk, HORIZON_PIPE_BUFFER_SIZE - pipe->head );
         memcpy( ptr + total, pipe->buffer + pipe->head, chunk );
         pipe->head = (pipe->head + chunk) % HORIZON_PIPE_BUFFER_SIZE;
-        pipe->used -= chunk;
+        __atomic_store_n( &pipe->used, pipe->used - chunk, __ATOMIC_RELEASE );
         total += chunk;
     }
     wake = pipe->write_waiters;
@@ -12971,6 +13017,8 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
  */
 
 static void *horizon_server_thread( void *param );
+static int horizon_server_pool_enabled( void );
+static int horizon_server_pool_add( struct horizon_server_connection *connection );
 
 #define HORIZON_STOP_SUSPEND 1
 #define HORIZON_STOP_END     2
@@ -13158,6 +13206,7 @@ static void horizon_server_wait_thread_locked( struct horizon_server_object *obj
         return;
     }
     if (state & (HORIZON_STOP_KERNEL | HORIZON_STOP_HELD)) return;
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     wine_nx_thread_wait_change( teb, object->thread.tid, state );
     pthread_mutex_lock( &horizon_server_objects_mutex );
@@ -13169,12 +13218,13 @@ static void horizon_server_wait_thread_locked( struct horizon_server_object *obj
  * threads stop crowding the process's default core. */
 static void horizon_server_follow_client( struct horizon_server_connection *connection )
 {
+    unsigned int *followed = horizon_server_pool_worker ? &horizon_server_pool_core_mask : &connection->core_mask;
     unsigned int mask;
 
     if (!connection->request_pipe) return;
     mask = __atomic_load_n( &connection->request_pipe->client_cores, __ATOMIC_RELAXED );
-    if (!mask || mask == connection->core_mask) return;
-    connection->core_mask = mask;
+    if (!mask || mask == *followed) return;
+    *followed = mask;
     svcSetThreadCoreMask( CUR_THREAD_HANDLE, lowest_set_core( mask ), mask );
 }
 
@@ -13236,7 +13286,11 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
         return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
     }
 
-    if ((errno = pthread_create( &thread, NULL, horizon_server_thread, thread_connection )))
+    if (horizon_server_pool_enabled())
+        errno = horizon_server_pool_add( thread_connection ) ? 0 : EBADF;
+    else
+        errno = pthread_create( &thread, NULL, horizon_server_thread, thread_connection );
+    if (errno)
     {
         pthread_mutex_lock( &horizon_server_objects_mutex );
         horizon_server_end_thread_locked( thread_connection );
@@ -17679,6 +17733,7 @@ static void horizon_sync_sleep_locked( struct horizon_sync_waiter *waiter, long 
     LARGE_INTEGER now;
     int have_time = 0;
 
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
     /* Keep quit responsive without rechecking ordinary waits every 20 ms. */
     if (timeout > 2500000) timeout = 2500000;
     for (unsigned int i = 0; i < waiter->count; i++)
@@ -18220,28 +18275,16 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
     return 1;
 }
 
-static void *horizon_server_thread( void *param )
+static int horizon_server_serve_one( struct horizon_server_connection *connection, void *diag_slot,
+                                     unsigned int *served )
 {
-    struct horizon_server_connection *connection = param;
     unsigned char message[HORIZON_SERVER_FIXED_MESSAGE_SIZE];
-    struct horizon_zombie *zombie;
-    unsigned int served = 0;
-
 #ifndef HORIZON_STANDALONE_SYNTAX
-    struct carafe_diag_connection *diag = carafe_diag_track( connection );
+    struct carafe_diag_connection *diag = diag_slot;
+#else
+    (void)diag_slot;
 #endif
 
-    horizon_server_current = connection;
-    connection->request_pipe = horizon_pipe_from_fd( connection->request_fd );
-    if (wine_nx_thread_register) wine_nx_thread_register( 's', connection->tid, NULL );
-    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
-    CARAFE_SERVER_STARTED();
-    /* A client blocks until this thread replies. At the program threads'
-     * priority (59) it waited for a round-robin slice behind whatever else ran
-     * on the core: 0.1-0.9 ms per request in NFSU2. Above them, below the audio
-     * feeder (56), it answers as soon as the client blocks. */
-    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
-    for (;;)
     {
         {
             extern volatile int wine_nx_quit_requested __attribute__((weak));
@@ -18255,7 +18298,7 @@ static void *horizon_server_thread( void *param )
         int ret = horizon_read_exact( connection->request_fd, message, sizeof(message) );
         unsigned long long request_start;
 
-        if (ret <= 0) break;
+        if (ret <= 0) return 0;
         request_start = CARAFE_SERVER_NOW();
         horizon_server_follow_client( connection );
         if (header->request_size)
@@ -18264,13 +18307,12 @@ static void *horizon_server_thread( void *param )
             {
                 if (connection->reply_fd != -1)
                     status = horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
-                if (status) goto done;
-                continue;
+                return !status;
             }
             if (horizon_read_exact( connection->request_fd, request_data, header->request_size ) <= 0)
             {
                 free( request_data );
-                break;
+                return 0;
             }
         }
 
@@ -18863,16 +18905,29 @@ static void *horizon_server_thread( void *param )
         }
 #endif
         CARAFE_SERVER_COUNT( header->req, request_start );
-        served++;
-        if (status) goto done;
+        (*served)++;
+        return !status;
     }
+}
 
-done:
+static void horizon_server_finish_connection( struct horizon_server_connection *connection, void *diag_slot,
+                                              unsigned int served )
+{
     CARAFE_SERVER_ENDED( served );
+    if (!connection->pooled) CARAFE_SERVER_STOPPED();
     CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_END, connection->tid, 0, 0 );
 #ifndef HORIZON_STANDALONE_SYNTAX
-    carafe_diag_untrack( diag );
+    carafe_diag_untrack( diag_slot );
+#else
+    (void)diag_slot;
 #endif
+    if (connection->pooled && connection->request_pipe)
+    {
+        pthread_mutex_lock( &connection->request_pipe->mutex );
+        connection->request_pipe->on_data = NULL;
+        connection->request_pipe->on_data_context = NULL;
+        pthread_mutex_unlock( &connection->request_pipe->mutex );
+    }
     /* The client closed its request pipe last in exit_thread: every Windows
      * frame is gone. Close our ends before signaling so a joiner observes
      * released pipes, then queue this pthread to be joined by another one. */
@@ -18888,6 +18943,179 @@ done:
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     horizon_server_current = NULL;
     free( connection );
+}
+
+static void *horizon_server_thread( void *param )
+{
+    struct horizon_server_connection *connection = param;
+    struct horizon_zombie *zombie;
+    unsigned int served = 0;
+    void *diag = NULL;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+    diag = carafe_diag_track( connection );
+#endif
+    horizon_server_current = connection;
+    connection->request_pipe = horizon_pipe_from_fd( connection->request_fd );
+    if (wine_nx_thread_register) wine_nx_thread_register( 's', connection->tid, NULL );
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
+    CARAFE_SERVER_STARTED();
+    /* A client blocks until this thread replies. At the program threads'
+     * priority (59) it waited for a round-robin slice behind whatever else ran
+     * on the core: 0.1-0.9 ms per request in NFSU2. Above them, below the audio
+     * feeder (56), it answers as soon as the client blocks. */
+    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
+    while (horizon_server_serve_one( connection, diag, &served )) {}
+    horizon_server_finish_connection( connection, diag, served );
+    if (wine_nx_thread_unregister) wine_nx_thread_unregister();
+    horizon_zombie_reap( &horizon_server_zombies );
+    if ((zombie = malloc( sizeof(*zombie) )))
+        horizon_zombie_push( &horizon_server_zombies, zombie, pthread_self() );
+    return NULL;
+}
+
+static void *horizon_server_pool_thread( void *param );
+
+/* Standard sync waits in the server on the client's behalf, so there every
+ * client keeps a thread of its own. */
+static int horizon_server_pool_enabled( void )
+{
+    return horizon_fast_sync_enabled && horizon_server_pool_wanted;
+}
+
+static void horizon_server_pool_start_worker( void )
+{
+    pthread_t thread;
+    int error;
+
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.workers++;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    if (!(error = pthread_create( &thread, NULL, horizon_server_pool_thread, NULL ))) return;
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.workers--;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    WARN( "server pool: no new worker: %s\n", strerror( error ) );
+}
+
+static void horizon_server_pool_append_locked( struct horizon_server_connection *connection )
+{
+    connection->pool_next = NULL;
+    if (horizon_server_pool.tail) horizon_server_pool.tail->pool_next = connection;
+    else horizon_server_pool.head = connection;
+    horizon_server_pool.tail = connection;
+    if (horizon_server_pool.idle) pthread_cond_signal( &horizon_server_pool.cond );
+}
+
+static int horizon_server_pool_ready( void *context )
+{
+    struct horizon_server_connection *connection = context;
+    unsigned int free_workers;
+
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    if (!connection->pool_queued)
+    {
+        connection->pool_queued = 1;
+        horizon_server_pool_append_locked( connection );
+    }
+    free_workers = horizon_server_pool.workers - horizon_server_pool.blocked;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    return !free_workers;
+}
+
+static void horizon_server_pool_blocking_locked( void )
+{
+    unsigned int free_workers;
+
+    horizon_server_pool_blocked = 1;
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.blocked++;
+    free_workers = horizon_server_pool.workers - horizon_server_pool.blocked;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    if (free_workers) return;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    horizon_server_pool_start_worker();
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+}
+
+static int horizon_server_pool_add( struct horizon_server_connection *connection )
+{
+    struct horizon_pipe *pipe;
+    unsigned int workers;
+    int need_worker = 0;
+
+    if (!(pipe = horizon_pipe_from_fd( connection->request_fd ))) return 0;
+    connection->request_pipe = pipe;
+    connection->pooled = 1;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    connection->pool_diag = carafe_diag_track( connection );
+#endif
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    workers = horizon_server_pool.workers;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    while (workers++ < HORIZON_SERVER_POOL_SPARE) horizon_server_pool_start_worker();
+    pthread_mutex_lock( &pipe->mutex );
+    pipe->on_data = horizon_server_pool_ready;
+    pipe->on_data_context = connection;
+    if (pipe->used || !pipe->write_open) need_worker = horizon_server_pool_ready( connection );
+    pthread_mutex_unlock( &pipe->mutex );
+    if (need_worker) horizon_server_pool_start_worker();
+    return 1;
+}
+
+static void *horizon_server_pool_thread( void *param )
+{
+    struct horizon_zombie *zombie;
+
+    (void)param;
+    horizon_server_pool_worker = 1;
+    if (wine_nx_thread_register) wine_nx_thread_register( 's', 0, NULL );
+    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
+    for (;;)
+    {
+        struct horizon_server_connection *connection;
+        int alive, pending;
+
+        pthread_mutex_lock( &horizon_server_pool.mutex );
+        if (horizon_server_pool.idle >= HORIZON_SERVER_POOL_SPARE &&
+            horizon_server_pool.workers > HORIZON_SERVER_POOL_SPARE)
+        {
+            horizon_server_pool.workers--;
+            pthread_mutex_unlock( &horizon_server_pool.mutex );
+            break;
+        }
+        horizon_server_pool.idle++;
+        while (!horizon_server_pool.head)
+            horizon_cond_wait_quit( &horizon_server_pool.cond, &horizon_server_pool.mutex );
+        horizon_server_pool.idle--;
+        connection = horizon_server_pool.head;
+        horizon_server_pool.head = connection->pool_next;
+        if (!horizon_server_pool.head) horizon_server_pool.tail = NULL;
+        pthread_mutex_unlock( &horizon_server_pool.mutex );
+
+        horizon_server_current = connection;
+        alive = horizon_server_serve_one( connection, connection->pool_diag, &connection->pool_served );
+        horizon_server_current = NULL;
+        if (horizon_server_pool_blocked)
+        {
+            pthread_mutex_lock( &horizon_server_pool.mutex );
+            horizon_server_pool.blocked--;
+            pthread_mutex_unlock( &horizon_server_pool.mutex );
+            horizon_server_pool_blocked = 0;
+        }
+        if (!alive)
+        {
+            horizon_server_finish_connection( connection, connection->pool_diag, connection->pool_served );
+            continue;
+        }
+        pthread_mutex_lock( &horizon_server_pool.mutex );
+        pending = __atomic_load_n( &connection->request_pipe->used, __ATOMIC_ACQUIRE ) ||
+                  !__atomic_load_n( &connection->request_pipe->write_open, __ATOMIC_ACQUIRE );
+        if (pending) horizon_server_pool_append_locked( connection );
+        else connection->pool_queued = 0;
+        pthread_mutex_unlock( &horizon_server_pool.mutex );
+    }
     if (wine_nx_thread_unregister) wine_nx_thread_unregister();
     horizon_zombie_reap( &horizon_server_zombies );
     if ((zombie = malloc( sizeof(*zombie) )))

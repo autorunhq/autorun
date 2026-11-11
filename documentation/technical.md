@@ -204,6 +204,11 @@ thread spends its time. DLLs that fail to load are logged (`[NXLDR]`, and
 Wine's `err:` lines) even without verbose traces, and so are files a program
 could not open (`[FS]`, with how it asked), the first overlapped socket
 operations (`[ASYNC]`), user APCs (`[APC]`) and x86 faults (`[BOX64]`).
+`[SYNC] server threads:` says whether each of the program's threads has a
+server thread of its own or they share a few (the program's `server-pool=1`
+setting, Carafe's server thread pool, which needs `sync=horizon`), and
+`[BUDGET]`, every 30 s, counts the threads in use against the limit, with the
+pool as `pool=threads/idle/waiting`.
 
 ## Building
 
@@ -280,6 +285,7 @@ sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scr
 sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the horizon-dlls checkout: install, resume, verify, update
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
+python3 horizon-wine/tests/check_server_pool.py   # Carafe's server thread pool with real threads, under the address and thread sanitizers
 python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
 (cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/carafe-shims -I source tests/carafe_reports.c -o /tmp/carafe_reports && /tmp/carafe_reports)   # Carafe's reports: waits by kind, the lock wait's priority, FEX's counters
 (cd horizon-wine && cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator && /tmp/orchestrator)   # Carafe's orchestrator: what it decides, on made-up loads

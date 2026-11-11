@@ -198,6 +198,10 @@ struct launcher_settings
      * (source/carafe_lock_boost.c). */
     int orchestrator;
     int lock_boost;
+    /* Carafe's server thread pool: with Horizon synchronization, the program's
+     * threads share a few server threads instead of having one each
+     * (dlls/ntdll/unix/horizon.c). Off unless asked for. */
+    int server_pool;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     /* A display mode of the program's own: -1 the shared setting, 0 the whole
      * picture with black bars, 1 filling the screen with its edges cropped,
@@ -427,6 +431,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
     settings->orchestrator = launcher_setting_state( kv, "orchestrator" ) == 1;
     settings->lock_boost = launcher_setting_state( kv, "lock-boost" ) == 1;
+    settings->server_pool = launcher_setting_state( kv, "server-pool" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
     {
@@ -526,6 +531,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "orchestrator", settings->orchestrator ? "1" : NULL ) &&
            launcher_kv_set( kv, "lock-boost", settings->lock_boost ? "1" : NULL ) &&
+           launcher_kv_set( kv, "server-pool", settings->server_pool ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
            launcher_kv_set( kv, "picture", settings->picture_mode < 0 ? NULL :
