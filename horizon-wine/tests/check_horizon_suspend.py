@@ -374,6 +374,10 @@ resume_test = r'''
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
+#ifndef __aarch64__
+#undef CONTEXT
+#define CONTEXT ARM64_NT_CONTEXT
+#endif
 #define __SWITCH__
 static TEB teb;
 #undef NtCurrentTeb

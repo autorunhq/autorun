@@ -152,6 +152,15 @@ static void *fn_enter_release( void *p )
     return NULL;
 }
 
+static void *fn_signal_waiter( void *p )
+{
+    struct nx_prof_thread *t = p;
+
+    while (!__atomic_load_n( &futex_waiters, __ATOMIC_ACQUIRE )) sched_yield();
+    wine_nx_thread_signal( (const void *)(uintptr_t)t->teb, t->tid );
+    return NULL;
+}
+
 int main( void )
 {
     static char teb_mem[0x2000];
@@ -223,6 +232,20 @@ int main( void )
     __atomic_fetch_or( &registry[0].stop[0], WINE_NX_STOP_END, __ATOMIC_SEQ_CST );
     wait_while_held( &registry[0] );
 
+    /* wine_nx_suspend_requested, wine_nx_thread_wait_change and wine_nx_thread_signal. */
+    registry[0].stop[0] = WINE_NX_STOP_SUSPEND;
+    assert( wine_nx_suspend_requested() );
+    futex_waiters = 0;
+    {
+        pthread_t signaler;
+        assert( !pthread_create( &signaler, NULL, fn_signal_waiter, &registry[0] ) );
+        wine_nx_thread_wait_change( (const void *)(uintptr_t)teb, 100, WINE_NX_STOP_SUSPEND );
+        assert( !pthread_join( signaler, NULL ) );
+        assert( registry[0].stop[0] & WINE_NX_STOP_HELD );
+    }
+    registry[0].stop[0] = 0;
+    assert( !wine_nx_suspend_requested() );
+
     /* 2. FEX TLS register inspection + fallback to I386_CONTEXT. */
     readable_lo = (uint64_t)(uintptr_t)cpu_mem;
     if ((uint64_t)(uintptr_t)teb_mem < readable_lo) readable_lo = (uint64_t)(uintptr_t)teb_mem;
@@ -273,6 +296,14 @@ int main( void )
     *(uint64_t *)(fex_thread_mem + 0) = fex_thread + NX_PROF_FEX_THREAD_SPAN;
     assert( x86_registers( teb, &eip, &esp, &ebp ) == 1 );
     assert( eip == 0 && esp == 0x11223344 && ebp == 0x55667788 );
+
+    /* Unreadable FEX thread pointer triggers fallback cleanly. */
+    *(uint64_t *)(fex_thread_mem + 0) = fex_frame;
+    bad_lo = fex_thread;
+    bad_hi = fex_thread + 16;
+    assert( x86_registers( teb, &eip, &esp, &ebp ) == 1 );
+    assert( eip == 0 && esp == 0x11223344 && ebp == 0x55667788 );
+    bad_lo = bad_hi = 0;
 
     /* Concurrent control word modification mid-read triggers fallback. */
     *(uint64_t *)(fex_thread_mem + 0) = fex_frame;

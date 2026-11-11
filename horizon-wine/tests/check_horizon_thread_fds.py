@@ -46,7 +46,7 @@ struct horizon_server_object {
     struct horizon_server_object *thread_next, *wait_port, *file_completion, *mapping_shared_file;
     struct horizon_user_apc *apc_first, *apc_last;
     struct horizon_completion_queue completion;
-    void *reg_key, *frozen_context, *mapping_version, *device_file;
+    void *reg_key, *frozen_context, *held_contexts, *mapping_version, *device_file;
     char *file_name, *dir_mask, *name;
 };
 static struct horizon_server_object *horizon_server_threads;

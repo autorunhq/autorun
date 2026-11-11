@@ -18,11 +18,13 @@ assert 'struct futex_exit ending =' in pe_sync
 assert 'NtWaitForAlertByThreadId( &ending, timeout );' in pe_sync
 
 test_c = r'''
+#define _GNU_SOURCE
 #include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include "windef.h"
 #include "winbase.h"
@@ -140,26 +142,34 @@ int main( void )
 
     /* 4. 32-bit (WoW64) queue unlink under lock contention. */
     {
-        struct list32 nodes[3];
-        LONG lock = -1;
-        pthread_t releaser;
-        struct lock_contend_ctx ctx = { &lock };
-        struct carafe_futex_exit desc;
-
-        if ((uintptr_t)nodes <= 0xffffffffULL)
+        struct list32 *nodes = (uintptr_t)&good <= 0xffffffffULL ? NULL :
+#ifdef MAP_32BIT
+            mmap( NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0 );
+#else
+            MAP_FAILED;
+#endif
+        struct list32 stack_nodes[3];
+        struct list32 *use = nodes != MAP_FAILED && nodes != NULL ? nodes :
+                             ((uintptr_t)stack_nodes <= 0xffffffffULL ? stack_nodes : NULL);
+        if (use)
         {
-            nodes[0].next = (UINT)(uintptr_t)&nodes[1];
-            nodes[0].prev = (UINT)(uintptr_t)&nodes[2];
-            nodes[0].addr = 0;
-            nodes[1].next = (UINT)(uintptr_t)&nodes[2];
-            nodes[1].prev = (UINT)(uintptr_t)&nodes[0];
-            nodes[1].addr = 0x400000;
-            nodes[2].next = (UINT)(uintptr_t)&nodes[0];
-            nodes[2].prev = (UINT)(uintptr_t)&nodes[1];
-            nodes[2].addr = 0x400004;
+            LONG lock = -1;
+            pthread_t releaser;
+            struct lock_contend_ctx ctx = { &lock };
+            struct carafe_futex_exit desc;
+
+            use[0].next = (UINT)(uintptr_t)&use[1];
+            use[0].prev = (UINT)(uintptr_t)&use[2];
+            use[0].addr = 0;
+            use[1].next = (UINT)(uintptr_t)&use[2];
+            use[1].prev = (UINT)(uintptr_t)&use[0];
+            use[1].addr = 0x400000;
+            use[2].next = (UINT)(uintptr_t)&use[0];
+            use[2].prev = (UINT)(uintptr_t)&use[1];
+            use[2].addr = 0x400004;
             desc.magic = CARAFE_FUTEX_EXIT_MAGIC;
             desc.pointer_size = sizeof(UINT);
-            desc.entry = (ULONG64)(uintptr_t)&nodes[1];
+            desc.entry = (ULONG64)(uintptr_t)&use[1];
             desc.lock = (ULONG64)(uintptr_t)&lock;
 
             yield_calls = 0;
@@ -168,17 +178,10 @@ int main( void )
             carafe_futex_exit_take_out();
             assert( !pthread_join( releaser, NULL ) );
             assert( lock == 0 && yield_calls > 0 );
-            assert( nodes[0].next == (UINT)(uintptr_t)&nodes[2] );
-            assert( nodes[2].prev == (UINT)(uintptr_t)&nodes[0] );
+            assert( use[0].next == (UINT)(uintptr_t)&use[2] );
+            assert( use[2].prev == (UINT)(uintptr_t)&use[0] );
         }
-        else
-        {
-            /* Verify 32-bit offset math in a low 32-bit-aligned region via relative offsets. */
-            ULONG64 base[9] = {0};
-            uint32_t *p0 = (uint32_t *)&base[0], *p1 = (uint32_t *)&base[3], *p2 = (uint32_t *)&base[6];
-            /* If stack is above 4GB on x86_64 host, mmap MAP_32BIT isn't portable without MAP_32BIT; covered below. */
-            (void)p0; (void)p1; (void)p2;
-        }
+        if (nodes != MAP_FAILED && nodes != NULL) munmap( nodes, 4096 );
     }
 
     puts( "carafe_futex_exit: validation, ending flag, 64-bit unlink and lock spin passed" );
