@@ -271,6 +271,28 @@ static void test_hooks_lifecycle_and_chains( void )
     rem_req.handle = h_global;
     horizon_server_handle_window_hook( &c1, (const void *)&rem_req, HORIZON_REQ_REMOVE_HOOK, NULL, 0 );
     assert( horizon_window_hooks == NULL );
+
+    /* Thread exiting mid-hook-chain releases its chain count and deferred unlinked hooks. */
+    set_req.id = 4;
+    set_req.tid = 0;
+    set_req.proc = 0x2345;
+    horizon_server_handle_window_hook( &c1, (const void *)&set_req, HORIZON_REQ_SET_HOOK, NULL, 0 );
+    assert( !set_rep->header.error && (h_global = set_rep->handle) );
+
+    memset( &start_req, 0, sizeof(start_req) );
+    start_req.header.reply_size = 520;
+    start_req.id = 4;
+    horizon_server_handle_window_hook( &c2, (const void *)&start_req, HORIZON_REQ_START_HOOK_CHAIN, NULL, 0 );
+    assert( !start_rep->header.error && horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 1 );
+
+    rem_req.handle = h_global;
+    horizon_server_handle_window_hook( &c1, (const void *)&rem_req, HORIZON_REQ_REMOVE_HOOK, NULL, 0 );
+    assert( horizon_window_hook_find_locked( h_global ) != NULL );
+
+    horizon_server_remove_thread_hooks_locked( 2 );
+    assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 0 );
+    assert( horizon_window_hook_find_locked( h_global ) == NULL );
+    assert( horizon_window_hooks == NULL );
 }
 
 static void test_ll_hooks_queue_and_drain( void )

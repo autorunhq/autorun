@@ -81,7 +81,7 @@ static struct horizon_server_object *horizon_server_get_thread_locked(unsigned h
     *status = handle == 1 ? 0 : STATUS_INVALID_HANDLE;
     return handle == 1 ? &target : NULL;
 }
-static Handle kernel_thread_handle;
+static Handle kernel_thread_handle, next_kernel_thread_handle;
 static int kernel_paused, kernel_in_runtime, stop_mask, stop_exit_code, pause_granted = 1;
 static uint64_t kernel_pc = 0x55550000ULL;
 __attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned tid, int set, int clear, int code, Handle *h) {
@@ -95,8 +95,7 @@ __attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned ti
 __attribute__((weak)) int wine_nx_in_runtime_code(uint64_t addr) { (void)addr; return kernel_in_runtime; }
 __attribute__((weak)) int wine_nx_thread_pause_granted(void) { return pause_granted; }
 static Result svcSetThreadActivity(Handle h, int activity) {
-    assert(h == kernel_thread_handle);
-    if (activity == ThreadActivity_Paused) { assert(!kernel_paused); kernel_paused = 1; }
+    if (activity == ThreadActivity_Paused) { assert(h == kernel_thread_handle && !kernel_paused); kernel_paused = 1; }
     else { assert(kernel_paused); kernel_paused = 0; }
     return 0;
 }
@@ -105,6 +104,11 @@ static Result svcGetThreadContext3(ThreadContext *ctx, Handle h) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->pc.x = kernel_pc;
     ctx->sp = 0x77770000ULL;
+    if (next_kernel_thread_handle)
+    {
+        kernel_thread_handle = next_kernel_thread_handle;
+        next_kernel_thread_handle = 0;
+    }
     return 0;
 }
 static int horizon_server_write_reply(int fd, const void *reply, size_t size, const void *data, size_t data_size) {
@@ -235,11 +239,21 @@ int main(void) {
     assert(!kernel_paused && !target.frozen && !target.thread_context_valid);
     /* Freeze fails when inside runtime code and falls back to stop-word, then terminates. */
     kernel_in_runtime = 1;
+    {
+        /* Snapshot still succeeds inside runtime code (WaitForSingleObject), but rejects handle reuse and ending threads. */
+        struct context_data snap;
+        assert(horizon_server_snapshot_locked(&target, &snap) && snap.ctl.arm64_regs.pc == kernel_pc && !kernel_paused);
+        next_kernel_thread_handle = 99;
+        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
+        kernel_thread_handle = 42;
+    }
     suspend();
     assert(!kernel_paused && !target.frozen && (stop_mask & HORIZON_STOP_SUSPEND));
     {
         struct horizon_terminate_thread_request term = {.handle = 1, .exit_code = 77};
+        struct context_data snap;
         assert(!horizon_server_handle_terminate_thread(&control, (void *)&term) && !reply_status());
+        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
         assert(target.ending && !target.thread.suspend && (stop_mask & HORIZON_STOP_END));
         assert(!(stop_mask & HORIZON_STOP_SUSPEND) && stop_exit_code == 77);
         assert(target.thread.exit_code == 77);

@@ -4730,7 +4730,7 @@ static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsig
     if (queue->tail) queue->tail->next = message;
     else queue->head = message;
     queue->tail = message;
-    pthread_cond_signal( &queue->cond );
+    pthread_cond_broadcast( &queue->cond );
     pthread_mutex_unlock( &queue->mutex );
 }
 
@@ -6996,11 +6996,36 @@ static void horizon_window_hook_remove_locked( struct horizon_window_hook *hook 
     if (!horizon_window_hook_chains[hook->index]) horizon_window_hook_free_locked( hook );
 }
 
-static void horizon_server_remove_thread_hooks_locked( unsigned int tid )
+static void horizon_window_hook_release_chain_locked( int index )
 {
     struct horizon_window_hook *hook, *next;
-    int removed = 0;
 
+    if (!horizon_window_hook_chains[index]) return;
+    if (--horizon_window_hook_chains[index]) return;
+    for (hook = horizon_window_hooks; hook; hook = next)
+    {
+        next = hook->next;
+        if (hook->index == index && !hook->proc) horizon_window_hook_free_locked( hook );
+    }
+}
+
+static void horizon_server_remove_thread_hooks_locked( unsigned int tid )
+{
+    struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
+    struct horizon_window_hook *hook, *next;
+    int i, removed = 0;
+
+    if (queue)
+    {
+        for (i = 0; i < HORIZON_HOOK_KINDS; i++)
+        {
+            while (queue->hook_chains[i] > 0)
+            {
+                queue->hook_chains[i]--;
+                horizon_window_hook_release_chain_locked( i );
+            }
+        }
+    }
     for (hook = horizon_window_hooks; hook; hook = next)
     {
         next = hook->next;
@@ -7124,6 +7149,8 @@ static int horizon_server_handle_start_hook_chain( struct horizon_server_connect
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((hook = horizon_window_hook_first_locked( request->id - HORIZON_WH_MINHOOK, connection->tid )))
     {
+        struct horizon_msgq *queue = horizon_server_queue_locked( connection->tid );
+
         reply.handle = hook->handle;
         reply.unicode = hook->unicode;
         reply.proc = hook->proc;
@@ -7131,6 +7158,7 @@ static int horizon_server_handle_start_hook_chain( struct horizon_server_connect
         reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
                                                                      module, sizeof(module) );
         horizon_window_hook_chains[hook->index]++;
+        if (queue) queue->hook_chains[hook->index]++;
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
@@ -7142,7 +7170,7 @@ static int horizon_server_handle_finish_hook_chain( struct horizon_server_connec
 {
     const struct horizon_finish_hook_chain_request *request = (const void *)message;
     struct horizon_server_reply_header reply = { 0, 0 };
-    struct horizon_window_hook *hook, *next;
+    struct horizon_msgq *queue;
     int index = request->id - HORIZON_WH_MINHOOK;
 
     if (request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
@@ -7151,13 +7179,11 @@ static int horizon_server_handle_finish_hook_chain( struct horizon_server_connec
     {
         pthread_mutex_lock( &horizon_server_objects_mutex );
         if (!horizon_window_hook_chains[index]) reply.error = HORIZON_STATUS_INVALID_PARAMETER;
-        else if (!--horizon_window_hook_chains[index])
+        else
         {
-            for (hook = horizon_window_hooks; hook; hook = next)
-            {
-                next = hook->next;
-                if (hook->index == index && !hook->proc) horizon_window_hook_free_locked( hook );
-            }
+            if ((queue = horizon_msgq_find( &horizon_msg_queues, connection->tid )) && queue->hook_chains[index] > 0)
+                queue->hook_chains[index]--;
+            horizon_window_hook_release_chain_locked( index );
         }
         pthread_mutex_unlock( &horizon_server_objects_mutex );
     }
@@ -7966,9 +7992,45 @@ struct horizon_monitor_info
 };
 
 #define HORIZON_MAX_MONITORS 8
+#define HORIZON_MONITOR_FLAG_CLONE    0x02u
+#define HORIZON_MONITOR_FLAG_INACTIVE 0x04u
 
 static struct horizon_monitor_info horizon_monitors[HORIZON_MAX_MONITORS];
 static unsigned int horizon_monitor_count;
+
+static void horizon_server_raw_screen_rect_locked( struct horizon_rectangle *rect )
+{
+    struct horizon_rectangle out = { 0, 0, 0, 0 };
+    unsigned int i;
+    int have = 0;
+
+    for (i = 0; i < horizon_monitor_count; i++)
+    {
+        const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+
+        if (horizon_monitors[i].flags & (HORIZON_MONITOR_FLAG_CLONE | HORIZON_MONITOR_FLAG_INACTIVE)) continue;
+        if (raw->left >= raw->right || raw->top >= raw->bottom) continue;
+        if (!have)
+        {
+            out = *raw;
+            have = 1;
+        }
+        else
+        {
+            if (raw->left < out.left) out.left = raw->left;
+            if (raw->top < out.top) out.top = raw->top;
+            if (raw->right > out.right) out.right = raw->right;
+            if (raw->bottom > out.bottom) out.bottom = raw->bottom;
+        }
+    }
+    if (!have)
+    {
+        out.left = out.top = 0;
+        out.right = 1280;
+        out.bottom = 720;
+    }
+    *rect = out;
+}
 
 static void horizon_server_map_point_raw_to_virt_locked( int *x, int *y )
 {
@@ -8056,8 +8118,7 @@ static unsigned int horizon_server_create_desktop_locked( const struct horizon_o
         return status;
     shared = horizon_server_shared_object_locked( locator );
     shared->shm.desktop.flags = flags;
-    shared->shm.desktop.cursor.clip.right = 1280;
-    shared->shm.desktop.cursor.clip.bottom = 720;
+    horizon_server_raw_screen_rect_locked( &shared->shm.desktop.cursor.clip );
     if ((status = horizon_server_flush_session_range_locked( locator.offset, sizeof(*shared) )))
         return status;
 
@@ -10404,11 +10465,7 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
         }
         if (request->flags & HORIZON_SET_CURSOR_CLIP) desktop->cursor.clip = request->clip;
         if (request->flags & HORIZON_SET_CURSOR_NOCLIP)
-        {
-            desktop->cursor.clip.left = desktop->cursor.clip.top = 0;
-            desktop->cursor.clip.right = 1280;
-            desktop->cursor.clip.bottom = 720;
-        }
+            horizon_server_raw_screen_rect_locked( &desktop->cursor.clip );
         if ((request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
             desktop->cursor.clip.left < desktop->cursor.clip.right &&
             desktop->cursor.clip.top < desktop->cursor.clip.bottom)
@@ -12672,15 +12729,17 @@ static void horizon_server_thaw_locked( struct horizon_server_object *object )
 static int horizon_server_snapshot_locked( struct horizon_server_object *object, struct context_data *context )
 {
     ThreadContext kernel;
-    Handle handle = 0;
+    Handle handle = 0, again = 0;
     Result rc;
 
-    if (!horizon_server_can_pause()) return 0;
+    if (!horizon_server_can_pause() || !object->thread.started || object->thread.terminated || object->ending)
+        return 0;
     if (!horizon_server_stop_request_locked( object, 0, 0, 0, &handle ) || !handle) return 0;
     if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) )) return 0;
     rc = svcGetThreadContext3( &kernel, handle );
     svcSetThreadActivity( handle, ThreadActivity_Runnable );
-    if (R_FAILED( rc )) return 0;
+    if (R_FAILED( rc ) || !horizon_server_stop_request_locked( object, 0, 0, 0, &again ) || again != handle)
+        return 0;
     horizon_server_context_from_kernel( context, &kernel );
     return 1;
 }

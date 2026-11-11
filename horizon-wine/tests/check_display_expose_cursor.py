@@ -297,8 +297,33 @@ int main( void )
     mock_desktop.cursor.y = 900;
     cur_req.flags = HORIZON_SET_CURSOR_NOCLIP;
     horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
-    assert( cur_rep->new_x == 1199 || cur_rep->new_x == 1200 ); /* wait: clip is 0..1280 -> 1200 stays, y 900 -> 719! */
-    assert( cur_rep->new_x == 1200 && cur_rep->new_y == 719 );
+    /* NOCLIP uses active raw monitor union {280, 0, 1000, 720}, not virt {0, 0, 640, 480}. */
+    assert( cur_rep->new_clip.left == 280 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1000 && cur_rep->new_clip.bottom == 720 );
+    assert( cur_rep->new_x == 999 && cur_rep->new_y == 719 );
+
+    mock_desktop.cursor.x = 100;
+    mock_desktop.cursor.y = 50;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_x == 280 && cur_rep->new_y == 50 );
+
+    /* Docked 1920x1080 raw monitor: NOCLIP expands beyond legacy 1280x720 cap. */
+    struct horizon_monitor_info mon_1080 = { { 0, 0, 1920, 1080 }, { 0, 0, 1920, 1080 }, 0, 96, 96, 96, 96 };
+    horizon_server_handle_set_winstation_monitors( &conn, (const void *)&mon_req, &mon_1080, sizeof(mon_1080) );
+    mock_desktop.cursor.x = 1500;
+    mock_desktop.cursor.y = 900;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.right == 1920 && cur_rep->new_clip.bottom == 1080 );
+    assert( cur_rep->new_x == 1500 && cur_rep->new_y == 900 );
+
+    /* No active monitors: NOCLIP falls back to 1280x720. */
+    horizon_monitor_count = 0;
+    mock_desktop.cursor.x = 1500;
+    mock_desktop.cursor.y = 900;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
+    assert( cur_rep->new_x == 1279 && cur_rep->new_y == 719 );
 
     /* 4. wine_nx_shown_rect keeps scaled fullscreen surface between side bars (0111). */
     struct window_rects scaled_rects = {
