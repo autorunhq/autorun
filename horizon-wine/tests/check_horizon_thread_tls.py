@@ -25,6 +25,10 @@ typedef int32_t s32;
 typedef void (*ThreadFunc)(void*);
 typedef struct { u64 addr, size; u32 type; } MemoryInfo;
 #define R_FAILED(rc) ((rc) != 0)
+/* What the [BUDGET] line counts; check_thread_creation_wait.py reads them. */
+#define CARAFE_THREAD_WAITED( ns, placed ) ((void)(ns), (void)(placed))
+#define CARAFE_THREAD_WAITER_REPORT() ((void)0)
+#define CARAFE_THREAD_REFUSED() ((void)0)
 #define R_SUCCEEDED(rc) ((rc) == 0)
 #define Module_Kernel 1
 #define KernelError_OutOfResource 103

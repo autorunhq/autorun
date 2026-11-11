@@ -100,6 +100,26 @@ jobs:
             ./$test || { echo "::error::horizon-wine/tests/$test.c failed"; exit 1; }
           done
 
+      - name: Reports and thread waits
+        # Carafe's diagnostics (PORTING.md, stages 2 and 3): what the [WAITS]
+        # and [FEX] lines say, what a thread creation at the limit counts, the
+        # fd queue's report, and the profiler's parts that need no kernel.
+        run: |
+          flags="-std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          cd horizon-wine
+          cc $flags -I tests/carafe-shims -I source tests/carafe_reports.c -o "$RUNNER_TEMP/carafe_reports"
+          cc $flags -I source tests/thread_profile.c -o "$RUNNER_TEMP/thread_profile"
+          "$RUNNER_TEMP/carafe_reports"
+          "$RUNNER_TEMP/thread_profile"
+          for check in check_thread_creation_wait check_horizon_thread_tls check_horizon_fd_owner \
+                       check_shader_affinity check_futex_exit; do
+            python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
+              echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
+              exit 1
+            }
+            tail -n 1 "$RUNNER_TEMP/$check.log"
+          done
+
       - name: Release list, archives and system32, made here
         # What the launcher does with the Carafe builds of DXVK and FEX
         # (carafe/dlls), on a release list and archives the test makes itself.

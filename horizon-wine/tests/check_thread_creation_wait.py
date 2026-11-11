@@ -73,11 +73,19 @@ static unsigned int mock_tls_give_place_calls;
 static unsigned int mock_join_ended_calls;
 static int mock_rlimit_used;
 static int mock_rlimit_limit = 96;
+
+/* The counters behind the [BUDGET] line: what each wait and refusal reports. */
+static unsigned int mock_waited_calls, mock_waited_placed, mock_waiter_reports, mock_refused;
+static unsigned long long mock_waited_ns;
+#define CARAFE_THREAD_WAITED( ns, placed ) do { mock_waited_calls++; mock_waited_ns = (ns); mock_waited_placed += !!(placed); } while (0)
+#define CARAFE_THREAD_WAITER_REPORT() (mock_waiter_reports++)
+#define CARAFE_THREAD_REFUSED() (mock_refused++)
 static int mock_real_fail_oores;
 static int mock_tls_conflicts;
 static u64 mock_now_ns;
 static u64 mock_step_ns = 1000000000ull;
 static unsigned int mock_sleep_calls;
+static unsigned int mock_free_after_sleeps;
 static char mock_last_trace[256];
 static unsigned int mock_trace_count;
 static int mock_zombie_ended;
@@ -152,6 +160,8 @@ static void svcSleepThread( s64 ns )
     (void)ns;
     mock_sleep_calls++;
     mock_now_ns += mock_step_ns;
+    /* Another thread ended while this one slept: its place is free. */
+    if (mock_free_after_sleeps && mock_sleep_calls == mock_free_after_sleeps) mock_rlimit_used--;
 }
 
 static Handle next_handle = 0x10;
@@ -201,6 +211,9 @@ static void reset_state( void )
     mock_trace_count = 0;
     mock_last_trace[0] = 0;
     mock_zombie_ended = 0;
+    mock_waited_calls = mock_waited_placed = mock_waiter_reports = mock_refused = 0;
+    mock_waited_ns = 0;
+    mock_free_after_sleeps = 0;
 }
 
 int main( void )
@@ -223,6 +236,7 @@ int main( void )
     assert( R_SUCCEEDED(rc) && h != 0 );
     assert( horizon_server_zombies.reaped == 1 && horizon_server_zombies.pending == 0 );
     assert( mock_sleep_calls == 0 );
+    assert( !mock_waited_calls && !mock_refused && !mock_waiter_reports );
 
     /* 2. Calls wine_nx_tls_give_place() when no ended pthread is waiting, freeing a TLS slot. */
     reset_state();
@@ -237,6 +251,7 @@ int main( void )
     wine_nx_quit_requested = 1;
     rc = __wrap_svcCreateThread( &h, dummy_thread_entry, NULL, NULL, 0, 0 );
     assert( rc == MAKERESULT( Module_Kernel, KernelError_OutOfResource ) && mock_sleep_calls == 0 );
+    assert( mock_refused == 1 && !mock_waited_calls );
     reset_state();
     horizon_lifecycle.tebs = 0;
     rc = __wrap_svcCreateThread( &h, dummy_thread_entry, NULL, NULL, 0, 0 );
@@ -248,8 +263,20 @@ int main( void )
     rc = __wrap_svcCreateThread( &h, dummy_thread_entry, NULL, NULL, 0, 0 );
     assert( rc == MAKERESULT( Module_Kernel, KernelError_OutOfResource ) );
     assert( mock_sleep_calls >= 3 && strstr( mock_last_trace, "[THREAD] create failed" ) != NULL );
+    /* The wait is counted once as lost, with how long it took; the threads'
+     * places are asked for once, at the first note; the refusal is counted. */
+    assert( mock_waited_calls == 1 && !mock_waited_placed && mock_waited_ns >= HORIZON_THREAD_WAIT_NS );
+    assert( mock_waiter_reports == 1 && mock_refused == 1 );
 
-    puts( "Thread creation waits for a place: zombie reap, TLS place give-up, quit bypass, and timeout passed" );
+    /* 5. A place that frees while waiting: counted as a wait that was placed, and not as a refusal. */
+    reset_state();
+    mock_free_after_sleeps = 2;
+    rc = __wrap_svcCreateThread( &h, dummy_thread_entry, NULL, NULL, 0, 0 );
+    assert( R_SUCCEEDED(rc) && mock_sleep_calls == 2 );
+    assert( mock_waited_calls == 1 && mock_waited_placed == 1 && mock_waited_ns > 0 && !mock_refused );
+    assert( strstr( mock_last_trace, "[THREAD] waited" ) != NULL );
+
+    puts( "Thread creation waits for a place: zombie reap, TLS place give-up, quit bypass, timeout, a place freed while waiting, and what each reports passed" );
     return 0;
 }
 '''

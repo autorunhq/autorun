@@ -281,6 +281,7 @@ sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the hori
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
 python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
+(cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/carafe-shims -I source tests/carafe_reports.c -o /tmp/carafe_reports && /tmp/carafe_reports)   # Carafe's reports: waits by kind, the lock wait's priority, FEX's counters
 ```
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by

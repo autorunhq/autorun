@@ -66,8 +66,8 @@ Each stage is one or a few commits, checked on the host and built by the
 | Stage | What | State |
 |---|---|---|
 | 1 | Videos through DirectShow and the Windows Media reader; small log and profiler fixes | **done** |
-| 2 | Diagnostics: `carafe_diag.c`, the event ring and connection table in `horizon.c`, `[BUDGET]` and `[SERVED]`, the alert table in `sync.c`, the stall report on request, `carafe_waits.c`, `carafe_mesa.c`, the fd queue report | next |
-| 3 | The profiler: x86 names of the code FEX runs, the busiest translated blocks, FEX time outside blocks, stages by call chain (`thread_profile.c`, +536 lines) | |
+| 2 | Diagnostics: `carafe_diag.c`, the event ring and connection table in `horizon.c`, `[BUDGET]` and `[SERVED]`, the alert table in `sync.c`, the stall report on request, `carafe_waits.c`, `carafe_mesa.c`, the fd queue report, FEX's counters | **done** |
+| 3 | The profiler: x86 names of the code FEX runs, the busiest translated blocks, FEX time outside blocks, stages by call chain (`thread_profile.c`, +536 lines) | **done** |
 | 4 | The orchestrator (`runtime/orchestrator`, GPL-3.0-or-later) with its host tests, `wine_nx_thread_place` and the side cores, `carafe_lock_boost.c`, `carafe_bench.c` | |
 | 5 | Carafe's FEX and DXVK patches, dxwrapper, Wine Mono, WinRT classes, and with them `carafe_fex_stats.c`, the FEX and DXVK options and the five missing menu rows | FEX for 32-bit programs and DXVK: **done**, downloaded from this repository's releases. The rest is open, see below |
 | 6 | The server thread pool (`0023`): one thread per Windows thread instead of two | after an audit of every wait inside a server request |
@@ -102,6 +102,61 @@ whose `classes.reg` names it as the server of the splitter's class. The table of
 unix calls in `media_unix.c` is indexed by the names in
 `dlls/winegstreamer/unixlib.h`, which is the same file here as at Carafe's base,
 so the two halves agree as long as that DLL was built from this header.
+
+### Stages 2 and 3: diagnostics and the profiler, done
+
+Nothing here changes what a game does; it changes what the log says about it.
+
+| Change | From | Files |
+|---|---|---|
+| The server keeps its last 512 thread events (new, suspend, resume, terminate, a wait on a suspended thread) and a table of its connections; the stall report prints the newest 96 and where each connection stands | patch `0001`, applied | `dlls/ntdll/unix/horizon.c` |
+| A handle taken from the fd queue that had to skip other owners' entries says so, and whether it found its own | the two report lines of `0002`; the owner matching was already here | `horizon.c` |
+| A table of the alertable waits in progress, printed with the stall report | patch `0004`, applied; the hunk at the wait's two returns by hand, before the fork's own `carafe_futex_wait_left()` | `dlls/ntdll/unix/sync.c` |
+| `[BUDGET]`: threads used and their peak, windows, server threads, refusals, how many creations waited for a place, how many of those got none and the time waited. `[SERVED]`: the ten requests the server answered most often and the time spent in each, every 30 s | patch `0019`, applied; the counters of `0020` and `0028` by hand, because the wait itself is the fork's `horizon_thread_may_wait` loop | `horizon.c` |
+| A creation that has waited 5 s writes where it was called from and asks the stall watch for every thread's place, instead of reading them itself | `0028`'s report, `0030` | `horizon.c`, `horizon-wine/source/runtime.c` |
+| The stall report names the native callers of a Windows thread from its stack | patch `0029` | `horizon-wine/source/thread_profile.c` |
+| With the profiler on: the x86 address of the code FEX runs, the busiest translated blocks written to `logs/jit-blocks.txt`, FEX's time outside blocks split by part, time counted by the calls near a thread's start, the block of a pc after a return point | patches `0050`, `0055`, `0058`, `0065`, `0076` | `thread_profile.c` |
+| With the profiler on, FEX is asked for its counters and gets an area for them from the runtime's heap; Carafe's FEX also gets `FEX_GDBSYMBOLS=1` and Carafe's DXVK `CARAFE_D3D9_STATS=1` | patches `0063`, `0066`, `0067`, `0081` | `runtime.c`, `horizon-wine/source/fex_unix.c` |
+| The reports themselves: frame rate, clocks and GPU load with every thread report; with the profiler on, each core's load, what each thread waited for by kind (`[WAITS]`), FEX's counters by thread (`[FEX]`), and once the A57 timings; where native threads are started from (`[NATIVE]`); the thread pools Mesa makes | `runtime/overlay`, taken whole | `horizon-wine/source/carafe_diag.c`, `carafe_bench.c`, `carafe_waits.c`, `carafe_fex_stats.c`, `carafe_lock_boost.c`, `carafe_mesa.c` |
+
+How `thread_profile.c` was brought over: as a three-way merge of the fork's
+file, Carafe's and their common base, because 11 of Carafe's patches change it
+and the fork had changed the same places. Of the nine conflicts, the fork's side
+was kept where it stops and holds threads (its 20 ms wait instead of an endless
+one, `wine_nx_stop_state`) and where it collects the rows the tasks panel also
+reads; Carafe's side everywhere else. The merge had also written one block
+twice, which was removed. What is left of Carafe's file that is not in the
+fork's is 13 lines, all of them those two places.
+
+The merge also brings what the orchestrator will call (`wine_nx_thread_views`,
+`wine_nx_thread_place`, `wine_nx_thread_reserve_core`,
+`wine_nx_thread_side_cores`, patches `0064` and `0072`). Nothing calls them
+before stage 4, and no core is reserved until something does.
+
+What differs from Carafe:
+
+- `carafe_lock_boost.c` times a wait for a libnx mutex, and in Carafe also
+  raises the waiting thread's priority by one. Here that second half is off
+  (`carafe_lock_boost_enabled` starts at 0) until stage 4 gives it a setting.
+- `[BUDGET]` has no `pool=` field: that is the server thread pool, stage 6.
+- The stock FEX is asked for its counters too. Its record has the same size as
+  Carafe's, with padding where Carafe's counts returns that miss the
+  call-return stack, so that one number reads 0.
+
+Checked: `tests/carafe_reports.c` (waits by kind and thread, the first sight of
+a thread counting nothing, the lock wait's priority off and on and for a thread
+at another priority, FEX's counters as differences between reports, a record
+that would end outside the area, a record of another size), also with two
+errors put into the code to see it fail; `tests/check_thread_creation_wait.py`,
+which now also checks what a wait reports (counted once, as placed or lost,
+with its time; one request for the threads' places; refusals) and a fifth case,
+a place that frees during the wait; `tests/check_horizon_fd_owner.py` with the
+two report lines; `tests/thread_profile.c`; the host suite, 82 passing before
+and after; every changed and added C file compiled for AArch64 against libnx's
+and newlib's headers; the `build` workflow.
+
+Not checked, because it needs a console: any of these lines in a real log, the
+clock and GPU services answering, and that FEX fills the area.
 
 ### Stage 5: FEX and DXVK, done
 
@@ -160,7 +215,6 @@ Still open in stage 5:
 | What | Why not yet |
 |---|---|
 | FEX for 64-bit programs (`libarm64ecfex.dll`) | Carafe's patch set is built here for `wow64fex` only; the ARM64EC target was not tried |
-| `carafe_fex_stats.c` and the area FEX keeps its counters in (`0066`, `0067`) | The reader belongs to the diagnostics of stage 2. Without it the two unix calls answer "not supported", as they do for the stock FEX |
 | Carafe's DXVK as the system Direct3D (`0105`, `0133`) | Here it is a source like the others, in a folder put in front of system32, which is what this fork does for every DXVK |
 | dxwrapper, Wine Mono, the WinRT classes, patch `0006` | Each needs Windows DLLs other than these two |
 
@@ -183,10 +237,10 @@ last column is the reading of the code and is filled in as each patch is read.
 
 | Patch | Subject | Lines added | Lines found | State |
 |---|---|---|---|---|
-| 0001 | horizon hang diagnostics | 122 | 12 % | stage 2 (diagnostics) |
-| 0002 | horizon fd owner | 37 | 62 % | owner matching is in the fork; the two report lines are stage 2 |
+| 0001 | horizon hang diagnostics | 122 | 100 % | taken (stage 2) |
+| 0002 | horizon fd owner | 37 | 97 % | owner matching was in the fork; the two report lines taken (stage 2) |
 | 0003 | horizon alias region | 31 | 90 % | in the fork; upstream renamed the log tag to [HMAP] and guards the overflow |
-| 0004 | sync alert diagnostics | 54 | 18 % | stage 2 (diagnostics) |
+| 0004 | sync alert diagnostics | 54 | 100 % | taken (stage 2) |
 | 0006 | virtual 32bit address space | 23 | 13 % | deferred: the fork's launcher and its own forwarders are 39-bit with the low window; only a third-party 32-bit forwarder would need it, and its PE half needs rebuilt DLLs (stage 5) |
 | 0007 | low window 32bit guest range | 10 | 100 % | in the fork |
 | 0008 | runtime screen until first frame | 29 | 96 % | in the fork but for a few lines; to review |
@@ -200,8 +254,8 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0016 | opengl present at window position | 31 | 100 % | in the fork |
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |
 | 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork but for a few lines; to review |
-| 0019 | horizon thread budget and server requests | 91 | 10 % | stage 2 (diagnostics) |
-| 0020 | horizon thread creation waits for a place | 42 | 23 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; only the [BUDGET] report lines differ (stage 2) |
+| 0019 | horizon thread budget and server requests | 91 | 97 % | taken (stage 2); `[BUDGET]` without the `pool=` field of `0023` |
+| 0020 | horizon thread creation waits for a place | 42 | 59 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
 | 0021 | horizon handle fd on the calling thread | 4 | 100 % | in the fork |
 | 0022 | server handle fd on the calling thread | 1 | 100 % | in the fork |
 | 0023 | horizon server thread pool | 180 | 17 % | stage 6 (server thread pool), after an audit of every wait inside a request |
@@ -209,9 +263,9 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0025 | horizon thread creation takes a tls holders place | 6 | 33 % | in the fork as horizon_tls_give_place |
 | 0026 | thread join an ended thread without waiting | 23 | 100 % | in the fork |
 | 0027 | horizon thread creation at the limit skips the kernel wait | 41 | 95 % | in the fork but for a few lines; to review |
-| 0028 | horizon thread creation waits longer for a place | 39 | 12 % | in the fork (20 s wait, 2 ms then 20 ms steps); the caller report is stage 2 |
-| 0029 | runtime stall report names native callers | 36 | 11 % | stage 2 (diagnostics) |
-| 0030 | runtime stall watch reports on request | 6 | 16 % | stage 2 (diagnostics) |
+| 0028 | horizon thread creation waits longer for a place | 39 | 58 % | in the fork (20 s wait, 2 ms then 20 ms steps); the caller report taken (stage 2) |
+| 0029 | runtime stall report names native callers | 36 | 94 % | taken (stage 2) |
+| 0030 | runtime stall watch reports on request | 6 | 100 % | taken (stage 2) |
 | 0031 | runtime threads carry a stop request | 32 | 87 % | to review |
 | 0032 | horizon suspend pauses threads and terminate ends them | 106 | 81 % | to review |
 | 0033 | syscalls stop on request and wow64 reads other threads | 36 | 80 % | to review |
@@ -228,38 +282,38 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0045 | compositor gl draws blended quads | 8 | 100 % | in the fork |
 | 0046 | compositor menu layer blends | 3 | 100 % | in the fork |
 | 0049 | registry tells carafe when loaded and can be changed | 77 | 100 % | in the fork |
-| 0050 | profiler names the x86 code fex runs | 71 | 2 % | stage 3 (profiler) |
+| 0050 | profiler names the x86 code fex runs | 71 | 92 % | taken (stage 3); the lines not found were replaced by later patches |
 | 0051 | fex options carry the disk cache | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0052 | horizon server grants file locks | 15 | 80 % | in the fork: upstream has its own file locks (HORIZON_REQ_LOCK_FILE 53, UNLOCK_FILE 54) |
 | 0053 | profiler tables hold more addresses | 3 | 100 % | ported in stage 1 |
 | 0054 | fex options carry x87 conversion rounding | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0055 | profiler writes the busiest translated blocks | 91 | 6 % | stage 3 (profiler) |
+| 0055 | profiler writes the busiest translated blocks | 91 | 98 % | taken (stage 3) |
 | 0056 | fex options carry x87 fast stack and single precision | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0057 | fex options carry gdb symbols | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0058 | profiler splits fex time outside blocks | 79 | 6 % | stage 3 (profiler) |
+| 0058 | profiler splits fex time outside blocks | 79 | 100 % | taken (stage 3) |
 | 0059 | fex options carry the flag option | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0060 | dxvk options carry the unchanged state path | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0061 | horizon aslr region traced once | 5 | 100 % | ported in stage 1 |
 | 0062 | runtime vulkan surfaces share a reserved screen | 18 | 100 % | in the fork |
-| 0063 | runtime profiler asks direct3d 9 for call counts | 5 | 20 % | stage 3 (profiler); the counts come from Carafe's DXVK (stage 5) |
-| 0064 | runtime threads placed by the orchestrator | 68 | 44 % | stage 4 (orchestrator) |
-| 0065 | profiler counts time by the calls near a threads start | 90 | 13 % | stage 3 (profiler) |
-| 0066 | fex gets an area for its thread counters | 24 | 12 % | open: stage 2 (the counters' reader is `carafe_fex_stats.c`) |
-| 0067 | runtime profiler asks fex for its counters | 4 | 0 % | open: stage 2 (the counters' reader is `carafe_fex_stats.c`) |
+| 0063 | runtime profiler asks direct3d 9 for call counts | 5 | 80 % | taken (stage 3); the counts come from Carafe's DXVK |
+| 0064 | runtime threads placed by the orchestrator | 68 | 95 % | the profiler's half taken with stage 3; nothing calls it before stage 4 (orchestrator) |
+| 0065 | profiler counts time by the calls near a threads start | 90 | 95 % | taken (stage 3); the lines not found were replaced by later patches |
+| 0066 | fex gets an area for its thread counters | 24 | 100 % | taken (stage 2) |
+| 0067 | runtime profiler asks fex for its counters | 4 | 100 % | taken (stage 2) |
 | 0068 | dxvk options carry the front end thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0069 | dxvk options carry the effect thread | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0070 | dxvk options carry the effect pass merge | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
 | 0071 | dxvk options carry the managed buffer copies | 3 | 0 % | done in stage 5: the row is in `dxvk_options.c`, for the DXVK Carafe source only |
-| 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 0 % | stage 4 (orchestrator) |
+| 0072 | runtime orchestrator moves threads to and from core 3 | 10 | 100 % | the profiler's half taken with stage 3; nothing calls it before stage 4 (orchestrator) |
 | 0073 | fex options carry the call cache and the bridge return | 8 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0074 | fex options carry the jump tables | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0075 | fex options carry compact returns | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
-| 0076 | profiler finds the block of a pc after a return point | 18 | 5 % | stage 3 (profiler) |
+| 0076 | profiler finds the block of a pc after a return point | 18 | 100 % | taken (stage 3) |
 | 0077 | fex options carry slim return points | 4 | 25 % | done in stage 5: the rows are in `fex_options.h`, shown and passed only to Carafe's FEX build |
 | 0078 | virtual large views start on 2mb | 10 | 100 % | in the fork |
 | 0079 | fex options turn jump tables on | 1 | 100 % | in the fork |
 | 0080 | fex options turn compact and slim returns on | 2 | 100 % | in the fork |
-| 0081 | runtime profiler turns fex gdb symbols on | 1 | 0 % | stage 3 (profiler) |
+| 0081 | runtime profiler turns fex gdb symbols on | 1 | 100 % | taken (stage 3); only Carafe's FEX is given the option |
 | 0082 | dxvk options carry sarek choices | 24 | 8 % | done in stage 5 for the DXVK Carafe source: the two frame limiter rows, the two compiler rows, and `dxvk.shaderCompilationMethod` as a row of its own. Sarek's row keeps its default |
 | 0085 | horizon server window hooks | 277 | 98 % | in the fork but for a few lines; to review |
 | 0087 | wow64 context of another thread waits until it stops | 8 | 37 % | to review |

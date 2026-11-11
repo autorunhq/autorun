@@ -32,6 +32,8 @@ alias_globals = re.search(
 funcs = '\n\n'.join([
     extract_function(horizon, 'horizon_fd_queue_push'),
     extract_function(horizon, 'horizon_fd_queue_push_dup'),
+    extract_function(horizon, 'horizon_fd_queue_report').replace(
+        'extern void wine_nx_runtime_trace( const char *msg );', ''),
     extract_function(horizon, 'horizon_fd_queue_pop'),
     alias_globals,
     extract_function(horizon, 'horizon_in_alias_region'),
@@ -104,16 +106,36 @@ int main( void )
     horizon_fd_queue_push( &q, fds[2], 0x33, &owner_c );
 
     /* Pop middle owner B first, preserving head=A and tail=C. */
-    assert( horizon_fd_queue_pop( &q, &owner_b, &h ) == fds[1] && h == 0x22 );
+    assert( horizon_fd_queue_pop( &q, &owner_b, &h, "client" ) == fds[1] && h == 0x22 );
     assert( q.head && q.head->owner == &owner_a && q.tail && q.tail->owner == &owner_c );
+    /* A thread whose fd was not the oldest says how many it passed. */
+    assert( trace_count == 1 );
+    assert( !strcmp( last_trace, "[CARAFE] client fd: own fd taken past 1 of other threads" ) );
 
     /* Pop tail owner C next, updating q.tail back to A. */
-    assert( horizon_fd_queue_pop( &q, &owner_c, &h ) == fds[2] && h == 0x33 );
+    assert( horizon_fd_queue_pop( &q, &owner_c, &h, "server" ) == fds[2] && h == 0x33 );
     assert( q.head && q.head->owner == &owner_a && q.tail == q.head );
+    assert( trace_count == 2 );
 
     /* Unknown owner falls back to head (owner A) and empties queue cleanly. */
-    assert( horizon_fd_queue_pop( &q, &owner_none, &h ) == fds[0] && h == 0x11 );
+    assert( horizon_fd_queue_pop( &q, &owner_none, &h, "server" ) == fds[0] && h == 0x11 );
     assert( !q.head && !q.tail );
+    assert( trace_count == 3 );
+    assert( !strcmp( last_trace, "[CARAFE] server fd: none from this thread, took the oldest of 1" ) );
+    /* Its own fd at the head is the usual case and says nothing; and the
+     * reports stop after the first 16. */
+    horizon_fd_queue_push( &q, dup( fds[0] ), 0x44, &owner_a );
+    close( horizon_fd_queue_pop( &q, &owner_a, &h, "client" ) );
+    assert( trace_count == 3 && h == 0x44 );
+    for (int i = 0; i < 20; i++)
+    {
+        horizon_fd_queue_push( &q, dup( fds[0] ), 0x55, &owner_a );
+        horizon_fd_queue_push( &q, dup( fds[0] ), 0x66, &owner_b );
+        close( horizon_fd_queue_pop( &q, &owner_b, &h, "client" ) );
+        close( horizon_fd_queue_pop( &q, &owner_a, &h, "client" ) );
+    }
+    assert( trace_count == 16 && !q.head && !q.tail );
+    trace_count = 0;
 
     close( fds[0] );
     close( fds[1] );

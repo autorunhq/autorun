@@ -487,6 +487,13 @@ static void open_game_log( const char *target )
     log_line( "[LOG] this run is kept in %s", path );
 }
 
+static int stall_report_asked;
+
+void wine_nx_stall_report_soon( void )
+{
+    __atomic_store_n( &stall_report_asked, 1, __ATOMIC_RELEASE );
+}
+
 static void stall_watch( void *arg )
 {
     extern unsigned int wine_nx_gl_swaps __attribute__((weak));
@@ -501,7 +508,12 @@ static void stall_watch( void *arg )
 
         /* Five seconds, in slices, so quitting does not wait for them. */
         for (i = 0; i < 50 && !__atomic_load_n( (int *)&stall_watch_quit, __ATOMIC_RELAXED ); i++)
+        {
             svcSleepThread( 100000000LL );
+            if (!__atomic_exchange_n( &stall_report_asked, 0, __ATOMIC_ACQ_REL )) continue;
+            log_line( "[STALL] a thread has waited 5 s for a place; where the threads are standing" );
+            wine_nx_threads_report_stalled();
+        }
         frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
                  (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
                  wine_nx_compositor_frames_fast() +
@@ -2427,12 +2439,24 @@ static size_t runtime_fex_environment( const char *target, char *buffer, size_t 
         if (nx_fex_option_carafe( option ) && !runtime_fex_carafe_active) continue;
         if (launcher_kv_get( &kv, option->name, configured, sizeof(configured) ) &&
             nx_fex_option_choice( option, configured ) >= 0) value = configured;
+        if (option->id == NX_FEX_GDB_SYMBOLS && runtime_profile) value = "1";
         length = snprintf( buffer + used, size - used, "%s=%s", option->name, value );
         if (length < 0 || (size_t)length + 1 > size - used) return 0;
         used += length + 1;
         if (option->id == NX_FEX_TSO) tso = option->values[nx_fex_option_choice( option, value )];
         else if (option->id == NX_FEX_MULTIBLOCK) multiblock = option->values[nx_fex_option_choice( option, value )];
         else if (option->id == NX_FEX_MAXINST) maxinst = option->values[nx_fex_option_choice( option, value )];
+    }
+    if (runtime_profile)
+    {
+        static const char stats[] = "CARAFE_D3D9_STATS=1", counters[] = "FEX_PROFILESTATS=1";
+
+        if (sizeof(stats) > size - used) return 0;
+        memcpy( buffer + used, stats, sizeof(stats) );
+        used += sizeof(stats);
+        if (sizeof(counters) > size - used) return 0;
+        memcpy( buffer + used, counters, sizeof(counters) );
+        used += sizeof(counters);
     }
     log_line( "[FEX] TSO=%s multiblock=%s maxinst=%s", tso, multiblock, maxinst );
     return used;

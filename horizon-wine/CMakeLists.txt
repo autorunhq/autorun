@@ -653,6 +653,10 @@ add_executable(wine-nx-runtime
     source/carafe_settings.c
     source/carafe_registry.c
     source/carafe_menu.c
+    source/carafe_diag.c
+    source/carafe_bench.c
+    source/carafe_waits.c
+    source/carafe_fex_stats.c
     ../dlls/winebus.sys/hid.c
     ../dlls/hidparse.sys/main.c
     $<TARGET_OBJECTS:wine-horizon-real>
@@ -794,6 +798,8 @@ set_source_files_properties(source/forwarder.c source/carafe_hid.c
     source/carafe_overlay.c source/carafe_loading.c source/carafe_error.c
     source/carafe_draw.c source/carafe_text.c
     source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c
+    source/carafe_diag.c source/carafe_bench.c source/carafe_waits.c source/carafe_fex_stats.c
+    source/carafe_lock_boost.c source/carafe_mesa.c
     PROPERTIES COMPILE_OPTIONS "-std=gnu11")
 set_property(SOURCE source/carafe_hid.c ../dlls/winebus.sys/hid.c APPEND PROPERTY
     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/winebus.sys")
@@ -941,6 +947,20 @@ target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCrea
     -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation
     -Wl,--wrap=main -Wl,--wrap=wine_nx_osk_visible -Wl,--wrap=wine_nx_osk_generation
     -Wl,--wrap=wine_nx_osk_frame -Wl,--wrap=wine_nx_osk_copy -Wl,--wrap=wine_nx_compositor_cursor)
+# Carafe's diagnostics (source/carafe_diag.c, carafe_waits.c): the stall report
+# also prints the server's last events and the alertable waits, the thread
+# report the frame rate, the clocks and, with the profiler on, what each thread
+# waited for and FEX's counters; every native thread's start is counted.
+foreach(symbol wine_nx_threads_report_stalled wine_nx_thread_report pthread_create
+        horizon_futex_wait horizon_server_sync_call)
+    target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=${symbol}")
+endforeach()
+# The time a thread waits for a libnx mutex (source/carafe_lock_boost.c). The
+# swap experiment wraps the same kernel call for its own purpose.
+if(NOT WINE_NX_SWAP_POC)
+    target_sources(wine-nx-runtime PRIVATE source/carafe_lock_boost.c)
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=svcArbitrateLock)
+endif()
 
 # freetype (+ its deps) for win32u font rendering; nx last for the libnx syscalls
 find_library(SWITCH_FREETYPE freetype HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
@@ -996,6 +1016,9 @@ if(WINE_NX_MESA_SWITCH_DIR)
         -Wl,-u,vk_icdGetInstanceProcAddr -Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion -pthread)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_MESA_SWITCH)
     target_sources(wine-nx-runtime PRIVATE source/vulkan_probe.c)
+    # The log says which thread pools Mesa starts and how large (source/carafe_mesa.c).
+    target_sources(wine-nx-runtime PRIVATE source/carafe_mesa.c)
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=util_queue_init)
     set_source_files_properties(source/vulkan_probe.c PROPERTIES
         INCLUDE_DIRECTORIES "${WINE_NX_MESA_SWITCH_DIR}/../include")
 

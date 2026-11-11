@@ -46,6 +46,11 @@ fixture = r'''
 #define TRUE 1
 #define FALSE 0
 #define TRACE(...) ((void)0)
+/* The server's request counters, which the [SERVER] report prints. */
+static unsigned int carafe_direct_calls;
+#define CARAFE_SERVER_DIRECT() __atomic_add_fetch( &carafe_direct_calls, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_NOW() 0ull
+#define CARAFE_SERVER_COUNT( req, start ) ((void)(req), (void)(start))
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define HORIZON_SERVER_WAIT_SLICE 200000LL
 #define HORIZON_SERVER_POLL_INTERVAL 10000LL

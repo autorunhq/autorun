@@ -3470,6 +3470,301 @@ static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t horizon_server_objects_cond = PTHREAD_COND_INITIALIZER;
 static unsigned int horizon_server_sleepers;  /* guarded by horizon_server_objects_mutex */
 static struct horizon_sync_waiter *horizon_sync_waiters;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+#define CARAFE_DIAG_EVENTS 512
+#define CARAFE_DIAG_DUMPED 96
+#define CARAFE_DIAG_CONNECTIONS 128
+
+enum carafe_diag_kind
+{
+    CARAFE_DIAG_NEW_THREAD,
+    CARAFE_DIAG_SERVER_START,
+    CARAFE_DIAG_SERVER_END,
+    CARAFE_DIAG_SUSPEND,
+    CARAFE_DIAG_RESUME,
+    CARAFE_DIAG_TERMINATE,
+    CARAFE_DIAG_SUSPENDED_WAIT,
+    CARAFE_DIAG_SUSPENDED_DONE,
+};
+
+static const char *const carafe_diag_names[] =
+{
+    "new_thread", "server_start", "server_end", "suspend", "resume", "terminate",
+    "select_waits_suspended", "select_resumed",
+};
+
+struct carafe_diag_event
+{
+    unsigned long long tick;
+    unsigned int kind, actor, target, value;
+};
+
+struct carafe_diag_connection
+{
+    struct horizon_server_connection *connection;
+    unsigned int tid, requests, handled, last_req;
+    int busy;
+};
+
+static struct carafe_diag_event carafe_diag_events[CARAFE_DIAG_EVENTS];
+static unsigned int carafe_diag_next;
+static struct carafe_diag_connection carafe_diag_connections[CARAFE_DIAG_CONNECTIONS];
+static pthread_mutex_t carafe_diag_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void carafe_diag_event( unsigned int kind, unsigned int actor, unsigned int target, unsigned int value )
+{
+    unsigned int slot = __atomic_fetch_add( &carafe_diag_next, 1, __ATOMIC_RELAXED ) % CARAFE_DIAG_EVENTS;
+    struct carafe_diag_event *event = &carafe_diag_events[slot];
+
+    event->tick = armGetSystemTick();
+    event->kind = kind;
+    event->actor = actor;
+    event->target = target;
+    event->value = value;
+}
+
+static struct carafe_diag_connection *carafe_diag_track( struct horizon_server_connection *connection )
+{
+    struct carafe_diag_connection *found = NULL;
+    unsigned int i;
+
+    pthread_mutex_lock( &carafe_diag_mutex );
+    for (i = 0; i < CARAFE_DIAG_CONNECTIONS && !found; i++)
+    {
+        if (carafe_diag_connections[i].connection) continue;
+        found = &carafe_diag_connections[i];
+        memset( found, 0, sizeof(*found) );
+        found->connection = connection;
+        found->tid = connection->tid;
+    }
+    pthread_mutex_unlock( &carafe_diag_mutex );
+    return found;
+}
+
+static void carafe_diag_untrack( struct carafe_diag_connection *slot )
+{
+    if (!slot) return;
+    pthread_mutex_lock( &carafe_diag_mutex );
+    slot->connection = NULL;
+    pthread_mutex_unlock( &carafe_diag_mutex );
+}
+
+void carafe_diag_dump( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    unsigned long long now = armGetSystemTick();
+    unsigned int next = __atomic_load_n( &carafe_diag_next, __ATOMIC_RELAXED );
+    unsigned int count = next < CARAFE_DIAG_DUMPED ? next : CARAFE_DIAG_DUMPED;
+    int objects_locked = pthread_mutex_trylock( &horizon_server_objects_mutex ) == 0;
+    char line[256];
+    unsigned int i;
+
+    if (!&wine_nx_runtime_trace) return;
+    snprintf( line, sizeof(line), "[CARAFE-DIAG] objects lock %s, %u events so far",
+              objects_locked ? "free" : "HELD", next );
+    wine_nx_runtime_trace( line );
+    pthread_mutex_lock( &carafe_diag_mutex );
+    for (i = 0; i < CARAFE_DIAG_CONNECTIONS; i++)
+    {
+        struct carafe_diag_connection *slot = &carafe_diag_connections[i];
+        struct horizon_server_object *thread;
+
+        if (!slot->connection) continue;
+        thread = slot->connection->thread;
+        snprintf( line, sizeof(line),
+                  "[CARAFE-DIAG] connection tid=%u (started as %u) requests=%u handled=%u last_req=%u %s"
+                  " suspend=%d terminated=%d",
+                  slot->connection->tid, slot->tid, slot->requests, slot->handled, slot->last_req,
+                  slot->busy ? "IN HANDLER" : "idle", thread ? (int)thread->thread.suspend : -1,
+                  thread ? (int)thread->thread.terminated : -1 );
+        wine_nx_runtime_trace( line );
+    }
+    pthread_mutex_unlock( &carafe_diag_mutex );
+    for (i = next - count; i != next; i++)
+    {
+        const struct carafe_diag_event *event = &carafe_diag_events[i % CARAFE_DIAG_EVENTS];
+        unsigned long long ago = armTicksToNs( now - event->tick ) / 1000000ull;
+
+        snprintf( line, sizeof(line), "[CARAFE-DIAG] -%llu ms %s actor=%u target=%u value=%u", ago,
+                  event->kind < ARRAY_SIZE(carafe_diag_names) ? carafe_diag_names[event->kind] : "?",
+                  event->actor, event->target, event->value );
+        wine_nx_runtime_trace( line );
+    }
+    if (objects_locked) pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+#define CARAFE_SERVER_REQS 512
+#define CARAFE_SERVER_TOP 10
+#define CARAFE_SERVER_REPORT_NS 30000000000ull
+
+static unsigned int carafe_server_counts[CARAFE_SERVER_REQS];
+static unsigned long long carafe_server_busy_ns[CARAFE_SERVER_REQS];
+static unsigned int carafe_server_direct;
+static unsigned int carafe_server_live;
+static unsigned int carafe_server_ended[4];
+static unsigned int carafe_threads_refused;
+static unsigned int carafe_threads_waits;
+static unsigned int carafe_threads_waits_lost;
+static unsigned long long carafe_threads_waited_ns;
+static unsigned long long carafe_server_reported;
+
+static void carafe_server_report( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    unsigned int counts[CARAFE_SERVER_REQS];
+    unsigned int total = 0, i, j;
+    unsigned long long busy = 0;
+    s64 used = -1, limit = -1, peak = -1;
+    u64 resource = 0;
+    char line[512];
+    int len;
+
+    if (!&wine_nx_runtime_trace) return;
+    if (R_SUCCEEDED(svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 )))
+    {
+        svcGetResourceLimitCurrentValue( &used, resource, LimitableResource_Threads );
+        svcGetResourceLimitLimitValue( &limit, resource, LimitableResource_Threads );
+        svcGetResourceLimitPeakValue( &peak, resource, LimitableResource_Threads );
+        svcCloseHandle( resource );
+    }
+    snprintf( line, sizeof(line),
+              "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u refused=%u waits=%u/%u waited_ms=%llu",
+              (long long)used, (long long)limit, (long long)peak,
+              (int)__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_refused, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waits_lost, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waits, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waited_ns, __ATOMIC_RELAXED ) / 1000000ull );
+    wine_nx_runtime_trace( line );
+    for (i = 0; i < CARAFE_SERVER_REQS; i++)
+    {
+        counts[i] = __atomic_load_n( &carafe_server_counts[i], __ATOMIC_RELAXED );
+        total += counts[i];
+        busy += __atomic_load_n( &carafe_server_busy_ns[i], __ATOMIC_RELAXED );
+    }
+    len = snprintf( line, sizeof(line),
+                    "[SERVED] requests=%u busy_ms=%llu direct=%u clients=%u ended=%u/%u/%u/%u top=",
+                    total, busy / 1000000ull, __atomic_load_n( &carafe_server_direct, __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[0], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[1], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[2], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[3], __ATOMIC_RELAXED ) );
+    for (j = 0; j < CARAFE_SERVER_TOP && len > 0 && len < (int)sizeof(line); j++)
+    {
+        unsigned int req = 0;
+
+        for (i = 1; i < CARAFE_SERVER_REQS; i++)
+            if (counts[i] > counts[req]) req = i;
+        if (!counts[req]) break;
+        len += snprintf( line + len, sizeof(line) - len, "%s%u:%u/%llums", j ? "," : "", req, counts[req],
+                         __atomic_load_n( &carafe_server_busy_ns[req], __ATOMIC_RELAXED ) / 1000000ull );
+        counts[req] = 0;
+    }
+    wine_nx_runtime_trace( line );
+}
+
+static void carafe_server_count( unsigned int req, unsigned long long start )
+{
+    unsigned long long now = armTicksToNs( armGetSystemTick() );
+    unsigned long long last = __atomic_load_n( &carafe_server_reported, __ATOMIC_RELAXED );
+
+    if (req < CARAFE_SERVER_REQS)
+    {
+        __atomic_add_fetch( &carafe_server_counts[req], 1, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &carafe_server_busy_ns[req], now - start, __ATOMIC_RELAXED );
+    }
+    if (!last)
+    {
+        __atomic_compare_exchange_n( &carafe_server_reported, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED );
+        return;
+    }
+    if (now - last < CARAFE_SERVER_REPORT_NS) return;
+    if (!__atomic_compare_exchange_n( &carafe_server_reported, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+        return;
+    carafe_server_report();
+}
+
+static void carafe_threads_refusal( void )
+{
+    unsigned int refused;
+
+    if (!__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED )) return;
+    refused = __atomic_add_fetch( &carafe_threads_refused, 1, __ATOMIC_RELAXED );
+    if (refused & (refused - 1)) return;
+    carafe_server_report();
+}
+
+/* A creation that met the limit and waited for a place: how many, how many
+ * of them got none, and the time they took. The lines the log gets for them
+ * are written where the wait is, in __wrap_svcCreateThread. */
+static void carafe_thread_waited( unsigned long long ns, int placed )
+{
+    __atomic_add_fetch( &carafe_threads_waits, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &carafe_threads_waited_ns, ns, __ATOMIC_RELAXED );
+    if (!placed) __atomic_add_fetch( &carafe_threads_waits_lost, 1, __ATOMIC_RELAXED );
+}
+
+/* Who is waiting: the creator's handle and the return addresses up its
+ * stack, and with them the stall report, which says what every other thread
+ * is doing while no place comes free. */
+static void carafe_thread_waiter_report( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    extern void wine_nx_stall_report_soon( void ) __attribute__((weak));
+    Thread *self = threadGetSelf();
+    uintptr_t low = self ? (uintptr_t)self->stack_mirror : 0;
+    uintptr_t high = self ? low + self->stack_sz : 0;
+    uintptr_t *frame = __builtin_frame_address( 0 );
+    char line[256];
+    int len, depth;
+
+    len = snprintf( line, sizeof(line), "[THREAD] the thread waiting for a place: h=%#x, called from",
+                    threadGetCurHandle() );
+    for (depth = 0; depth < 12 && len > 0 && len < (int)sizeof(line) - 20; depth++)
+    {
+        uintptr_t *next;
+
+        if ((uintptr_t)frame < low || (uintptr_t)frame + 16 > high || ((uintptr_t)frame & 15)) break;
+        len += snprintf( line + len, sizeof(line) - len, " %#lx", (unsigned long)frame[1] );
+        next = (uintptr_t *)frame[0];
+        if (next <= frame) break;
+        frame = next;
+    }
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+    if (&wine_nx_stall_report_soon) wine_nx_stall_report_soon();
+}
+
+static void carafe_server_client_ended( unsigned int requests )
+{
+    unsigned int bucket = requests <= 4 ? 0 : requests <= 50 ? 1 : requests <= 500 ? 2 : 3;
+
+    __atomic_add_fetch( &carafe_server_ended[bucket], 1, __ATOMIC_RELAXED );
+    __atomic_sub_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED );
+}
+
+#define CARAFE_DIAG_EVENT( kind, actor, target, value ) carafe_diag_event( kind, actor, target, value )
+#define CARAFE_SERVER_NOW() armTicksToNs( armGetSystemTick() )
+#define CARAFE_SERVER_COUNT( req, start ) carafe_server_count( req, start )
+#define CARAFE_SERVER_DIRECT() __atomic_add_fetch( &carafe_server_direct, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_ENDED( requests ) carafe_server_client_ended( requests )
+#define CARAFE_SERVER_STARTED() __atomic_add_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
+#define CARAFE_THREAD_REFUSED() carafe_threads_refusal()
+#define CARAFE_THREAD_WAITED( ns, placed ) carafe_thread_waited( ns, placed )
+#define CARAFE_THREAD_WAITER_REPORT() carafe_thread_waiter_report()
+#else
+#define CARAFE_DIAG_EVENT( kind, actor, target, value ) do { } while (0)
+#define CARAFE_SERVER_NOW() 0ull
+#define CARAFE_SERVER_COUNT( req, start ) do { (void)(start); } while (0)
+#define CARAFE_SERVER_DIRECT() do { } while (0)
+#define CARAFE_SERVER_ENDED( requests ) do { (void)(requests); } while (0)
+#define CARAFE_SERVER_STARTED() do { } while (0)
+#define CARAFE_THREAD_REFUSED() do { } while (0)
+#define CARAFE_THREAD_WAITED( ns, placed ) do { (void)(ns); (void)(placed); } while (0)
+#define CARAFE_THREAD_WAITER_REPORT() do { } while (0)
+#endif
 static void horizon_sync_notify_object_locked( struct horizon_server_object *object, int satisfy );
 static void horizon_sync_notify_async_locked(void);
 static unsigned int horizon_server_find_io_object_locked( unsigned int handle, struct horizon_server_object **object );
@@ -4751,17 +5046,36 @@ static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, u
     horizon_fd_queue_push( queue, passed_fd, handle, owner );
 }
 
+/* Carafe: how often a thread's fd was not the oldest in the queue, and how
+ * often none was its own, the first 16 times. */
+static void horizon_fd_queue_report( const char *queue_name, unsigned int skipped, int matched )
+{
+    extern void wine_nx_runtime_trace( const char *msg );
+    static unsigned int reports;
+    char message[160];
+
+    if (__atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) >= 16) return;
+    if (matched)
+        snprintf( message, sizeof(message), "[CARAFE] %s fd: own fd taken past %u of other threads",
+                  queue_name, skipped );
+    else
+        snprintf( message, sizeof(message), "[CARAFE] %s fd: none from this thread, took the oldest of %u",
+                  queue_name, skipped );
+    wine_nx_runtime_trace( message );
+}
+
 static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, const struct horizon_pipe *owner,
-                                 unsigned int *handle )
+                                 unsigned int *handle, const char *queue_name )
 {
     struct horizon_fd_message *message, **link;
+    unsigned int skipped = 0;
     int fd;
 
     pthread_mutex_lock( &queue->mutex );
     while (!queue->head)
         horizon_cond_wait_quit( &queue->cond, &queue->mutex );
 
-    for (link = &queue->head; *link && (*link)->owner != owner; link = &(*link)->next);
+    for (link = &queue->head; *link && (*link)->owner != owner; link = &(*link)->next) skipped++;
     if (!*link) link = &queue->head;
     message = *link;
     *link = message->next;
@@ -4772,6 +5086,7 @@ static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, const struct ho
     }
     pthread_mutex_unlock( &queue->mutex );
 
+    if (skipped) horizon_fd_queue_report( queue_name, skipped, message->owner == owner );
     fd = message->fd;
     if (handle) *handle = message->handle;
     free( message );
@@ -4785,7 +5100,7 @@ void horizon_server_queue_fd( int fd, unsigned int handle )
 
 int horizon_server_take_client_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_client_to_server_fds, horizon_fd_server_owner(), handle );
+    return horizon_fd_queue_pop( &horizon_client_to_server_fds, horizon_fd_server_owner(), handle, "client" );
 }
 
 static int horizon_read_exact( int fd, void *buffer, size_t size )
@@ -12938,6 +13253,7 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
      * itself on horizon_server_zombies when it ends. */
 
     reply.tid = thread_connection->tid;
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_NEW_THREAD, connection->tid, thread_connection->tid, 0 );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -12963,6 +13279,12 @@ static int horizon_server_handle_resume_thread( struct horizon_server_connection
             horizon_server_release_locked( object );
         }
 #endif
+        CARAFE_DIAG_EVENT(
+            CARAFE_DIAG_RESUME,
+            connection->tid,
+            object->thread.tid,
+            status ? 0xffffffffu : (unsigned int)reply.count
+        );
     }
     horizon_server_signal_changed_locked();  /* the start gate */
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12991,6 +13313,12 @@ static int horizon_server_handle_suspend_thread( struct horizon_server_connectio
             if (!horizon_server_hold_locked( object )) horizon_server_freeze_locked( object );
         }
 #endif
+        CARAFE_DIAG_EVENT(
+            CARAFE_DIAG_SUSPEND,
+            connection->tid,
+            object->thread.tid,
+            status ? 0xffffffffu : (unsigned int)reply.count
+        );
     }
     if (!status) horizon_server_signal_changed_locked();
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -13166,6 +13494,7 @@ static int horizon_server_handle_terminate_thread( struct horizon_server_connect
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((object = horizon_server_get_thread_locked( request->handle, &status )))
     {
+        CARAFE_DIAG_EVENT( CARAFE_DIAG_TERMINATE, connection->tid, object->thread.tid, object == connection->thread );
         if (object == connection->thread)
         {
             /* The client exits itself; the object signals when its pipe closes. */
@@ -17686,11 +18015,23 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 if (&wine_nx_thread_signal)
                     wine_nx_thread_signal( (const void *)(ULONG_PTR)thread->thread.teb, thread->thread.tid );
             }
+            CARAFE_DIAG_EVENT(
+                CARAFE_DIAG_SUSPENDED_WAIT,
+                connection->tid,
+                thread->thread.tid,
+                thread->thread.suspend
+            );
             while (thread->thread.suspend && !thread->thread.terminated)
             {
                 horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
                 horizon_server_quit_check_locked();
             }
+            CARAFE_DIAG_EVENT(
+                CARAFE_DIAG_SUSPENDED_DONE,
+                connection->tid,
+                thread->thread.tid,
+                thread->thread.terminated
+            );
             thread->thread_contexts = NULL;
             thread->thread_context_valid = 0;
             thread->thread_context_count = 0;
@@ -17875,6 +18216,7 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
         memset( reply, 0, HORIZON_SERVER_FIXED_MESSAGE_SIZE );
         header->error = HORIZON_STATUS_UNSUCCESSFUL;
     }
+    CARAFE_SERVER_DIRECT();
     return 1;
 }
 
@@ -17883,10 +18225,17 @@ static void *horizon_server_thread( void *param )
     struct horizon_server_connection *connection = param;
     unsigned char message[HORIZON_SERVER_FIXED_MESSAGE_SIZE];
     struct horizon_zombie *zombie;
+    unsigned int served = 0;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+    struct carafe_diag_connection *diag = carafe_diag_track( connection );
+#endif
 
     horizon_server_current = connection;
     connection->request_pipe = horizon_pipe_from_fd( connection->request_fd );
     if (wine_nx_thread_register) wine_nx_thread_register( 's', connection->tid, NULL );
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
+    CARAFE_SERVER_STARTED();
     /* A client blocks until this thread replies. At the program threads'
      * priority (59) it waited for a round-robin slice behind whatever else ran
      * on the core: 0.1-0.9 ms per request in NFSU2. Above them, below the audio
@@ -17904,8 +18253,10 @@ static void *horizon_server_thread( void *param )
         unsigned char *request_data = NULL;
         int status = 0;
         int ret = horizon_read_exact( connection->request_fd, message, sizeof(message) );
+        unsigned long long request_start;
 
         if (ret <= 0) break;
+        request_start = CARAFE_SERVER_NOW();
         horizon_server_follow_client( connection );
         if (header->request_size)
         {
@@ -17923,6 +18274,14 @@ static void *horizon_server_thread( void *param )
             }
         }
 
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (diag)
+        {
+            diag->last_req = header->req;
+            diag->requests++;
+            diag->busy = 1;
+        }
+#endif
         switch (header->req)
         {
         case HORIZON_REQ_GET_TOKEN_SID:
@@ -18496,10 +18855,24 @@ static void *horizon_server_thread( void *param )
         }
 
         free( request_data );
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (diag)
+        {
+            diag->handled++;
+            diag->busy = 0;
+        }
+#endif
+        CARAFE_SERVER_COUNT( header->req, request_start );
+        served++;
         if (status) goto done;
     }
 
 done:
+    CARAFE_SERVER_ENDED( served );
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_END, connection->tid, 0, 0 );
+#ifndef HORIZON_STANDALONE_SYNTAX
+    carafe_diag_untrack( diag );
+#endif
     /* The client closed its request pipe last in exit_thread: every Windows
      * frame is gone. Close our ends before signaling so a joiner observes
      * released pipes, then queue this pthread to be joined by another one. */
@@ -18595,7 +18968,7 @@ void horizon_server_send_fd( int fd )
 
 int horizon_server_receive_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_server_to_client_fds, horizon_fd_client_owner(), handle );
+    return horizon_fd_queue_pop( &horizon_server_to_client_fds, horizon_fd_client_owner(), handle, "server" );
 }
 
 #ifndef HORIZON_NO_LIBNX_EXCEPTION_HANDLER
@@ -22053,11 +22426,13 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
             snprintf( message, sizeof(message), "[THREAD] limit reached; still waiting for a place after %llu s",
                       (now - waited_from) / 1000000000ull );
             wine_nx_runtime_trace( message );
+            if (noted == waited_from) CARAFE_THREAD_WAITER_REPORT();
             noted = now;
         }
         svcSleepThread( now - waited_from < HORIZON_THREAD_WAIT_SLOW_NS ? HORIZON_THREAD_WAIT_STEP_NS
                                                                        : HORIZON_THREAD_WAIT_SLOW_STEP );
     }
+    if (waited_from) CARAFE_THREAD_WAITED( armTicksToNs( armGetSystemTick() ) - waited_from, R_SUCCEEDED(rc) );
     if (R_SUCCEEDED(rc) && waited_from)
     {
         char message[96];
@@ -22086,6 +22461,7 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         snprintf( message, sizeof(message), "[THREAD] create failed rc=%#x threads=%lld/%lld tls_retries=%u",
                   rc, (long long)used, (long long)limit, retries );
         wine_nx_runtime_trace( message );
+        CARAFE_THREAD_REFUSED();
     }
     return rc;
 }
