@@ -293,8 +293,10 @@ Still open in stage 5:
 "Lines found" is a textual measure: of the lines a patch adds (12 characters
 or longer), how many are in the fork's file today, ignoring spaces. It
 understates what upstream rewrote and says nothing where a block moved; the
-last column is the reading of the code and is filled in as each patch is read.
-"To review" means not read yet, not missing.
+last column is the reading of the code. Every row has been read. For the
+rows that are not at 100 %, each line not found was looked up in Carafe's
+final file and in the fork: either a later Carafe patch rewrote it, or the
+fork has it in its own form, which the last column names.
 
 | Patch | Subject | Lines added | Lines found | State |
 |---|---|---|---|---|
@@ -304,41 +306,41 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0004 | sync alert diagnostics | 54 | 100 % | taken (stage 2) |
 | 0006 | virtual 32bit address space | 23 | 13 % | deferred: the fork's launcher and its own forwarders are 39-bit with the low window; only a third-party 32-bit forwarder would need it, and its PE half needs rebuilt DLLs (stage 5) |
 | 0007 | low window 32bit guest range | 10 | 100 % | in the fork |
-| 0008 | runtime screen until first frame | 29 | 96 % | in the fork but for a few lines; to review |
+| 0008 | runtime screen until first frame | 29 | 96 % | in the fork; the notice before the program starts has one more condition (`wine_nx_watch_window_pictures`) |
 | 0009 | winnx vulkan reserve screen | 2 | 100 % | in the fork |
-| 0010 | vulkan take screen at swapchain | 3 | 33 % | to review |
+| 0010 | vulkan take screen at swapchain | 3 | 33 % | in the fork, with the call made weak |
 | 0011 | winnx opengl first frame | 22 | 100 % | in the fork |
-| 0012 | winnx flush mouse motion | 4 | 75 % | to review |
+| 0012 | winnx flush mouse motion | 4 | 75 % | in the fork; the motion is flushed only when the pointer moved |
 | 0013 | audio source rate frames | 30 | 100 % | in the fork |
-| 0014 | winnx opengl clear after loading screen | 29 | 79 % | to review |
+| 0014 | winnx opengl clear after loading screen | 29 | 79 % | in the fork, with atomic loads and stores |
 | 0015 | win32u screen size of a window | 15 | 100 % | in the fork |
 | 0016 | opengl present at window position | 31 | 100 % | in the fork |
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |
-| 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork but for a few lines; to review |
+| 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork; it falls back to the first active monitor instead of the first |
 | 0019 | horizon thread budget and server requests | 91 | 97 % | taken (stage 2); `[BUDGET]` without the `pool=` field of `0023` |
 | 0020 | horizon thread creation waits for a place | 42 | 59 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
 | 0021 | horizon handle fd on the calling thread | 4 | 100 % | in the fork |
 | 0022 | server handle fd on the calling thread | 1 | 100 % | in the fork |
 | 0023 | horizon server thread pool | 180 | 17 % | stage 6 (server thread pool), after an audit of every wait inside a request |
-| 0024 | runtime tls holders give their place | 31 | 87 % | to review |
+| 0024 | runtime tls holders give their place | 31 | 87 % | in the fork; the lines not found were rewritten by later Carafe patches |
 | 0025 | horizon thread creation takes a tls holders place | 6 | 33 % | in the fork as horizon_tls_give_place |
 | 0026 | thread join an ended thread without waiting | 23 | 100 % | in the fork |
-| 0027 | horizon thread creation at the limit skips the kernel wait | 41 | 95 % | in the fork but for a few lines; to review |
+| 0027 | horizon thread creation at the limit skips the kernel wait | 41 | 95 % | in the fork, as `horizon_thread_may_wait` |
 | 0028 | horizon thread creation waits longer for a place | 39 | 58 % | in the fork (20 s wait, 2 ms then 20 ms steps); the caller report taken (stage 2) |
 | 0029 | runtime stall report names native callers | 36 | 94 % | taken (stage 2) |
 | 0030 | runtime stall watch reports on request | 6 | 100 % | taken (stage 2) |
-| 0031 | runtime threads carry a stop request | 32 | 87 % | to review |
-| 0032 | horizon suspend pauses threads and terminate ends them | 106 | 81 % | to review |
-| 0033 | syscalls stop on request and wow64 reads other threads | 36 | 80 % | to review |
+| 0031 | runtime threads carry a stop request | 32 | 87 % | in the fork; the lines not found were rewritten by later Carafe patches |
+| 0032 | horizon suspend pauses threads and terminate ends them | 106 | 81 % | in the fork, in its own form: the stop request is read through `wine_nx_stop_state()`, not a thread-local word, and the runtime's calls are weak |
+| 0033 | syscalls stop on request and wow64 reads other threads | 36 | 80 % | in the fork, in its own form: the stop request is read through `wine_nx_stop_state()` |
 | 0034 | sleep stops on request | 6 | 0 % | in the fork, with the calls made weak |
 | 0035 | runtime tls holders wait on an address | 14 | 100 % | in the fork |
-| 0036 | runtime shows the error screen when the game fails | 7 | 85 % | to review |
+| 0036 | runtime shows the error screen when the game fails | 7 | 85 % | in the fork |
 | 0037 | unhandled exceptions are noted for the error screen | 3 | 100 % | in the fork |
-| 0038 | horizon refused threads are noted for the error screen | 2 | 50 % | to review |
+| 0038 | horizon refused threads are noted for the error screen | 2 | 50 % | in the fork, with one more condition: only once a program's threads exist |
 | 0039 | horizon a runtime fault ends the program for the error screen | 17 | 100 % | in the fork |
 | 0041 | runtime settings menu buttons | 3 | 100 % | in the fork |
-| 0042 | vulkan menu over the frame | 461 | 90 % | in the fork but for a few lines; to review |
-| 0043 | winnx opengl menu over the frame | 155 | 99 % | in the fork but for a few lines; to review |
+| 0042 | vulkan menu over the frame | 461 | 90 % | in the fork, grown since: one routine records the upload of the menu's and the pointer's picture, and the pointer has a descriptor set of its own |
+| 0043 | winnx opengl menu over the frame | 155 | 99 % | in the fork, with the call made weak |
 | 0044 | compositor gl quad blends | 0 | 100 % | in the fork |
 | 0045 | compositor gl draws blended quads | 8 | 100 % | in the fork |
 | 0046 | compositor menu layer blends | 3 | 100 % | in the fork |
@@ -376,17 +378,17 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0080 | fex options turn compact and slim returns on | 2 | 100 % | in the fork |
 | 0081 | runtime profiler turns fex gdb symbols on | 1 | 100 % | taken (stage 3); only Carafe's FEX is given the option |
 | 0082 | dxvk options carry sarek choices | 24 | 8 % | done in stage 5 for the DXVK Carafe source: the two frame limiter rows, the two compiler rows, and `dxvk.shaderCompilationMethod` as a row of its own. Sarek's row keeps its default |
-| 0085 | horizon server window hooks | 277 | 98 % | in the fork but for a few lines; to review |
-| 0087 | wow64 context of another thread waits until it stops | 8 | 37 % | to review |
+| 0085 | horizon server window hooks | 277 | 98 % | in the fork; taking a hook out of its chain is a function of its own |
+| 0087 | wow64 context of another thread waits until it stops | 8 | 37 % | in the fork; `wow64_wait_stopped` returns a status |
 | 0088 | win32u counts shown dialogs | 5 | 100 % | in the fork |
-| 0089 | raised exceptions are noted in the log | 30 | 96 % | in the fork but for a few lines; to review |
+| 0089 | raised exceptions are noted in the log | 30 | 96 % | in the fork, with the call made weak |
 | 0090 | horizon server shown window exposes its children | 11 | 100 % | in the fork |
 | 0091 | modules without unix calls are noted in the log | 9 | 100 % | ported in stage 1 |
 | 0092 | xinput notes the first read and press | 16 | 100 % | in the fork |
 | 0094 | winnx game window repainted after the screen follows it | 1 | 100 % | in the fork |
-| 0095 | ntdll system locale follows the console language | 9 | 66 % | to review |
+| 0095 | ntdll system locale follows the console language | 9 | 66 % | in the fork, as `wine_nx_console_locale` |
 | 0096 | media ffmpeg parser for directshow | 808 | 100 % | ported in stage 1 (parser, codecs, filter registration) |
-| 0097 | winnx screen follows the window on its own thread | 8 | 62 % | to review |
+| 0097 | winnx screen follows the window on its own thread | 8 | 62 % | in the fork, with atomic loads and stores |
 | 0098 | win32u a thread counts its waits for a reply | 6 | 100 % | in the fork |
 | 0099 | horizon server low level input hooks | 94 | 95 % | in the fork, in upstream's later form (wheel data only for wheel messages) |
 | 0100 | win32u the cursor stays on the programs screen | 3 | 100 % | in the fork |
@@ -394,35 +396,35 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0104 | runtime the log is written out before the game closes | 6 | 100 % | in the fork |
 | 0105 | runtime the runtimes own dxvk is the system direct3d | 10 | 0 % | not taken: Carafe's DXVK is a release source here, in its own folder in front of system32 |
 | 0106 | runtime the screen follows what a window shows last | 35 | 100 % | in the fork |
-| 0107 | vulkan a swapchain gives the screen to gdi drawing | 152 | 86 % | to review |
-| 0108 | winnx a picture the program draws in a window is reported | 25 | 64 % | to review |
+| 0107 | vulkan a swapchain gives the screen to gdi drawing | 152 | 86 % | in the fork, with the calls made weak and `nx_acquired` atomic |
+| 0108 | winnx a picture the program draws in a window is reported | 25 | 64 % | in the fork, with the calls made weak |
 | 0111 | winnx a fullscreen window in a scaled mode is placed between the bars | 11 | 100 % | in the fork |
-| 0112 | win32u a window surface knows when the program drew into it | 15 | 86 % | to review |
+| 0112 | win32u a window surface knows when the program drew into it | 15 | 86 % | in the fork: the hunk is in `dibdrv/dc.c`, the call weak |
 | 0113 | win32u the system paints backgrounds and frames as itself | 12 | 100 % | in the fork |
-| 0114 | win32u a scaled surface passes on that the program drew | 9 | 66 % | to review |
-| 0115 | compositor a layer tells whether a flush draws over its picture | 17 | 88 % | to review |
-| 0116 | win32u a thread waiting for input is reported | 5 | 60 % | to review |
-| 0117 | runtime a program starts with the hint explorer gives | 1 | 0 % | to review |
-| 0118 | ntdll a system call keeps its callers registers | 158 | 97 % | in the fork but for a few lines; to review |
-| 0119 | runtime a suspended thread is held in the kernel | 116 | 99 % | in the fork but for a few lines; to review |
+| 0114 | win32u a scaled surface passes on that the program drew | 9 | 66 % | in the fork, with the call made weak |
+| 0115 | compositor a layer tells whether a flush draws over its picture | 17 | 88 % | in the fork |
+| 0116 | win32u a thread waiting for input is reported | 5 | 60 % | in the fork, with the call made weak |
+| 0117 | runtime a program starts with the hint explorer gives | 1 | 0 % | not taken: Autorun starts a program with the hint to maximise, on purpose, so that a desktop program fills the screen. Carafe starts it as Explorer does, for games that restore their window after Direct3D fitted it; a game that needs that here would need it as a setting |
+| 0118 | ntdll a system call keeps its callers registers | 158 | 97 % | in the fork; the stop request is read through `wine_nx_stop_state()` |
+| 0119 | runtime a suspended thread is held in the kernel | 116 | 99 % | in the fork; a held thread looks again every 20 ms instead of waiting without end |
 | 0120 | ntdll the server turns registers into contexts | 9 | 100 % | in the fork |
-| 0121 | horizon suspending a thread works as on windows | 91 | 84 % | to review |
+| 0121 | horizon suspending a thread works as on windows | 91 | 84 % | in the fork, with the runtime's calls made weak; one line belongs to the server thread pool (stage 6) |
 | 0122 | runtime fex thread state offsets | 11 | 100 % | in the fork |
-| 0123 | runtime wow64 registers come from fex state | 42 | 85 % | to review |
+| 0123 | runtime wow64 registers come from fex state | 42 | 100 % | in the fork (with the profiler's merge, stage 3) |
 | 0124 | runtime checks the fex state offsets | 4 | 100 % | in the fork |
 | 0125 | horizon a thread let go in a wait looks again before it sleeps | 0 | 100 % | in the fork |
-| 0126 | ntdll an ended thread takes its address wait out of the table | 47 | 93 % | in the fork but for a few lines; to review |
+| 0126 | ntdll an ended thread takes its address wait out of the table | 47 | 93 % | in the fork; the stop request is read through `wine_nx_stop_state()` |
 | 0127 | thread an ending thread takes its address wait out first | 4 | 100 % | in the fork |
-| 0128 | horizon kernel devices open read and answer ioctls | 170 | 98 % | in the fork but for a few lines; to review |
+| 0128 | horizon kernel devices open read and answer ioctls | 170 | 98 % | in the fork |
 | 0129 | ntdll a read done at once fills the status block | 6 | 100 % | in the fork |
-| 0130 | xinput the pad state is shared with the hid gamepad | 12 | 83 % | to review |
+| 0130 | xinput the pad state is shared with the hid gamepad | 12 | 83 % | in the fork; the profile is read through `wine_nx_input_profile_get` |
 | 0131 | runtime the input poll feeds the hid gamepad | 2 | 100 % | in the fork |
 | 0132 | registry volatile keys for devices | 16 | 100 % | in the fork |
 | 0133 | dxvk the build manifest names the system dxvk | 11 | 9 % | not taken: there is no system DXVK to name; an installed release carries its version in its folder |
-| 0135 | runtime a window picture publication event | 20 | 90 % | in the fork but for a few lines; to review |
+| 0135 | runtime a window picture publication event | 20 | 90 % | in the fork |
 | 0136 | horizon sections use separate backing blocks | 73 | 100 % | in the fork |
 | 0136 | sync window picture publication notifies the runtime | 12 | 100 % | in the fork |
-| 0137 | horizon anonymous mappings use smaller backing pieces | 17 | 94 % | in the fork but for a few lines; to review |
+| 0137 | horizon anonymous mappings use smaller backing pieces | 17 | 94 % | in the fork; one more condition, for views read on demand |
 | 0137 | vulkan consumes the primary publication after image submission | 9 | 100 % | in the fork |
 | 0138 | horizon section views claim addresses before anchors | 15 | 100 % | in the fork |
 
@@ -434,6 +436,14 @@ last column is the reading of the code and is filled in as each patch is read.
 - Missing features: the functions, macros, types and file-scope variables each
   file defines at `b785476` that it defines neither at `636913ca` nor in the
   fork (224 names in 11 files before stage 1).
+- The reading of a patch that is not found whole: each line it adds that the
+  fork's file lacks is looked up in Carafe's file at `b785476`. A line that is
+  not there either was rewritten by a later Carafe patch. A line that is there
+  is a difference, and the fork's code at that place was read to see whether it
+  does the same in another form. Of the 127 patches, that left two differences
+  kept on purpose (`0105`, `0117`), two patches not needed here (`0006`,
+  `0133`), one waiting for stage 6 (`0023`, and with it one line of `0019` and
+  one of `0121`).
 - The host tests are `horizon-wine/tests/check_*.py`. The sandbox they ran in
   has gcc but neither clang nor the Switch toolchain, so a full build is the
   `build` workflow's, and tests that need clang, an ARM64 host or the
