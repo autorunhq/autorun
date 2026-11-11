@@ -13,7 +13,7 @@ def block(text, start_sig, end_sig):
     e = text.index(end_sig, s)
     return text[s:e]
 
-kernel_ctx_code = block(sig, '#define KERNEL_FRAME_SIZE', 'static void continue_changed(')
+kernel_ctx_code = block(sig, '#define KERNEL_FRAME_SIZE', 'NTSTATUS signal_set_full_context(')
 self_ctx_code = block(sig, 'NTSTATUS WINAPI NtSetContextThread(', 'static NTSTATUS check_current_thread_context_access(')
 
 test_c = r'''
@@ -80,17 +80,39 @@ typedef struct { CHPE_V2_CPU_AREA_INFO *ChpeV2CpuAreaInfo; } TEB;
 static TEB teb;
 static TEB *NtCurrentTeb(void) { return &teb; }
 static int horizon_suspend_pending;
-const void *wine_nx_kernel_enter(const void *f) { (void)f; return NULL; }
-const void *wine_nx_kernel_leave(void) { return NULL; }
+static int sim_in_kernel;
+static unsigned sim_enter_calls, sim_leave_calls, sim_enter_null_calls;
+static const void *sim_enter_changed[4];
+static unsigned sim_enter_idx;
+static const void *sim_leave_changed;
+const void *wine_nx_kernel_enter(const void *f)
+{
+    if (!f) { sim_enter_null_calls++; return NULL; }
+    sim_enter_calls++;
+    sim_in_kernel = 1;
+    return sim_enter_idx < 4 ? sim_enter_changed[sim_enter_idx++] : NULL;
+}
+const void *wine_nx_kernel_leave(void)
+{
+    sim_leave_calls++;
+    sim_in_kernel = 0;
+    return sim_leave_changed;
+}
 int wine_nx_suspend_requested(void) { return 0; }
-void horizon_contexts_from_server(CONTEXT *c, const void *s) { (void)c; (void)s; }
+void horizon_contexts_from_server(CONTEXT *c, const void *s) { memset(c, 0, sizeof(*c)); c->ContextFlags = CONTEXT_ARM64_FULL; c->Pc = (uintptr_t)s; }
 __thread const void *wine_nx_kernel_frame;
 static unsigned full_set_calls, capture_calls;
 static CONTEXT last_full_set;
 static NTSTATUS set_full_ret = STATUS_UNSUCCESSFUL;
+static int set_full_leave_kernel = 0;
 
 NTSTATUS signal_set_full_context(CONTEXT *context)
 {
+    if (set_full_leave_kernel && wine_nx_kernel_frame)
+    {
+        wine_nx_kernel_leave();
+        wine_nx_kernel_frame = NULL;
+    }
     full_set_calls++;
     last_full_set = *context;
     return set_full_ret;
@@ -215,6 +237,31 @@ int main(void)
     assert(NtSetContextThread(NULL, &ctx) == STATUS_UNSUCCESSFUL && full_set_calls == 1);
     assert(last_full_set.Pc == 0x77778888ULL && last_full_set.Sp == 0x99990000ULL);
     assert(last_full_set.X[0] == 0xaaaa0000 && last_full_set.X18 == 0xaaaa0018);
+
+    /* return_to_kernel with SetThreadContext change must leave kernel (clearing WINE_NX_STOP_KERNEL)
+     * and if signal_set_full_context returns an error, re-enter the kernel frame cleanly. */
+    set_full_leave_kernel = 1;
+    sim_enter_calls = sim_leave_calls = sim_enter_null_calls = sim_enter_idx = 0;
+    sim_in_kernel = 0;
+    sim_leave_changed = NULL;
+    sim_enter_changed[0] = (const void *)0x12340000ULL;
+    sim_enter_changed[1] = NULL;
+    {
+        const void *outer = enter_kernel(frame);
+        assert(outer == frame);
+        assert(sim_enter_calls == 2 && sim_leave_calls == 1);
+        assert(sim_in_kernel == 1 && wine_nx_kernel_frame == frame);
+        {
+            const void *cb_outer = enter_program();
+            assert(cb_outer == frame && sim_leave_calls == 2 && sim_in_kernel == 0 && !wine_nx_kernel_frame);
+            return_to_kernel(cb_outer);
+            assert(sim_enter_calls == 3 && sim_in_kernel == 1 && wine_nx_kernel_frame == frame);
+        }
+        leave_kernel(outer);
+        assert(sim_leave_calls == 3 && sim_in_kernel == 1 && wine_nx_kernel_frame == frame);
+        wine_nx_kernel_leave();
+        wine_nx_kernel_frame = NULL;
+    }
 
     puts("kernel_context: 416-byte layout, program_frame, self NtGet/SetContextThread passed");
     return 0;

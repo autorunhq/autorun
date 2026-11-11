@@ -64,9 +64,11 @@ static void svcSignalToAddress( void *addr, int type, int op, int count )
     pthread_mutex_unlock( &futex_mutex );
 }
 
+static long long last_futex_timeout;
+
 static int horizon_futex_wait( const int *addr, int value, long long timeout_ns )
 {
-    (void)timeout_ns;
+    last_futex_timeout = timeout_ns;
     pthread_mutex_lock( &futex_mutex );
     if (__atomic_load_n( addr, __ATOMIC_SEQ_CST ) == value)
     {
@@ -241,6 +243,7 @@ int main( void )
         assert( !pthread_create( &signaler, NULL, fn_signal_waiter, &registry[0] ) );
         wine_nx_thread_wait_change( (const void *)(uintptr_t)teb, 100, WINE_NX_STOP_SUSPEND );
         assert( !pthread_join( signaler, NULL ) );
+        assert( last_futex_timeout == 20000000LL );
         assert( registry[0].stop[0] & WINE_NX_STOP_HELD );
     }
     registry[0].stop[0] = 0;

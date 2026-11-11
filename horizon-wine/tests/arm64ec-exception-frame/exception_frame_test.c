@@ -146,9 +146,15 @@ __thread const void *wine_nx_kernel_frame;
 int horizon_suspend_pending;
 static const void *mock_changed_contexts;
 static int mock_suspend_requested;
-static unsigned int kernel_leave_calls, wait_suspend_calls;
+static unsigned int kernel_leave_calls, kernel_enter_null_calls, wait_suspend_calls;
 static CONTEXT changed_from_server, wait_suspend_override;
 static int has_wait_suspend_override;
+
+const void *wine_nx_kernel_enter( const void *frame )
+{
+    if (!frame) ++kernel_enter_null_calls;
+    return NULL;
+}
 
 const void *wine_nx_kernel_leave( void )
 {
@@ -193,7 +199,7 @@ static void reset_mocks(void)
     mock_changed_contexts = NULL;
     mock_suspend_requested = 0;
     horizon_suspend_pending = 0;
-    kernel_leave_calls = wait_suspend_calls = 0;
+    kernel_leave_calls = kernel_enter_null_calls = wait_suspend_calls = 0;
     has_wait_suspend_override = 0;
 }
 
@@ -446,7 +452,8 @@ static void test_kernel_leave_and_pending_suspend(void)
     mock_changed_contexts = (const void *)0x1;
     report( "kernel-leave-uses-server-context",
             signal_set_full_context( &context ) == STATUS_UNSUCCESSFUL &&
-            kernel_leave_calls == 1 && !wine_nx_kernel_frame && !wait_suspend_calls &&
+            kernel_leave_calls == 1 && kernel_enter_null_calls == 1 &&
+            !wine_nx_kernel_frame && !wait_suspend_calls &&
             continue_count == 1 && continued.Pc == 0x27000 &&
             continued.Sp == (uintptr_t)(stack + sizeof(stack) - 0x100) );
     set_ec( 0x27000, 0 );
@@ -459,7 +466,7 @@ static void test_kernel_leave_and_pending_suspend(void)
     wait_suspend_override = make_context( 0x29000, (uintptr_t)(stack + sizeof(stack) - 0x200) );
     report( "program-suspend-wait-before-resume",
             signal_set_full_context( &context ) == STATUS_UNSUCCESSFUL &&
-            !kernel_leave_calls && wait_suspend_calls == 1 &&
+            !kernel_leave_calls && kernel_enter_null_calls == 1 && wait_suspend_calls == 1 &&
             continue_count == 1 && continued.Pc == 0x29000 &&
             continued.Sp == (uintptr_t)(stack + sizeof(stack) - 0x200) );
     set_ec( 0x29000, 0 );

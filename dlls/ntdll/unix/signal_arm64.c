@@ -96,14 +96,25 @@ static void continue_changed( const void *changed )
 
     if (!changed) return;
     horizon_contexts_from_server( &context, changed );
-    wine_nx_kernel_frame = NULL;
     signal_set_full_context( &context );
 }
 
 static void return_to_kernel( const void *frame )
 {
-    wine_nx_kernel_frame = frame;
-    continue_changed( wine_nx_kernel_enter( frame ) );
+    const void *changed;
+
+    if (!frame)
+    {
+        wine_nx_kernel_frame = NULL;
+        wine_nx_kernel_enter( NULL );
+        return;
+    }
+    do
+    {
+        wine_nx_kernel_frame = frame;
+        changed = wine_nx_kernel_enter( frame );
+        continue_changed( changed );
+    } while (changed);
 }
 
 static const void *enter_kernel( const ULONG_PTR *frame )
@@ -186,6 +197,7 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
     horizon_trace( "[CONTINUE] flags=%08x pc=%llx sp=%llx x18=%llx\n",
                    context->ContextFlags, (unsigned long long)context->Pc,
                    (unsigned long long)context->Sp, (unsigned long long)context->X18 );
+    wine_nx_kernel_enter( NULL );
     horizon_continue_context( context );
     return STATUS_UNSUCCESSFUL; /* The restore routine does not return. */
 }

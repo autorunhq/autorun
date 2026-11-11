@@ -615,7 +615,7 @@ void wine_nx_thread_wait_change( const void *teb, unsigned int tid, int observed
     pthread_mutex_lock( &registry_mutex );
     thread = registered_locked( teb, tid );
     pthread_mutex_unlock( &registry_mutex );
-    if (thread) horizon_futex_wait( (const int *)&thread->stop[0], observed, -1 );
+    if (thread) horizon_futex_wait( (const int *)&thread->stop[0], observed, 20000000LL );
 }
 
 int wine_nx_stop_state( int *code )

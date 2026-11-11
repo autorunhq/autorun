@@ -334,10 +334,30 @@ int main(void) {
     assert(!target.held && !target.held_changed && released_changed == target.held_contexts);
     assert(((const struct context_data *)released_changed)->ctl.arm64_regs.pc == 0x33333333);
 
+    /* Held thread entering select with suspend_contexts overwrites held mode cleanly without zero reply. */
+    kernel_can_hold = 1;
+    suspend();
+    assert(target.held && target.thread_context_valid);
+    update.ctl.arm64_regs.pc = 0x44444444;
+    assert(!horizon_server_handle_set_thread_context(&control, (void *)&set, (void *)&update, sizeof(update)) && !reply_status());
+    assert(target.held_changed);
+    assert(!pthread_create(&thread, NULL, select_thread, (void *)1));
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    while (target.held) pthread_cond_wait(&changed, &horizon_server_objects_mutex);
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    resume();
+    assert(!pthread_join(thread, NULL));
+    assert(replies[1].size == HORIZON_APC_CALL_SIZE + sizeof(struct context_data));
+    returned = (void *)(replies[1].data + HORIZON_APC_CALL_SIZE);
+    assert(returned->ctl.arm64_regs.pc == 0x44444444);
+
     /* Held thread entering server select signals stop word even without doorbell contexts. */
     kernel_can_hold = 1;
     suspend();
     assert(target.held && target.thread_context_valid);
+    update.ctl.arm64_regs.pc = 0x55555555;
+    assert(!horizon_server_handle_set_thread_context(&control, (void *)&set, (void *)&update, sizeof(update)) && !reply_status());
+    assert(target.held_changed);
     target.thread_context_valid = 0;
     signal_calls = 0;
     assert(!pthread_create(&thread, NULL, select_thread, (void *)0));
@@ -346,11 +366,12 @@ int main(void) {
     pthread_mutex_unlock(&horizon_server_objects_mutex);
     assert(signal_calls == 1);
 
-    /* Terminate releases held/frozen state, clears suspend, sets END, and alerts the target tid. */
+    /* Terminate releases held/frozen state without forwarding pending SetThreadContext jumps, clears suspend, sets END, and alerts tid. */
     {
         struct horizon_terminate_thread_request term = {.handle = 1, .exit_code = 77};
+        released_changed = (const void *)0x1;
         assert(!horizon_server_handle_terminate_thread(&control, (void *)&term) && !reply_status());
-        assert(alert_calls == 1 && !target.held && !kernel_paused);
+        assert(alert_calls == 1 && !target.held && !target.held_changed && !released_changed && !kernel_paused);
         assert(target.ending && !target.thread.suspend && (stop_mask & HORIZON_STOP_END));
         assert(!(stop_mask & HORIZON_STOP_SUSPEND) && stop_exit_code == 77);
         assert(target.thread.exit_code == 77);

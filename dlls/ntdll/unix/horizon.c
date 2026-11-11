@@ -13180,6 +13180,7 @@ static int horizon_server_handle_terminate_thread( struct horizon_server_connect
                 object->thread.suspend = 0;
                 horizon_server_set_suspend_doorbell_locked( object, 0 );
                 horizon_server_thaw_locked( object );
+                object->held_changed = 0;
                 horizon_server_release_locked( object );
                 NtAlertThreadByThreadId( ULongToHandle( object->thread.tid ) );
                 horizon_server_signal_changed_locked();
@@ -17647,13 +17648,32 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 queued = -1;
             }
 
-            if (!thread->thread_context_valid)
+            if (suspend_context_count)
             {
+                unsigned int count = suspend_context_count;
+
+                if (thread->held && thread->held_changed && thread->held_count)
+                {
+                    if (count > thread->held_count) count = thread->held_count;
+                    memcpy( suspend_reply.contexts, thread->held_contexts,
+                            count * sizeof(*suspend_contexts) );
+                }
+                else
+                    memcpy( suspend_reply.contexts, suspend_contexts,
+                            suspend_context_count * sizeof(*suspend_contexts) );
+                thread->held = 0;
+                thread->held_changed = 0;
                 thread->thread_contexts = suspend_reply.contexts;
                 thread->thread_context_count = suspend_context_count;
-                if (suspend_context_count)
-                    memcpy( thread->thread_contexts, suspend_contexts,
-                            suspend_context_count * sizeof(*suspend_contexts) );
+                thread->thread_context_valid = 1;
+                horizon_server_signal_changed_locked();
+                if (&wine_nx_thread_signal)
+                    wine_nx_thread_signal( (const void *)(ULONG_PTR)thread->thread.teb, thread->thread.tid );
+            }
+            else if (!thread->thread_context_valid)
+            {
+                thread->thread_contexts = suspend_reply.contexts;
+                thread->thread_context_count = 0;
                 thread->thread_context_valid = 1;
                 horizon_server_signal_changed_locked();
                 if (&wine_nx_thread_signal)
