@@ -61,6 +61,7 @@ typedef struct {
 } ThreadContext;
 ''' + definitions + '\n' + structures + r'''
 struct horizon_server_object {
+    unsigned refs;
     struct horizon_thread_state thread;
     struct context_data *thread_contexts;
     struct context_data *frozen_context;
@@ -74,7 +75,25 @@ struct horizon_server_object {
 };
 struct horizon_server_connection { int reply_fd; unsigned tid; struct horizon_server_object *thread; void *direct_reply; };
 struct horizon_user_apc { unsigned size; unsigned char call[HORIZON_APC_CALL_SIZE]; };
-static struct horizon_server_object target;
+static struct horizon_server_object target = {.refs = 1};
+/* A handler that waits for the thread holds it meanwhile; the handle's own
+ * reference outlives every request here, so nothing may free the thread. */
+static void horizon_server_free_object(struct horizon_server_object *object) { (void)object; assert(0); }
+/* Carafe's event ring (stage 2) and the shared server threads (stage 6): the
+ * handlers note what they did and tell the pool before they sleep. Here they
+ * run on plain threads; a handler that says it blocks is counted. */
+enum { CARAFE_DIAG_SUSPEND, CARAFE_DIAG_RESUME, CARAFE_DIAG_TERMINATE, CARAFE_DIAG_SUSPENDED_WAIT,
+       CARAFE_DIAG_SUSPENDED_DONE };
+static unsigned diag_events[5];
+#define CARAFE_DIAG_EVENT( kind, actor, target, value ) \
+    do { (void)(actor); (void)(target); (void)(value); \
+         __atomic_add_fetch( &diag_events[kind], 1, __ATOMIC_RELAXED ); } while (0)
+static __thread int horizon_server_pool_worker, horizon_server_pool_blocked;
+static unsigned pool_blocking_calls;
+static void horizon_server_pool_blocking_locked(void) {
+    horizon_server_pool_blocked = 1;
+    __atomic_add_fetch( &pool_blocking_calls, 1, __ATOMIC_RELAXED );
+}
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static struct { char reply[64]; _Alignas(8) char data[4096]; unsigned size; } replies[2];
@@ -122,6 +141,9 @@ __attribute__((weak)) int wine_nx_thread_state(const void *t, unsigned tid, cons
 }
 __attribute__((weak)) void wine_nx_thread_wait_change(const void *t, unsigned tid, int observed) {
     (void)t; (void)tid; (void)observed;
+    /* This wait is outside the server's lock: a shared server thread must
+     * have told the pool by now, or the pool is one thread short meanwhile. */
+    assert(!horizon_server_pool_worker || horizon_server_pool_blocked);
     wait_change_calls++;
     kernel_can_hold = 1;
     kernel_frame = (const void *)0xfeedULL;
@@ -238,12 +260,15 @@ static void *select_thread(void *arg) {
                                         HORIZON_APC_RESULT_SIZE + count * sizeof(struct context_data)));
     return NULL;
 }
+static unsigned suspends, resumes;
 static void suspend(void) {
     struct horizon_suspend_thread_request request = {.handle = 1};
+    suspends++;
     assert(!horizon_server_handle_suspend_thread(&control, (void *)&request) && !reply_status());
 }
 static void resume(void) {
     struct horizon_resume_thread_request request = {.handle = 1};
+    resumes++;
     assert(!horizon_server_handle_resume_thread(&control, (void *)&request) && !reply_status());
 }
 int main(void) {
@@ -322,8 +347,13 @@ int main(void) {
     kernel_frame = NULL;
     suspend();
     assert(!kernel_paused && !target.frozen && !target.held && (stop_mask & HORIZON_STOP_SUSPEND));
+    /* Asked by a shared server thread (stage 6): it waits for the thread
+     * outside the lock, so it tells the pool first, once. */
+    horizon_server_pool_worker = 1;
     assert(!horizon_server_handle_get_thread_context(&control, (void *)&get) && !reply_status());
     assert(wait_change_calls == 1 && target.held && target.thread_context_valid);
+    assert(pool_blocking_calls == 1 && horizon_server_pool_blocked);
+    horizon_server_pool_worker = horizon_server_pool_blocked = 0;
     returned = (void *)replies[0].data;
     assert(returned->ctl.arm64_regs.pc == kernel_frame_pc);
     update.ctl.arm64_regs.pc = 0x33333333;
@@ -378,6 +408,12 @@ int main(void) {
         assert(!pthread_join(thread, NULL));
         assert(((struct horizon_server_reply_header *)replies[1].reply)->error == HORIZON_STATUS_THREAD_IS_TERMINATING);
     }
+    /* Carafe's event ring (stage 2) heard of every request, and of each
+     * select that sat out a suspension and came back. */
+    assert(diag_events[CARAFE_DIAG_SUSPEND] == suspends && diag_events[CARAFE_DIAG_RESUME] == resumes);
+    assert(suspends == 10 && resumes == 9 && diag_events[CARAFE_DIAG_TERMINATE] == 1);
+    assert(diag_events[CARAFE_DIAG_SUSPENDED_WAIT] == diag_events[CARAFE_DIAG_SUSPENDED_DONE]);
+    assert(diag_events[CARAFE_DIAG_SUSPENDED_WAIT] == 4 && pool_blocking_calls == 1 && target.refs == 1);
     free(target.frozen_context);
     free(target.held_contexts);
     puts("Horizon suspend: safe-point contexts, nested suspend/resume, kernel hold/leaving and terminate passed");
@@ -485,6 +521,22 @@ static unsigned walk_x86(uint64_t teb, uint32_t *callers) {
     assert(paused);
     return 0;
 }
+/* Carafe's native callers (stage 2): the stack is copied while the thread is
+ * paused, and looked through for return addresses, which asks for images
+ * and so may take locks, only after the thread runs again. */
+#define CARAFE_SCAN_WORDS 4
+static unsigned copies, picks;
+static unsigned copy_stack(const ThreadContext *ctx, uint64_t *words) {
+    assert(paused); words[0] = ctx->lr + 4; copies++;
+    return 1;
+}
+static unsigned pick_calls(const uint64_t *words, unsigned count, uint64_t *callers) {
+    assert(!paused && !pthread_mutex_trylock(&profile_mutex));
+    pthread_mutex_unlock(&profile_mutex);
+    picks++;
+    if (count) { assert(count == 1 && words[0] == 0x12340004); callers[0] = words[0]; }
+    return count;
+}
 static void name_address(uint64_t address, char *buf, size_t size) {
     assert(!paused && !pthread_mutex_trylock(&profile_mutex));
     pthread_mutex_unlock(&profile_mutex);
@@ -503,7 +555,9 @@ int main(void) {
         assert(!paused && !pthread_mutex_trylock(&profile_mutex));
         pthread_mutex_unlock(&profile_mutex);
     }
-    assert(names == 4 && logs == 5);
+    /* Two threads read once each: where it is and one caller, and for the
+     * Windows thread the one native caller its copied stack holds. */
+    assert(names == 5 && logs == 5 && copies == 1 && picks == 2);
 }
 '''
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise runtime thread placement with mocked kernel permissions."""
 from pathlib import Path
+import os
 import re
 import subprocess
 import tempfile
@@ -81,12 +82,17 @@ static int appendf(char *line, int len, const char *format, ...) {
 void horizon_follow_thread_cores(void *teb, unsigned mask) __attribute__((weak));
 void horizon_follow_thread_cores(void *teb, unsigned mask) { assert(teb == (void *)123); followed = mask; }
 '''
-globals_ = r'''
+shader_kinds = re.search(r"^enum nx_shader_affinity\s*\{[^}]*\};", source, re.M)
+assert shader_kinds, "the kinds of shader thread"
+globals_ = shader_kinds.group(0) + r'''
 static struct nx_prof_thread registry[NX_PROF_MAX_THREADS];
 static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int four_cores_enabled;
+static u32 reserved_cores;
 int wine_nx_balance_enabled = 1;
 static __thread int affinity_fixed;
+__thread volatile int *wine_nx_stop_word;
+static __thread struct nx_prof_thread *self_thread;
 '''
 test = r'''
 int main(void) {
@@ -193,17 +199,51 @@ int main(void) {
     previous = calls;
     wine_nx_thread_set_name(5, "dxvk-shader-n");
     assert(calls == previous && current_mask == 4);
-    puts("Core affinity: graphics offload, shader migration, balancing, rollback and explicit affinity passed");
+    /* The orchestrator keeps a core for the thread it drives (Carafe, stage
+     * 4): shader threads stay off it, those moved before and those named
+     * after, and they get it back when it is given up. */
+    registry[0].fixed = 0; affinity_fixed = 0;
+    allowed_cores = 7; current_core = 1; current_mask = 2;
+    wine_nx_thread_set_name(5, "ordinary-worker");
+    wine_nx_thread_set_name(5, "dxvk-shader-h");
+    assert(registry[0].migratable && current_mask == 7 && followed == 7);
+    wine_nx_thread_reserve_core(1);
+    assert(reserved_cores == 2 && current_mask == 5 && current_core == -1 && followed == 5);
+    wine_nx_thread_set_name(5, "ordinary-worker");
+    assert(!registry[0].migratable && current_mask == 2 && followed == 2);
+    wine_nx_thread_set_name(5, "dxvk-shader-h");
+    assert(registry[0].migratable && current_mask == 5 && followed == 5);
+    /* A thread with an affinity of its own stays where it is. */
+    registry[0].fixed = 1; previous = calls;
+    wine_nx_thread_reserve_core(2);
+    assert(reserved_cores == 4 && calls == previous && current_mask == 5 && followed == 5);
+    registry[0].fixed = 0;
+    wine_nx_thread_reserve_core(-1);
+    assert(!reserved_cores && current_mask == 7 && followed == 7);
+    /* The only core there is cannot be kept from them. */
+    allowed_cores = 2;
+    wine_nx_thread_reserve_core(1);
+    assert(reserved_cores == 2 && current_mask == 2 && followed == 2);
+    wine_nx_thread_set_name(5, "ordinary-worker");
+    wine_nx_thread_set_name(5, "dxvk-shader-h");
+    assert(registry[0].migratable && current_mask == 2);
+    /* No answer from the kernel: nothing changes. */
+    fail_info = 1; previous = calls;
+    wine_nx_thread_reserve_core(0);
+    fail_info = 0;
+    assert(reserved_cores == 2 && calls == previous);
+    puts("Core affinity: graphics offload, shader migration, balancing, rollback, explicit affinity and the reserved core passed");
 }
 '''
 functions = "".join(definition(name) for name in (
     "__wrap_svcSetThreadCoreMask",
     "wine_nx_four_cores_available", "wine_nx_thread_configure_cores", "offload_thread_locked",
     "restore_thread_locked", "migrate_shader_locked", "wine_nx_thread_set_name", "wine_nx_thread_set_affinity",
-    "wine_nx_thread_register", "wine_nx_thread_affinity_fixed", "wine_nx_thread_balance"))
+    "wine_nx_thread_register", "wine_nx_thread_affinity_fixed", "wine_nx_thread_balance",
+    "wine_nx_thread_reserve_core"))
 with tempfile.TemporaryDirectory(prefix="wine-nx-cores-") as tmp:
     c, exe = Path(tmp) / "test.c", Path(tmp) / "test"
     c.write_text(fixture + definition("nx_prof_thread", True) + globals_ + functions + test)
-    subprocess.run(["clang", "-Wall", "-Wextra", "-Werror", "-pthread", "-fsanitize=address,undefined",
+    subprocess.run([os.environ.get("WINE_NX_HOST_CC", "clang"), "-Wall", "-Wextra", "-Werror", "-pthread", "-fsanitize=address,undefined",
                     "-I" + str(root / "horizon-wine/source"), str(c), "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True, timeout=15)

@@ -287,6 +287,8 @@ sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the hori
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
 python3 horizon-wine/tests/check_server_pool.py   # Carafe's server thread pool with real threads, under the address and thread sanitizers
+python3 horizon-wine/tests/check_horizon_suspend.py  # the server's suspend, resume, thread context and terminate handlers, and where the stall report may take locks
+python3 horizon-wine/tests/check_core_affinity.py    # which cores the runtime gives graphics and shader threads, and the core the orchestrator keeps
 python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
 python3 horizon-wine/tests/check_menu_languages.py   # the settings menu's catalog, shown by the menu's own reader under each of the fifteen console languages and held against Carafe's texts
 python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu shows for each DXVK and FEX build, against the launcher's own rules

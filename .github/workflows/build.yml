@@ -122,9 +122,12 @@ jobs:
           "$RUNNER_TEMP/orchestrator"
           "$RUNNER_TEMP/orchestrator_switch"
           # Stage 6: the server's shared threads, run with real threads under
-          # the address and thread sanitizers (check_server_pool).
+          # the address and thread sanitizers (check_server_pool). The last two
+          # run the server's suspend, resume and terminate handlers and the
+          # runtime's thread placement, which stages 2, 4 and 6 changed.
           for check in check_thread_creation_wait check_horizon_thread_tls check_horizon_fd_owner \
-                       check_shader_affinity check_futex_exit check_orchestrator_setting check_server_pool; do
+                       check_shader_affinity check_futex_exit check_orchestrator_setting check_server_pool \
+                       check_horizon_suspend check_core_affinity; do
             python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
               echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error|never true|data race|failed' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
               exit 1

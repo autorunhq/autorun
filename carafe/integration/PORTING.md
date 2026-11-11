@@ -160,6 +160,18 @@ two report lines; `tests/thread_profile.c`; the host suite, 82 passing before
 and after; every changed and added C file compiled for AArch64 against libnx's
 and newlib's headers; the `build` workflow.
 
+Added later: `tests/check_horizon_suspend.py` runs the server's suspend,
+resume, thread context and terminate handlers and the stall report. It had
+stopped building before this work (the handlers hold a reference the test's
+thread did not have), and stages 2 and 6 put more into those functions that
+it did not know. It builds again, is in the `build` workflow, and now also
+checks that the event ring hears of every suspend, resume and terminate and
+of each select that sits out a suspension; that the stall report copies a
+thread's stack while the thread is paused and looks for return addresses in
+it only after the thread runs again and the lock is free; and that a shared
+server thread tells the pool before it waits for a thread outside the lock.
+Nine errors put into `horizon.c` and `thread_profile.c` each made it fail.
+
 Not checked, because it needs a console: any of these lines in a real log, the
 clock and GPU services answering, and that FEX fills the area.
 
@@ -216,6 +228,16 @@ errors put into the code to see each one fail; `tests/launcher_settings.c` for
 the two keys; the host suite, 83 passing (the 82 of before and the new check)
 with the same 30 failing as before; the changed C files and the launcher
 compiled for AArch64; the `build` workflow.
+
+Added later: the core the orchestrator keeps for the busiest thread had no
+check of the runtime's side (`wine_nx_thread_reserve_core` and the shader
+threads' mask in `thread_profile.c`; `orchestrator_switch.c` only sees that it
+is asked for). `tests/check_core_affinity.py`, which had also stopped
+building, builds again, is in the `build` workflow, and checks it: shader
+threads moved before and named after stay off the kept core and get it back,
+their server threads follow, a thread with an affinity of its own is left
+alone, the only core there is cannot be kept, and nothing changes when the
+kernel does not answer. Eight errors put into the code each made it fail.
 
 Not checked, because it needs a console: that the orchestrator's layouts make
 any game faster here, that the kernel's idle counters read as the code expects,
@@ -525,8 +547,10 @@ Wine's Direct3D, as it already did for a missing DXVK (`runtime.c`). The
 menu does not know whether the program is 32-bit, so **FEX build** shows for
 64-bit programs too, where the runtime keeps the stock FEX; the row's text
 says it is for 32-bit programs. The menu lists options by build, not by the
-installed version, which the launcher also looks at. These rows have no
-text in Carafe and are English in every language.
+installed version, which the launcher also looks at. With **DXVK + VKD3D**
+chosen the launcher runs official DXVK in place of DXVK-Sarek, as it did
+before (`launcher_settings_read`); the menu still lists Sarek's options then.
+These rows have no text in Carafe and are English in every language.
 
 `tests/check_menu_builds.py` asks the menu's reader which rows it shows for
 each choice and holds that against the code the launcher and the runtime
