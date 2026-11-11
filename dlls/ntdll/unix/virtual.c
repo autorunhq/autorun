@@ -1257,6 +1257,22 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
     }
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     if (!status && entry) status = entry();
+#ifdef __SWITCH__
+    if (status)
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int reported;
+        const char *name = wine_nx_module_export_name( module );
+        char message[192];
+
+        if (&wine_nx_runtime_trace && __atomic_add_fetch( &reported, 1, __ATOMIC_RELAXED ) <= 16)
+        {
+            snprintf( message, sizeof(message), "[UNIXLIB] %s at %p has no unix calls%s, status %#x",
+                      name ? name : "?", module, wow ? " for WoW64" : "", (unsigned int)status );
+            wine_nx_runtime_trace( message );
+        }
+    }
+#endif
     return status;
 }
 

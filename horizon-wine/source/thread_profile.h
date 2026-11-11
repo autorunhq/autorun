@@ -276,7 +276,8 @@ static inline uint64_t nx_prof_svc_key( int svc, uint64_t caller )
     return ((uint64_t)svc << 40) | (caller & 0xffffffffffull);
 }
 
-#define NX_PROF_BUCKETS 512  /* a power of two */
+#define NX_PROF_BUCKET_BITS 12
+#define NX_PROF_BUCKETS (1u << NX_PROF_BUCKET_BITS)  /* a power of two */
 #define NX_PROF_PROBES  64
 
 struct nx_prof_bucket
@@ -293,7 +294,7 @@ struct nx_prof_table
 
 static inline void nx_prof_add( struct nx_prof_table *table, uint64_t key )
 {
-    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> 55), i;
+    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> (64 - NX_PROF_BUCKET_BITS)), i;
 
     for (i = 0; i < NX_PROF_PROBES; i++)
     {
