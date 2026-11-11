@@ -96,6 +96,25 @@ change; the `build` workflow.
 
 Not checked, because it needs a console: that a game's video plays.
 
+What it rests on outside this repository: the Windows half is the downloaded
+`winegstreamer.dll` (`autorunhq/autorun-horizon-dlls`, group `directx-media`),
+whose `classes.reg` names it as the server of the splitter's class. The table of
+unix calls in `media_unix.c` is indexed by the names in
+`dlls/winegstreamer/unixlib.h`, which is the same file here as at Carafe's base,
+so the two halves agree as long as that DLL was built from this header.
+
+### Stage 5, looked at ahead
+
+FEX is pinned to the same revision (`395b132`, FEX-2609) by Carafe, by this
+repository's `horizon-wine/fex/horizon.patch` and by the DLL repository. On that
+revision with this repository's `horizon.patch` applied, 23 of Carafe's 25 FEX
+patches apply cleanly. The other two, `0023` (thread state in virtual memory)
+and `0024` (locked instructions are full barriers), are already inside
+`horizon.patch`: `git apply -R --check` accepts both. So no FEX patch needs
+porting by hand; what stage 5 needs is somewhere to build and publish the
+result. DXVK is pinned to the same revision (`b1a1c99`) by Carafe and by the DLL
+repository; Carafe's 22 DXVK patches were not applied here.
+
 ## Left out, and why
 
 | Carafe part | Why it stays out |
@@ -103,7 +122,7 @@ Not checked, because it needs a console: that a game's video plays.
 | The desktop app (`app/`) and the NSP it builds | It is the packing and installing this fork does without |
 | The loader (`runtime/loader`) | It starts the runtime inside an NSP; here `hbloader` and the forwarder do |
 | The `sdmc:` device over RomFS and save data, and the save commits, in `carafe_overlay.c` | Games and their saves are plain files on the card |
-| Patch `0006` (shared user data and thread data in a 32-bit host address space) | The launcher starts programs only from the 39-bit forwarder, with the low window for fixed-base games |
+| Patch `0006` (shared user data and thread data in a 32-bit host address space) | Not needed on the fork's own paths: the launcher refuses to start a program unless the process is 39-bit (`launcher.c` `address_space_fits`), the forwarders it installs are always 39-bit (`forwarder.c` `npdm_patch`), and fixed-base games get the low window there. A 32-bit forwarder made by another tool that starts a game directly is not refused for i386 programs (`runtime.c` only refuses AMD64), and `documentation/technical.md` still describes that route; `0006` would matter only there. Its PE half needs rebuilt Windows DLLs, so it waits for the stage 5 decision |
 
 ## The 127 patches
 
@@ -119,7 +138,7 @@ last column is the reading of the code and is filled in as each patch is read.
 | 0002 | horizon fd owner | 37 | 62 % | owner matching is in the fork; the two report lines are stage 2 |
 | 0003 | horizon alias region | 31 | 90 % | in the fork; upstream renamed the log tag to [HMAP] and guards the overflow |
 | 0004 | sync alert diagnostics | 54 | 18 % | stage 2 (diagnostics) |
-| 0006 | virtual 32bit address space | 23 | 13 % | not applicable: the fork runs every program in the 39-bit forwarder with the low window, never in a 32-bit host address space |
+| 0006 | virtual 32bit address space | 23 | 13 % | deferred: the fork's launcher and its own forwarders are 39-bit with the low window; only a third-party 32-bit forwarder would need it, and its PE half needs rebuilt DLLs (stage 5) |
 | 0007 | low window 32bit guest range | 10 | 100 % | in the fork |
 | 0008 | runtime screen until first frame | 29 | 96 % | in the fork but for a few lines; to review |
 | 0009 | winnx vulkan reserve screen | 2 | 100 % | in the fork |
