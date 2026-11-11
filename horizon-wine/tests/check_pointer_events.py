@@ -259,8 +259,17 @@ int main(void) {
     assert(wine_nx_drv_GetCursorPos(&gp) && gp.x == 640 && gp.y == 360);
     shared_desktop_status = -1;
 
-    puts("PASS: stick moves, A left and B right clicks, drag, touch press, clicks between calls, cursor visibility "
-         "and SetCursorPos");
+    /* Relative delta motion without placed=1 delivers relative MOUSEEVENTF_MOVE (no ABSOLUTE) and returns TRUE,
+     * even if the visual cursor sat at the screen edge (moved=0). */
+    state = (struct input_snapshot){ .x = 1279, .y = 360, .dx = 25, .dy = -10, .moved = 0 };
+    int before_rel = sent_count;
+    assert(wine_nx_drv_ProcessEvents(0));
+    assert(sent_count == before_rel + 1);
+    assert(sent[before_rel].mi.dwFlags == MOUSEEVENTF_MOVE);
+    assert(sent[before_rel].mi.dx == 25 && sent[before_rel].mi.dy == -10);
+
+    puts("PASS: stick moves, A left and B right clicks, drag, touch press, clicks between calls, cursor visibility, "
+         "relative dock mouse motion and SetCursorPos");
     return 0;
 }
 '''
@@ -278,4 +287,125 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-pointer-') as temp:
     )
     subprocess.run(['cc', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
                     '-I', str(root / 'horizon-wine/source'), str(src), str(osk), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+runtime_src = (root / 'horizon-wine/source/runtime.c').read_text()
+dock_start = runtime_src.index('/* A mouse plugged into the dock')
+dock_end = runtime_src.index('/* Two fingers scroll the picture under them', dock_start)
+dock_block = runtime_src[dock_start:dock_end]
+
+dock_fixture = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "pointer_cursor.h"
+
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int32_t s32;
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
+enum { HidMouseAttribute_IsConnected = 1 };
+enum { HidMouseButton_Left = 1, HidMouseButton_Right = 2, HidMouseButton_Middle = 4 };
+enum { WINE_NX_POINTER_LEFT = 1, WINE_NX_POINTER_RIGHT = 2, WINE_NX_POINTER_MIDDLE = 4 };
+typedef struct {
+    u64 sampling_number;
+    s32 x, y;
+    s32 delta_x, delta_y;
+    s32 wheel_delta_x, wheel_delta_y;
+    u32 buttons;
+    u32 attributes;
+} HidMouseState;
+
+static HidMouseState mock_states[17];
+static size_t mock_count;
+static size_t hidGetMouseStates(HidMouseState *out, size_t max_count) {
+    size_t n = mock_count < max_count ? mock_count : max_count;
+    if (n) memcpy(out, mock_states, n * sizeof(*out));
+    return n;
+}
+static void log_line(const char *fmt, ...) { (void)fmt; }
+
+static struct pointer_cursor wine_nx_pointer = { .width = 1280, .height = 720, .x = 640, .y = 360 };
+static int wine_nx_pointer_placed;
+static int runtime_wheel[2];
+
+static int run_dock_mouse_poll(int on_keyboard, int controls_open, int tasks_open, int finger_down,
+                               int *moved_out, int *buttons_out)
+{
+    int moved = 0;
+    struct { unsigned int buttons; } output = { 0 };
+''' + dock_block + r'''
+    *moved_out = moved;
+    *buttons_out = output.buttons;
+    return 0;
+}
+
+int main(void) {
+    int moved = 0, buttons = 0, dx = 0, dy = 0;
+
+    /* Initial connection places cursor once at OS coordinates and marks placed. */
+    mock_count = 1;
+    mock_states[0] = (HidMouseState){ .sampling_number = 10, .x = 500, .y = 300, .delta_x = 12, .delta_y = -4,
+                                      .attributes = HidMouseAttribute_IsConnected };
+    run_dock_mouse_poll(0, 0, 0, 0, &moved, &buttons);
+    assert(wine_nx_pointer.x == 500 && wine_nx_pointer.y == 300);
+    assert(wine_nx_pointer_placed == 1 && moved == 1);
+    wine_nx_pointer_placed = 0;
+
+    /* Game warps cursor to center via SetCursorPos; idle poll must NOT snap back to mouse.x/y. */
+    pointer_cursor_warp(&wine_nx_pointer, 500, 300, 640, 360);
+    run_dock_mouse_poll(0, 0, 0, 0, &moved, &buttons);
+    assert(wine_nx_pointer.x == 640 && wine_nx_pointer.y == 360);
+    assert(!wine_nx_pointer_placed && !moved);
+
+    /* Multiple unseen LIFO samples (newest at index 0) sum delta_x/y and wheel deltas without placed=1. */
+    mock_count = 4;
+    mock_states[0] = (HidMouseState){ .sampling_number = 13, .x = 1279, .y = 0, .delta_x = 15, .delta_y = 2,
+                                      .wheel_delta_y = 1, .buttons = HidMouseButton_Left,
+                                      .attributes = HidMouseAttribute_IsConnected };
+    mock_states[1] = (HidMouseState){ .sampling_number = 12, .x = 1279, .y = 0, .delta_x = 10, .delta_y = -5,
+                                      .wheel_delta_x = -2, .attributes = HidMouseAttribute_IsConnected };
+    mock_states[2] = (HidMouseState){ .sampling_number = 11, .x = 1279, .y = 0, .delta_x = 5, .delta_y = -1,
+                                      .attributes = HidMouseAttribute_IsConnected };
+    mock_states[3] = (HidMouseState){ .sampling_number = 10, .x = 500, .y = 300, .delta_x = 999, .delta_y = 999,
+                                      .attributes = HidMouseAttribute_IsConnected };
+    run_dock_mouse_poll(0, 0, 0, 0, &moved, &buttons);
+    assert(moved == 1 && !wine_nx_pointer_placed);
+    assert(buttons == WINE_NX_POINTER_LEFT);
+    assert(runtime_wheel[0] == 120 && runtime_wheel[1] == -240);
+    assert(pointer_cursor_take_motion(&wine_nx_pointer, &dx, &dy) && dx == 30 && dy == -4);
+    assert(wine_nx_pointer.x == 670 && wine_nx_pointer.y == 356);
+
+    /* Samples arriving while OSK is open are drained, not replayed as a jump when OSK closes. */
+    mock_count = 1;
+    mock_states[0] = (HidMouseState){ .sampling_number = 14, .x = 0, .y = 0, .delta_x = 100, .delta_y = 100,
+                                      .wheel_delta_y = 2, .attributes = HidMouseAttribute_IsConnected };
+    run_dock_mouse_poll(1, 0, 0, 0, &moved, &buttons);
+    assert(!moved && !buttons && runtime_wheel[0] == 120);
+    run_dock_mouse_poll(0, 0, 0, 0, &moved, &buttons);
+    assert(!moved && !pointer_cursor_take_motion(&wine_nx_pointer, &dx, &dy));
+
+    /* Even pinned at right screen edge (1279), physical delta keeps turning mouse-look view. */
+    pointer_cursor_place(&wine_nx_pointer, 1279, 360);
+    mock_states[0] = (HidMouseState){ .sampling_number = 15, .x = 1279, .y = 360, .delta_x = 40, .delta_y = 0,
+                                      .attributes = HidMouseAttribute_IsConnected };
+    run_dock_mouse_poll(0, 0, 0, 0, &moved, &buttons);
+    assert(moved == 1 && !wine_nx_pointer_placed);
+    assert(pointer_cursor_take_motion(&wine_nx_pointer, &dx, &dy) && dx == 40 && dy == 0);
+
+    puts("PASS: physical dock mouse drains LIFO deltas, keeps SetCursorPos warps, and works at screen edges");
+    return 0;
+}
+'''
+
+with tempfile.TemporaryDirectory(prefix='wine-nx-dock-mouse-') as temp:
+    src = Path(temp) / 'dock.c'
+    exe = Path(temp) / 'dock'
+    src.write_text(dock_fixture)
+    subprocess.run(['cc', '-std=gnu11', '-g', '-Wall', '-Werror', '-Wno-unused-function', '-fsanitize=address,undefined',
+                    '-I', str(root / 'horizon-wine/source'), str(src), '-lm', '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

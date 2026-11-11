@@ -1400,38 +1400,64 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
 
-    /* A mouse plugged into the dock points as a finger does and turns the
-     * wheel; a finger on the glass wins over it. */
+    /* A mouse plugged into the dock reports relative deltas and wheel turns so
+     * mouse-look games (SetCursorPos / ClipCursor) keep turning freely; a
+     * finger on the glass wins over it. */
     {
         static int mouse_was_connected;
         static u64 last_mouse_sample;
-        HidMouseState mouse;
+        HidMouseState states[17];
+        size_t count = hidGetMouseStates( states, ARRAY_SIZE(states) );
 
-        if (hidGetMouseStates( &mouse, 1 ) && (mouse.attributes & HidMouseAttribute_IsConnected))
+        if (count && (states[0].attributes & HidMouseAttribute_IsConnected))
         {
-            if (!mouse_was_connected) log_line( "[NXINPUT] physical mouse connected" );
+            if (!mouse_was_connected)
+            {
+                log_line( "[NXINPUT] physical mouse connected" );
+                last_mouse_sample = states[0].sampling_number;
+                if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
+                {
+                    int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+                    int placed_now;
+
+                    pointer_cursor_place( &wine_nx_pointer, states[0].x, states[0].y );
+                    placed_now = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                    moved |= placed_now;
+                    wine_nx_pointer_placed |= placed_now;
+                }
+            }
+            else
+            {
+                int dx = 0, dy = 0, wheel_x = 0, wheel_y = 0;
+
+                for (size_t i = count; i > 0; i--)
+                {
+                    const HidMouseState *s = &states[i - 1];
+                    if (!(s->attributes & HidMouseAttribute_IsConnected) ||
+                        s->sampling_number <= last_mouse_sample)
+                        continue;
+                    dx += (int)s->delta_x;
+                    dy += (int)s->delta_y;
+                    wheel_y += (int)s->wheel_delta_y;
+                    wheel_x += (int)s->wheel_delta_x;
+                }
+                last_mouse_sample = states[0].sampling_number;
+                if (!on_keyboard && !controls_open && !tasks_open)
+                {
+                    if (!finger_down && (dx || dy))
+                        moved |= pointer_cursor_move_delta( &wine_nx_pointer, dx, dy ) || dx || dy;
+                    if (wheel_y)
+                        runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + wheel_y * 120 ) );
+                    if (wheel_x)
+                        runtime_wheel[1] = max( -7680, min( 7680, runtime_wheel[1] + wheel_x * 120 ) );
+                }
+            }
             mouse_was_connected = 1;
             if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
             {
-                int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
-
-                pointer_cursor_place( &wine_nx_pointer, mouse.x, mouse.y );
-                moved |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
-                wine_nx_pointer_placed |= (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
-                if (mouse.buttons & HidMouseButton_Left) output.buttons |= WINE_NX_POINTER_LEFT;
-                if (mouse.buttons & HidMouseButton_Right) output.buttons |= WINE_NX_POINTER_RIGHT;
-                if (mouse.buttons & HidMouseButton_Middle) output.buttons |= WINE_NX_POINTER_MIDDLE;
-            }
-            if (mouse.sampling_number != last_mouse_sample)
-            {
-                last_mouse_sample = mouse.sampling_number;
-                if (!on_keyboard && !controls_open && !tasks_open)
-                {
-                    if (mouse.wheel_delta_y)
-                        runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + (int)mouse.wheel_delta_y * 120 ) );
-                    if (mouse.wheel_delta_x)
-                        runtime_wheel[1] = max( -7680, min( 7680, runtime_wheel[1] + (int)mouse.wheel_delta_x * 120 ) );
-                }
+                if (states[0].buttons & HidMouseButton_Left) output.buttons |= WINE_NX_POINTER_LEFT;
+                if (states[0].buttons & HidMouseButton_Right) output.buttons |= WINE_NX_POINTER_RIGHT;
+                if (states[0].buttons & HidMouseButton_Middle) output.buttons |= WINE_NX_POINTER_MIDDLE;
             }
         }
         else mouse_was_connected = 0;

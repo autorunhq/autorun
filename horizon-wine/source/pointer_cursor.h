@@ -58,6 +58,18 @@ static inline void pointer_cursor_place( struct pointer_cursor *c, double x, dou
     c->y = y < 0 ? 0 : y > c->height - 1 ? c->height - 1 : y;
 }
 
+/* Move by a physical mouse delta in pixels, keeping the relative motion even at
+ * screen edges or when the program warps the cursor back to center. */
+static inline int pointer_cursor_move_delta( struct pointer_cursor *c, double dx, double dy )
+{
+    int old_x = (int)c->x, old_y = (int)c->y;
+
+    c->motion_x += dx;
+    c->motion_y += dy;
+    pointer_cursor_place( c, c->x + dx, c->y + dy );
+    return (int)c->x != old_x || (int)c->y != old_y;
+}
+
 /* Move by the stick deflection (libnx axes: y up) held for elapsed_ns.
  * Returns nonzero when the whole-pixel position changed. */
 static inline int pointer_cursor_step( struct pointer_cursor *c, int stick_x, int stick_y,

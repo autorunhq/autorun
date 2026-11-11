@@ -312,6 +312,29 @@ static void test_custom_deadzone_and_rgba(void)
     assert( pixels[2 * POINTER_CURSOR_W + 1] == 0xffffffffu );
 }
 
+static void test_physical_mouse_delta_and_warp(void)
+{
+    struct pointer_cursor c = cursor_at( 640, 360 );
+    int dx = 0, dy = 0;
+
+    /* Relative delta moves from warped center and delivers full motion, even at edges. */
+    assert( pointer_cursor_move_delta( &c, 25, -10 ) );
+    assert( c.x == 665 && c.y == 350 );
+    assert( pointer_cursor_take_motion( &c, &dx, &dy ) && dx == 25 && dy == -10 );
+
+    pointer_cursor_warp( &c, 665, 350, 640, 360 );
+    assert( c.x == 640 && c.y == 360 );
+    /* No new HID delta keeps warped cursor at center rather than snapping back to OS x/y. */
+    assert( !pointer_cursor_take_motion( &c, &dx, &dy ) );
+    assert( c.x == 640 && c.y == 360 );
+
+    /* At right/bottom screen edge, motion_x/y still reports full physical mouse delta. */
+    c = cursor_at( 1279, 719 );
+    assert( !pointer_cursor_move_delta( &c, 40, 15 ) );
+    assert( c.x == 1279 && c.y == 719 );
+    assert( pointer_cursor_take_motion( &c, &dx, &dy ) && dx == 40 && dy == 15 );
+}
+
 int main(void)
 {
     test_buttons_between_takes();
@@ -326,6 +349,7 @@ int main(void)
     test_held_cursor_still_moves();
     test_speed_scales_the_stick();
     test_custom_deadzone_and_rgba();
+    test_physical_mouse_delta_and_warp();
     puts( "pointer cursor: buttons between takes, dead zone, speed curve, time scaling, edges, sprite "
           "restore, motion kept across warps, a held cursor still moving, custom deadzone and GPU sprite passed" );
     return 0;

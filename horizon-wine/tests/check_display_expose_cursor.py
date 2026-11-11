@@ -36,6 +36,10 @@ funcs = '\n\n'.join([
     extract_function(horizon, 'horizon_server_handle_set_window_pos'),
     extract_function(horizon, 'horizon_server_handle_set_cursor'),
 ])
+send_fn = extract_function(horizon, 'horizon_server_handle_send_hardware_message')
+send_clamp_start = send_fn.index('if (desktop->cursor.clip.left <= desktop->cursor.clip.right')
+send_clamp_end = send_fn.index('if (legacy)', send_clamp_start)
+send_clamp = send_fn[send_clamp_start:send_clamp_end].replace('desktop->', 'mock_desktop.')
 shown_rect_fn = extract_function(winnx_c, 'wine_nx_shown_rect')
 
 fixture = r'''
@@ -350,6 +354,60 @@ int main( void )
     assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
             cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
     assert( cur_rep->new_x == 1279 && cur_rep->new_y == 719 );
+
+    /* Oversized, inverted, and off-screen clips clamp/fallback to active raw screen rect. */
+    cur_req.flags = HORIZON_SET_CURSOR_CLIP;
+    cur_req.clip = (struct horizon_rectangle){ -300, -200, 5000, 4000 };
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
+
+    cur_req.clip = (struct horizon_rectangle){ 800, 500, 400, 200 };
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
+
+    cur_req.clip = (struct horizon_rectangle){ -50, -50, -50, -50 };
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
+
+    /* SET_CURSOR_POS alone respects the active clip rectangle. */
+    cur_req.clip = (struct horizon_rectangle){ 400, 200, 800, 500 };
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    cur_req.flags = HORIZON_SET_CURSOR_POS;
+    cur_req.x = 10;
+    cur_req.y = 10;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_x == 400 && cur_rep->new_y == 200 );
+    cur_req.x = 950;
+    cur_req.y = 600;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_x == 799 && cur_rep->new_y == 499 );
+
+    /* Zero-sized pin clip {640, 360, 640, 360} pins cursor on both SET_CURSOR_CLIP and SET_CURSOR_POS. */
+    mock_desktop.cursor.x = 50;
+    mock_desktop.cursor.y = 700;
+    cur_req.flags = HORIZON_SET_CURSOR_CLIP;
+    cur_req.clip = (struct horizon_rectangle){ 640, 360, 640, 360 };
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 640 && cur_rep->new_clip.top == 360 &&
+            cur_rep->new_clip.right == 640 && cur_rep->new_clip.bottom == 360 );
+    assert( cur_rep->new_x == 640 && cur_rep->new_y == 360 );
+
+    cur_req.flags = HORIZON_SET_CURSOR_POS;
+    cur_req.x = 800;
+    cur_req.y = 100;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_x == 640 && cur_rep->new_y == 360 );
+
+    /* Verify extracted hardware move clamp keeps zero-sized clip at (640, 360), not (639, 359). */
+    for (int step = -10; step <= 10; step += 20)
+    {
+        int x = 640 + step, y = 360 + step;
+''' + send_clamp + r'''
+        assert( x == 640 && y == 360 );
+    }
 
     /* 4. wine_nx_shown_rect keeps scaled fullscreen surface between side bars (0111). */
     struct window_rects scaled_rects = {

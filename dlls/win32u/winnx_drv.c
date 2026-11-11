@@ -1073,7 +1073,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     wine_nx_update_cursor();
     wine_nx_fb_present();
     __atomic_store_n( &delivering, 0, __ATOMIC_RELEASE );
-    return moved || first || keys;
+    return moved || stepped || first || keys;
 }
 
 /**********************************************************************

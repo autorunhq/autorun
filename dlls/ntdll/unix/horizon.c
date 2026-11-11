@@ -10055,10 +10055,14 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         }
         if (flags & HORIZON_MOUSEEVENTF_MOVE)
         {
-            if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
-            if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
-            if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
-            if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+            if (desktop->cursor.clip.left <= desktop->cursor.clip.right &&
+                desktop->cursor.clip.top <= desktop->cursor.clip.bottom)
+            {
+                if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
+                if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+                if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
+                if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
+            }
             if (legacy)
             {
                 desktop->cursor.x = x;
@@ -10465,18 +10469,29 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
         reply.prev_y = desktop->cursor.y;
         if (request->flags & HORIZON_SET_CURSOR_HANDLE) input->cursor = request->handle;
         if (request->flags & HORIZON_SET_CURSOR_COUNT) input->cursor_count += request->show_count;
+        if (request->flags & HORIZON_SET_CURSOR_CLIP)
+        {
+            struct horizon_rectangle top_rect, new_rect = request->clip;
+
+            horizon_server_raw_screen_rect_locked( &top_rect );
+            if (new_rect.left   < top_rect.left)   new_rect.left   = top_rect.left;
+            if (new_rect.right  > top_rect.right)  new_rect.right  = top_rect.right;
+            if (new_rect.top    < top_rect.top)    new_rect.top    = top_rect.top;
+            if (new_rect.bottom > top_rect.bottom) new_rect.bottom = top_rect.bottom;
+            if (new_rect.left > new_rect.right || new_rect.top > new_rect.bottom) new_rect = top_rect;
+            desktop->cursor.clip = new_rect;
+        }
+        if (request->flags & HORIZON_SET_CURSOR_NOCLIP)
+            horizon_server_raw_screen_rect_locked( &desktop->cursor.clip );
         if (request->flags & HORIZON_SET_CURSOR_POS)
         {
             desktop->cursor.x = request->x;
             desktop->cursor.y = request->y;
             desktop->cursor.last_change = horizon_server_input_time();
         }
-        if (request->flags & HORIZON_SET_CURSOR_CLIP) desktop->cursor.clip = request->clip;
-        if (request->flags & HORIZON_SET_CURSOR_NOCLIP)
-            horizon_server_raw_screen_rect_locked( &desktop->cursor.clip );
-        if ((request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
-            desktop->cursor.clip.left < desktop->cursor.clip.right &&
-            desktop->cursor.clip.top < desktop->cursor.clip.bottom)
+        if ((request->flags & (HORIZON_SET_CURSOR_POS | HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
+            desktop->cursor.clip.left <= desktop->cursor.clip.right &&
+            desktop->cursor.clip.top <= desktop->cursor.clip.bottom)
         {
             int x = desktop->cursor.x, y = desktop->cursor.y;
 
