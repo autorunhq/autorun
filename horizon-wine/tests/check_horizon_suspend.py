@@ -82,7 +82,7 @@ static struct horizon_server_object *horizon_server_get_thread_locked(unsigned h
     return handle == 1 ? &target : NULL;
 }
 static Handle kernel_thread_handle, next_kernel_thread_handle;
-static int kernel_paused, kernel_in_runtime, stop_mask, stop_exit_code, pause_granted = 1;
+static int kernel_paused, kernel_in_runtime, kernel_ctx_fail, stop_mask, stop_exit_code, pause_granted = 1;
 static uint64_t kernel_pc = 0x55550000ULL;
 __attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned tid, int set, int clear, int code, Handle *h) {
     (void)t; (void)tid;
@@ -108,6 +108,11 @@ static Result svcGetThreadContext3(ThreadContext *ctx, Handle h) {
     {
         kernel_thread_handle = next_kernel_thread_handle;
         next_kernel_thread_handle = 0;
+    }
+    if (kernel_ctx_fail)
+    {
+        kernel_ctx_fail = 0;
+        return 1;
     }
     return 0;
 }
@@ -240,9 +245,11 @@ int main(void) {
     /* Freeze fails when inside runtime code and falls back to stop-word, then terminates. */
     kernel_in_runtime = 1;
     {
-        /* Snapshot still succeeds inside runtime code (WaitForSingleObject), but rejects handle reuse and ending threads. */
+        /* Snapshot still succeeds inside runtime code (WaitForSingleObject), but rejects context error, handle reuse, and ending threads. */
         struct context_data snap;
         assert(horizon_server_snapshot_locked(&target, &snap) && snap.ctl.arm64_regs.pc == kernel_pc && !kernel_paused);
+        kernel_ctx_fail = 1;
+        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
         next_kernel_thread_handle = 99;
         assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
         kernel_thread_handle = 42;

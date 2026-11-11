@@ -7151,14 +7151,18 @@ static int horizon_server_handle_start_hook_chain( struct horizon_server_connect
     {
         struct horizon_msgq *queue = horizon_server_queue_locked( connection->tid );
 
-        reply.handle = hook->handle;
-        reply.unicode = hook->unicode;
-        reply.proc = hook->proc;
-        if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
-        reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
-                                                                     module, sizeof(module) );
-        horizon_window_hook_chains[hook->index]++;
-        if (queue) queue->hook_chains[hook->index]++;
+        if (!queue) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        else
+        {
+            reply.handle = hook->handle;
+            reply.unicode = hook->unicode;
+            reply.proc = hook->proc;
+            if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
+            reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
+                                                                         module, sizeof(module) );
+            horizon_window_hook_chains[hook->index]++;
+            queue->hook_chains[hook->index]++;
+        }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
@@ -7178,11 +7182,12 @@ static int horizon_server_handle_finish_hook_chain( struct horizon_server_connec
     else
     {
         pthread_mutex_lock( &horizon_server_objects_mutex );
-        if (!horizon_window_hook_chains[index]) reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+        queue = horizon_msgq_find( &horizon_msg_queues, connection->tid );
+        if (!horizon_window_hook_chains[index] || !queue || queue->hook_chains[index] <= 0)
+            reply.error = HORIZON_STATUS_INVALID_PARAMETER;
         else
         {
-            if ((queue = horizon_msgq_find( &horizon_msg_queues, connection->tid )) && queue->hook_chains[index] > 0)
-                queue->hook_chains[index]--;
+            queue->hook_chains[index]--;
             horizon_window_hook_release_chain_locked( index );
         }
         pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -8034,16 +8039,19 @@ static void horizon_server_raw_screen_rect_locked( struct horizon_rectangle *rec
 
 static void horizon_server_map_point_raw_to_virt_locked( int *x, int *y )
 {
-    const struct horizon_monitor_info *monitor = NULL;
+    const struct horizon_monitor_info *monitor = NULL, *first_active = NULL;
     int width_from, height_from, width_to, height_to;
     unsigned int i;
 
     for (i = 0; i < horizon_monitor_count && !monitor; i++)
     {
         const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+
+        if (horizon_monitors[i].flags & (HORIZON_MONITOR_FLAG_CLONE | HORIZON_MONITOR_FLAG_INACTIVE)) continue;
+        if (!first_active) first_active = &horizon_monitors[i];
         if (*x >= raw->left && *x < raw->right && *y >= raw->top && *y < raw->bottom) monitor = &horizon_monitors[i];
     }
-    if (!monitor && horizon_monitor_count) monitor = &horizon_monitors[0];
+    if (!monitor) monitor = first_active;
     if (!monitor) return;
     width_from = monitor->raw.right - monitor->raw.left;
     height_from = monitor->raw.bottom - monitor->raw.top;

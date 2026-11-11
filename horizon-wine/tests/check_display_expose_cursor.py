@@ -316,6 +316,32 @@ int main( void )
     assert( cur_rep->new_clip.right == 1920 && cur_rep->new_clip.bottom == 1080 );
     assert( cur_rep->new_x == 1500 && cur_rep->new_y == 900 );
 
+    /* Multi-monitor union skips CLONE and INACTIVE monitors for both NOCLIP and point mapping. */
+    struct horizon_monitor_info multi[4] = {
+        { { 0, 0, 640, 480 }, { 0, 0, 640, 480 }, HORIZON_MONITOR_FLAG_INACTIVE, 96, 96, 96, 96 },
+        { { 0, 0, 1280, 720 }, { 0, 0, 1280, 720 }, 0, 96, 96, 96, 96 },
+        { { 1280, 0, 3200, 1080 }, { 1280, 0, 3200, 1080 }, 0, 96, 96, 96, 96 },
+        { { 0, 0, 4000, 2000 }, { 0, 0, 4000, 2000 }, HORIZON_MONITOR_FLAG_CLONE, 96, 96, 96, 96 },
+    };
+    horizon_server_handle_set_winstation_monitors( &conn, (const void *)&mon_req, multi, sizeof(multi) );
+    mock_desktop.cursor.x = 3500;
+    mock_desktop.cursor.y = 950;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 3200 && cur_rep->new_clip.bottom == 1080 );
+    assert( cur_rep->new_x == 3199 && cur_rep->new_y == 950 );
+
+    /* When all monitors are INACTIVE or CLONE, NOCLIP falls back to 1280x720. */
+    multi[1].flags = HORIZON_MONITOR_FLAG_INACTIVE;
+    multi[2].flags = HORIZON_MONITOR_FLAG_CLONE;
+    horizon_server_handle_set_winstation_monitors( &conn, (const void *)&mon_req, multi, sizeof(multi) );
+    mock_desktop.cursor.x = 1500;
+    mock_desktop.cursor.y = 900;
+    horizon_server_handle_set_cursor( &conn, (const void *)&cur_req );
+    assert( cur_rep->new_clip.left == 0 && cur_rep->new_clip.top == 0 &&
+            cur_rep->new_clip.right == 1280 && cur_rep->new_clip.bottom == 720 );
+    assert( cur_rep->new_x == 1279 && cur_rep->new_y == 719 );
+
     /* No active monitors: NOCLIP falls back to 1280x720. */
     horizon_monitor_count = 0;
     mock_desktop.cursor.x = 1500;

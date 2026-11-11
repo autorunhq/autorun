@@ -188,12 +188,13 @@ static int horizon_server_write_reply( int fd, const void *reply, size_t size, c
 
 ''' + hook_block + '\n\n' + ll_defs + '\n' + ll_helpers + r'''
 
-static struct horizon_server_object t1, t2;
+static struct horizon_server_object t1, t2, t3;
 
 static void test_hooks_lifecycle_and_chains( void )
 {
     struct horizon_server_connection c1 = { 1, 0x100, 1 };
     struct horizon_server_connection c2 = { 1, 0x100, 2 };
+    struct horizon_server_connection c3 = { 1, 0x100, 3 };
     struct horizon_set_hook_request set_req;
     struct horizon_remove_hook_request rem_req;
     struct horizon_start_hook_chain_request start_req;
@@ -203,13 +204,15 @@ static void test_hooks_lifecycle_and_chains( void )
     const struct horizon_start_hook_chain_reply *start_rep = (const void *)last_reply;
     const struct horizon_get_hook_info_reply *info_rep = (const void *)last_reply;
     const unsigned char mod_name[] = "hookmod.dll";
-    unsigned int h_thread, h_global;
+    unsigned int h_thread, h_global, h_g2;
 
     t1.thread.tid = 1; t1.thread_next = &t2;
-    t2.thread.tid = 2;
+    t2.thread.tid = 2; t2.thread_next = &t3;
+    t3.thread.tid = 3;
     horizon_server_threads = &t1;
     horizon_server_queue_locked( 1 );
     horizon_server_queue_locked( 2 );
+    horizon_server_queue_locked( 3 );
 
     /* Reject unsupported/bad hooks cleanly. */
     memset( &set_req, 0, sizeof(set_req) );
@@ -291,6 +294,53 @@ static void test_hooks_lifecycle_and_chains( void )
 
     horizon_server_remove_thread_hooks_locked( 2 );
     assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 0 );
+    assert( horizon_window_hook_find_locked( h_global ) == NULL );
+    assert( horizon_window_hooks == NULL );
+
+    /* Overlapping nested + cross-thread chains, foreign finish rejection, concurrent remove, partial exit. */
+    set_req.id = 4;
+    set_req.tid = 0;
+    set_req.proc = 0x3456;
+    horizon_server_handle_window_hook( &c1, (const void *)&set_req, HORIZON_REQ_SET_HOOK, NULL, 0 );
+    assert( !set_rep->header.error && (h_global = set_rep->handle) );
+    set_req.proc = 0x4567;
+    horizon_server_handle_window_hook( &c1, (const void *)&set_req, HORIZON_REQ_SET_HOOK, NULL, 0 );
+    assert( !set_rep->header.error && (h_g2 = set_rep->handle) );
+
+    /* c2 starts 2 nested chains, c3 starts 1 overlapping chain (global == 3). */
+    horizon_server_handle_window_hook( &c2, (const void *)&start_req, HORIZON_REQ_START_HOOK_CHAIN, NULL, 0 );
+    assert( !start_rep->header.error && start_rep->handle == h_g2 );
+    horizon_server_handle_window_hook( &c2, (const void *)&start_req, HORIZON_REQ_START_HOOK_CHAIN, NULL, 0 );
+    assert( !start_rep->header.error );
+    horizon_server_handle_window_hook( &c3, (const void *)&start_req, HORIZON_REQ_START_HOOK_CHAIN, NULL, 0 );
+    assert( !start_rep->header.error );
+    assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 3 );
+
+    /* Remove both global hooks while chains are active: deferred free keeps both intact. */
+    rem_req.handle = h_g2;
+    horizon_server_handle_window_hook( &c1, (const void *)&rem_req, HORIZON_REQ_REMOVE_HOOK, NULL, 0 );
+    rem_req.handle = h_global;
+    horizon_server_handle_window_hook( &c1, (const void *)&rem_req, HORIZON_REQ_REMOVE_HOOK, NULL, 0 );
+    assert( horizon_window_hook_find_locked( h_g2 ) != NULL );
+    assert( horizon_window_hook_find_locked( h_global ) != NULL );
+
+    /* Thread c1 with no active chain cannot prematurely finish another thread's chain. */
+    fin_req.id = 4;
+    horizon_server_handle_window_hook( &c1, (const void *)&fin_req, HORIZON_REQ_FINISH_HOOK_CHAIN, NULL, 0 );
+    assert( ((const struct horizon_server_reply_header *)last_reply)->error == HORIZON_STATUS_INVALID_PARAMETER );
+    assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 3 );
+
+    /* c2 exits mid-chain: drops only its 2 chains; c3 still keeps global == 1 and hooks alive. */
+    horizon_server_remove_thread_hooks_locked( 2 );
+    assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 1 );
+    assert( horizon_window_hook_find_locked( h_g2 ) != NULL );
+    assert( horizon_window_hook_find_locked( h_global ) != NULL );
+
+    /* Only when c3 finishes its chain does global drop to 0 and both deferred hooks free. */
+    horizon_server_handle_window_hook( &c3, (const void *)&fin_req, HORIZON_REQ_FINISH_HOOK_CHAIN, NULL, 0 );
+    assert( !((const struct horizon_server_reply_header *)last_reply)->error );
+    assert( horizon_window_hook_chains[4 - HORIZON_WH_MINHOOK] == 0 );
+    assert( horizon_window_hook_find_locked( h_g2 ) == NULL );
     assert( horizon_window_hook_find_locked( h_global ) == NULL );
     assert( horizon_window_hooks == NULL );
 }
