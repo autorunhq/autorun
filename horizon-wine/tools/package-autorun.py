@@ -71,7 +71,8 @@ licenses = stage / 'licenses'
 licenses.mkdir()
 for source, name in ((root / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (horizon_wine / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
-                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt')):
+                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
+                     (horizon_wine / 'licenses/MPLUS1p-OFL-1.1.txt', 'MPLUS1p-OFL-1.1.txt')):
     shutil.copy2(source, licenses / name)
 
 # --- Autorun's setup programs ------------------------------------------------

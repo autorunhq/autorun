@@ -1901,6 +1901,13 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
 
+#ifdef __SWITCH__
+    {
+        extern void carafeErrorException( unsigned int code, const void *address ) __attribute__((weak));
+
+        if (carafeErrorException) carafeErrorException( rec->ExceptionCode, rec->ExceptionAddress );
+    }
+#endif
     NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
     return STATUS_SUCCESS;
 }

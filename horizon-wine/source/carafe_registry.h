@@ -68,6 +68,7 @@ void carafeRegistryUndoPending(void);
 void carafeRegistryReset(void);
 void carafeRegistryBringBack(void);
 void carafeRegistryTrialClear(void);
+void carafeRegistrySyncProgram(void) __attribute__((weak));
 
 void carafeRegistryFormat(uint32_t type, const uint8_t* data, uint32_t size, char* out, size_t out_size);
 size_t carafeRegistryUtf16(const char* text, uint16_t* out, size_t max);

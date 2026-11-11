@@ -289,15 +289,36 @@ static Thread stall_watch_thread;
 static int log_flusher_quit;
 static pthread_t log_flusher_thread;
 static int runtime_profile;
+static volatile int wine_nx_overlay_poll_armed;
+
+extern void carafeLoadingTick( void ) __attribute__((weak));
+extern void carafeSettingsTick( void ) __attribute__((weak));
+extern _Bool carafeMenuVisible( void ) __attribute__((weak));
+extern void carafeErrorMissingDll( const char *name ) __attribute__((weak));
+extern _Bool carafeErrorRelaunch( const char *own_nro, unsigned int exit_code ) __attribute__((weak));
+extern _Bool carafeErrorRestart( unsigned int exit_code ) __attribute__((weak));
+static void wine_nx_runtime_overlay_poll( void );
 
 static void *log_flusher( void *arg )
 {
     unsigned int ticks = 0;
+    u64 last_200ms = armGetSystemTick();
 
     (void)arg;
     while (!__atomic_load_n( &log_flusher_quit, __ATOMIC_RELAXED ))
     {
-        svcSleepThread( 200000000LL );
+        u64 now;
+        s64 sleep_ns = 100000000LL;
+
+        if (__atomic_load_n( &wine_nx_overlay_poll_armed, __ATOMIC_ACQUIRE ) && wine_nx_osk_visible())
+            sleep_ns = 33000000LL;
+        svcSleepThread( sleep_ns );
+        wine_nx_runtime_overlay_poll();
+        if (carafeLoadingTick) carafeLoadingTick();
+        else if (carafeSettingsTick) carafeSettingsTick();
+        now = armGetSystemTick();
+        if (armTicksToNs( now - last_200ms ) < 200000000ULL) continue;
+        last_200ms = now;
         runtime_tick_std_streams();
         if (++ticks % 25 == 0)
         {
@@ -1241,13 +1262,13 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         hidInitializeMouse();
         padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
         padInitializeDefault( &wine_nx_pad );
-        wine_nx_pointer_tick = armGetSystemTick();
-        wine_nx_pointer_ready = 1;
+        __atomic_store_n( &wine_nx_pointer_tick, armGetSystemTick(), __ATOMIC_RELAXED );
+        __atomic_store_n( &wine_nx_pointer_ready, 1, __ATOMIC_RELEASE );
     }
     padUpdate( &wine_nx_pad );
     now = armGetSystemTick();
     elapsed = armTicksToNs( now - wine_nx_pointer_tick );
-    wine_nx_pointer_tick = now;
+    __atomic_store_n( &wine_nx_pointer_tick, now, __ATOMIC_RELAXED );
     all_held = padIsConnected( &wine_nx_pad ) ? padGetButtons( &wine_nx_pad ) : 0;
     held = all_held;
     if (padIsConnected( &wine_nx_pad ))
@@ -1578,6 +1599,22 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     return moved;
 }
 
+static void wine_nx_runtime_overlay_poll( void )
+{
+    int x, y;
+    unsigned int buttons;
+    u64 min_age_ns;
+
+    if (!__atomic_load_n( &wine_nx_overlay_poll_armed, __ATOMIC_ACQUIRE )) return;
+    min_age_ns = wine_nx_osk_visible() ? 33000000ULL : 150000000ULL;
+    if (__atomic_load_n( &wine_nx_pointer_ready, __ATOMIC_ACQUIRE ))
+    {
+        u64 last_tick = __atomic_load_n( &wine_nx_pointer_tick, __ATOMIC_RELAXED );
+        if (armTicksToNs( armGetSystemTick() - last_tick ) < min_age_ns) return;
+    }
+    wine_nx_pointer_poll( &x, &y, &buttons );
+}
+
 void wine_nx_input_take( struct input_snapshot *out )
 {
     struct input_key_edges edges;
@@ -1660,9 +1697,16 @@ static int call_pe_entry_point( void *entry )
 
 static void park_forever(void)
 {
+    extern volatile int wine_nx_quit_requested;
+    void wine_nx_quit_point( void );
+
     log_line( "[EXIT] parked after runtime handoff; close from HOME" );
     appletNotifyRunning( NULL );
-    for (;;) svcSleepThread( 1000000000LL );
+    for (;;)
+    {
+        if (wine_nx_quit_requested) wine_nx_quit_point();
+        svcSleepThread( 50000000LL );
+    }
 }
 
 static void trim_line( char *line )
@@ -4183,6 +4227,7 @@ static int return_to_launcher( void )
 {
     int i, still_lent = 0;
 
+    __atomic_store_n( &wine_nx_overlay_poll_armed, 0, __ATOMIC_RELEASE );
     /* Only reached with the program's threads already gone. Both of these wait
      * for the thread they end: a thread of the runtime's own has no quit point
      * to stop at, and while it runs it holds the heap pages of its stack. */
@@ -4350,28 +4395,18 @@ static int return_to_launcher( void )
     }
     {
         extern _Bool carafeRestartRequested( void ) __attribute__((weak));
-        extern _Bool carafeGameArgv( char *out, size_t size ) __attribute__((weak));
 
         if (!runtime_components_run && carafeRestartRequested && carafeRestartRequested())
         {
-            char argv[2048];
-
-            if (!still_lent && envHasNextLoad() && own_nro[0])
+            if (!still_lent && envHasNextLoad() && own_nro[0] &&
+                runtime_program[0] && run_next_push( runtime_program ) &&
+                R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
             {
-                if (carafeGameArgv && carafeGameArgv( argv, sizeof(argv) ) &&
-                    R_SUCCEEDED( envSetNextLoad( own_nro, argv ) ))
-                {
-                    log_step( "starting the game again with the new settings" );
-                    return 0;
-                }
-                if ((runtime_forwarded_launch || (runtime_program[0] && run_next_push( runtime_program ))) &&
-                    R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
-                {
-                    log_step( "starting the game again with the new settings" );
-                    return 0;
-                }
+                log_step( "starting the game again with the new settings" );
+                return 0;
             }
-            if (still_lent && R_SUCCEEDED( appletRestartProgram( NULL, 0 ) ))
+            if (runtime_program[0]) run_next_push( runtime_program );
+            if (carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
             {
                 __nx_applet_exit_mode = 1;
                 log_step( "closing this program; the application starts again with the new settings" );
@@ -4379,6 +4414,9 @@ static int return_to_launcher( void )
             }
         }
     }
+    if (!still_lent && !runtime_components_run && own_nro[0] && carafeErrorRelaunch &&
+        carafeErrorRelaunch( own_nro, wine_nx_program_exit_code ))
+        return 0;
     /* A program waiting in run-next.txt (after the components setup) is started
      * by the runtime started again, whether or not the launcher would be. */
     if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
@@ -4388,7 +4426,10 @@ static int return_to_launcher( void )
         return 0;
     }
     __nx_applet_exit_mode = 1;
-    log_step( "closing this program; the console goes back to the menu" );
+    if (!runtime_components_run && carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
+        log_step( "closing this program; the application starts again with the error screen" );
+    else
+        log_step( "closing this program; the console goes back to the menu" );
     return 0;
 }
 
@@ -4882,6 +4923,15 @@ int main( int argc, char **argv )
 
     run_components_first( target, sizeof(target) );
     snprintf( runtime_program, sizeof(runtime_program), "%s", target );
+    if (!runtime_components_run)
+    {
+        extern void carafeAutorunSetProgram( const char *target, const char *own_nro,
+                                             _Bool forwarded, _Bool reopen_launcher ) __attribute__((weak));
+
+        if (carafeAutorunSetProgram)
+            carafeAutorunSetProgram( target, own_nro, runtime_forwarded_launch != 0,
+                                     runtime_reopen_launcher != 0 );
+    }
 
     /* From here a thread may be asked to end; this one comes back here. */
     if (setjmp( quit_jump )) return return_to_launcher();
@@ -5035,6 +5085,11 @@ int main( int argc, char **argv )
     if (status || (status = horizon_set_process_machine( target_machine )))
     {
         log_line( "[FAIL] target machine status=%08x", status );
+        if (autorun)
+        {
+            wine_nx_program_exit_code = status ? (unsigned int)status : 0xC000007Bu;
+            return return_to_launcher();
+        }
         park_forever();
     }
     main_image_info.Machine = target_machine;
@@ -5049,6 +5104,13 @@ int main( int argc, char **argv )
             access( cpu_module, R_OK ))
         {
             log_line( "[FAIL] FEX CPU module missing or unsupported target: %04x (%s)", target_machine, cpu_module );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = 0xC0000135u;
+                if (carafeErrorMissingDll)
+                    carafeErrorMissingDll( target_machine == IMAGE_FILE_MACHINE_AMD64
+                                           ? "libarm64ecfex.dll" : "libwow64fex.dll" );
+            }
             return return_to_launcher();
         }
         if (wine_nx_fex_exception_attach())
@@ -5123,6 +5185,11 @@ int main( int argc, char **argv )
     if (status || !runtime_describe_image( module, view_size, &entry ))
     {
         log_line( "[FAIL] map target status=%08x", status );
+        if (autorun)
+        {
+            wine_nx_program_exit_code = status ? (unsigned int)status : 0xC0000135u;
+            return return_to_launcher();
+        }
         park_forever();
     }
     main_module = module;
@@ -5186,6 +5253,11 @@ int main( int argc, char **argv )
         if (status)
         {
             log_line( "[FAIL] init_process_done status=%08x", status );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = (unsigned int)status;
+                return return_to_launcher();
+            }
             park_forever();
         }
     }
@@ -5194,12 +5266,23 @@ int main( int argc, char **argv )
      * to go, and before the program runs or makes a thread of its own. */
     if (!low_window_available) hold_thread_local_pages();
     else log_line( "[TLS] kernel TLS stays above 4 GiB; placeholder threads not needed" );
+    {
+        extern void carafeLoadingStart( void ) __attribute__((weak));
+
+        if (wine_nx_compositor_mode && !runtime_components_run && carafeLoadingStart) carafeLoadingStart();
+    }
+    __atomic_store_n( &wine_nx_overlay_poll_armed, 1, __ATOMIC_RELEASE );
     if (!wine_nx_compositor_enabled() || !wine_nx_watch_window_pictures) appletNotifyRunning( NULL );
     {
         params = runtime_create_process_params( target, &main_nt_name, dos_path, sizeof(dos_path) );
         if (!params)
         {
             log_line( "[FAIL] process parameter allocation" );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = 0xC0000017u;
+                return return_to_launcher();
+            }
             park_forever();
         }
         runtime_init_peb_process( teb, module, params );
@@ -5220,6 +5303,14 @@ int main( int argc, char **argv )
                 svcSetThreadPriority( CUR_THREAD_HANDLE, 0x3b );
                 wine_nx_thread_register( 'w', HandleToULong( teb->ClientId.UniqueThread ), teb );
                 wine_nx_start_arm64ec_thread( (PRTL_THREAD_START_ROUTINE)entry, teb->Peb, suspend, teb );
+                park_forever();
+            }
+            if (autorun)
+            {
+                wine_nx_program_exit_code = status ? (unsigned int)status : 0xC0000142u;
+                if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                    carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+                return return_to_launcher();
             }
             park_forever();
         }
@@ -5229,6 +5320,13 @@ int main( int argc, char **argv )
         {
             status = runtime_start_wow64( module, entry, params, &main_nt_name, autorun );
             log_line( "[WOW64] startup status=%08x", status );
+            if (status && autorun)
+            {
+                wine_nx_program_exit_code = (unsigned int)status;
+                if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                    carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+                return return_to_launcher();
+            }
             park_forever();
         }
 #endif
@@ -5271,6 +5369,11 @@ int main( int argc, char **argv )
             wine_nx_console_quiet = 0;
             log_line( "[BLOCK] run-entry.txt enabled, but loader status import=%08x attach=%08x",
                       ldr_status, attach_status );
+            wine_nx_program_exit_code = ldr_status ? (unsigned int)ldr_status :
+                                        attach_status ? (unsigned int)attach_status : 0xC0000135u;
+            if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+            return return_to_launcher();
         }
     }
 

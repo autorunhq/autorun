@@ -2771,6 +2771,20 @@ failed:
     return status;
 }
 
+#define CARAFE_LARGE_GUEST_VIEW ((size_t)0x200000)
+
+static BOOL carafe_large_guest_views(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *value = getenv( "CARAFE_LARGE_GUEST_PAGES" );
+        enabled = value && !strcmp( value, "1" );
+    }
+    return enabled;
+}
+
 /***********************************************************************
  *           map_view
  *
@@ -2785,6 +2799,10 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
     void *ptr;
     int unix_prot = get_unix_prot( vprot );
     NTSTATUS status;
+
+    if (!align_mask && !base && size >= CARAFE_LARGE_GUEST_VIEW && carafe_large_guest_views() &&
+        !map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, CARAFE_LARGE_GUEST_VIEW - 1 ))
+        return STATUS_SUCCESS;
 
     if (!align_mask) align_mask = granularity_mask;
     assert( align_mask >= host_page_mask );

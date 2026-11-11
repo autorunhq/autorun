@@ -18754,6 +18754,17 @@ static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr );
 extern int wine_nx_stop_state( int *code ) __attribute__((weak));
 extern void wine_nx_stop_end( void ) __attribute__((weak));
 extern const void *wine_nx_kernel_enter( const void *frame ) __attribute__((weak));
+extern _Bool carafeErrorNative( unsigned int esr, unsigned long pc ) __attribute__((weak));
+
+static void horizon_native_failure_exit( void )
+{
+    extern void wine_nx_request_quit( const char *why ) __attribute__((weak));
+    extern void wine_nx_quit_point( void ) __attribute__((weak));
+
+    if (wine_nx_request_quit) wine_nx_request_quit( "the runtime hit an error" );
+    if (wine_nx_quit_point) wine_nx_quit_point();
+    for (;;) svcSleepThread( 1000ULL * 1000ULL * 1000ULL );
+}
 
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
@@ -18979,6 +18990,19 @@ unhandled_exception:
             horizon_exception_context( ctx, &context );
             wine_nx_box64_handle_fault( (ULONG_PTR)ctx->far.x, (esr >> 6) & 1, &context );
         }
+#if defined(__aarch64__)
+        if (carafeErrorNative && carafeErrorNative( (unsigned int)esr, ctx->pc.x ))
+        {
+            snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; ending the program for the error screen",
+                      (unsigned)status );
+            wine_nx_runtime_trace( buf );
+            ctx->sp.x = (ctx->sp.x - 0x400) & ~(u64)15;
+            ctx->fp.x = 0;
+            ctx->lr.x = 0;
+            ctx->pc.x = (ULONG_PTR)horizon_native_failure_exit;
+            horizon_resume_exception( ctx );
+        }
+#endif
         snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; parking thread", (unsigned)status );
         wine_nx_runtime_trace( buf );
         /* Park rather than returning: libnx's exception_returnentry would
@@ -22037,9 +22061,14 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
     }
     if (R_FAILED(rc))
     {
+        extern void carafeErrorThreadRefused( void ) __attribute__((weak));
         u64 resource = 0;
         s64 used = -1, limit = -1;
         char message[160];
+
+        if (rc == MAKERESULT( Module_Kernel, KernelError_OutOfResource ) &&
+            __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) && carafeErrorThreadRefused)
+            carafeErrorThreadRefused();
 
         if (R_SUCCEEDED(svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 )))
         {

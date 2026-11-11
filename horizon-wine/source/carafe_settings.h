@@ -205,5 +205,6 @@ bool carafeGameArgv(char* out, size_t size);
 bool carafeOptionsSummary(char* out, size_t size);
 bool carafeMeasuring(void);
 bool carafeOrchestrating(void);
+void carafeSettingsSyncProgram(void) __attribute__((weak));
 
 #endif

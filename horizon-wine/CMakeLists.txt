@@ -645,6 +645,8 @@ add_executable(wine-nx-runtime
     source/compositor_egl.c
     source/carafe_hid.c
     source/carafe_overlay.c
+    source/carafe_loading.c
+    source/carafe_error.c
     source/carafe_draw.c
     source/carafe_text.c
     source/carafe_settings.c
@@ -678,6 +680,7 @@ add_executable(wine-nx-runtime
 
 target_sources(wine-nx-runtime PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
     source/launcher.c source/launcher_graphics.c source/launcher_dxvk.c source/dxvk_options.c source/launcher_catalog.c source/launcher_console.c
     source/input_profile.c source/launcher_input.c
     source/game_settings.c source/launcher_game_settings.c
@@ -756,13 +759,39 @@ if(ELF2NSO AND NPDMTOOL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
         VERBATIM
     )
+    set(CARAFE_MENU_TXT "${CMAKE_CURRENT_BINARY_DIR}/carafe_menu.txt")
+    add_custom_command(
+        OUTPUT "${CARAFE_MENU_TXT}"
+        COMMAND "${CMAKE_COMMAND}" -E env python3
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
+                "${CARAFE_MENU_TXT}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
+        COMMAND "${CMAKE_COMMAND}" -E env python3
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py" --asm
+                "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
+                carafe_menu_txt "${CARAFE_MENU_TXT}"
+                carafe_font_regular "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Regular.ttf"
+                carafe_font_bold "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Bold.ttf"
+                carafe_font_extrabold "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-ExtraBold.ttf"
+        DEPENDS "${CARAFE_MENU_TXT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Regular.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Bold.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-ExtraBold.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
+        VERBATIM
+    )
 else()
     message(FATAL_ERROR "elf2nso and npdmtool are needed to build the forwarder loader")
 endif()
 # libnx's service macros use C11's static_assert, which the rest of the tree,
 # built as gnu99, does not have.
 set_source_files_properties(source/forwarder.c source/carafe_hid.c
-    source/carafe_overlay.c source/carafe_draw.c source/carafe_text.c
+    source/carafe_overlay.c source/carafe_loading.c source/carafe_error.c
+    source/carafe_draw.c source/carafe_text.c
     source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c
     PROPERTIES COMPILE_OPTIONS "-std=gnu11")
 set_property(SOURCE source/carafe_hid.c ../dlls/winebus.sys/hid.c APPEND PROPERTY
@@ -908,7 +937,9 @@ endif()
 target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
     -Wl,--wrap=svcSetThreadCoreMask
     -Wl,--wrap=virtmemFindAslr -Wl,--wrap=virtmemFindCodeMemory
-    -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation)
+    -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation
+    -Wl,--wrap=main -Wl,--wrap=wine_nx_osk_visible -Wl,--wrap=wine_nx_osk_generation
+    -Wl,--wrap=wine_nx_osk_frame -Wl,--wrap=wine_nx_osk_copy -Wl,--wrap=wine_nx_compositor_cursor)
 
 # freetype (+ its deps) for win32u font rendering; nx last for the libnx syscalls
 find_library(SWITCH_FREETYPE freetype HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
@@ -1013,6 +1044,7 @@ endif()
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c
+    source/carafe_loading.c source/carafe_error.c
     source/carafe_draw.c source/carafe_text.c source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)

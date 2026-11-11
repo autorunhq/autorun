@@ -1,6 +1,7 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <math.h>
+#include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,7 @@
 
 #define FONT_SLOTS 16
 #define FONT_LIMIT (4 * 1024 * 1024)
-#define ICON_LIMIT (512 * 1024)
+#define ICON_LIMIT (2 * 1024 * 1024)
 #define LINE_LIMIT 512
 
 typedef struct {
@@ -338,6 +339,28 @@ bool carafeLoadIcon(CarafeImage* icon) {
     unsigned char* data = carafeOverlayReadRomfsFile("/carafe/icon.jpg", ICON_LIMIT, &size);
     if (data == NULL) {
         return false;
+    }
+    static const unsigned char PNG_SIG[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    if (size >= 8 && memcmp(data, PNG_SIG, 8) == 0) {
+        png_image png;
+        memset(&png, 0, sizeof(png));
+        png.version = PNG_IMAGE_VERSION;
+        uint32_t* pixels = NULL;
+        if (png_image_begin_read_from_memory(&png, data, size) && png.width > 0 && png.height > 0
+            && png.width <= 1024 && png.height <= 1024) {
+            png.format = PNG_FORMAT_BGRA;
+            pixels = malloc(PNG_IMAGE_SIZE(png));
+            if (pixels != NULL && png_image_finish_read(&png, NULL, pixels, 0, NULL)) {
+                icon->pixels = pixels;
+                icon->width = (int)png.width;
+                icon->height = (int)png.height;
+            } else {
+                free(pixels);
+            }
+        }
+        png_image_free(&png);
+        free(data);
+        return icon->pixels != NULL;
     }
     tjhandle decoder = tjInitDecompress();
     int width = 0;

@@ -11,14 +11,13 @@
 #include "carafe_overlay.h"
 #include "carafe_registry.h"
 #include "carafe_settings.h"
+#include "fex_options.h"
 #include "input_profile.h"
+#include "launcher_settings.h"
 
 #define MENU_FILE "/carafe/menu.txt"
 #define MENU_LIMIT (1024 * 1024)
 #define CHANGES_DIR "sdmc:/switch/wine/carafe"
-#define CHANGES_FILE CHANGES_DIR "/changes.txt"
-#define MERGED_MARK CHANGES_DIR "/merged"
-#define VOLATILE_FILE "sdmc:/switch/carafe/%016lx/%s"
 #define RUNTIME_ROOT "sdmc:/switch/wine"
 #define ARGV_SIZE 2048
 #define PATH_SIZE 768
@@ -71,6 +70,7 @@ static bool g_trial_active;
 static u64 g_start_tick;
 static bool g_trial_done;
 static char* g_effective[CarafeFileCount];
+static char* g_snapshot_disk[CarafeFileCount];
 
 static void note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -81,6 +81,45 @@ static void note(const char* fmt, ...) {
     vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
     carafeOverlayLog(line);
+}
+
+static void ensureParentDir(const char* path) {
+    char buf[PATH_SIZE];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf)) {
+        return;
+    }
+    memcpy(buf, path, len + 1);
+    char* slash = strrchr(buf, '/');
+    if (slash == NULL) {
+        return;
+    }
+    *slash = '\0';
+    for (char* p = buf; *p != '\0'; p++) {
+        if (*p == '/' && p != buf && p[-1] != ':') {
+            *p = '\0';
+            mkdir(buf, 0777);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0777);
+}
+
+static bool programFilePath(const char* name, char* out, size_t size) {
+    char dir[PATH_SIZE];
+    if (carafeOverlayProgramDir != NULL && carafeOverlayProgramDir(dir, sizeof(dir))) {
+        int written = snprintf(out, size, "%s/%s", dir, name);
+        return written > 0 && (size_t)written < size;
+    }
+    u64 program_id = 0;
+    svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0);
+    mkdir("sdmc:/switch", 0777);
+    mkdir("sdmc:/switch/wine", 0777);
+    mkdir(CHANGES_DIR, 0777);
+    snprintf(dir, sizeof(dir), "%s/%016lx", CHANGES_DIR, program_id);
+    mkdir(dir, 0777);
+    int written = snprintf(out, size, "%s/%s", dir, name);
+    return written > 0 && (size_t)written < size;
 }
 
 static CarafeLanguage languageOf(SetLanguage set) {
@@ -184,6 +223,14 @@ const char* carafeText(const char* const texts[CARAFE_TEXTS]) {
 }
 
 bool carafeGameArgv(char* out, size_t size) {
+    if (carafeOverlayProgramTarget != NULL && carafeOverlayProgramTarget(out, size)) {
+        char quoted[ARGV_SIZE];
+        int written = snprintf(quoted, sizeof(quoted), "\"%s\"", out);
+        if (written > 0 && (size_t)written < size) {
+            snprintf(out, size, "%s", quoted);
+            return true;
+        }
+    }
     if (!carafeOverlayReadRomfsText("/carafe/argv", out, size)) {
         return false;
     }
@@ -192,6 +239,9 @@ bool carafeGameArgv(char* out, size_t size) {
 }
 
 static bool gameTarget(char* out, size_t size) {
+    if (carafeOverlayProgramTarget != NULL && carafeOverlayProgramTarget(out, size)) {
+        return true;
+    }
     char argv[ARGV_SIZE];
     if (!carafeGameArgv(argv, sizeof(argv))) {
         return false;
@@ -209,6 +259,12 @@ static bool filePath(CarafeFile file, char* out, size_t size) {
     char target[PATH_SIZE];
     if (!gameTarget(target, sizeof(target))) {
         return false;
+    }
+    if (file == CarafeFileProgram) {
+        return launcher_program_settings_path(RUNTIME_ROOT, target, out, size) != 0;
+    }
+    if (file == CarafeFileKeys && launcher_settings_on_usb(target)) {
+        return launcher_program_settings_path(RUNTIME_ROOT, target, out, size) != 0;
     }
     size_t length = strlen(target);
     if (length < 4 || strcasecmp(target + length - 4, ".exe") != 0) {
@@ -235,6 +291,7 @@ static char* readWhole(const char* path, size_t limit) {
 }
 
 static bool writeWhole(const char* path, const char* text) {
+    ensureParentDir(path);
     char temp[PATH_SIZE];
     snprintf(temp, sizeof(temp), "%s.new", path);
     FILE* file = fopen(temp, "wb");
@@ -339,7 +396,7 @@ static char* textSet(const char* text, const char* key, const char* value) {
         size_t found_length = 0;
         if (lineKey(line, line_length, key, &found, &found_length)) {
             if (value != NULL && !placed) {
-                used += (size_t)snprintf(out + used, room - used, "%s = %s\n", key, value);
+                used += (size_t)snprintf(out + used, room - used, "%s=%s\n", key, value);
             }
             placed = true;
         } else {
@@ -353,7 +410,7 @@ static char* textSet(const char* text, const char* key, const char* value) {
         line = end + 1;
     }
     if (!placed && value != NULL) {
-        used += (size_t)snprintf(out + used, room - used, "%s = %s\n", key, value);
+        used += (size_t)snprintf(out + used, room - used, "%s=%s\n", key, value);
     }
     out[used] = '\0';
     return out;
@@ -402,9 +459,12 @@ static void loadChanges(void) {
     if (g_changes_loaded) {
         return;
     }
-    char* text = readWhole(CHANGES_FILE, FILE_LIMIT);
-    parseChanges(text);
-    free(text);
+    char path[PATH_SIZE];
+    if (programFilePath("changes.txt", path, sizeof(path))) {
+        char* text = readWhole(path, FILE_LIMIT);
+        parseChanges(text);
+        free(text);
+    }
     g_changes_loaded = true;
 }
 
@@ -415,6 +475,18 @@ static Change* findChange(CarafeFile file, const char* key) {
         }
     }
     return NULL;
+}
+
+static void removeChange(CarafeFile file, const char* key) {
+    for (int i = 0; i < g_change_count; i++) {
+        if (g_changes[i].file == file && strcasecmp(g_changes[i].key, key) == 0) {
+            if (i + 1 < g_change_count) {
+                memmove(&g_changes[i], &g_changes[i + 1], (size_t)(g_change_count - i - 1) * sizeof(Change));
+            }
+            g_change_count--;
+            return;
+        }
+    }
 }
 
 static bool recordChange(CarafeFile file, const char* key, const char* value) {
@@ -446,19 +518,26 @@ static char* changesText(void) {
 }
 
 bool carafeSaveChanges(void) {
-    mkdir(CHANGES_DIR, 0777);
+    char path[PATH_SIZE];
+    if (!programFilePath("changes.txt", path, sizeof(path))) {
+        return false;
+    }
     if (g_change_count == 0) {
-        remove(CHANGES_FILE);
+        remove(path);
         return true;
     }
     char* text = changesText();
-    bool ok = text != NULL && writeWhole(CHANGES_FILE, text);
+    bool ok = text != NULL && writeWhole(path, text);
     free(text);
     return ok;
 }
 
 bool carafeReadChangesText(char* out, size_t size) {
-    char* text = readWhole(CHANGES_FILE, FILE_LIMIT);
+    char path[PATH_SIZE];
+    if (!programFilePath("changes.txt", path, sizeof(path))) {
+        return false;
+    }
+    char* text = readWhole(path, FILE_LIMIT);
     if (text == NULL) {
         return false;
     }
@@ -468,18 +547,25 @@ bool carafeReadChangesText(char* out, size_t size) {
 }
 
 bool carafeWriteChangesText(const char* text) {
-    mkdir(CHANGES_DIR, 0777);
+    char path[PATH_SIZE];
+    if (!programFilePath("changes.txt", path, sizeof(path))) {
+        return false;
+    }
     g_changes_loaded = false;
     if (text == NULL || text[0] == '\0') {
-        remove(CHANGES_FILE);
+        remove(path);
         return true;
     }
-    return writeWhole(CHANGES_FILE, text);
+    return writeWhole(path, text);
 }
 
 bool carafeChangesExist(void) {
+    char path[PATH_SIZE];
+    if (!programFilePath("changes.txt", path, sizeof(path))) {
+        return false;
+    }
     struct stat st;
-    return stat(CHANGES_FILE, &st) == 0;
+    return stat(path, &st) == 0;
 }
 
 static char* mergedText(CarafeFile file, const char* base) {
@@ -495,23 +581,114 @@ static char* mergedText(CarafeFile file, const char* base) {
     return text;
 }
 
-static bool writeEffective(CarafeFile file, const char* text) {
+/* Write a single key=value directly into a program's disk file, preserving unrelated Launcher keys. */
+static bool applyOneKeyToDisk(CarafeFile file, const char* key, const char* value) {
     char path[PATH_SIZE];
     if (!filePath(file, path, sizeof(path))) {
         return false;
     }
-    return writeWhole(path, text);
+    char* disk = readWhole(path, FILE_LIMIT);
+    const char* val = (value == NULL || strcmp(value, "-") == 0) ? NULL : value;
+    char* updated = textSet(disk, key, val);
+    free(disk);
+    if (updated == NULL) {
+        return false;
+    }
+    bool ok = true;
+    if (updated[0] == '\0') {
+        remove(path);
+    } else {
+        ok = writeWhole(path, updated);
+    }
+    free(updated);
+    /* If a keys.txt setting was previously overridden inside .wine-nx.txt by Launcher, clear that duplicate so keys.txt wins cleanly. */
+    if (file == CarafeFileKeys) {
+        char prog_path[PATH_SIZE];
+        if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path)) && strcmp(prog_path, path) != 0) {
+            char* prog = readWhole(prog_path, FILE_LIMIT);
+            if (prog != NULL) {
+                char dummy[CARAFE_VALUE_SIZE];
+                if (textValue(prog, key, dummy, sizeof(dummy))) {
+                    char* trimmed = textSet(prog, key, NULL);
+                    if (trimmed != NULL) {
+                        if (trimmed[0] == '\0') {
+                            remove(prog_path);
+                        } else {
+                            writeWhole(prog_path, trimmed);
+                        }
+                        free(trimmed);
+                    }
+                }
+                free(prog);
+            }
+        }
+    }
+    return ok;
+}
+
+static void applyPendingArrayToDisk(void) {
+    for (int f = 0; f < CarafeFileCount; f++) {
+        bool touched = false;
+        for (int i = 0; i < g_change_count; i++) {
+            if (g_changes[i].file == (CarafeFile)f) {
+                touched = true;
+                break;
+            }
+        }
+        if (!touched) {
+            continue;
+        }
+        char path[PATH_SIZE];
+        if (!filePath((CarafeFile)f, path, sizeof(path))) {
+            continue;
+        }
+        char* base = readWhole(path, FILE_LIMIT);
+        char* merged = mergedText((CarafeFile)f, base);
+        free(base);
+        if (merged != NULL) {
+            if (merged[0] == '\0') {
+                remove(path);
+            } else {
+                writeWhole(path, merged);
+            }
+            free(merged);
+        }
+        if ((CarafeFile)f == CarafeFileKeys) {
+            char prog_path[PATH_SIZE];
+            if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path)) && strcmp(prog_path, path) != 0) {
+                char* prog = readWhole(prog_path, FILE_LIMIT);
+                if (prog != NULL) {
+                    bool prog_changed = false;
+                    for (int i = 0; i < g_change_count; i++) {
+                        if (g_changes[i].file != CarafeFileKeys) {
+                            continue;
+                        }
+                        char dummy[CARAFE_VALUE_SIZE];
+                        if (textValue(prog, g_changes[i].key, dummy, sizeof(dummy))) {
+                            char* trimmed = textSet(prog, g_changes[i].key, NULL);
+                            if (trimmed != NULL) {
+                                free(prog);
+                                prog = trimmed;
+                                prog_changed = true;
+                            }
+                        }
+                    }
+                    if (prog_changed) {
+                        if (prog[0] == '\0') {
+                            remove(prog_path);
+                        } else {
+                            writeWhole(prog_path, prog);
+                        }
+                    }
+                    free(prog);
+                }
+            }
+        }
+    }
 }
 
 static void volatilePath(const char* name, char* out, size_t size) {
-    u64 program_id = 0;
-    char dir[PATH_SIZE];
-    svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0);
-    mkdir("sdmc:/switch", 0777);
-    mkdir("sdmc:/switch/carafe", 0777);
-    snprintf(dir, sizeof(dir), "sdmc:/switch/carafe/%016lx", program_id);
-    mkdir(dir, 0777);
-    snprintf(out, size, VOLATILE_FILE, program_id, name);
+    programFilePath(name, out, size);
 }
 
 static char* programText(void) {
@@ -539,18 +716,65 @@ bool carafeOrchestrating(void) {
     return on;
 }
 
-__attribute__((constructor(105))) static void carafeSettingsEnvironment(void) {
+static void applyEnvironmentFromProgram(void) {
+    setenv("NVK_SWITCH_CPU_WRITE_MEM_UNCACHED", "0", 1);
     char* text = programText();
     if (text == NULL) {
+        unsetenv("CARAFE_LARGE_GUEST_PAGES");
         return;
     }
     char value[16] = "";
-    setenv("NVK_SWITCH_CPU_WRITE_MEM_UNCACHED", "0", 1);
     if (textValue(text, "large-pages", value, sizeof(value)) && strcmp(value, "1") == 0) {
         setenv("CARAFE_LARGE_GUEST_PAGES", "1", 1);
         note("[CARAFE] settings: large views of the game's memory start on 2 MB");
+    } else {
+        unsetenv("CARAFE_LARGE_GUEST_PAGES");
     }
     free(text);
+}
+
+void carafeSettingsSyncProgram(void) {
+    g_start_tick = armGetSystemTick();
+    g_changes_loaded = false;
+    g_change_count = 0;
+    g_restart = false;
+    g_trial_done = false;
+    free(g_start_changes);
+    g_start_changes = NULL;
+    for (int f = 0; f < CarafeFileCount; f++) {
+        free(g_snapshot_disk[f]);
+        g_snapshot_disk[f] = NULL;
+    }
+
+    char changes_path[PATH_SIZE];
+    if (programFilePath("changes.txt", changes_path, sizeof(changes_path))) {
+        g_start_changes = readWhole(changes_path, FILE_LIMIT);
+        parseChanges(g_start_changes);
+    }
+    g_changes_loaded = true;
+
+    char trial[PATH_SIZE];
+    volatilePath("trial.txt", trial, sizeof(trial));
+    struct stat st;
+    g_trial_active = stat(trial, &st) == 0;
+
+    if (g_change_count > 0) {
+        applyPendingArrayToDisk();
+        g_change_count = 0;
+        remove(changes_path);
+        note("[CARAFE] settings: pending changes written to program configuration%s",
+            g_trial_active ? ", trial run" : "");
+    }
+
+    /* Capture initial disk texts so Trial rollback / Undo knows exact prior values even without changes.txt. */
+    for (int f = 0; f < CarafeFileCount; f++) {
+        char p[PATH_SIZE];
+        if (filePath((CarafeFile)f, p, sizeof(p))) {
+            g_snapshot_disk[f] = readWhole(p, FILE_LIMIT);
+        }
+    }
+
+    applyEnvironmentFromProgram();
 }
 
 bool carafeOptionsSummary(char* out, size_t size) {
@@ -595,64 +819,81 @@ bool carafeOptionsSummary(char* out, size_t size) {
     return true;
 }
 
-__attribute__((constructor(104))) static void carafeSettingsMerge(void) {
-    g_start_tick = armGetSystemTick();
-    char path[PATH_SIZE];
-    if (!filePath(CarafeFileProgram, path, sizeof(path))) {
-        return;
+static char* mergeTextLayers(const char* base, const char* over) {
+    if (base == NULL) {
+        return over != NULL ? strdup(over) : NULL;
     }
-    g_start_changes = readWhole(CHANGES_FILE, FILE_LIMIT);
-    parseChanges(g_start_changes);
-    g_changes_loaded = true;
-    char trial[PATH_SIZE];
-    volatilePath("trial.txt", trial, sizeof(trial));
-    struct stat st;
-    g_trial_active = stat(trial, &st) == 0;
-    bool marked = stat(MERGED_MARK, &st) == 0;
-    if (g_change_count == 0 && !marked) {
-        return;
+    if (over == NULL) {
+        return strdup(base);
     }
-    int written = 0;
-    for (int f = 0; f < CarafeFileCount; f++) {
-        bool touched = false;
-        for (int i = 0; i < g_change_count; i++) {
-            touched |= g_changes[i].file == (CarafeFile)f;
-        }
-        char* base = romfsText((CarafeFile)f);
-        if (!touched && !marked) {
-            free(base);
-            continue;
-        }
-        if (base == NULL && !touched) {
-            if (filePath((CarafeFile)f, path, sizeof(path))) {
-                remove(path);
+    size_t blen = strlen(base);
+    size_t olen = strlen(over);
+    char* out = malloc(blen + olen + 4);
+    if (out == NULL) {
+        return NULL;
+    }
+    memcpy(out, base, blen);
+    size_t used = blen;
+    if (used > 0 && out[used - 1] != '\n') {
+        out[used++] = '\n';
+    }
+    memcpy(out + used, over, olen);
+    used += olen;
+    out[used] = '\0';
+    /* Replay keys from over cleanly via textSet so textValue() reads the winning value. */
+    char* res = strdup(base);
+    const char* line = over;
+    while (res != NULL && *line != '\0') {
+        const char* end = strchr(line, '\n');
+        size_t len = end != NULL ? (size_t)(end - line) : strlen(line);
+        const char* eq = memchr(line, '=', len);
+        if (eq != NULL) {
+            const char* ks = line;
+            while (ks < eq && (*ks == ' ' || *ks == '\t')) ks++;
+            const char* ke = eq;
+            while (ke > ks && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+            const char* vs = eq + 1;
+            const char* ve = line + len;
+            while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
+            while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\r')) ve--;
+            if (ke > ks && (size_t)(ke - ks) < KEY_SIZE && (size_t)(ve - vs) < CARAFE_VALUE_SIZE) {
+                char k[KEY_SIZE];
+                char v[CARAFE_VALUE_SIZE];
+                snprintf(k, sizeof(k), "%.*s", (int)(ke - ks), ks);
+                snprintf(v, sizeof(v), "%.*s", (int)(ve - vs), vs);
+                char* next = textSet(res, k, v);
+                free(res);
+                res = next;
             }
-            continue;
         }
-        char* merged = mergedText((CarafeFile)f, base);
-        free(base);
-        if (merged != NULL && writeEffective((CarafeFile)f, merged)) {
-            written++;
-        }
-        free(merged);
+        line = end != NULL ? end + 1 : line + len;
     }
-    mkdir(CHANGES_DIR, 0777);
-    if (g_change_count > 0) {
-        FILE* mark = fopen(MERGED_MARK, "wb");
-        if (mark != NULL) {
-            fclose(mark);
-        }
-    } else {
-        remove(MERGED_MARK);
-    }
-    note("[CARAFE] settings: %d changes made on the console laid over %d files%s", g_change_count, written,
-        g_trial_active ? ", trial run" : "");
+    free(out);
+    return res;
 }
 
 static char* effectiveText(CarafeFile file) {
     char path[PATH_SIZE];
     if (!filePath(file, path, sizeof(path))) {
         return NULL;
+    }
+    if (file == CarafeFileKeys) {
+        char* global_keys = readWhole(RUNTIME_ROOT "/config/keys.txt", FILE_LIMIT);
+        char* keys_file = readWhole(path, FILE_LIMIT);
+        char* merged = mergeTextLayers(global_keys, keys_file);
+        free(global_keys);
+        free(keys_file);
+        char prog_path[PATH_SIZE];
+        if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path)) && strcmp(prog_path, path) != 0) {
+            char* prog = readWhole(prog_path, FILE_LIMIT);
+            if (prog != NULL) {
+                char* next = mergeTextLayers(merged, prog);
+                free(merged);
+                merged = next;
+                free(prog);
+            }
+        }
+        return merged;
     }
     return readWhole(path, FILE_LIMIT);
 }
@@ -762,6 +1003,64 @@ static void parseWhen(const CarafeCatalog* catalog, const char* text, CarafeWhen
     when->values = values;
 }
 
+static const char* normalizeAliasValue(const CarafeSetting* setting, const char* text) {
+    if (text == NULL || text[0] == '\0') {
+        return "-";
+    }
+    const char* key = setting->key;
+    if (strcasecmp(key, "button-layout") == 0) {
+        if (strcasecmp(text, "xbox") == 0 || strcasecmp(text, "abxy") == 0) {
+            return "0";
+        }
+        if (strcasecmp(text, "switch") == 0 || strcasecmp(text, "nintendo") == 0 || strcasecmp(text, "bayx") == 0) {
+            return "1";
+        }
+    } else if (strcasecmp(key, "upscaling") == 0) {
+        if (strcasecmp(text, "off") == 0 || strcasecmp(text, "none") == 0 || strcmp(text, "0") == 0) {
+            return "-";
+        }
+        if (strcmp(text, "1") == 0) {
+            return "fsr";
+        }
+        if (strcmp(text, "2") == 0) {
+            return "integer";
+        }
+    } else if (strcasecmp(key, "upscaling-sharpness") == 0 && strcmp(text, "40%") == 0) {
+        return "-";
+    } else if ((strcasecmp(key, "vsync") == 0 || strcasecmp(key, "four-cores") == 0
+                   || strcasecmp(key, "lsfg-performance") == 0)
+        && (strcmp(text, "1") == 0 || strcasecmp(text, "on") == 0)) {
+        return "-";
+    } else if ((strcasecmp(key, "lsfg") == 0 || strcasecmp(key, "lazy-file-views") == 0
+                   || strcasecmp(key, "large-pages") == 0 || strcasecmp(key, "dxvk-hud") == 0)
+        && (strcmp(text, "0") == 0 || strcasecmp(text, "off") == 0)) {
+        return "-";
+    } else if (strcasecmp(key, "lsfg-flow") == 0 && strcmp(text, "0.25") == 0) {
+        return "-";
+    } else if (strcasecmp(key, "d3d") == 0 && strcasecmp(text, "dxvk") == 0) {
+        return "-";
+    } else if (strcasecmp(key, "dxvk-source") == 0 && strcasecmp(text, "official") == 0) {
+        return "-";
+    } else if (strcasecmp(key, "cpu") == 0 && strcasecmp(text, "fex") == 0) {
+        return "-";
+    } else if (strcasecmp(key, "sync") == 0 && strcasecmp(text, "standard") == 0) {
+        return "-";
+    } else if (strcasecmp(key, "frame-limit") == 0 && strcmp(text, "0") == 0) {
+        return "-";
+    } else if (strncasecmp(key, "FEX_", 4) == 0) {
+        for (size_t i = 0; i < NX_FEX_OPTION_COUNT; i++) {
+            if (strcasecmp(nx_fex_options[i].name, key) == 0) {
+                const char* def = nx_fex_options[i].values[nx_fex_options[i].default_choice];
+                if (def != NULL && strcasecmp(text, def) == 0) {
+                    return "-";
+                }
+                break;
+            }
+        }
+    }
+    return NULL;
+}
+
 static int valueIndex(const CarafeSetting* setting, const char* text, bool present) {
     for (int i = 0; i < setting->value_count; i++) {
         const char* value = setting->values[i].text;
@@ -769,7 +1068,17 @@ static int valueIndex(const CarafeSetting* setting, const char* text, bool prese
             return i;
         }
     }
-    if (!present) {
+    if (present) {
+        const char* alias = normalizeAliasValue(setting, text);
+        if (alias != NULL) {
+            for (int i = 0; i < setting->value_count; i++) {
+                if (strcasecmp(setting->values[i].text, alias) == 0) {
+                    return i;
+                }
+            }
+        }
+    }
+    if (!present || (text != NULL && text[0] == '\0')) {
         return setting->default_index >= 0 && setting->default_index < setting->value_count ? setting->default_index : 0;
     }
     return -1;
@@ -1126,7 +1435,14 @@ CarafeCatalog* carafeCatalogLoad(void) {
     }
     char* package[CarafeFileCount];
     for (int f = 0; f < CarafeFileCount; f++) {
-        package[f] = romfsText((CarafeFile)f);
+        if (f == CarafeFileKeys) {
+            package[f] = readWhole(RUNTIME_ROOT "/config/keys.txt", FILE_LIMIT);
+            if (package[f] == NULL) {
+                package[f] = romfsText((CarafeFile)f);
+            }
+        } else {
+            package[f] = romfsText((CarafeFile)f);
+        }
     }
     for (int i = 0; i < catalog->setting_count; i++) {
         CarafeSetting* setting = &catalog->settings[i];
@@ -1207,19 +1523,32 @@ static void applyKeysLive(void) {
     if (merged == NULL) {
         return;
     }
-    if (!writeEffective(CarafeFileKeys, merged)) {
-        free(merged);
-        return;
+    char path[PATH_SIZE];
+    if (filePath(CarafeFileKeys, path, sizeof(path))) {
+        for (int i = 0; i < g_change_count; i++) {
+            if (g_changes[i].file == CarafeFileKeys) {
+                applyOneKeyToDisk(CarafeFileKeys, g_changes[i].key, g_changes[i].value);
+            }
+        }
     }
     free(g_effective[CarafeFileKeys]);
     g_effective[CarafeFileKeys] = merged;
+    for (int i = g_change_count - 1; i >= 0; i--) {
+        if (g_changes[i].file == CarafeFileKeys) {
+            if (i + 1 < g_change_count) {
+                memmove(&g_changes[i], &g_changes[i + 1], (size_t)(g_change_count - i - 1) * sizeof(Change));
+            }
+            g_change_count--;
+        }
+    }
+    carafeSaveChanges();
+
     char target[PATH_SIZE];
     if (!gameTarget(target, sizeof(target))) {
         return;
     }
     static struct input_profile profile;
     static struct launcher_kv kv;
-    char path[PATH_SIZE];
     if (input_profile_program(RUNTIME_ROOT, target, wine_nx_swkbd_auto_enabled, &profile, &kv, path, sizeof(path))) {
         wine_nx_input_profile = profile;
         wine_nx_swkbd_auto_enabled = profile.keyboard_auto;
@@ -1232,16 +1561,22 @@ static void applyLive(CarafeCatalog* catalog, const CarafeSetting* setting) {
         applyKeysLive();
         return;
     }
-    if (strcasecmp(setting->key, "frame-limit") == 0 && wine_nx_graphics_configure != NULL) {
-        int vsync = 1;
-        int index = carafeCatalogFindKey(catalog, CarafeFileProgram, "vsync");
-        if (index >= 0) {
-            const CarafeSetting* v = &catalog->settings[index];
-            vsync = !(v->start >= 0 && strcmp(v->values[v->start].text, "0") == 0);
+    if (strcasecmp(setting->key, "frame-limit") == 0) {
+        const char* val = setting->current_text[0] == '\0' ? "-" : setting->current_text;
+        applyOneKeyToDisk(CarafeFileProgram, setting->key, val);
+        removeChange(CarafeFileProgram, setting->key);
+        carafeSaveChanges();
+        if (wine_nx_graphics_configure != NULL) {
+            int vsync = 1;
+            int index = carafeCatalogFindKey(catalog, CarafeFileProgram, "vsync");
+            if (index >= 0) {
+                const CarafeSetting* v = &catalog->settings[index];
+                vsync = !(v->start >= 0 && strcmp(v->values[v->start].text, "0") == 0);
+            }
+            int limit = strcmp(setting->current_text, "") == 0 ? 0 : atoi(setting->current_text);
+            wine_nx_graphics_configure(limit, vsync);
+            note("[CARAFE] settings menu: frame limit %d while the game runs", limit);
         }
-        int limit = strcmp(setting->current_text, "") == 0 ? 0 : atoi(setting->current_text);
-        wine_nx_graphics_configure(limit, vsync);
-        note("[CARAFE] settings menu: frame limit %d while the game runs", limit);
     }
 }
 
@@ -1380,13 +1715,9 @@ bool carafeUndoPending(CarafeCatalog* catalog) {
         if (!carafeSettingPending(s)) {
             continue;
         }
-        if (s->start >= 0) {
-            carafeSettingSet(catalog, i, s->start);
-        } else {
-            recordChange(s->file, s->key, s->start_text[0] != '\0' ? s->start_text : "-");
-            s->current = s->start;
-            snprintf(s->current_text, sizeof(s->current_text), "%s", s->start_text);
-        }
+        removeChange(s->file, s->key);
+        s->current = s->start;
+        snprintf(s->current_text, sizeof(s->current_text), "%s", s->start_text);
     }
     return carafeSaveChanges();
 }
@@ -1395,31 +1726,93 @@ bool carafeResetAll(CarafeCatalog* catalog, bool live) {
     carafeRegistryReset();
     g_change_count = 0;
     bool ok = carafeSaveChanges();
+    char trial[PATH_SIZE];
+    volatilePath("trial.txt", trial, sizeof(trial));
+    remove(trial);
+    CarafeCatalog* owned = NULL;
     if (catalog == NULL) {
-        return ok;
+        owned = carafeCatalogLoad();
+        catalog = owned;
+        if (catalog == NULL) {
+            return ok;
+        }
     }
     for (int f = 0; f < CarafeFileCount; f++) {
-        char* base = romfsText((CarafeFile)f);
+        if ((CarafeFile)f == CarafeFileKeys) {
+            char path[PATH_SIZE];
+            if (filePath(CarafeFileKeys, path, sizeof(path))) {
+                char* disk = readWhole(path, FILE_LIMIT);
+                if (disk != NULL) {
+                    for (int i = 0; i < catalog->setting_count; i++) {
+                        if (catalog->settings[i].file == CarafeFileKeys) {
+                            char* next = textSet(disk, catalog->settings[i].key, NULL);
+                            if (next != NULL) {
+                                free(disk);
+                                disk = next;
+                            }
+                        }
+                    }
+                    for (int s = 0; s < CARAFE_SOURCES; s++) {
+                        char k[KEY_SIZE];
+                        snprintf(k, sizeof(k), "key.%s", carafe_source_names[s]);
+                        char* next = textSet(disk, k, NULL);
+                        if (next != NULL) {
+                            free(disk);
+                            disk = next;
+                        }
+                        snprintf(k, sizeof(k), "pad.%s", carafe_source_names[s]);
+                        next = textSet(disk, k, NULL);
+                        if (next != NULL) {
+                            free(disk);
+                            disk = next;
+                        }
+                    }
+                    if (disk[0] == '\0') {
+                        remove(path);
+                    } else {
+                        writeWhole(path, disk);
+                    }
+                    free(disk);
+                }
+            }
+        }
         for (int i = 0; i < catalog->setting_count; i++) {
             CarafeSetting* s = &catalog->settings[i];
             if (s->file != (CarafeFile)f) {
                 continue;
             }
-            char value[CARAFE_VALUE_SIZE] = "";
-            bool present = textValue(base, s->key, value, sizeof(value));
-            s->current = valueIndex(s, value, present);
-            snprintf(s->current_text, sizeof(s->current_text), "%s", value);
-        }
-        if (f == CarafeFileKeys) {
-            free(g_effective[f]);
-            g_effective[f] = base;
-            base = NULL;
-            loadBindings(catalog, g_effective[f]);
-            if (live) {
-                applyKeysLive();
+            int def = s->default_index >= 0 && s->default_index < s->value_count ? s->default_index : 0;
+            if (s->now) {
+                if ((CarafeFile)f != CarafeFileKeys) {
+                    applyOneKeyToDisk((CarafeFile)f, s->key, "-");
+                }
+                s->current = def;
+                s->start = def;
+                s->current_text[0] = '\0';
+                s->start_text[0] = '\0';
+            } else {
+                recordChange(s->file, s->key, "-");
+                s->current = def;
+                s->current_text[0] = '\0';
             }
         }
-        free(base);
+    }
+    if (!live && g_change_count > 0) {
+        applyPendingArrayToDisk();
+        g_change_count = 0;
+    }
+    carafeSaveChanges();
+    free(g_effective[CarafeFileKeys]);
+    g_effective[CarafeFileKeys] = effectiveText(CarafeFileKeys);
+    loadBindings(catalog, g_effective[CarafeFileKeys]);
+    if (live) {
+        applyKeysLive();
+        if (wine_nx_graphics_configure != NULL) {
+            wine_nx_graphics_configure(0, 1);
+        }
+    }
+    if (owned != NULL) {
+        carafeCatalogFree(owned);
     }
     return ok;
 }
@@ -1434,8 +1827,16 @@ void carafeTrialWrite(bool trial) {
     if (trial) {
         FILE* file = fopen(path, "wb");
         if (file != NULL) {
-            if (g_start_changes != NULL) {
-                fputs(g_start_changes, file);
+            fprintf(file, "carafe-changes\t1\n");
+            for (int i = 0; i < g_change_count; i++) {
+                char prev[CARAFE_VALUE_SIZE] = "";
+                const char* src = g_snapshot_disk[g_changes[i].file];
+                bool had = src != NULL && textValue(src, g_changes[i].key, prev, sizeof(prev));
+                fprintf(file, "%s\t%s\t%s\n", FILE_NAMES[g_changes[i].file], g_changes[i].key,
+                    (had && prev[0] != '\0') ? prev : "-");
+            }
+            if (g_start_changes != NULL && strncmp(g_start_changes, "carafe-changes\t1\n", 17) == 0) {
+                fputs(g_start_changes + 17, file);
             }
             fclose(file);
         }
@@ -1447,6 +1848,11 @@ void carafeTrialWrite(bool trial) {
 
 void carafeRequestRestart(bool trial) {
     carafeTrialWrite(trial);
+    if (g_change_count > 0) {
+        applyPendingArrayToDisk();
+        g_change_count = 0;
+        carafeSaveChanges();
+    }
     g_restart = true;
     if (wine_nx_request_quit != NULL) {
         wine_nx_request_quit("restart with new settings");

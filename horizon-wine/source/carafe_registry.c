@@ -19,10 +19,6 @@
 #define PENDING_HEADER "carafe-registry-pending\t1"
 #define REMOVED_HEADER "carafe-registry-removed\t1"
 #define CARAFE_DIR "sdmc:/switch/wine/carafe"
-#define PENDING_FILE CARAFE_DIR "/registry-pending.txt"
-#define REMOVED_FILE CARAFE_DIR "/registry-removed.txt"
-#define APPLIED_MARK CARAFE_DIR "/registry-applied"
-#define ROLLBACK_FILE "sdmc:/switch/carafe/%016lx/registry-rollback.txt"
 #define PENDING_LIMIT (2 * 1024 * 1024)
 #define MAX_PENDING 256
 #define MAX_REMOVED 256
@@ -284,15 +280,21 @@ static bool samePath(const char* a, const char* b) {
     return strcasecmp(left, right) == 0;
 }
 
-static void volatilePath(char* out, size_t size) {
-    u64 program_id = 0;
+static bool programFilePath(const char* name, char* out, size_t size) {
     char dir[PATH_SIZE];
-    svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0);
+    if (carafeOverlayProgramDir != NULL && carafeOverlayProgramDir(dir, sizeof(dir))) {
+        int n = snprintf(out, size, "%s/%s", dir, name);
+        return n > 0 && (size_t)n < size;
+    }
     mkdir("sdmc:/switch", 0777);
-    mkdir("sdmc:/switch/carafe", 0777);
-    snprintf(dir, sizeof(dir), "sdmc:/switch/carafe/%016lx", program_id);
-    mkdir(dir, 0777);
-    snprintf(out, size, ROLLBACK_FILE, program_id);
+    mkdir("sdmc:/switch/wine", 0777);
+    mkdir(CARAFE_DIR, 0777);
+    int n = snprintf(out, size, "%s/%s", CARAFE_DIR, name);
+    return n > 0 && (size_t)n < size;
+}
+
+static void volatilePath(char* out, size_t size) {
+    programFilePath("registry-rollback.txt", out, size);
 }
 
 static char* readText(const char* path, size_t limit) {
@@ -495,7 +497,11 @@ static void loadPendingLocked(void) {
     }
     g_pending_loaded = true;
     g_pending_count = 0;
-    char* text = readText(PENDING_FILE, PENDING_LIMIT);
+    char pending_path[PATH_SIZE];
+    if (!programFilePath("registry-pending.txt", pending_path, sizeof(pending_path))) {
+        return;
+    }
+    char* text = readText(pending_path, PENDING_LIMIT);
     if (text == NULL) {
         return;
     }
@@ -558,13 +564,16 @@ static void writeChangeLine(FILE* file, Op op, int hive, const char* path, const
 }
 
 static bool savePendingLocked(void) {
-    mkdir(CARAFE_DIR, 0777);
+    char pending_path[PATH_SIZE];
+    if (!programFilePath("registry-pending.txt", pending_path, sizeof(pending_path))) {
+        return false;
+    }
     if (g_pending_count == 0) {
-        remove(PENDING_FILE);
+        remove(pending_path);
         return true;
     }
-    char temp[PATH_SIZE];
-    snprintf(temp, sizeof(temp), "%s.new", PENDING_FILE);
+    char temp[PATH_SIZE + 8];
+    snprintf(temp, sizeof(temp), "%s.new", pending_path);
     FILE* file = fopen(temp, "wb");
     if (file == NULL) {
         return false;
@@ -579,8 +588,8 @@ static bool savePendingLocked(void) {
         remove(temp);
         return false;
     }
-    remove(PENDING_FILE);
-    return rename(temp, PENDING_FILE) == 0;
+    remove(pending_path);
+    return rename(temp, pending_path) == 0;
 }
 
 static void writeRollback(void) {
@@ -622,7 +631,11 @@ static bool underKey(const char* key, const char* path) {
 
 static void loadRemoved(void) {
     g_removed_count = 0;
-    char* text = readText(REMOVED_FILE, PENDING_LIMIT);
+    char removed_path[PATH_SIZE];
+    if (!programFilePath("registry-removed.txt", removed_path, sizeof(removed_path))) {
+        return;
+    }
+    char* text = readText(removed_path, PENDING_LIMIT);
     if (text == NULL) {
         return;
     }
@@ -659,13 +672,16 @@ static void loadRemoved(void) {
 }
 
 static void saveRemoved(void) {
-    mkdir(CARAFE_DIR, 0777);
-    if (g_removed_count == 0) {
-        remove(REMOVED_FILE);
+    char removed_path[PATH_SIZE];
+    if (!programFilePath("registry-removed.txt", removed_path, sizeof(removed_path))) {
         return;
     }
-    char temp[PATH_SIZE];
-    snprintf(temp, sizeof(temp), "%s.new", REMOVED_FILE);
+    if (g_removed_count == 0) {
+        remove(removed_path);
+        return;
+    }
+    char temp[PATH_SIZE + 8];
+    snprintf(temp, sizeof(temp), "%s.new", removed_path);
     FILE* file = fopen(temp, "wb");
     if (file == NULL) {
         return;
@@ -679,8 +695,8 @@ static void saveRemoved(void) {
         remove(temp);
         return;
     }
-    remove(REMOVED_FILE);
-    rename(temp, REMOVED_FILE);
+    remove(removed_path);
+    rename(temp, removed_path);
 }
 
 static bool removedCovers(int hive, const char* path, const char* name, bool key) {
@@ -788,7 +804,8 @@ void carafeRegistryLoaded(void) {
         char hash[32];
         snprintf(hash, sizeof(hash), "%016llx", (unsigned long long)textHash(text));
         char mark[32] = "";
-        FILE* file = fopen(APPLIED_MARK, "rb");
+        char mark_path[PATH_SIZE];
+        FILE* file = programFilePath("registry-applied", mark_path, sizeof(mark_path)) ? fopen(mark_path, "rb") : NULL;
         if (file != NULL) {
             size_t got = fread(mark, 1, sizeof(mark) - 1, file);
             mark[got] = '\0';
@@ -796,8 +813,7 @@ void carafeRegistryLoaded(void) {
         }
         if (always || strcmp(mark, hash) != 0) {
             int applied = applyEntries(text);
-            mkdir(CARAFE_DIR, 0777);
-            file = fopen(APPLIED_MARK, "wb");
+            file = mark_path[0] != '\0' ? fopen(mark_path, "wb") : NULL;
             if (file != NULL) {
                 fputs(hash, file);
                 fclose(file);
@@ -1328,30 +1344,46 @@ void carafeRegistryUndoPending(void) {
 }
 
 void carafeRegistryReset(void) {
+    char applied_path[PATH_SIZE];
+    char removed_path[PATH_SIZE];
     carafeRegistryUndoPending();
-    remove(APPLIED_MARK);
-    remove(REMOVED_FILE);
+    if (programFilePath("registry-applied", applied_path, sizeof(applied_path))) {
+        remove(applied_path);
+    }
+    if (programFilePath("registry-removed.txt", removed_path, sizeof(removed_path))) {
+        remove(removed_path);
+    }
     note("[CARAFE] registry: the package's entries are laid over the registry again at the next start");
 }
 
 void carafeRegistryBringBack(void) {
     char path[PATH_SIZE];
+    char pending_path[PATH_SIZE];
     volatilePath(path, sizeof(path));
     char* text = readText(path, PENDING_LIMIT);
     if (text == NULL) {
         return;
     }
-    mkdir(CARAFE_DIR, 0777);
-    FILE* file = fopen(PENDING_FILE, "wb");
-    if (file != NULL) {
-        fputs(text, file);
-        fclose(file);
-        note("[CARAFE] registry: the values from before the trial run come back at the next start");
+    if (programFilePath("registry-pending.txt", pending_path, sizeof(pending_path))) {
+        FILE* file = fopen(pending_path, "wb");
+        if (file != NULL) {
+            fputs(text, file);
+            fclose(file);
+            note("[CARAFE] registry: the values from before the trial run come back at the next start");
+        }
     }
     free(text);
     remove(path);
     pthread_mutex_lock(&g_lock);
     g_pending_loaded = false;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void carafeRegistrySyncProgram(void) {
+    pthread_mutex_lock(&g_lock);
+    g_pending_loaded = false;
+    g_pending_count = 0;
+    g_removed_count = 0;
     pthread_mutex_unlock(&g_lock);
 }
 

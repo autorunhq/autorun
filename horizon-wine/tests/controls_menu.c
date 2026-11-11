@@ -148,6 +148,7 @@ static const char TEST_REGISTRY[] =
     "set\tHKCU\tSoftware\\Test\tEnabled\t4\t01000000\n";
 
 static const char TEST_PROGRAM_CFG[] = "frame-limit = 0\nvsync = 1\n";
+static char* g_custom_menu;
 
 void *carafeOverlayReadRomfsFile( const char *path, size_t limit, size_t *size )
 {
@@ -156,7 +157,7 @@ void *carafeOverlayReadRomfsFile( const char *path, size_t limit, size_t *size )
 
     if (size) *size = 0;
     if (!path) return NULL;
-    if (!strcmp( path, "/carafe/menu.txt" )) src = TEST_MENU;
+    if (!strcmp( path, "/carafe/menu.txt" )) src = g_custom_menu ? g_custom_menu : TEST_MENU;
     else if (!strcmp( path, "/carafe/registry.txt" )) src = TEST_REGISTRY;
     else if (strstr( path, ".wine-nx.txt" )) src = TEST_PROGRAM_CFG;
     else return NULL;
@@ -190,7 +191,7 @@ bool carafeOverlayReadRomfsText( const char *path, char *out, size_t size )
 void carafeOverlayLog( const char *line ) { (void)line; }
 void carafeOverlayCommit( const char *reason ) { (void)reason; }
 
-int main( void )
+int main( int argc, char **argv )
 {
     const u64 menu_chord = HidNpadButton_Minus | HidNpadButton_Plus | HidNpadButton_L | HidNpadButton_R;
     struct wine_nx_osk_frame frame;
@@ -198,6 +199,21 @@ int main( void )
     unsigned int gen0, gen1, copied;
     CarafeCatalog *catalog;
     int fl_idx, vs_idx;
+
+    (void)argc;
+    if (argc > 1 && argv[1] && argv[1][0])
+    {
+        FILE *f = fopen( argv[1], "rb" );
+        assert( f != NULL );
+        assert( fseek( f, 0, SEEK_END ) == 0 );
+        long len = ftell( f );
+        assert( len > 0 && fseek( f, 0, SEEK_SET ) == 0 );
+        g_custom_menu = malloc( (size_t)len + 1 );
+        assert( g_custom_menu != NULL );
+        assert( fread( g_custom_menu, 1, (size_t)len, f ) == (size_t)len );
+        g_custom_menu[len] = '\0';
+        fclose( f );
+    }
 
     input_profile_defaults( &wine_nx_input_profile, 1 );
 
@@ -208,13 +224,31 @@ int main( void )
     assert( g_reg_locks == 0 );
 
     /* Catalog & live vs restart settings. */
+    carafeSettingsSyncProgram();
+    assert( strcmp( getenv( "NVK_SWITCH_CPU_WRITE_MEM_UNCACHED" ), "0" ) == 0 );
     catalog = carafeCatalogLoad();
     assert( catalog != NULL );
-    assert( catalog->section_count == 1 );
-    assert( catalog->setting_count == 2 );
+    if (g_custom_menu)
+    {
+        assert( catalog->section_count == 4 );
+        assert( catalog->setting_count == 116 );
+        assert( catalog->group_count == 2 );
+        assert( catalog->suggest_count == 11 );
+        assert( catalog->pad_count == 24 );
+        assert( catalog->key_count == 120 );
+        assert( carafeCatalogFindKey( catalog, CarafeFileProgram, "FEX_TSOENABLED" ) >= 0 );
+        assert( carafeCatalogFind( catalog, "large-pages" ) >= 0 );
+        assert( carafeCatalogFindKey( catalog, CarafeFileProgram, "lazy-file-views" ) >= 0 );
+        assert( carafeCatalogFind( catalog, "button-layout" ) >= 0 );
+    }
+    else
+    {
+        assert( catalog->section_count == 1 );
+        assert( catalog->setting_count == 2 );
+    }
     fl_idx = carafeCatalogFind( catalog, "frame-limit" );
     vs_idx = carafeCatalogFind( catalog, "vsync" );
-    assert( fl_idx == 0 && vs_idx == 1 );
+    assert( fl_idx >= 0 && vs_idx >= 0 );
 
     assert( carafeSettingSet( catalog, fl_idx, 1 ) );
     assert( g_gfx_calls == 1 && g_gfx_limit == 30 && g_gfx_vsync == 1 );
@@ -225,6 +259,7 @@ int main( void )
     carafeUndoPending( catalog );
     assert( carafePendingCount( catalog ) == 0 );
     carafeCatalogFree( catalog );
+    assert( carafeResetAll( NULL, true ) );
 
     /* Menu open via 0041 chord + OSK delegation. */
     assert( !carafeMenuVisible() );
@@ -287,6 +322,8 @@ int main( void )
     assert( !carafeMenuVisible() );
     assert( !wine_nx_osk_visible() );
 
+    free( g_custom_menu );
+    g_custom_menu = NULL;
     puts( "controls_menu tests passed" );
     return 0;
 }
