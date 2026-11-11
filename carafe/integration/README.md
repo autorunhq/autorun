@@ -23,8 +23,9 @@ or regenerate a branch with:
 | Source | State |
 | --- | --- |
 | `carafe-nx/autorun` main (`1ac9b6c`) | Already fully contained in `arena/43825775-autorun` — nothing to take. |
-| `carafe-nx/carafe` `runtime/patches/autorun` @ `636913ca` | All 127 patches apply cleanly onto `636913ca` (verified as branch `carafe-patches`). Most of their content is already carried by this fork's own Carafe work (`b8eb2cb..ed58909`); the folder keeps the full set for diffing and future rebases. |
-| `carafe-nx/carafe` app (Tauri/Rust desktop packager), `runtime/{fex,dxvk,loader,...}`, docs | Not applicable inside the Autorun tree — they live in Carafe's own build system and consume Autorun as a submodule. The link back is described below. |
+| `carafe-nx/carafe` `runtime/patches/autorun` @ `636913ca` | All 127 patches apply cleanly onto `636913ca` (verified as branch `carafe-patches`). Upstream Autorun has since taken many of them in its own form; what the fork has, what it still lacks and the order it is being brought over in are in [PORTING.md](PORTING.md). The folder keeps the full set for diffing and future rebases. |
+| `carafe-nx/carafe` app (Tauri/Rust desktop packager), `runtime/loader` | Not taken: they pack a game into an NSP and start it from there, which this fork does without. |
+| `carafe-nx/carafe` `runtime/{overlay,orchestrator,fex,dxvk,dxwrapper,media,dshow}` | Being brought over in stages, see [PORTING.md](PORTING.md). |
 
 ## Submodule pointer used by Carafe
 

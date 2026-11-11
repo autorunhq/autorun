@@ -307,6 +307,9 @@ changes, and fails if the pinned text moves.
   `C:\windows\autorun-setup.exe` (`tools/autorun_setup.c`) before the first
   program on a card: the MP3 decoder under Drivers32 and DllRegisterServer for
   the DirectShow and DMO DLLs, which lay out their own filter data. The
+  splitter that plays a file through the runtime's FFmpeg parser is
+  winegstreamer's, which that setup does not register; the runtime loads its
+  entry itself at every start (`dlls/ntdll/unix/horizon_directshow_reg.h`). The
   program waits in `run-next.txt` and starts when the runtime starts again; the
   mark is `registry/components-1.done`, so a reset registry runs it again.
 - A 32-bit address space leaves a program about 2 GiB of addresses and caps the
@@ -338,6 +341,7 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) | Martin Storsjö; LLVM and mingw-w64 authors | Apache-2.0 with LLVM exception, mingw-w64's licenses | Building Wine's and DXVK's Windows DLLs |
 | [FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) | Advanced Micro Devices | MIT | The Upscaling setting's FSR 1.0 (EASU and RCAS, `tools/fsr1`), which isrmicha brought to the launcher |
 | [dolphin-nx](https://github.com/NaGaa95/dolphin-nx) | NaGaa95 | GPL-2.0-or-later | The launcher's look (icon grid, program menu, settings and themes) follows its launcher; Autorun's launcher is its own code |
+| [Carafe](https://github.com/carafe-nx/carafe) | The Carafe authors | LGPL-2.1-or-later for its runtime overlay and Autorun patches | The in-game settings menu, the loading and error screens and the registry overlay (`horizon-wine/source/carafe_*.c`), DirectShow and Windows Media playback through FFmpeg (`source/media_unix.c`) and runtime fixes; what was taken and what is still to come is in [carafe/integration/PORTING.md](../carafe/integration/PORTING.md) |
 
 References that shaped the port without being part of the build:
 
