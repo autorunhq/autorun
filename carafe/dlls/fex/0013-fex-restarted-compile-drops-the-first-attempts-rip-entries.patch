@@ -1,0 +1,20 @@
+Carafe: a block compiled again after a restart keeps only the RIP entries of the code it really emitted.
+When a compile restarts, for far branches or a larger buffer, the JIT starts over without clearing the
+RIP entries and sub-blocks of the first attempt. The block's tail then lists the first attempt's entries
+followed by the real ones, so RestoreRIPFromHostPC and the profiler can map a host PC to the wrong x86
+instruction in such blocks, after far-branch restarts most of all, where the code moves. Both lists are
+now emptied at the start of each attempt.
+MIT, as the file it changes.
+
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -878,6 +878,9 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+   default: LOGMAN_MSG_A_FMT("Unhandled Arm64 restart condition!");
+   }
+ 
++  DebugData->GuestOpcodes.clear();
++  DebugData->Subblocks.clear();
++
+   uint32_t SSACount = IR->GetSSACount();
+   JumpTargets.clear();
+   CallReturnTargets.clear();

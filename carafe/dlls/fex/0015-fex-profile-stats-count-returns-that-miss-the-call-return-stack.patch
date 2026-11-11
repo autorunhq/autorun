@@ -1,0 +1,56 @@
+Carafe: with FEX_PROFILESTATS on, a return that misses the call-return stack counts itself in its thread's stats.
+The miss path of a guest ret, after the pair popped from the call-return stack does not match, loads the thread's
+ThreadStats through the frame and adds one to AccumulatedReturnMissCount, which takes the place of the struct's
+padding so its size stays. Without the option no code is added. The profiler reads the count to tell whether the
+stack drifts at the system-call bridge.
+MIT, as the files it changes.
+
+--- a/FEXCore/include/FEXCore/Utils/SHMStats.h
++++ b/FEXCore/include/FEXCore/Utils/SHMStats.h
+@@ -78,7 +78,7 @@
+   uint64_t AccumulatedDiskCacheHitCount;
+   uint64_t AccumulatedDiskCacheMissCount;
+   uint64_t AccumulatedDiskCacheLookupTime;
+-  uint64_t Padding;
++  uint64_t AccumulatedReturnMissCount;
+ };
+ 
+ // Ensure 16-byte alignment to take advantage of ARM single-copy atomicity.
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
+@@ -308,6 +308,8 @@
+   }
+ #endif
+ 
++  FEX_CONFIG_OPT(ProfileStats, PROFILESTATS);
++
+ #ifdef VIXL_SIMULATOR
+   vixl::aarch64::Decoder SimDecoder;
+   vixl::aarch64::Simulator Simulator;
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -16,6 +16,7 @@
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
+ #include <FEXCore/Utils/MathUtils.h>
++#include <FEXCore/Utils/SHMStats.h>
+ 
+ namespace FEXCore::CPU {
+ 
+@@ -199,6 +200,16 @@
+       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
+       sub(TMP1, TMP1, RipReg.X());
+       (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &SkipFullLookup);
++      if (ProfileStats()) {
++        ARMEmitter::ForwardLabel NoStats;
++        ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Thread));
++        ldr(TMP1, TMP1, offsetof(FEXCore::Core::InternalThreadState, ThreadStats));
++        (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &NoStats);
++        ldr(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++        add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 1);
++        str(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++        (void)Bind(&NoStats);
++      }
+     }
+ 
+     // L1 Cache

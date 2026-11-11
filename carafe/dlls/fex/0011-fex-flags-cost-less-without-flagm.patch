@@ -1,0 +1,309 @@
+Carafe: with FlagsWithoutFlagM, FEX spends fewer instructions on x86 flags on hosts without FlagM, like the A57.
+x86 and Arm keep the carry of a subtraction in opposite forms. With FlagM, FEX fixes the form with CFINV, which the
+dead-flag pass drops when carry is dead; without it the fix was a read, XOR and write of NZCV the pass could not
+drop. With the option, the fix-up is a CarryInvert op lowered to that sequence, pending flags fold into conditional
+and plain jumps instead of being stored before them, single carry bits are inserted with one ORN, dead NZCV inserts
+(inc and dec keeping CF) are dropped, and a carry inversion after TEST or AND becomes a compare that yields carry in
+the needed form. Off by default; with the option off FEX emits what it did before.
+Checked in the study with FEX's ASM tests (32 and 64 bit, FlagM on and off) and 18000 differential fuzzer runs; it
+cut ARM64 by 1.4 % in DXVK's d3d9.dll and executed instructions by 3.5 % in flag-heavy code.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -634,6 +634,15 @@
+           "the thread state, so FSAVE, FXSAVE and MMX see the same layout."
+         ]
+       },
++      "FlagsWithoutFlagM": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "On hosts without FlagM, emits the carry fix-up as an op the dead-flag pass can drop, folds pending flags into",
++          "jumps, inserts carry bits with fewer instructions and drops dead NZCV inserts and carry inversions."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+--- a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
+@@ -289,8 +289,13 @@ DEF_OP(CmpPairZ) {
+ }
+ 
+ DEF_OP(CarryInvert) {
+-  LOGMAN_THROW_A_FMT(CTX->HostFeatures.SupportsFlagM, "Unsupported flagm op");
+-  cfinv();
++  if (CTX->HostFeatures.SupportsFlagM) {
++    cfinv();
++  } else {
++    mrs(TMP1, ARMEmitter::SystemRegister::NZCV);
++    eor(ARMEmitter::Size::i32Bit, TMP1, TMP1, 1U << 29);
++    msr(ARMEmitter::SystemRegister::NZCV, TMP1);
++  }
+ }
+ 
+ DEF_OP(RmifNZCV) {
+@@ -487,7 +492,7 @@ DEF_OP(Ornror) {
+   auto Op = IROp->C<IR::IROp_Ornror>();
+ 
+   const auto Dst = GetReg(Node);
+-  const auto Src1 = GetReg(Op->Src1);
++  const auto Src1 = GetZeroableReg(Op->Src1);
+ 
+   const auto Src2 = GetReg(Op->Src2);
+   orn(ConvertSize(IROp), Dst, Src1, Src2, ARMEmitter::ShiftType::ROR, Op->BitShift);
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -655,7 +655,9 @@ void OpDispatchBuilder::CMOVOp(OpcodeArgs) {
+ 
+ void OpDispatchBuilder::CondJUMPOp(OpcodeArgs) {
+   // Calculate flags early.
+-  CalculateDeferredFlags();
++  if (!FlagsWithoutFlagMMode) {
++    CalculateDeferredFlags();
++  }
+ 
+   BlockSetRIP = true;
+ 
+@@ -847,7 +849,9 @@ void OpDispatchBuilder::LoopOp(OpcodeArgs) {
+ 
+ void OpDispatchBuilder::JUMPOp(OpcodeArgs) {
+   // Calculate flags early.
+-  CalculateDeferredFlags();
++  if (!FlagsWithoutFlagMMode) {
++    CalculateDeferredFlags();
++  }
+ 
+   BlockSetRIP = true;
+ 
+@@ -869,7 +873,9 @@ void OpDispatchBuilder::JUMPOp(OpcodeArgs) {
+     TargetRIP &= 0xFFFFFFFFU;
+   }
+ 
+-  CalculateDeferredFlags();
++  if (!FlagsWithoutFlagMMode) {
++    CalculateDeferredFlags();
++  }
+   // This is just an unconditional relative literal jump
+   if (Multiblock) {
+     auto JumpBlock = JumpTargets.find(TargetRIP);
+@@ -2417,8 +2423,12 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
+         Value = _Lshr(IR::SizeToOpSize(LshrSize), Value, BitSelect.Ref());
+       }
+ 
+-      SetRFLAG(Value, X86State::RFLAG_CF_RAW_LOC, Src.IsConstant ? Src.C : 0, true);
+-      CFInverted = false;
++      if (CTX->HostFeatures.SupportsFlagM || !FlagsWithoutFlagMMode) {
++        SetRFLAG(Value, X86State::RFLAG_CF_RAW_LOC, Src.IsConstant ? Src.C : 0, true);
++        CFInverted = false;
++      } else {
++        SetCFDirect(Value, Src.IsConstant ? Src.C : 0, true);
++      }
+     }
+ 
+     switch (Action) {
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1310,6 +1310,7 @@ private:
+   FEX_CONFIG_OPT(ConversionRoundingMode, X87CONVERSIONROUNDING);
+   FEX_CONFIG_OPT(FastStackMode, X87FASTSTACK);
+   FEX_CONFIG_OPT(SinglePrecisionMode, X87SINGLEPRECISION);
++  FEX_CONFIG_OPT(FlagsWithoutFlagMMode, FLAGSWITHOUTFLAGM);
+ 
+   IR::OpSize X87StackSize() const {
+     return SinglePrecisionMode() ? OpSize::i32Bit : OpSize::i64Bit;
+@@ -1753,7 +1754,7 @@ private:
+       CachedNZCV = nullptr;
+     } else {
+       // Insert as GPR
+-      if (FlagOffset || MustMask) {
++      if (FlagOffset || (MustMask && !FlagsWithoutFlagMMode)) {
+         Value = _Bfe(OpSize::i64Bit, 1, FlagOffset, Value);
+       }
+ 
+@@ -1778,7 +1779,7 @@ private:
+   // operation reading carry or at the end of a block.
+   void RectifyCarryInvert(bool RequiredInvert) {
+     if (CFInverted != RequiredInvert) {
+-      if (CTX->HostFeatures.SupportsFlagM && !NZCVDirty) {
++      if ((CTX->HostFeatures.SupportsFlagM || FlagsWithoutFlagMMode) && !NZCVDirty) {
+         // Invert as NZCV.
+         _CarryInvert();
+         CachedNZCV = nullptr;
+@@ -1805,6 +1806,12 @@ private:
+   }
+ 
+   void SetCFDirect(Ref Value, unsigned ValueOffset = 0, bool MustMask = false) {
++    if (!CTX->HostFeatures.SupportsFlagM && FlagsWithoutFlagMMode) {
++      SetRFLAG(_Ornror(OpSize::i64Bit, Constant(0), Value, ValueOffset), X86State::RFLAG_CF_RAW_LOC);
++      CFInverted = true;
++      return;
++    }
++
+     Value = _Xor(OpSize::i64Bit, Value, _InlineConstant(1ull << ValueOffset));
+     SetRFLAG(Value, X86State::RFLAG_CF_RAW_LOC, ValueOffset, MustMask);
+     CFInverted = true;
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -1295,6 +1295,7 @@
+       "GPR = Ornror OpSize:#Size, GPR:$Src1, GPR:$Src2, u8:$BitShift": {
+         "Desc": ["Integer binary or with NOT on second source and rotation right"
+                 ],
++        "Inline": ["Zero", ""],
+         "DestSize": "Size",
+         "EmitValidation": [
+           "Size == FEXCore::IR::OpSize::i32Bit || Size == FEXCore::IR::OpSize::i64Bit"
+--- a/FEXCore/Source/Interface/IR/Passes/RedundantFlagCalculationElimination.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/RedundantFlagCalculationElimination.cpp
+@@ -160,6 +160,8 @@ private:
+   CondClass X86ToArmFloatCond(CondClass X86);
+   bool ProcessBlock(IREmitter* IREmit, IRListView& CurrentIR, Ref Block, ControlFlowGraph& CFG);
+   void OptimizeParity(IREmitter* IREmit, IRListView& CurrentIR, ControlFlowGraph& CFG);
++  void FoldCarryInvert(IREmitter* IREmit, IRListView& CurrentIR, Ref Block);
++  FEX_CONFIG_OPT(FlagsWithoutFlagMMode, FLAGSWITHOUTFLAGM);
+ };
+ 
+ unsigned DeadFlagCalculationEliminination::FlagsForCondClassType(CondClass Cond) {
+@@ -543,6 +545,57 @@ bool DeadFlagCalculationEliminination::ProcessBlock(IREmitter* IREmit, IRListVie
+     FlagsRead = CFG.Get(ExitOp->Args[0])->Flags;
+   }
+ 
++  auto EliminateDeadNZCVInsert = [&](Ref CodeNode, IROp_Header* IROp) {
++    if (IROp->Op != OP_STORENZCV) {
++      return false;
++    }
++
++    auto Value = IROp->Args[0];
++    auto ValueOp = CurrentIR.GetOp<IR::IROp_Header>(Value);
++    bool Peeled = false;
++
++    while (ValueOp->Op == OP_BFI && ValueOp->Size == OpSize::i32Bit) {
++      auto Bfi = ValueOp->C<IR::IROp_Bfi>();
++      unsigned Flag = 0;
++      if (Bfi->Width == 1) {
++        Flag = Bfi->lsb == 31 ? FLAG_N : Bfi->lsb == 30 ? FLAG_Z : Bfi->lsb == 29 ? FLAG_C : Bfi->lsb == 28 ? FLAG_V : 0;
++      }
++
++      if (!Flag || (FlagsRead & Flag)) {
++        break;
++      }
++
++      Value = Bfi->Dest;
++      ValueOp = CurrentIR.GetOp<IR::IROp_Header>(Value);
++      Peeled = true;
++    }
++
++    if (Peeled) {
++      IREmit->ReplaceNodeArgument(CodeNode, 0, CurrentIR.GetNode(Value));
++    }
++
++    if (ValueOp->Op != OP_LOADNZCV) {
++      return false;
++    }
++
++    Ref Load = CurrentIR.GetNode(Value);
++    auto It = CurrentIR.at(CodeNode);
++    while (!(It == CodeBegin)) {
++      --It;
++      auto [Node, Op] = It();
++      if (Node == Load) {
++        IREmit->Remove(CodeNode);
++        return true;
++      }
++
++      if (Classify(Op).Write() || ImplicitFlagClobber(Op->Op) || Op->Op == OP_TESTZ) {
++        return false;
++      }
++    }
++
++    return false;
++  };
++
+   // Iterate the block in reverse
+   while (true) {
+     auto [CodeNode, IROp] = CodeLast();
+@@ -550,7 +603,7 @@ bool DeadFlagCalculationEliminination::ProcessBlock(IREmitter* IREmit, IRListVie
+     // Optimizing flags can cause earlier flag reads to become dead but dead
+     // flag reads should not impede optimiation of earlier dead flag writes.
+     // We must DCE as we go to ensure we converge in a single iteration.
+-    if (!EliminateDeadCode(IREmit, CodeNode, IROp)) {
++    if (!EliminateDeadCode(IREmit, CodeNode, IROp) && !(FlagsWithoutFlagMMode && EliminateDeadNZCVInsert(CodeNode, IROp))) {
+       // Optimiation algorithm: For each flag written...
+       //
+       //  If the flag has a later read (per FlagsRead), remove the flag from
+@@ -680,6 +733,60 @@ void DeadFlagCalculationEliminination::OptimizeParity(IREmitter* IREmit, IRListV
+   }
+ }
+ 
++void DeadFlagCalculationEliminination::FoldCarryInvert(IREmitter* IREmit, IRListView& CurrentIR, Ref Block) {
++  struct Fold {
++    Ref Producer;
++    IROp_Header* ProducerOp;
++    Ref Invert;
++  };
++
++  fextl::vector<Fold> Folds;
++  Ref Producer = nullptr;
++  IROp_Header* ProducerOp = nullptr;
++
++  for (auto [CodeNode, IROp] : CurrentIR.GetCode(Block)) {
++    if (IROp->Op == OP_CARRYINVERT) {
++      if (Producer) {
++        Folds.push_back({Producer, ProducerOp, CodeNode});
++      }
++
++      Producer = nullptr;
++    } else if (IROp->Op == OP_TESTNZ || (IROp->Op == OP_ANDWITHFLAGS && IROp->Size >= OpSize::i32Bit)) {
++      Producer = CodeNode;
++      ProducerOp = IROp;
++    } else {
++      const auto Info = Classify(IROp);
++      if (((Info.Read() | Info.Write()) & FLAG_NZCV) || ImplicitFlagClobber(IROp->Op) || IROp->Op == OP_TESTZ) {
++        Producer = nullptr;
++      }
++    }
++  }
++
++  for (auto& F : Folds) {
++    const auto Size = F.ProducerOp->Size;
++    IREmit->SetWriteCursor(F.Producer);
++
++    if (F.ProducerOp->Op == OP_ANDWITHFLAGS) {
++      F.ProducerOp->Op = OP_AND;
++      IREmit->_SubNZCV(Size, F.Producer, IREmit->_InlineConstant(0));
++    } else {
++      const auto WideSize = std::max(Size, OpSize::i32Bit);
++      Ref Src1 = CurrentIR.GetNode(F.ProducerOp->Args[0]);
++      Ref Src2 = CurrentIR.GetNode(F.ProducerOp->Args[1]);
++      Ref Value = Src1 == Src2 ? Src1 : IREmit->_And(WideSize, Src1, Src2);
++
++      if (Size < OpSize::i32Bit) {
++        Value = IREmit->_Lshl(OpSize::i32Bit, Value, IREmit->_InlineConstant(32 - IR::OpSizeAsBits(Size)));
++      }
++
++      IREmit->_SubNZCV(WideSize, Value, IREmit->_InlineConstant(0));
++      IREmit->Remove(F.Producer);
++    }
++
++    IREmit->Remove(F.Invert);
++  }
++}
++
+ void DeadFlagCalculationEliminination::Run(IREmitter* IREmit) {
+   FEXCORE_PROFILE_SCOPED("PassManager::DFE");
+ 
+@@ -723,6 +830,12 @@ void DeadFlagCalculationEliminination::Run(IREmitter* IREmit) {
+     }
+   }
+ 
++  if (FlagsWithoutFlagMMode) {
++    for (auto [Block, _] : CurrentIR.GetBlocks()) {
++      FoldCarryInvert(IREmit, CurrentIR, Block);
++    }
++  }
++
+   // Fold compares into branches now that we're otherwise optimized. This needs
+   // to run after eliminating carries etc and it needs the global flag metadata.
+   // But it only needs to run once, we don't do it in the loop.

@@ -1,0 +1,161 @@
+Carafe: JumpTables reads a switch's tables from any committed readable memory, not only from the executable range of
+the jump. Libraries built with GCC or MinGW (DXVK's d3d9.dll, Wine's d3dx9) keep their jump tables in .rdata, far
+from the code, and those switches took 3.2 % of the samples of Carbon's race on FEX's lookup. The frontend asks the
+new QueryGuestReadableRange, which WoW64 answers with NtQueryVirtualMemory, and keeps the last range it got. Up to
+four instructions may now stand between the bounds check and the jump, as in GCC's "cmp; ja; lea; jmp [table]". The
+index register is not traced through them: a wrong bound only reads a table too short or too long, and every jump
+still compares the loaded target with the case's guest RIP before it takes the case.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/include/FEXCore/HLE/SyscallHandler.h b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+--- a/FEXCore/include/FEXCore/HLE/SyscallHandler.h
++++ b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+@@ -38,6 +38,9 @@
+   virtual void MarkOvercommitRange(uint64_t Start, uint64_t Length) {}
+   virtual void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) {}
+   virtual ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) = 0;
++  virtual ExecutableRangeInfo QueryGuestReadableRange(uint64_t Address) {
++    return {};
++  }
+   virtual std::optional<ExecutableFileSectionInfo> LookupExecutableFileSection(Core::InternalThreadState* Thread, uint64_t GuestAddr) = 0;
+ 
+   virtual void PreCompile() {}
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -1228,11 +1228,21 @@
+ #endif
+ }
+ 
+-std::optional<uint32_t> Decoder::ReadReadOnlyGuest(uint64_t Address, uint8_t Size) const {
+-  if (ExecutableRangeWritable || Address < ExecutableRangeBase || Address + Size < Address || Address + Size > ExecutableRangeEnd) {
++std::optional<uint32_t> Decoder::ReadGuestTable(uint64_t Address, uint8_t Size) {
++  if (Address + Size < Address) {
+     return std::nullopt;
+   }
+ 
++  const bool InCode = !ExecutableRangeWritable && Address >= ExecutableRangeBase && Address + Size <= ExecutableRangeEnd;
++  if (!InCode && (Address < ReadableRangeBase || Address + Size > ReadableRangeEnd)) {
++    const auto Range = CTX->SyscallHandler->QueryGuestReadableRange(Address);
++    ReadableRangeBase = Range.Base;
++    ReadableRangeEnd = Range.Base + Range.Size;
++    if (Address < ReadableRangeBase || Address + Size > ReadableRangeEnd) {
++      return std::nullopt;
++    }
++  }
++
+   uint32_t Value {};
+   memcpy(&Value, reinterpret_cast<const void*>(Address), Size);
+   return Value;
+@@ -1306,36 +1316,35 @@
+     return;
+   }
+ 
+-  uint32_t Count {};
+-  if (NumInstructions == 1) {
+-    if (Bound->second.Reg != IndexReg) {
+-      return;
+-    }
+-    Count = Bound->second.Count;
+-  } else if (NumInstructions == 2) {
+-    const auto Narrow = std::prev(DecodeInst);
+-    const auto* NarrowBytes = reinterpret_cast<const uint8_t*>(Narrow->PC);
+-    if (Narrow->InstSize != 7 || NarrowBytes[0] != 0x0F || NarrowBytes[1] != 0xB6 || (NarrowBytes[2] >> 6) != 2) {
+-      return;
+-    }
++  constexpr uint64_t MAX_INSTRUCTIONS_BEFORE_JUMP = 4;
++  if (NumInstructions > MAX_INSTRUCTIONS_BEFORE_JUMP + 1) {
++    return;
++  }
+ 
+-    const uint8_t NarrowDest = (NarrowBytes[2] >> 3) & 7;
+-    const uint8_t NarrowIndex = NarrowBytes[2] & 7;
+-    if (NarrowIndex == FEXCore::X86State::REG_RSP || NarrowDest != IndexReg || Bound->second.Reg != NarrowIndex) {
++  uint32_t Count {};
++  const auto Narrow = NumInstructions >= 2 ? std::prev(DecodeInst) : nullptr;
++  const auto* NarrowBytes = Narrow ? reinterpret_cast<const uint8_t*>(Narrow->PC) : nullptr;
++  const bool NarrowForm = Narrow && Narrow->InstSize == 7 && NarrowBytes[0] == 0x0F && NarrowBytes[1] == 0xB6 &&
++                          (NarrowBytes[2] >> 6) == 2 && ((NarrowBytes[2] >> 3) & 7) == IndexReg && (NarrowBytes[2] & 7) != FEXCore::X86State::REG_RSP;
++  if (NarrowForm) {
++    if (Bound->second.Reg != (NarrowBytes[2] & 7)) {
+       return;
+     }
+ 
+     uint32_t ByteTable {};
+     memcpy(&ByteTable, NarrowBytes + 3, sizeof(ByteTable));
+     for (uint32_t i = 0; i < Bound->second.Count; ++i) {
+-      auto Case = ReadReadOnlyGuest(uint64_t {ByteTable} + i, 1);
++      auto Case = ReadGuestTable(uint64_t {ByteTable} + i, 1);
+       if (!Case) {
+         return;
+       }
+       Count = std::max(Count, *Case + 1);
+     }
+   } else {
+-    return;
++    if (Bound->second.Reg != IndexReg) {
++      return;
++    }
++    Count = Bound->second.Count;
+   }
+ 
+   const uint64_t InstEnd = DecodeInst->PC + DecodeInst->InstSize;
+@@ -1345,7 +1354,7 @@
+   Table.Targets.resize(Count);
+   bool HasTarget = false;
+   for (uint32_t i = 0; i < Count; ++i) {
+-    auto Target = ReadReadOnlyGuest(uint64_t {TableAddress} + uint64_t {i} * 4, 4);
++    auto Target = ReadGuestTable(uint64_t {TableAddress} + uint64_t {i} * 4, 4);
+     if (!Target) {
+       return;
+     }
+@@ -1856,6 +1865,7 @@
+   BlockInfo.Blocks.clear();
+   VisitedBlocks.clear();
+   SwitchBounds.clear();
++  ReadableRangeBase = ReadableRangeEnd = 0;
+   BlockInfo.JumpTables.clear();
+   // Reset internal state management
+   Paused = false;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Frontend.h b/FEXCore/Source/Interface/Core/Frontend.h
+--- a/FEXCore/Source/Interface/Core/Frontend.h
++++ b/FEXCore/Source/Interface/Core/Frontend.h
+@@ -118,7 +118,7 @@
+   void RecordSwitchBound(uint64_t NumInstructions);
+   void RecordJumpTable(uint64_t BlockEntry, uint64_t NumInstructions);
+   bool JumpTablesAllowed() const;
+-  std::optional<uint32_t> ReadReadOnlyGuest(uint64_t Address, uint8_t Size) const;
++  std::optional<uint32_t> ReadGuestTable(uint64_t Address, uint8_t Size);
+   bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
+   bool InstCanContinue() const;
+ 
+@@ -169,6 +169,8 @@
+ 
+   uint64_t ExecutableRangeBase {};
+   uint64_t ExecutableRangeEnd {};
++  uint64_t ReadableRangeBase {};
++  uint64_t ReadableRangeEnd {};
+   bool ExecutableRangeWritable {};
+   bool ExecutableRangeWriteTracked {};
+   bool HitNonExecutableRange {};
+diff -ruN -x cpp-optparse -x .git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -517,6 +517,17 @@
+     return InvalidationTracker->QueryExecutableRange(Address);
+   }
+ 
++  FEXCore::HLE::ExecutableRangeInfo QueryGuestReadableRange(uint64_t Address) override {
++    constexpr ULONG Readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
++    MEMORY_BASIC_INFORMATION Info;
++    if (NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(Address), MemoryBasicInformation, &Info, sizeof(Info), nullptr) ||
++        Info.State != MEM_COMMIT || (Info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(Info.Protect & Readable)) {
++      return {};
++    }
++    const bool Writable = Info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
++    return {reinterpret_cast<uint64_t>(Info.BaseAddress), Info.RegionSize, Writable};
++  }
++
+   void PreCompile() override {
+     Wow64ProcessPendingCrossProcessItems();
+   }

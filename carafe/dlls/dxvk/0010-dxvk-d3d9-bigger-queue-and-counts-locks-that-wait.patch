@@ -1,0 +1,120 @@
+Carafe: the front end queue holds 4 MB instead of 1 MB, so a heavy frame of effect calls no longer waits for room.
+With the profiler on, every buffer or texture lock that has to wait for the queue to run out is counted by its pool,
+usage, lock flags, and whether the buffer was bound for drawing or the texture is a render target, and logged next to
+the drains by caller as one "locks that wait" line every 600 presents.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_common_buffer.cpp b/src/d3d9/d3d9_common_buffer.cpp
+--- a/src/d3d9/d3d9_common_buffer.cpp
++++ b/src/d3d9/d3d9_common_buffer.cpp
+@@ -36,6 +36,7 @@
+     if (D3D9FrontEnd* frontEnd = m_parent->Queuing()) {
+       if (frontEnd->StagesLock(this, OffsetToLock, SizeToLock, Flags))
+         return frontEnd->LockStaged(this, OffsetToLock, SizeToLock, ppbData, Flags);
++      frontEnd->NoteWaitingLock(false, m_desc.Pool, m_desc.Usage, Flags, m_frontEndUsed);
+     }
+ 
+     return m_parent->LockBuffer(
+diff -ruN a/src/d3d9/d3d9_common_buffer.h b/src/d3d9/d3d9_common_buffer.h
+--- a/src/d3d9/d3d9_common_buffer.h
++++ b/src/d3d9/d3d9_common_buffer.h
+@@ -87,6 +87,8 @@
+ 
+     std::array<D3D9FrontEndStaging, 2> m_frontEndStaging;
+ 
++    bool m_frontEndUsed = false;
++
+     D3D9CommonBuffer(
+             D3D9DeviceEx*      pDevice,
+       const D3D9_BUFFER_DESC*  pDesc);
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -5248,6 +5248,10 @@
+             D3DLOCKED_BOX*          pLockedBox,
+       const D3DBOX*                 pBox,
+             DWORD                   Flags) {
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      frontEnd->NoteWaitingLock(true, pResource->Desc()->Pool, pResource->Desc()->Usage, Flags,
++        (pResource->Desc()->Usage & D3DUSAGE_RENDERTARGET) != 0);
++
+     D3D9DeviceLock lock = LockDevice();
+ 
+     UINT Subresource = pResource->CalcSubresource(Face, MipLevel);
+diff -ruN a/src/d3d9/d3d9_front_end.cpp b/src/d3d9/d3d9_front_end.cpp
+--- a/src/d3d9/d3d9_front_end.cpp
++++ b/src/d3d9/d3d9_front_end.cpp
+@@ -386,6 +386,8 @@
+       ShadowStream(m_shadow.streams[StreamNumber], buffer, OffsetInBytes, Stride);
+     }
+     RefPrivate<D3D9VertexBuffer>(buffer, true);
++    if (buffer != nullptr)
++      buffer->GetCommonBuffer()->m_frontEndUsed = true;
+     auto args = reinterpret_cast<ObjectArgs*>(Allocate(D3D9FrontEndOp::StreamSource, sizeof(ObjectArgs)));
+     args->object = buffer;
+     args->a = StreamNumber;
+@@ -422,6 +424,8 @@
+   HRESULT D3D9FrontEnd::SetIndices(IDirect3DIndexBuffer9* pIndexData) {
+     D3D9IndexBuffer* buffer = static_cast<D3D9IndexBuffer*>(pIndexData);
+     RefPrivate<D3D9IndexBuffer>(buffer, true);
++    if (buffer != nullptr)
++      buffer->GetCommonBuffer()->m_frontEndUsed = true;
+     auto args = reinterpret_cast<ObjectArgs*>(Allocate(D3D9FrontEndOp::Indices, sizeof(ObjectArgs)));
+     args->object = buffer;
+     return D3D_OK;
+@@ -1020,6 +1024,20 @@
+     }
+     if (!sites.empty())
+       Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " drains by caller:", sites));
++    static const char* pools[] = { "default", "managed", "systemmem", "scratch" };
++    static const char* flagNames[] = { "no flags", "discard", "nooverwrite", "readonly" };
++    std::string locks;
++    for (uint32_t kind = 0; kind < m_waitingLocks.size(); kind++) {
++      if (m_waitingLocks[kind] == 0)
++        continue;
++      bool texture = (kind & 8u) != 0;
++      locks += str::format(" ", texture ? "texture" : "buffer", "/", pools[kind & 3u],
++        (kind & 4u) ? "/dynamic" : "", "/", flagNames[(kind >> 4) & 3u],
++        (kind & 64u) ? (texture ? "/render target" : "/drawn from") : "", " ", m_waitingLocks[kind]);
++    }
++    if (!locks.empty())
++      Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " locks that wait:", locks));
++    m_waitingLocks = { };
+     m_drainSites = { };
+     m_statQueued = 0;
+     m_statDropped = 0;
+diff -ruN a/src/d3d9/d3d9_front_end.h b/src/d3d9/d3d9_front_end.h
+--- a/src/d3d9/d3d9_front_end.h
++++ b/src/d3d9/d3d9_front_end.h
+@@ -90,7 +90,7 @@
+ 
+   public:
+ 
+-    static constexpr uint32_t RingSize      = 1u << 20;
++    static constexpr uint32_t RingSize      = 1u << 22;
+     static constexpr uint32_t MaxRecord     = RingSize / 8;
+     static constexpr uint32_t PublishEvery  = 32;
+     static constexpr uint32_t SpinCount     = 4000;
+@@ -317,6 +317,13 @@
+ 
+     uint32_t StagedLocks(D3D9CommonBuffer* pBuffer) const;
+ 
++    void NoteWaitingLock(bool Texture, D3DPOOL Pool, DWORD Usage, DWORD Flags, bool Used) {
++      uint32_t flags = (Flags & D3DLOCK_READONLY) ? 3u : (Flags & D3DLOCK_NOOVERWRITE) ? 2u : (Flags & D3DLOCK_DISCARD) ? 1u : 0u;
++      uint32_t kind = (uint32_t(Pool) & 3u) | ((Usage & D3DUSAGE_DYNAMIC) ? 4u : 0u) | (Texture ? 8u : 0u)
++        | (flags << 4) | (Used ? 64u : 0u);
++      m_waitingLocks[kind]++;
++    }
++
+   private:
+ 
+     struct Header {
+@@ -369,6 +376,8 @@
+ 
+     std::array<std::pair<uintptr_t, uint32_t>, 8> m_drainSites = { };
+ 
++    std::array<uint32_t, 128> m_waitingLocks = { };
++
+     static uint32_t Load(std::atomic<uint32_t>& value) {
+       return value.fetch_add(0u);
+     }
