@@ -4988,6 +4988,10 @@ static void nx_trace_window_words( HWND hwnd )
 }
 #endif
 
+#ifdef __SWITCH__
+unsigned int wine_nx_dialogs_shown;
+#endif
+
 static BOOL show_window( HWND hwnd, INT cmd )
 {
     WND *win;
@@ -5015,6 +5019,9 @@ static BOOL show_window( HWND hwnd, INT cmd )
                          is_iconic( hwnd ) ? ", minimized" : "" );
         nx_trace_window_words( hwnd );
     }
+    if (!(style & WS_CHILD) && cmd != SW_HIDE &&
+        get_class_long( hwnd, GCW_ATOM, FALSE ) == LOWORD(DIALOG_CLASS_ATOM))
+        __atomic_add_fetch( &wine_nx_dialogs_shown, 1, __ATOMIC_RELAXED );
     if (nx_fullscreen && (cmd == SW_SHOW || cmd == SW_SHOWNORMAL || cmd == SW_SHOWDEFAULT))
         cmd = SW_SHOWMAXIMIZED;
 #endif

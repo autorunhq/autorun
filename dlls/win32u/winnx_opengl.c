@@ -36,6 +36,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 extern void *wine_nx_gl_acquire_window( void );
 extern void wine_nx_gl_release_window( void );
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+extern int  wine_nx_osk_translucent( void ) __attribute__((weak));
+extern int  wine_nx_cursor_state( int *x, int *y, int *visible ) __attribute__((weak));
+extern void wine_nx_cursor_bitmap( uint32_t *rgba ) __attribute__((weak));
 
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
@@ -208,6 +211,9 @@ struct nx_osk_gl
 {
     EGLContext context;
     GLuint texture, framebuffer;
+    GLuint menu_program, menu_array;
+    GLuint cursor_texture;
+    BOOL menu_failed;
     int width, height;
     unsigned int generation;
     void *pixels;
@@ -220,6 +226,223 @@ static PFN_glFramebufferTexture2D p_glFramebufferTexture2D;
 static PFN_glBlitFramebuffer p_glBlitFramebuffer;
 static PFN_glIsFramebuffer p_glIsFramebuffer;
 static PFN_glBindBuffer p_glBindBuffer;
+static PFN_glCreateShader p_glCreateShader;
+static PFN_glShaderSource p_glShaderSource;
+static PFN_glCompileShader p_glCompileShader;
+static PFN_glGetShaderiv p_glGetShaderiv;
+static PFN_glDeleteShader p_glDeleteShader;
+static PFN_glCreateProgram p_glCreateProgram;
+static PFN_glAttachShader p_glAttachShader;
+static PFN_glLinkProgram p_glLinkProgram;
+static PFN_glGetProgramiv p_glGetProgramiv;
+static PFN_glDeleteProgram p_glDeleteProgram;
+static PFN_glUseProgram p_glUseProgram;
+static PFN_glIsProgram p_glIsProgram;
+static PFN_glActiveTexture p_glActiveTexture;
+static PFN_glBlendFuncSeparate p_glBlendFuncSeparate;
+static PFN_glBlendEquationSeparate p_glBlendEquationSeparate;
+static PFN_glGenVertexArrays p_glGenVertexArrays;
+static PFN_glBindVertexArray p_glBindVertexArray;
+static PFN_glIsVertexArray p_glIsVertexArray;
+static PFN_glBindSampler p_glBindSampler;
+static BOOL nx_menu_gl_loaded, nx_menu_gl_usable, nx_menu_gl_logged;
+#define NX_SCREEN_CLEARS 8
+static BOOL nx_osk_shown;
+static unsigned int nx_screen_clears;
+
+static const char nx_menu_gl_vertex[] =
+    "#version 130\n"
+    "out vec2 coord;\n"
+    "void main()\n"
+    "{\n"
+    "    vec2 c = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "    coord = vec2(c.x, 1.0 - c.y);\n"
+    "    gl_Position = vec4(c * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char nx_menu_gl_fragment[] =
+    "#version 130\n"
+    "in vec2 coord;\n"
+    "out vec4 color;\n"
+    "uniform sampler2D menu;\n"
+    "void main()\n"
+    "{\n"
+    "    color = texture(menu, coord);\n"
+    "}\n";
+
+static BOOL nx_menu_gl_load( void )
+{
+    if (nx_menu_gl_loaded) return nx_menu_gl_usable;
+    nx_menu_gl_loaded = TRUE;
+    p_glCreateShader = (void *)funcs->p_eglGetProcAddress( "glCreateShader" );
+    p_glShaderSource = (void *)funcs->p_eglGetProcAddress( "glShaderSource" );
+    p_glCompileShader = (void *)funcs->p_eglGetProcAddress( "glCompileShader" );
+    p_glGetShaderiv = (void *)funcs->p_eglGetProcAddress( "glGetShaderiv" );
+    p_glDeleteShader = (void *)funcs->p_eglGetProcAddress( "glDeleteShader" );
+    p_glCreateProgram = (void *)funcs->p_eglGetProcAddress( "glCreateProgram" );
+    p_glAttachShader = (void *)funcs->p_eglGetProcAddress( "glAttachShader" );
+    p_glLinkProgram = (void *)funcs->p_eglGetProcAddress( "glLinkProgram" );
+    p_glGetProgramiv = (void *)funcs->p_eglGetProcAddress( "glGetProgramiv" );
+    p_glDeleteProgram = (void *)funcs->p_eglGetProcAddress( "glDeleteProgram" );
+    p_glUseProgram = (void *)funcs->p_eglGetProcAddress( "glUseProgram" );
+    p_glIsProgram = (void *)funcs->p_eglGetProcAddress( "glIsProgram" );
+    p_glActiveTexture = (void *)funcs->p_eglGetProcAddress( "glActiveTexture" );
+    p_glBlendFuncSeparate = (void *)funcs->p_eglGetProcAddress( "glBlendFuncSeparate" );
+    p_glBlendEquationSeparate = (void *)funcs->p_eglGetProcAddress( "glBlendEquationSeparate" );
+    p_glGenVertexArrays = (void *)funcs->p_eglGetProcAddress( "glGenVertexArrays" );
+    p_glBindVertexArray = (void *)funcs->p_eglGetProcAddress( "glBindVertexArray" );
+    p_glIsVertexArray = (void *)funcs->p_eglGetProcAddress( "glIsVertexArray" );
+    p_glBindSampler = (void *)funcs->p_eglGetProcAddress( "glBindSampler" );
+    nx_menu_gl_usable = p_glCreateShader && p_glShaderSource && p_glCompileShader && p_glGetShaderiv &&
+                        p_glDeleteShader && p_glCreateProgram && p_glAttachShader && p_glLinkProgram &&
+                        p_glGetProgramiv && p_glDeleteProgram && p_glUseProgram && p_glIsProgram &&
+                        p_glActiveTexture && p_glBlendFuncSeparate && p_glBlendEquationSeparate &&
+                        p_glGenVertexArrays && p_glBindVertexArray && p_glIsVertexArray;
+    return nx_menu_gl_usable;
+}
+
+static GLuint nx_menu_gl_shader( GLenum type, const char *source )
+{
+    GLuint shader = p_glCreateShader( type );
+    GLint compiled = 0;
+
+    if (!shader) return 0;
+    p_glShaderSource( shader, 1, &source, NULL );
+    p_glCompileShader( shader );
+    p_glGetShaderiv( shader, GL_COMPILE_STATUS, &compiled );
+    if (compiled) return shader;
+    p_glDeleteShader( shader );
+    return 0;
+}
+
+static BOOL nx_menu_gl_prepare( struct nx_osk_gl *osk )
+{
+    GLuint vertex, fragment, program;
+    GLint linked = 0;
+
+    if (osk->menu_failed || !nx_menu_gl_load()) return FALSE;
+    if (osk->menu_program && p_glIsProgram( osk->menu_program ) && osk->menu_array &&
+        p_glIsVertexArray( osk->menu_array ))
+        return TRUE;
+    osk->menu_program = osk->menu_array = 0;
+    vertex = nx_menu_gl_shader( GL_VERTEX_SHADER, nx_menu_gl_vertex );
+    fragment = nx_menu_gl_shader( GL_FRAGMENT_SHADER, nx_menu_gl_fragment );
+    program = vertex && fragment ? p_glCreateProgram() : 0;
+    if (program)
+    {
+        p_glAttachShader( program, vertex );
+        p_glAttachShader( program, fragment );
+        p_glLinkProgram( program );
+        p_glGetProgramiv( program, GL_LINK_STATUS, &linked );
+        if (!linked) p_glDeleteProgram( program );
+    }
+    if (vertex) p_glDeleteShader( vertex );
+    if (fragment) p_glDeleteShader( fragment );
+    if (linked) p_glGenVertexArrays( 1, &osk->menu_array );
+    if (!linked || !osk->menu_array)
+    {
+        osk->menu_failed = TRUE;
+        nx_log( "[NXGL] settings menu: the blending program could not be built, it is shown opaque" );
+        return FALSE;
+    }
+    osk->menu_program = program;
+    if (!nx_menu_gl_logged)
+    {
+        nx_menu_gl_logged = TRUE;
+        nx_log( "[NXGL] settings menu drawn by the GPU over the frame" );
+    }
+    return TRUE;
+}
+
+static BOOL nx_quad_gl_draw( struct nx_osk_gl *osk, GLuint tex, int x, int y, int w, int h, EGLint height )
+{
+    GLint program, array, active, texture, sampler = 0, viewport[4];
+    GLint src_rgb, dst_rgb, src_alpha, dst_alpha, equation_rgb, equation_alpha;
+    GLboolean blend, depth, stencil, cull, discard, mask[4];
+
+    if (!nx_menu_gl_prepare( osk )) return FALSE;
+
+    funcs->p_glGetIntegerv( GL_CURRENT_PROGRAM, &program );
+    funcs->p_glGetIntegerv( GL_VERTEX_ARRAY_BINDING, &array );
+    funcs->p_glGetIntegerv( GL_ACTIVE_TEXTURE, &active );
+    funcs->p_glGetIntegerv( GL_VIEWPORT, viewport );
+    funcs->p_glGetIntegerv( GL_BLEND_SRC_RGB, &src_rgb );
+    funcs->p_glGetIntegerv( GL_BLEND_DST_RGB, &dst_rgb );
+    funcs->p_glGetIntegerv( GL_BLEND_SRC_ALPHA, &src_alpha );
+    funcs->p_glGetIntegerv( GL_BLEND_DST_ALPHA, &dst_alpha );
+    funcs->p_glGetIntegerv( GL_BLEND_EQUATION_RGB, &equation_rgb );
+    funcs->p_glGetIntegerv( GL_BLEND_EQUATION_ALPHA, &equation_alpha );
+    funcs->p_glGetBooleanv( GL_COLOR_WRITEMASK, mask );
+    blend = funcs->p_glIsEnabled( GL_BLEND );
+    depth = funcs->p_glIsEnabled( GL_DEPTH_TEST );
+    stencil = funcs->p_glIsEnabled( GL_STENCIL_TEST );
+    cull = funcs->p_glIsEnabled( GL_CULL_FACE );
+    discard = funcs->p_glIsEnabled( GL_RASTERIZER_DISCARD );
+    p_glActiveTexture( GL_TEXTURE0 );
+    funcs->p_glGetIntegerv( GL_TEXTURE_BINDING_2D, &texture );
+    if (p_glBindSampler) funcs->p_glGetIntegerv( GL_SAMPLER_BINDING, &sampler );
+
+    p_glUseProgram( osk->menu_program );
+    p_glBindVertexArray( osk->menu_array );
+    funcs->p_glBindTexture( GL_TEXTURE_2D, tex );
+    if (p_glBindSampler) p_glBindSampler( 0, 0 );
+    funcs->p_glViewport( x, height - y - h, w, h );
+    funcs->p_glEnable( GL_BLEND );
+    p_glBlendFuncSeparate( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+    p_glBlendEquationSeparate( GL_FUNC_ADD, GL_FUNC_ADD );
+    funcs->p_glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+    funcs->p_glDisable( GL_DEPTH_TEST );
+    funcs->p_glDisable( GL_STENCIL_TEST );
+    funcs->p_glDisable( GL_CULL_FACE );
+    funcs->p_glDisable( GL_RASTERIZER_DISCARD );
+    funcs->p_glDrawArrays( GL_TRIANGLES, 0, 3 );
+
+    if (discard) funcs->p_glEnable( GL_RASTERIZER_DISCARD );
+    if (cull) funcs->p_glEnable( GL_CULL_FACE );
+    if (stencil) funcs->p_glEnable( GL_STENCIL_TEST );
+    if (depth) funcs->p_glEnable( GL_DEPTH_TEST );
+    if (!blend) funcs->p_glDisable( GL_BLEND );
+    funcs->p_glColorMask( mask[0], mask[1], mask[2], mask[3] );
+    p_glBlendEquationSeparate( equation_rgb, equation_alpha );
+    p_glBlendFuncSeparate( src_rgb, dst_rgb, src_alpha, dst_alpha );
+    funcs->p_glViewport( viewport[0], viewport[1], viewport[2], viewport[3] );
+    if (p_glBindSampler) p_glBindSampler( 0, sampler );
+    funcs->p_glBindTexture( GL_TEXTURE_2D, texture );
+    p_glActiveTexture( active );
+    p_glBindVertexArray( array );
+    p_glUseProgram( program );
+    return TRUE;
+}
+
+static BOOL nx_menu_gl_draw( struct nx_osk_gl *osk, const struct wine_nx_osk_frame *frame, EGLint height )
+{
+    return nx_quad_gl_draw( osk, osk->texture, frame->x, frame->y, frame->width, frame->height, height );
+}
+
+static void nx_cursor_gl_draw( struct nx_osk_gl *osk, int cx, int cy, EGLint width, EGLint height )
+{
+    int draw_x, draw_y, draw_w, draw_h;
+
+    if (!wine_nx_cursor_bitmap || !nx_menu_gl_prepare( osk )) return;
+    if (!osk->cursor_texture || !funcs->p_glIsTexture( osk->cursor_texture ))
+    {
+        uint32_t pixels[12 * 19];
+
+        wine_nx_cursor_bitmap( pixels );
+        funcs->p_glGenTextures( 1, &osk->cursor_texture );
+        funcs->p_glBindTexture( GL_TEXTURE_2D, osk->cursor_texture );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+        funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, 12, 19, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
+    }
+    draw_x = cx * (int)width / 1280;
+    draw_y = cy * (int)height / 720;
+    draw_w = width > 1280 ? (12 * (int)width + 640) / 1280 : 12;
+    draw_h = height > 720 ? (19 * (int)height + 360) / 720 : 19;
+    nx_quad_gl_draw( osk, osk->cursor_texture, draw_x, draw_y, draw_w, draw_h, height );
+}
 
 static void nx_osk_draw( struct opengl_drawable *base )
 {
@@ -229,13 +452,20 @@ static void nx_osk_draw( struct opengl_drawable *base )
     EGLContext context;
     GLint read_fb, draw_fb, texture, unpack_buffer, row_length, skip_pixels, skip_rows, alignment;
     GLboolean scissor, srgb;
+    BOOL overlay_visible = wine_nx_osk_visible() || wine_nx_osk_map_visible();
+    int cursor_x = 0, cursor_y = 0, cursor_visible = 0;
+    BOOL cursor_on = !overlay_visible && wine_nx_cursor_state && wine_nx_cursor_bitmap &&
+                     wine_nx_cursor_state( &cursor_x, &cursor_y, &cursor_visible ) && cursor_visible;
     unsigned int i;
 
-    if (!wine_nx_osk_visible() && !wine_nx_osk_map_visible()) return;
+    if (!overlay_visible && !cursor_on) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
         !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
-        !wine_nx_osk_frame( width, height, &frame ) || !(context = funcs->p_eglGetCurrentContext()))
+        !(context = funcs->p_eglGetCurrentContext()))
         return;
+    if (overlay_visible && !wine_nx_osk_frame( width, height, &frame ))
+        overlay_visible = FALSE;
+    if (!overlay_visible && !cursor_on) return;
     if (!p_glBlitFramebuffer)
     {
         p_glGenFramebuffers = (void *)funcs->p_eglGetProcAddress( "glGenFramebuffers" );
@@ -272,45 +502,63 @@ static void nx_osk_draw( struct opengl_drawable *base )
     scissor = funcs->p_glIsEnabled( GL_SCISSOR_TEST );
     srgb = funcs->p_glIsEnabled( GL_FRAMEBUFFER_SRGB );
 
-    /* Names the program deleted, or a context that took an old one's place. */
-    if (!osk->texture || !funcs->p_glIsTexture( osk->texture ) || !p_glIsFramebuffer( osk->framebuffer ))
-    {
-        funcs->p_glGenTextures( 1, &osk->texture );
-        p_glGenFramebuffers( 1, &osk->framebuffer );
-        osk->width = osk->height = 0;
-    }
-    funcs->p_glBindTexture( GL_TEXTURE_2D, osk->texture );
     p_glBindBuffer( GL_PIXEL_UNPACK_BUFFER, 0 );
     funcs->p_glPixelStorei( GL_UNPACK_ROW_LENGTH, 0 );
     funcs->p_glPixelStorei( GL_UNPACK_SKIP_PIXELS, 0 );
     funcs->p_glPixelStorei( GL_UNPACK_SKIP_ROWS, 0 );
     funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
-    if (osk->width != frame.width || osk->height != frame.height)
+
+    if (overlay_visible)
     {
-        free( osk->pixels );
-        osk->pixels = malloc( (size_t)frame.width * frame.height * 4 );
-        funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, frame.width, frame.height, 0, GL_BGRA,
-                               GL_UNSIGNED_BYTE, NULL );
-        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
-        osk->width = frame.width;
-        osk->height = frame.height;
-        osk->generation = 0;
+        /* Names the program deleted, or a context that took an old one's place. */
+        if (!osk->texture || !funcs->p_glIsTexture( osk->texture ) || !p_glIsFramebuffer( osk->framebuffer ))
+        {
+            funcs->p_glGenTextures( 1, &osk->texture );
+            p_glGenFramebuffers( 1, &osk->framebuffer );
+            osk->width = osk->height = 0;
+        }
+        funcs->p_glBindTexture( GL_TEXTURE_2D, osk->texture );
+        if (osk->width != frame.width || osk->height != frame.height)
+        {
+            free( osk->pixels );
+            osk->pixels = malloc( (size_t)frame.width * frame.height * 4 );
+            funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, frame.width, frame.height, 0, GL_BGRA,
+                                   GL_UNSIGNED_BYTE, NULL );
+            funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+            funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+            osk->width = frame.width;
+            osk->height = frame.height;
+            osk->generation = 0;
+        }
+        if (osk->pixels && osk->generation != frame.generation &&
+            (osk->generation = wine_nx_osk_copy( width, height, osk->pixels, frame.width * 4, 0 )))
+            funcs->p_glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height, GL_BGRA, GL_UNSIGNED_BYTE,
+                                      osk->pixels );
+        if (osk->generation)
+        {
+            BOOL drawn;
+
+            p_glBindFramebuffer( GL_READ_FRAMEBUFFER, osk->framebuffer );
+            p_glFramebufferTexture2D( GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, osk->texture, 0 );
+            p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+            if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+            if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
+            drawn = wine_nx_osk_translucent && wine_nx_osk_translucent() && nx_menu_gl_draw( osk, &frame, height );
+            /* The picture's first row is its top; the window's first is its bottom. */
+            if (!drawn)
+                p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
+                                     frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+            if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+            if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+            nx_osk_shown = TRUE;
+        }
     }
-    if (osk->pixels && osk->generation != frame.generation &&
-        (osk->generation = wine_nx_osk_copy( width, height, osk->pixels, frame.width * 4, 0 )))
-        funcs->p_glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height, GL_BGRA, GL_UNSIGNED_BYTE,
-                                  osk->pixels );
-    if (osk->generation)
+    else if (cursor_on)
     {
-        p_glBindFramebuffer( GL_READ_FRAMEBUFFER, osk->framebuffer );
-        p_glFramebufferTexture2D( GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, osk->texture, 0 );
         p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
         if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
         if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
-        /* The picture's first row is its top; the window's first is its bottom. */
-        p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
-                             frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+        nx_cursor_gl_draw( osk, cursor_x, cursor_y, width, height );
         if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
         if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
     }
@@ -325,6 +573,30 @@ static void nx_osk_draw( struct opengl_drawable *base )
     funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, alignment );
 }
 
+static void nx_screen_clear( void )
+{
+    GLint draw_fb, draw_buffer;
+    GLfloat color[4];
+    GLboolean mask[4], scissor;
+
+    funcs->p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb );
+    funcs->p_glGetFloatv( GL_COLOR_CLEAR_VALUE, color );
+    funcs->p_glGetBooleanv( GL_COLOR_WRITEMASK, mask );
+    scissor = funcs->p_glIsEnabled( GL_SCISSOR_TEST );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+    funcs->p_glGetIntegerv( GL_DRAW_BUFFER, &draw_buffer );
+    funcs->p_glDrawBuffer( GL_BACK );
+    if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+    funcs->p_glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+    funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+    funcs->p_glClear( GL_COLOR_BUFFER_BIT );
+    funcs->p_glClearColor( color[0], color[1], color[2], color[3] );
+    funcs->p_glColorMask( mask[0], mask[1], mask[2], mask[3] );
+    if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+    funcs->p_glDrawBuffer( draw_buffer );
+    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, draw_fb );
+}
+
 static BOOL nx_drawable_swap( struct opengl_drawable *base )
 {
     unsigned long long start;
@@ -332,12 +604,48 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
     if (!impl_from_opengl_drawable( base )->screen)
         return funcs->p_eglSwapBuffers( egl->display, base->surface );
+    nx_osk_shown = FALSE;
     nx_osk_draw( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_gl_swaps, 1, __ATOMIC_RELAXED );
+    if (nx_osk_shown) nx_screen_clears = NX_SCREEN_CLEARS;
+    if (ret && nx_screen_clears && p_glBindFramebuffer)
+    {
+        nx_screen_clears--;
+        nx_screen_clear();
+    }
     return ret;
+}
+
+static void nx_screen_first_frame( struct nx_gl_drawable *gl, int format )
+{
+    EGLContext previous = funcs->p_eglGetCurrentContext(), context;
+    EGLSurface draw = funcs->p_eglGetCurrentSurface( EGL_DRAW ), read = funcs->p_eglGetCurrentSurface( EGL_READ );
+    unsigned int i;
+
+    if (!wine_nx_osk_visible()) return;
+    funcs->p_eglBindAPI( EGL_OPENGL_API );
+    if (!(context = funcs->p_eglCreateContext( egl->display, nx_config_for_format( format ), NULL, NULL ))) return;
+    if (funcs->p_eglMakeCurrent( egl->display, gl->base.surface, gl->base.surface, context ))
+    {
+        funcs->p_glClearColor( 0, 0, 0, 1 );
+        funcs->p_glClear( GL_COLOR_BUFFER_BIT );
+        nx_osk_draw( &gl->base );
+        nx_log( "[NXGL] first frame: the floating keyboard's picture, swap %s",
+                funcs->p_eglSwapBuffers( egl->display, gl->base.surface ) ? "done" : "failed" );
+    }
+    if (!funcs->p_eglMakeCurrent( egl->display, draw, read, previous ))
+        nx_log( "[NXGL] first frame: the thread's context could not be made current again, error %#x",
+                funcs->p_eglGetError() );
+    funcs->p_eglDestroyContext( egl->display, context );
+    for (i = 0; i < ARRAY_SIZE(nx_osk_gl); i++)
+    {
+        if (nx_osk_gl[i].context != context) continue;
+        free( nx_osk_gl[i].pixels );
+        memset( &nx_osk_gl[i], 0, sizeof(nx_osk_gl[i]) );
+    }
 }
 
 static const struct opengl_drawable_funcs nx_drawable_funcs =
@@ -437,6 +745,7 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
     nx_screen_format = format;
     nx_screen_refs = 1;
     pthread_mutex_unlock( &nx_screen_mutex );
+    if (!previous) nx_screen_first_frame( gl, format );
 
     TRACE( "created drawable %s with EGL surface %p\n", debugstr_opengl_drawable( &gl->base ), gl->base.surface );
     {

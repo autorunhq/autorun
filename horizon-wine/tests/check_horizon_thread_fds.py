@@ -37,7 +37,7 @@ struct horizon_server_request_header { int req; unsigned request_size, reply_siz
 struct horizon_server_reply_header { unsigned error, reply_size; };
 #include "horizon_completion.h"
 enum { HORIZON_SERVER_OBJECT_THREAD, HORIZON_SERVER_OBJECT_FILE, HORIZON_SERVER_OBJECT_TIMER,
-       HORIZON_SERVER_OBJECT_MSG_QUEUE };
+       HORIZON_SERVER_OBJECT_MSG_QUEUE, HORIZON_SERVER_OBJECT_DEVICE };
 struct horizon_user_apc { struct horizon_user_apc *next; };
 struct horizon_server_object {
     unsigned id, refs, queue_tid;
@@ -46,13 +46,16 @@ struct horizon_server_object {
     struct horizon_server_object *thread_next, *wait_port, *file_completion, *mapping_shared_file;
     struct horizon_user_apc *apc_first, *apc_last;
     struct horizon_completion_queue completion;
-    void *reg_key;
+    void *reg_key, *frozen_context, *mapping_version, *device_file;
     char *file_name, *dir_mask, *name;
 };
 static struct horizon_server_object *horizon_server_threads;
 static unsigned horizon_server_running_threads;
 static struct { unsigned thread_objects; } horizon_lifecycle;
 static int horizon_registry;
+static void (*carafeHidClose)(void *);
+static void horizon_file_locks_release_locked(struct horizon_server_object *o) { (void)o; }
+static void horizon_server_publish_hooks_locked(struct horizon_msgq *q) { (void)q; }
 static void horizon_server_unlink_timer_locked(struct horizon_server_object *o) { (void)o; assert(0); }
 static unsigned long long horizon_get_system_affinity_mask(void) { return 7; }
 static long long horizon_server_now(void) { return 12345; }

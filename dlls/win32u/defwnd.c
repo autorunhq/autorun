@@ -2416,6 +2416,25 @@ static LRESULT handle_nc_mouse_leave( HWND hwnd )
 }
 
 
+#ifdef __SWITCH__
+extern __thread int wine_nx_system_painting;
+LRESULT nx_default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL ansi );
+
+LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL ansi )
+{
+    BOOL system = msg == WM_ERASEBKGND || msg == WM_ICONERASEBKGND || msg == WM_NCPAINT ||
+                  msg == WM_NCACTIVATE || msg == WM_SETTEXT;
+    LRESULT result;
+
+    if (system) wine_nx_system_painting++;
+    result = nx_default_window_proc( hwnd, msg, wparam, lparam, ansi );
+    if (system) wine_nx_system_painting--;
+    return result;
+}
+
+#define default_window_proc nx_default_window_proc
+#endif
+
 LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL ansi )
 {
     LRESULT result = 0;

@@ -42,7 +42,9 @@ typedef struct { struct { int biWidth, biHeight; } bmiHeader; DWORD bmiColors[25
 #define GW_OWNER 4
 #define GW_CHILD 5
 #define GW_HWNDNEXT 2
+#define GA_PARENT 1
 #define GA_ROOT 2
+#define InterlockedExchange(p, v) __atomic_exchange_n((p), (v), __ATOMIC_ACQ_REL)
 #define SWP_HIDEWINDOW 0x80
 #define RDW_INVALIDATE 1
 #define RDW_ERASE 4
@@ -87,6 +89,13 @@ static void union_rect(RECT *out, const RECT *a, const RECT *b) {
 }
 static void wine_nx_runtime_trace(const char *s) {}
 static int wine_nx_runtime_verbose;
+static int wine_nx_screen_wants_pictures(void) { return 0; }
+static void wine_nx_screen_picture_drawn(DWORD thread, int redrawn) { (void)thread; (void)redrawn; }
+static int wine_nx_layer_redrawn(struct wine_nx_layer *l, const uint32_t *p, int s, int a, int b, int c, int d) {
+    (void)l; (void)p; (void)s; (void)a; (void)b; (void)c; (void)d; return 0;
+}
+static HWND NtUserGetDesktopWindow(void) { return 0; }
+static DWORD NtUserGetWindowThread(HWND h, DWORD *pid) { if (pid) *pid = 1; return 1; }
 static int wine_nx_pointer_poll(int *x, int *y, unsigned int *b) { (void)x; (void)y; (void)b; return 0; }
 static void *wine_nx_fb_lock(int *w, int *h, int *stride) { *w = *stride = 320; *h = 300; return framebuffer; }
 static void wine_nx_fb_unlock(void) {}

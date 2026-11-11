@@ -86,6 +86,7 @@ struct compositor_gl_quad
     int x, y, width, height;
     int src_x, src_y;
     int src_width, src_height;
+    int blend;
 };
 
 struct compositor_gl

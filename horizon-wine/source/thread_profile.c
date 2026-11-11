@@ -932,14 +932,20 @@ static struct nx_prof_row rows_all[NX_PROF_MAX_THREADS];
 
 static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, unsigned int *total )
 {
-    u64 now = armGetSystemTick(), interval = rows_last ? now - rows_last : 0, mask;
+    u64 now, interval, mask;
     unsigned int count = 0, i, j;
     struct nx_prof_row row;
 
-    rows_last = now;
     *total = 0;
-    if (!interval) return 0;
     pthread_mutex_lock( &registry_mutex );
+    now = armGetSystemTick();
+    interval = rows_last ? now - rows_last : 0;
+    rows_last = now;
+    if (!interval)
+    {
+        pthread_mutex_unlock( &registry_mutex );
+        return 0;
+    }
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
         struct nx_prof_thread *thread = &registry[i];

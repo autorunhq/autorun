@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -169,6 +170,13 @@ static void mock_interval(void *display, int value) { intervals++; }
 static int mock_error(void) { return 0; }
 static const char *mock_string(void *display, int name) { return "mock"; }
 static void nx_osk_draw(struct opengl_drawable *base) { overlays++; }
+#define NX_SCREEN_CLEARS 8
+static BOOL nx_osk_shown;
+static unsigned int nx_screen_clears;
+static void (*p_glBindFramebuffer)(int, int);
+static void nx_screen_clear(void) {}
+struct nx_gl_drawable;
+static void nx_screen_first_frame(struct nx_gl_drawable *gl, int format) { (void)gl; (void)format; }
 static unsigned long long horizon_interrupt_time(void) { static unsigned int ticks; return ++ticks; }
 static unsigned int wine_nx_gl_swaps;
 static unsigned long long wine_nx_gl_swap_time;
@@ -342,7 +350,8 @@ with tempfile.TemporaryDirectory(prefix="autorun-gl-surfaces-") as directory:
     source = path / "gl_surfaces.c"
     source.write_text(fixture + implementation + checks)
     executable = path / "gl_surfaces"
-    subprocess.run(["clang", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+    cc = shutil.which("clang") or "gcc"
+    subprocess.run([cc, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                     "-Wno-unused-parameter", "-Wno-unused-variable", "-fsanitize=address,undefined", "-pthread",
                     str(source), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

@@ -4660,6 +4660,26 @@ static LONG apply_display_settings( struct source *target, const DEVMODEW *devmo
     return ret;
 }
 
+#ifdef __SWITCH__
+LONG wine_nx_fit_screen( UINT width, UINT height )
+{
+    DEVMODEW mode = {.dmSize = sizeof(DEVMODEW)};
+    struct source *source;
+    LONG ret;
+
+    if (!(source = find_source( NULL ))) return DISP_CHANGE_BADPARAM;
+    source_get_current_settings( source, &mode );
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
+    mode.dmPosition.x = 0;
+    mode.dmPosition.y = 0;
+    ret = apply_display_settings( source, &mode, NULL, CDS_FULLSCREEN, NULL );
+    source_release( source );
+    return ret;
+}
+#endif
+
 /***********************************************************************
  *	     NtUserChangeDisplaySettings    (win32u.@)
  */

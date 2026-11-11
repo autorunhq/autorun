@@ -93,6 +93,7 @@ static void nxdrv_trace(const char *fmt, int a, int b, int c, int d) {}
 static void nxdrv_trace_hot(const char *fmt, int a, int b, int c, int d) {}
 static void nxdrv_say(const char *line) { (void)line; }
 static void nxdrv_note_key_sent(WORD vk, BOOL up) { (void)vk; (void)up; }
+static void wine_nx_fit_screen_to_game(void) {}
 static void nxdrv_check_key_taken(void) {}
 static void nxdrv_trace_key_target(void) {}
 static DWORD NtGetTickCount(void) { return mock_tick; }

@@ -32,7 +32,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
 
 /* The runtime hands the screen's NWindow to one surface at a time
  * (horizon-wine/source/runtime.c); OpenGL and Vulkan take turns with it. */
-extern void *wine_nx_gl_acquire_window( void );
+extern void *wine_nx_vk_reserve_window( void );
 extern void wine_nx_gl_release_window( void );
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 
@@ -102,7 +102,7 @@ static VkResult nx_vulkan_surface_create( struct client_surface *client, const s
 
     TRACE( "hwnd %p, raw %u, instance %p\n", hwnd, client->raw, instance );
 
-    if (!(info.window = wine_nx_gl_acquire_window()))
+    if (!(info.window = wine_nx_vk_reserve_window()))
     {
         ERR( "hwnd %p: the screen already has an OpenGL or Vulkan surface\n", hwnd );
         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;

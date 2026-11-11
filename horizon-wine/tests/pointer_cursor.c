@@ -290,6 +290,28 @@ static void test_speed_scales_the_stick(void)
     assert( fabs( c.x - a.x ) < 0.01 );
 }
 
+static void test_custom_deadzone_and_rgba(void)
+{
+    struct pointer_cursor tight = cursor_at( 100, 100 );
+    struct pointer_cursor wide = cursor_at( 100, 100 );
+    uint32_t pixels[POINTER_CURSOR_W * POINTER_CURSOR_H];
+
+    tight.custom_deadzone = 1;
+    tight.deadzone = 0.0;
+    for (int i = 0; i < 3; i++) pointer_cursor_step( &tight, 3000, 0, 50 * MS );
+    assert( tight.x > 101.0 );
+
+    wide.custom_deadzone = 1;
+    wide.deadzone = 12000.0;
+    assert( !pointer_cursor_step( &wide, 10000, 0, 50 * MS ) );
+    assert( wide.x == 100.0 && wide.y == 100.0 );
+
+    pointer_cursor_rgba( pixels );
+    assert( pixels[0] == 0xff000000u );
+    assert( pixels[1] == 0x00000000u );
+    assert( pixels[2 * POINTER_CURSOR_W + 1] == 0xffffffffu );
+}
+
 int main(void)
 {
     test_buttons_between_takes();
@@ -303,7 +325,8 @@ int main(void)
     test_warp_keeps_unsent_motion();
     test_held_cursor_still_moves();
     test_speed_scales_the_stick();
+    test_custom_deadzone_and_rgba();
     puts( "pointer cursor: buttons between takes, dead zone, speed curve, time scaling, edges, sprite "
-          "restore, motion kept across warps, a held cursor still moving and the speed scale passed" );
+          "restore, motion kept across warps, a held cursor still moving, custom deadzone and GPU sprite passed" );
     return 0;
 }

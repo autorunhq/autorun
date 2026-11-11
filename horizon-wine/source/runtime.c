@@ -616,6 +616,13 @@ static struct pointer_cursor wine_nx_cursor =
 static int wine_nx_cursor_moved;
 static int wine_nx_cursor_visible = 1;  /* 0 while the program hides the mouse cursor */
 static int wine_nx_gl_window;  /* an OpenGL window surface owns the screen's NWindow */
+static int wine_nx_screen_reserved;
+static int wine_nx_vk_surfaces;
+static int wine_nx_vk_swapchains;
+int wine_nx_window_picture_shown;
+HANDLE wine_nx_window_picture_event;
+int wine_nx_window_picture_pending;
+static unsigned int wine_nx_picture_thread;
 /* Controller and touchscreen state, guarded by wine_nx_pointer_mutex. */
 static pthread_mutex_t wine_nx_pointer_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct pointer_cursor wine_nx_pointer =
@@ -772,8 +779,113 @@ void *wine_nx_gl_acquire_window(void)
     pthread_mutex_unlock( &wine_nx_fb_mutex );
     if (window && compositor) wine_nx_compositor_suspend();
     if (window) nwindowSetDimensions( window, WINE_NX_FB_W, WINE_NX_FB_H );
+    if (window) appletNotifyRunning( NULL );
     log_line( "[NXGL] %s", window ? "screen handed to an OpenGL surface" : "screen busy; OpenGL surface refused" );
     return window;
+}
+
+void *wine_nx_vk_reserve_window(void)
+{
+    NWindow *window = NULL;
+    int surfaces = 0;
+
+    if (!wine_nx_compositor_enabled()) return wine_nx_gl_acquire_window();
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (!wine_nx_gl_window && !wine_nx_fb_lock_depth)
+    {
+        window = nwindowGetDefault();
+        wine_nx_gl_window = 1;
+        wine_nx_screen_reserved = 1;
+        surfaces = wine_nx_vk_surfaces = 1;
+    }
+    else if (wine_nx_vk_surfaces && !wine_nx_fb_lock_depth)
+    {
+        window = nwindowGetDefault();
+        surfaces = ++wine_nx_vk_surfaces;
+    }
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (surfaces > 1)
+        log_line( "[NXVK] screen shared with the Vulkan surface before it; %d surfaces hold it", surfaces );
+    else
+        log_line( "[NXVK] %s", window ? "screen reserved for a Vulkan surface; the compositor keeps it until a swapchain"
+                                      : "screen busy; Vulkan surface refused" );
+    return window;
+}
+
+void wine_nx_vk_take_window(void)
+{
+    int take;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    take = wine_nx_screen_reserved;
+    wine_nx_screen_reserved = 0;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (!take) return;
+    wine_nx_compositor_suspend();
+    nwindowSetDimensions( nwindowGetDefault(), WINE_NX_FB_W, WINE_NX_FB_H );
+    appletNotifyRunning( NULL );
+    log_line( "[NXVK] screen handed to the Vulkan swapchain" );
+}
+
+void wine_nx_vk_swapchain_made(void)
+{
+    __atomic_add_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
+}
+
+void wine_nx_vk_swapchain_gone(void)
+{
+    __atomic_sub_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
+}
+
+int wine_nx_screen_wants_pictures(void)
+{
+    extern int wine_nx_watch_window_pictures(void) __attribute__((weak));
+
+    if (wine_nx_watch_window_pictures && !__atomic_load_n( &wine_nx_window_picture_shown, __ATOMIC_ACQUIRE ) &&
+        wine_nx_watch_window_pictures())
+        return 1;
+    return __atomic_load_n( &wine_nx_vk_surfaces, __ATOMIC_ACQUIRE ) &&
+           !__atomic_load_n( &wine_nx_screen_reserved, __ATOMIC_ACQUIRE );
+}
+
+void wine_nx_screen_input_waits(unsigned int thread)
+{
+    if (thread && __atomic_load_n( &wine_nx_picture_thread, __ATOMIC_ACQUIRE ) == thread)
+        __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
+}
+
+void wine_nx_window_picture_presented(void)
+{
+    if (__atomic_exchange_n( &wine_nx_window_picture_pending, 0, __ATOMIC_ACQ_REL ) &&
+        !__atomic_exchange_n( &wine_nx_window_picture_shown, 1, __ATOMIC_ACQ_REL ))
+        log_line( "[NXSCREEN] foreground primary surface submitted" );
+}
+
+void wine_nx_screen_picture_drawn(unsigned int thread, int redrawn)
+{
+    extern void wine_nx_vk_displace_screen(void) __attribute__((weak));
+    int give, shown;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give && wine_nx_vk_displace_screen) wine_nx_vk_displace_screen();
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved &&
+           !__atomic_load_n( &wine_nx_vk_swapchains, __ATOMIC_ACQUIRE );
+    if (give) wine_nx_screen_reserved = 1;
+    shown = !wine_nx_gl_window || wine_nx_screen_reserved;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give)
+    {
+        wine_nx_compositor_resume();
+        log_line( "[NXVK] a window was drawn with GDI and no swapchain shows the screen; the compositor shows the "
+                  "windows until the next swapchain" );
+    }
+    if (!shown) return;
+    if (redrawn) __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
+    else __atomic_store_n( &wine_nx_picture_thread, thread, __ATOMIC_RELEASE );
 }
 
 /* The OpenGL surface is destroyed; the framebuffer or the compositor may take
@@ -781,10 +893,22 @@ void *wine_nx_gl_acquire_window(void)
 void wine_nx_gl_release_window(void)
 {
     int compositor = wine_nx_compositor_running();
+    int surfaces;
 
     pthread_mutex_lock( &wine_nx_fb_mutex );
-    wine_nx_gl_window = 0;
+    surfaces = wine_nx_vk_surfaces > 1 ? --wine_nx_vk_surfaces : 0;
+    if (!surfaces)
+    {
+        wine_nx_vk_surfaces = 0;
+        wine_nx_gl_window = 0;
+        wine_nx_screen_reserved = 0;
+    }
     pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (surfaces)
+    {
+        log_line( "[NXVK] a Vulkan surface let go of the screen; %d still hold it", surfaces );
+        return;
+    }
     log_line( "[NXGL] screen returned to the %s", compositor ? "compositor" : "framebuffer" );
     if (compositor) wine_nx_compositor_resume();
 }
@@ -855,6 +979,21 @@ void wine_nx_cursor_show( int visible )
     int x = (int)wine_nx_cursor.x, y = (int)wine_nx_cursor.y;
     pthread_mutex_unlock( &wine_nx_fb_mutex );
     wine_nx_compositor_cursor( x, y, visible );
+}
+
+int wine_nx_cursor_state( int *x, int *y, int *visible )
+{
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (x) *x = (int)wine_nx_cursor.x;
+    if (y) *y = (int)wine_nx_cursor.y;
+    if (visible) *visible = wine_nx_cursor_visible;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    return 1;
+}
+
+void wine_nx_cursor_bitmap( uint32_t *rgba )
+{
+    if (rgba) pointer_cursor_rgba( rgba );
 }
 
 /* The floating keyboard (osk.c) draws its labels with the console's own font,
@@ -1070,6 +1209,10 @@ static int runtime_wheel[2];
 
 void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
+extern int wine_nx_watch_window_pictures( void ) __attribute__((weak));
+extern void carafeHidPoll( void ) __attribute__((weak));
+extern void wine_nx_menu_poll( u64 held ) __attribute__((weak));
+extern void carafeSettingsTick( void ) __attribute__((weak));
 
 
 int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
@@ -1108,6 +1251,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         HidAnalogStickState left = padGetStickPos( &wine_nx_pad, 0 ), right = padGetStickPos( &wine_nx_pad, 1 );
         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
     }
+    if (wine_nx_menu_poll) wine_nx_menu_poll( all_held );
     {
         /* - and A together: the controls panel up, and the same again down. */
         const u64 with_a = HidNpadButton_Minus | HidNpadButton_A;
@@ -1392,11 +1536,13 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     wine_nx_pointer_moved |= moved;
     {
         const u64 chord = HidNpadButton_Plus | HidNpadButton_Minus;
-        if ((all_held & chord) != chord) quit_since = 0;
+        if ((all_held & (chord | HidNpadButton_L | HidNpadButton_R)) != chord) quit_since = 0;
         else if (!quit_since) quit_since = now;
         else if (armTicksToNs( now - quit_since ) >= 1000000000ull) leave = 1;
     }
     pthread_mutex_unlock( &wine_nx_pointer_mutex );
+    if (carafeSettingsTick) carafeSettingsTick();
+    if (carafeHidPoll) carafeHidPoll();
     if (leave) wine_nx_request_quit( "+ and - held" );
     wine_nx_cursor_move( *x, *y );
     return moved;
@@ -1485,6 +1631,7 @@ static int call_pe_entry_point( void *entry )
 static void park_forever(void)
 {
     log_line( "[EXIT] parked after runtime handoff; close from HOME" );
+    appletNotifyRunning( NULL );
     for (;;) svcSleepThread( 1000000000LL );
 }
 
@@ -2127,7 +2274,8 @@ static const char runtime_environment[] =
     "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
     "windir=C:\\windows\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0"
-    "WINE_NX_GRAPHICS_PATH=\0";
+    "WINE_NX_GRAPHICS_PATH=\0"
+    "WINE_NX_WINDOW_PICTURE_EVENT=\0";
 
 static size_t runtime_fex_environment( const char *target, char *buffer, size_t size )
 {
@@ -2320,6 +2468,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     char nt_path[640], dll_path[1024], current_dir[512];
     char cmdline[1024], args_buf[896], args_path[512];
     char fex_environment[NX_FEX_OPTION_COUNT * 80];
+    char picture_event[64] = "";
     size_t chars, size, i, fex_environment_size;
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
@@ -2424,6 +2573,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     if (left4dead && !left4dead_append_arguments( cmdline, sizeof(cmdline) )) return NULL;
     if (api) log_line( "[ARGS] final CommandLine='%s'", cmdline );
 
+    if (!wine_nx_window_picture_event)
+    {
+        NTSTATUS ev_status = NtCreateEvent( &wine_nx_window_picture_event, EVENT_MODIFY_STATE, NULL,
+                                            NotificationEvent, FALSE );
+        if (ev_status) log_line( "[NXSCREEN] publication event unavailable: %08x", (unsigned int)ev_status );
+    }
+    if (wine_nx_window_picture_event)
+        snprintf( picture_event, sizeof(picture_event), "%lx:%lx", (unsigned long)GetCurrentProcessId(),
+                  (unsigned long)(uintptr_t)wine_nx_window_picture_event );
+
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;
     chars += strlen( dos_path ) + 1;
@@ -2432,6 +2591,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
     chars += fex_environment_size;
+    chars += strlen( picture_event );
     if (left4dead) chars += sizeof(LEFT4DEAD_ENVIRONMENT) - 1;
     size = sizeof(*params) + chars * sizeof(WCHAR);
 
@@ -2475,6 +2635,11 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         {
             for (i = 0; i < 22; i++) *cursor++ = (unsigned char)*value++;
             value = graphics_path;
+        }
+        if (!strncmp( entry, "WINE_NX_WINDOW_PICTURE_EVENT=", 29 ))
+        {
+            for (i = 0; i < 29; i++) *cursor++ = (unsigned char)*value++;
+            value = picture_event;
         }
         do *cursor++ = (unsigned char)*value; while (*value++);
     }
@@ -3951,6 +4116,7 @@ static void release_thread_local_pages( void )
 static int runtime_components_run;
 /* The program this runtime started, for game_fixes_finish when it ends. */
 static char runtime_program[512];
+static int runtime_forwarded_launch;
 
 /* The exit code the program gave NtTerminateProcess (dlls/ntdll/unix/process.c);
  * ~0 while it has not ended by itself. */
@@ -4151,6 +4317,37 @@ static int return_to_launcher( void )
         if (runtime_program[0] &&
             game_fixes_finish( RUNTIME_DIR, runtime_program, wine_nx_program_exit_code, line, sizeof(line) ))
             log_line( "%s", line );
+    }
+    {
+        extern _Bool carafeRestartRequested( void ) __attribute__((weak));
+        extern _Bool carafeGameArgv( char *out, size_t size ) __attribute__((weak));
+
+        if (!runtime_components_run && carafeRestartRequested && carafeRestartRequested())
+        {
+            char argv[2048];
+
+            if (!still_lent && envHasNextLoad() && own_nro[0])
+            {
+                if (carafeGameArgv && carafeGameArgv( argv, sizeof(argv) ) &&
+                    R_SUCCEEDED( envSetNextLoad( own_nro, argv ) ))
+                {
+                    log_step( "starting the game again with the new settings" );
+                    return 0;
+                }
+                if ((runtime_forwarded_launch || (runtime_program[0] && run_next_push( runtime_program ))) &&
+                    R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+                {
+                    log_step( "starting the game again with the new settings" );
+                    return 0;
+                }
+            }
+            if (still_lent && R_SUCCEEDED( appletRestartProgram( NULL, 0 ) ))
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "closing this program; the application starts again with the new settings" );
+                return 0;
+            }
+        }
     }
     /* A program waiting in run-next.txt (after the components setup) is started
      * by the runtime started again, whether or not the launcher would be. */
@@ -4375,6 +4572,7 @@ int main( int argc, char **argv )
         if (recovered < 0)
         {
             wine_nx_console_quiet = 0;
+            appletNotifyRunning( NULL );
             PadState pad;
             log_line( "[UPDATE] Recovery failed. Restore switch/wine/updates/previous.nro before starting a game. Press + to close." );
             padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
@@ -4548,6 +4746,7 @@ int main( int argc, char **argv )
         const char *name;
 
         autorun = 1;
+        runtime_forwarded_launch = forwarded_game > 0;
         if (!resumed_program && !forwarded_game) snprintf( target, sizeof(target), "%s", argv[1] );
         name = strrchr( target, '/' );
         log_line( "[TARGET] starting %s", name ? name + 1 : target );
@@ -4597,6 +4796,7 @@ int main( int argc, char **argv )
         log_lent_memory( "the settings" );
         log_line( "[LAUNCHER] bringing the screen up: the launcher" );
         wine_nx_runtime_network_fast( 1 );
+        appletNotifyRunning( NULL );
         chosen = wine_nx_launcher_run( &options, target, sizeof(target) );
         wine_nx_runtime_network_fast( 0 );
         log_lent_memory( "the launcher" );
@@ -4964,6 +5164,7 @@ int main( int argc, char **argv )
      * to go, and before the program runs or makes a thread of its own. */
     if (!low_window_available) hold_thread_local_pages();
     else log_line( "[TLS] kernel TLS stays above 4 GiB; placeholder threads not needed" );
+    if (!wine_nx_compositor_enabled() || !wine_nx_watch_window_pictures) appletNotifyRunning( NULL );
     {
         params = runtime_create_process_params( target, &main_nt_name, dos_path, sizeof(dos_path) );
         if (!params)

@@ -436,14 +436,26 @@ static void move( unsigned int direction )
     generation++;
 }
 
+extern _Bool carafeMenuVisible( void ) __attribute__((weak));
+extern unsigned int carafeMenuGeneration( void ) __attribute__((weak));
+extern unsigned int carafeMenuCopy( int screen_width, int screen_height, void *pixels, int stride, int rgba )
+    __attribute__((weak));
+extern int carafeMenuHandleInput( unsigned int held, int stick_x, int stick_y,
+                                  int touching, int touch_x, int touch_y, uint64_t now_ns )
+    __attribute__((weak));
+extern void carafeMenuClose( void ) __attribute__((weak));
+
 int wine_nx_osk_visible( void )
 {
+    if (carafeMenuVisible && carafeMenuVisible()) return 1;
     return __atomic_load_n( &visible, __ATOMIC_RELAXED );
 }
 
 unsigned int wine_nx_osk_generation( void )
 {
-    return __atomic_load_n( &generation, __ATOMIC_RELAXED );
+    unsigned int gen = __atomic_load_n( &generation, __ATOMIC_RELAXED );
+    if (carafeMenuGeneration) gen += carafeMenuGeneration();
+    return gen;
 }
 
 /* One surface, three views of it: the keyboard, what the controller sends, and
@@ -571,6 +583,13 @@ int wine_nx_osk_input( unsigned int held, int stick_x, int stick_y,
 {
     unsigned int pressed, bit;
     int i, on_panel;
+
+    if (carafeMenuVisible && carafeMenuVisible() && carafeMenuHandleInput)
+    {
+        int touching = count > 0 && points != NULL;
+        return carafeMenuHandleInput( held, stick_x, stick_y, touching,
+                                      touching ? points[0].x : 0, touching ? points[0].y : 0, now_ns );
+    }
 
     pthread_mutex_lock( &osk_lock );
     if (!visible)
@@ -913,6 +932,16 @@ int wine_nx_osk_frame( int screen_width, int screen_height, struct wine_nx_osk_f
     struct geometry g;
     struct map_geometry map;
 
+    if (carafeMenuVisible && carafeMenuVisible())
+    {
+        frame->x = 0;
+        frame->y = 0;
+        frame->width = screen_width;
+        frame->height = screen_height;
+        frame->generation = (carafeMenuGeneration ? carafeMenuGeneration() : 1) | 0x80000000u;
+        return 1;
+    }
+
     pthread_mutex_lock( &osk_lock );
     if (!visible && !map_visible)
     {
@@ -946,6 +975,12 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
     unsigned int copied = 0;
     int x, y;
 
+    if (carafeMenuVisible && carafeMenuVisible() && carafeMenuCopy)
+    {
+        copied = carafeMenuCopy( screen_width, screen_height, pixels, stride, rgba );
+        if (copied) return copied;
+    }
+
     pthread_mutex_lock( &osk_lock );
     if (visible || map_visible)
     {
@@ -968,6 +1003,7 @@ unsigned int wine_nx_osk_copy( int screen_width, int screen_height, void *pixels
 
 void wine_nx_osk_reset( void )
 {
+    if (carafeMenuClose) carafeMenuClose();
     pthread_mutex_lock( &osk_lock );
     visible = at_top = map_visible = map_count = map_kind = 0;
     release_all();

@@ -643,6 +643,15 @@ add_executable(wine-nx-runtime
     source/osk.c
     source/compositor_gl.c
     source/compositor_egl.c
+    source/carafe_hid.c
+    source/carafe_overlay.c
+    source/carafe_draw.c
+    source/carafe_text.c
+    source/carafe_settings.c
+    source/carafe_registry.c
+    source/carafe_menu.c
+    ../dlls/winebus.sys/hid.c
+    ../dlls/hidparse.sys/main.c
     $<TARGET_OBJECTS:wine-horizon-real>
     $<TARGET_OBJECTS:wine-server-real>
     $<TARGET_OBJECTS:wine-sync-real>
@@ -752,7 +761,14 @@ else()
 endif()
 # libnx's service macros use C11's static_assert, which the rest of the tree,
 # built as gnu99, does not have.
-set_source_files_properties(source/forwarder.c PROPERTIES COMPILE_OPTIONS "-std=gnu11")
+set_source_files_properties(source/forwarder.c source/carafe_hid.c
+    source/carafe_overlay.c source/carafe_draw.c source/carafe_text.c
+    source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c
+    PROPERTIES COMPILE_OPTIONS "-std=gnu11")
+set_property(SOURCE source/carafe_hid.c ../dlls/winebus.sys/hid.c APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/winebus.sys")
+set_property(SOURCE ../dlls/hidparse.sys/main.c APPEND PROPERTY
+    COMPILE_OPTIONS -include "${CMAKE_CURRENT_SOURCE_DIR}/source/carafe_hid_kernel.h")
 set_source_files_properties(source/audio_unix.c source/wma_unix.c source/xinput_unix.c
     source/schannel_mbedtls.c source/crypt32_roots.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
 include(cmake/Media.cmake)
@@ -996,7 +1012,8 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c
+    source/carafe_draw.c source/carafe_text.c source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)

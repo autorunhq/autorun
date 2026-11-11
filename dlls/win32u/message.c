@@ -49,6 +49,7 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 unsigned int wine_nx_keys_taken;
 
 #ifdef __SWITCH__
+extern void wine_nx_screen_input_waits( unsigned int thread ) __attribute__((weak));
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int wine_nx_runtime_verbose __attribute__((weak));
 
@@ -3509,6 +3510,10 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
 
     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
+#ifdef __SWITCH__
+    if (!(changed_mask & QS_SMRESULT) && wine_nx_screen_input_waits)
+        wine_nx_screen_input_waits( GetCurrentThreadId() );
+#endif
 
 #ifdef __SWITCH__
     /* The Switch display driver polls controller and touch input from the
@@ -3743,6 +3748,7 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
     {
 #ifdef __SWITCH__
         LARGE_INTEGER delay = {.QuadPart = -100000}; /* poll every 10 ms until Horizon queues are event-backed */
+        if (wine_nx_screen_input_waits) wine_nx_screen_input_waits( GetCurrentThreadId() );
         NtDelayExecution( FALSE, &delay );
         check_for_driver_events();
 #else
@@ -3866,6 +3872,10 @@ static NTSTATUS post_dde_message_call( HWND hwnd, UINT msg, WPARAM wparam, LPARA
 }
 
 
+#ifdef __SWITCH__
+__thread int wine_nx_reply_waits;
+#endif
+
 /***********************************************************************
  *           wait_message_reply
  *
@@ -3900,7 +3910,13 @@ static void wait_message_reply( UINT flags )
             continue;
         }
 
+#ifdef __SWITCH__
+        wine_nx_reply_waits++;
+#endif
         wait_message( 1, &server_queue, INFINITE, wake_mask, wake_mask, 0 );
+#ifdef __SWITCH__
+        wine_nx_reply_waits--;
+#endif
     }
 }
 

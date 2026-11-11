@@ -517,6 +517,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_REGISTER_ASYNC 132
 #define HORIZON_REQ_CANCEL_ASYNC 133
 #define HORIZON_REQ_GET_ASYNC_RESULT 134
+#define HORIZON_REQ_READ 136
+#define HORIZON_REQ_WRITE 137
 #define HORIZON_REQ_IOCTL 138
 #define HORIZON_REQ_CREATE_NAMED_PIPE 140
 #define HORIZON_REQ_SET_NAMED_PIPE_INFO 141
@@ -933,7 +935,8 @@ enum horizon_server_object_type
     HORIZON_SERVER_OBJECT_COMPLETION,
     HORIZON_SERVER_OBJECT_COMPLETION_WAIT,
     HORIZON_SERVER_OBJECT_NAMED_PIPE,
-    HORIZON_SERVER_OBJECT_NSI
+    HORIZON_SERVER_OBJECT_NSI,
+    HORIZON_SERVER_OBJECT_DEVICE
 };
 
 struct horizon_ratio
@@ -1681,6 +1684,18 @@ static unsigned int horizon_async_apc_ids;
 
 #define HORIZON_APC_USER      1
 #define HORIZON_APC_ASYNC_IO  2
+#define HORIZON_DEVICE_OUT_MAX 0x10000
+#define HORIZON_METHOD_BUFFERED 0
+
+extern void *carafeHidOpen( const unsigned short *name, unsigned int bytes ) __attribute__((weak));
+extern void carafeHidClose( void *file ) __attribute__((weak));
+extern unsigned int carafeHidIoctl( void *file, unsigned int code, const unsigned char *in, unsigned int in_size,
+                                    unsigned char *out, unsigned int out_max, unsigned int *out_size )
+    __attribute__((weak));
+extern unsigned int carafeHidRead( void *file, unsigned char *out, unsigned int out_max, unsigned int *out_size )
+    __attribute__((weak));
+extern unsigned int carafeHidWrite( void *file, const unsigned char *in, unsigned int size, unsigned int *written )
+    __attribute__((weak));
 #define HORIZON_APC_CALL_SIZE 64  /* union apc_call */
 #define HORIZON_STATUS_NOT_FOUND 0xc0000225u
 #define HORIZON_NT_ERROR(status) (((status) >> 30) == 3)
@@ -3430,6 +3445,7 @@ struct horizon_server_object
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
     struct horizon_server_object *mapping_shared_file;
     struct horizon_pe_version *mapping_version;
+    void *device_file;
 };
 
 struct horizon_server_handle_entry
@@ -5066,6 +5082,7 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (!object) return;
     if (object->type == HORIZON_SERVER_OBJECT_FILE) horizon_file_locks_release_locked( object );
     if (object->type == HORIZON_SERVER_OBJECT_TIMER) horizon_server_unlink_timer_locked( object );
+    if (object->type == HORIZON_SERVER_OBJECT_DEVICE && carafeHidClose) carafeHidClose( object->device_file );
     if (object->type == HORIZON_SERVER_OBJECT_THREAD)
     {
         struct horizon_server_object **ptr;
@@ -5169,9 +5186,10 @@ static unsigned int horizon_server_close_object_handle( unsigned int handle )
         object = entry->object;
         horizon_server_unlink_handle_locked( entry );
         if (object) horizon_sync_notify_object_locked( object, 0 );
-        /* What waits on a socket that is closed ends, as wineserver ends it. */
+        /* What waits on a socket, pipe, or device that is closed ends, as wineserver ends it. */
         if (object && (object->type == HORIZON_SERVER_OBJECT_SOCK ||
-                       object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE) && horizon_asyncs.head &&
+                       object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE ||
+                       object->type == HORIZON_SERVER_OBJECT_DEVICE) && horizon_asyncs.head &&
             horizon_async_cancel( &horizon_asyncs, handle, 0, 0, horizon_async_now(), 1 ))
             horizon_sync_notify_async_locked();
         /* server/completion.c's close_handle: closing a port's last handle
@@ -7300,6 +7318,7 @@ static int horizon_server_object_is_signaled( const struct horizon_server_object
     case HORIZON_SERVER_OBJECT_SEMAPHORE:
         return object->count > 0;
     case HORIZON_SERVER_OBJECT_TIMER:
+    case HORIZON_SERVER_OBJECT_DEVICE:
         return object->signaled;
     case HORIZON_SERVER_OBJECT_THREAD:
         return object->thread.terminated;
@@ -12283,7 +12302,8 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
               entry->object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE) ||
              entry->object->file_fd == -1)
     {
-        if (entry->object->type == HORIZON_SERVER_OBJECT_FILE && entry->object->file_is_dir)
+        if ((entry->object->type == HORIZON_SERVER_OBJECT_FILE && entry->object->file_is_dir) ||
+            entry->object->type == HORIZON_SERVER_OBJECT_DEVICE)
             reply.header.error = HORIZON_STATUS_BAD_DEVICE_TYPE;
         else
             reply.header.error = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
@@ -13440,6 +13460,7 @@ static void horizon_report_async( const char *what, const struct horizon_async *
     static LONG reported;
     char message[192];
 
+    if (async->kind == HORIZON_ASYNC_DEVICE_READ) return;
     if (__atomic_add_fetch( &reported, 1, __ATOMIC_RELAXED ) > 24) return;
     snprintf( message, sizeof(message), "[ASYNC] %s: socket %04x %s by %04x, status %08x%s%s",
               what, async->sock,
@@ -14129,8 +14150,28 @@ static int horizon_server_handle_open_file_object( struct horizon_server_connect
     unsigned int chars = data_size / 2;
     int is_afd = 0;
     int is_nsi = horizon_nsi_device_name( data, data_size );
+    void *device_file = carafeHidOpen && !(data_size & 1) ? carafeHidOpen( (const void *)data, data_size ) : NULL;
 
     memset( &reply, 0, sizeof(reply) );
+
+    if (device_file)
+    {
+        struct horizon_server_handle_entry *entry;
+
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        if ((entry = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_DEVICE )))
+        {
+            entry->object->device_file = device_file;
+            entry->object->file_access = request->access;
+            entry->object->file_options = request->options;
+            entry->object->signaled = 1;
+            reply.handle = entry->handle;
+        }
+        else reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+        if (reply.header.error && carafeHidClose) carafeHidClose( device_file );
+        return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    }
 
     /* accept "\Device\Afd" and "\Device\Afd\..." in any case */
     if (chars >= 11)
@@ -14798,6 +14839,193 @@ static void horizon_server_ioctl_done( unsigned int tid, const struct horizon_as
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 }
 
+struct horizon_device_io_request
+{
+    struct horizon_server_request_header header;
+    char __pad_12[4];
+    struct horizon_async_data async;
+    long long pos;
+};
+
+struct horizon_device_io_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int wait;
+    unsigned int options;
+    unsigned int size;
+    char __pad_20[4];
+};
+
+typedef char horizon_device_io_async_offset[
+    offsetof( struct horizon_device_io_request, async ) == 16 ? 1 : -1];
+typedef char horizon_device_io_size_offset[offsetof( struct horizon_device_io_reply, size ) == 16 ? 1 : -1];
+
+static void horizon_server_device_done_locked( unsigned int handle )
+{
+    struct horizon_server_object *device;
+
+    if (horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, &device )) return;
+    if (device->signaled) return;
+    device->signaled = 1;
+    horizon_sync_notify_object_locked( device, 1 );
+}
+
+static void horizon_server_device_start_locked( struct horizon_server_object *device )
+{
+    device->signaled = 0;
+}
+
+void wine_nx_device_reports( void )
+{
+    struct horizon_async *async;
+    int ready = 0;
+
+    if (!carafeHidRead) return;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    for (async = horizon_asyncs.head; async; async = async->next)
+    {
+        struct horizon_server_object *device;
+        unsigned char *out;
+        unsigned int size = 0, status;
+
+        if (async->kind != HORIZON_ASYNC_DEVICE_READ || async->state != HORIZON_ASYNC_QUEUED) continue;
+        if (horizon_server_find_typed_object_locked( async->sock, HORIZON_SERVER_OBJECT_DEVICE, &device )) continue;
+        if (!(out = malloc( async->out_size ? async->out_size : 1 ))) continue;
+        status = carafeHidRead( device->device_file, out, async->out_size, &size );
+        if (status == HORIZON_STATUS_PENDING)
+        {
+            free( out );
+            continue;
+        }
+        free( async->out );
+        async->out = out;
+        async->out_size = size;
+        async->out_status = status;
+        async->out_info = size;
+        horizon_async_ready( &horizon_asyncs, async, HORIZON_STATUS_ALERTED, horizon_async_now() );
+        ready = 1;
+    }
+    if (ready) horizon_sync_notify_async_locked();
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+static int horizon_server_handle_device_read( struct horizon_server_connection *connection,
+                                              const unsigned char *message )
+{
+    const struct horizon_device_io_request *request = (const void *)message;
+    struct horizon_device_io_reply reply;
+    struct horizon_server_object *device;
+    struct horizon_async *async;
+    unsigned int max = request->header.reply_size, size = 0, status;
+    unsigned char *out;
+    int ret;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidRead)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    if (max > HORIZON_DEVICE_OUT_MAX) max = HORIZON_DEVICE_OUT_MAX;
+    if (!(out = malloc( max ? max : 1 )))
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+    {
+        horizon_server_device_start_locked( device );
+        status = carafeHidRead( device->device_file, out, max, &size );
+        if (status == HORIZON_STATUS_PENDING)
+        {
+            if (!(async = horizon_server_async_create_locked( connection, &request->async, HORIZON_ASYNC_READ,
+                                                              HORIZON_ASYNC_DEVICE_READ )))
+                status = HORIZON_STATUS_NO_MEMORY;
+            else
+            {
+                async->out_size = max;
+                async->state = HORIZON_ASYNC_QUEUED;
+                async->pending = 1;
+            }
+        }
+        if (status != HORIZON_STATUS_PENDING) horizon_server_device_done_locked( request->async.handle );
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (status != HORIZON_STATUS_PENDING)
+        horizon_server_ioctl_done( connection->tid, &request->async, status, size );
+    reply.header.error = status;
+    reply.header.reply_size = status == HORIZON_STATUS_PENDING ? 0 : size;
+    ret = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply),
+                                      reply.header.reply_size ? out : NULL, reply.header.reply_size );
+    free( out );
+    return ret;
+}
+
+static int horizon_server_handle_device_write( struct horizon_server_connection *connection,
+                                               const unsigned char *message,
+                                               const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_device_io_request *request = (const void *)message;
+    struct horizon_device_io_reply reply;
+    struct horizon_server_object *device;
+    unsigned int written = 0, status;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidWrite)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+        status = carafeHidWrite( device->device_file, data, data_size, &written );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    horizon_server_ioctl_done( connection->tid, &request->async, status, written );
+    reply.header.error = status;
+    reply.size = written;
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_device_ioctl( struct horizon_server_connection *connection,
+                                               const struct horizon_ioctl_request *request,
+                                               const unsigned char *data, unsigned int data_size )
+{
+    struct horizon_ioctl_reply reply;
+    struct horizon_server_object *device;
+    unsigned int max = request->header.reply_size, in_size = data_size, out_size = 0, status;
+    unsigned char *out;
+    int ret;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidIoctl)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    if (max > HORIZON_DEVICE_OUT_MAX) max = HORIZON_DEVICE_OUT_MAX;
+    if (!(out = calloc( 1, max ? max : 1 )))
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
+    if ((request->code & 3) != HORIZON_METHOD_BUFFERED && data_size >= request->header.reply_size)
+    {
+        in_size = data_size - request->header.reply_size;
+        memcpy( out, data + in_size, min( max, request->header.reply_size ) );
+    }
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+        status = carafeHidIoctl( device->device_file, request->code, data, in_size, out, max, &out_size );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (HORIZON_NT_ERROR( status )) out_size = 0;
+    else if (out_size > max) out_size = max;
+    horizon_server_ioctl_done( connection->tid, &request->async, status, out_size );
+    reply.header.error = status;
+    reply.header.reply_size = out_size;
+    ret = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), out_size ? out : NULL, out_size );
+    free( out );
+    return ret;
+}
+
+static int horizon_server_is_device_locked( unsigned int handle )
+{
+    struct horizon_server_object *device;
+
+    return !horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, &device );
+}
+
 static int horizon_server_handle_nsi_ioctl( struct horizon_server_connection *connection,
                                            const struct horizon_ioctl_request *request,
                                            const unsigned char *data, unsigned int data_size )
@@ -14925,6 +15153,12 @@ static int horizon_server_handle_ioctl( struct horizon_server_connection *connec
     unsigned int out_size = 0;
     unsigned int out_max = request->header.reply_size;
     unsigned int status;
+    int is_device;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    is_device = horizon_server_is_device_locked( handle );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (is_device) return horizon_server_handle_device_ioctl( connection, request, data, data_size );
 
     if ((request->code & 0xfffff000) == 0x00121000) /* Wine's private NSI ioctls */
         return horizon_server_handle_nsi_ioctl( connection, request, data, data_size );
@@ -16329,6 +16563,8 @@ static unsigned int horizon_server_find_io_object_locked( unsigned int handle, s
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NSI, object );
     if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NAMED_PIPE, object );
+    if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
+        status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, object );
     return status;
 }
 
@@ -16851,6 +17087,7 @@ static int horizon_sync_queue_locked( struct horizon_sync_waiter *waiter )
         case HORIZON_SERVER_OBJECT_MUTEX:
         case HORIZON_SERVER_OBJECT_SEMAPHORE:
         case HORIZON_SERVER_OBJECT_TIMER:
+        case HORIZON_SERVER_OBJECT_DEVICE:
         case HORIZON_SERVER_OBJECT_THREAD:
         case HORIZON_SERVER_OBJECT_MSG_QUEUE:
         case HORIZON_SERVER_OBJECT_COMPLETION:
@@ -17127,6 +17364,7 @@ static void horizon_async_finish_locked( struct horizon_async *async, unsigned i
         event->object->signaled = 1;
         horizon_sync_notify_object_locked( event->object, 1 );
     }
+    if (async->kind == HORIZON_ASYNC_DEVICE_READ) horizon_server_device_done_locked( async->sock );
     if (async->pending) horizon_report_async( "done", async, status );
 }
 
@@ -17561,6 +17799,13 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_IOCTL:
             status = horizon_server_handle_ioctl( connection, message, request_data,
                                                   header->request_size );
+            break;
+        case HORIZON_REQ_READ:
+            status = horizon_server_handle_device_read( connection, message );
+            break;
+        case HORIZON_REQ_WRITE:
+            status = horizon_server_handle_device_write( connection, message, request_data,
+                                                         header->request_size );
             break;
         case HORIZON_REQ_CREATE_NAMED_PIPE:
             status = horizon_server_handle_create_named_pipe( connection, message, request_data,

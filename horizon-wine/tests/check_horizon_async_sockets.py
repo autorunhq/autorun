@@ -236,6 +236,7 @@ static unsigned int horizon_server_queue_user_apc_locked( struct horizon_server_
 
 static void horizon_async_finish_locked( struct horizon_async *async, unsigned int status,
                                          unsigned long long total );
+static void horizon_server_device_done_locked( unsigned int handle ) { (void)handle; }
 
 #define calloc test_calloc
 @FUNCTIONS@

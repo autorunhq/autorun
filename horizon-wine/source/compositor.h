@@ -49,6 +49,8 @@ void wine_nx_layer_destroy( struct wine_nx_layer *layer );
  * stride pixels laid out like the layer's. */
 void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, int stride,
                            int left, int top, int right, int bottom );
+int wine_nx_layer_redrawn( struct wine_nx_layer *layer, const uint32_t *pixels, int stride,
+                           int left, int top, int right, int bottom );
 /* Show the layer's top-left width by height pixels with their corner at x, y on
  * the screen; a width or height of 0 hides it. */
 void wine_nx_layer_place( struct wine_nx_layer *layer, int x, int y, int width, int height );

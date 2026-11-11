@@ -2,6 +2,7 @@
  * The Switch controller behind Wine's XInput DLLs: player 1's pad, handheld
  * or docked. */
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <switch.h>
 #include "ntstatus.h"
@@ -35,13 +36,35 @@ static int pad_ready;
 static XINPUT_GAMEPAD last_gamepad;
 static DWORD packet;
 
-static NTSTATUS nx_xinput_get_state_unix( void *args )
+static void nx_xinput_note( const struct nx_xinput_state_params *params )
 {
-    struct nx_xinput_state_params *params = args;
+    extern void wine_nx_runtime_trace( const char *msg );
+    static int read_noted, press_noted;
+    char message[96];
+
+    if (!__atomic_load_n( &read_noted, __ATOMIC_RELAXED ) &&
+        !__atomic_exchange_n( &read_noted, 1, __ATOMIC_RELAXED ))
+    {
+        snprintf( message, sizeof(message), "[XINPUT] the game reads player 1: %s",
+                  params->connected ? "the pad is there" : "no pad" );
+        wine_nx_runtime_trace( message );
+    }
+    if (params->connected && params->state.Gamepad.wButtons && !__atomic_load_n( &press_noted, __ATOMIC_RELAXED ) &&
+        !__atomic_exchange_n( &press_noted, 1, __ATOMIC_RELAXED ))
+    {
+        snprintf( message, sizeof(message), "[XINPUT] the first press reaches the game: buttons %#x",
+                  params->state.Gamepad.wButtons );
+        wine_nx_runtime_trace( message );
+    }
+}
+
+static void nx_xinput_read( struct nx_xinput_state_params *params )
+{
     XINPUT_GAMEPAD gamepad;
 
     params->connected = 0;
-    if (params->index || wine_nx_input_profile.mode == INPUT_KEYBOARD_MOUSE) return STATUS_SUCCESS;
+    memset( &params->state, 0, sizeof(params->state) );
+    if (params->index || wine_nx_input_profile.mode == INPUT_KEYBOARD_MOUSE) return;
     pthread_mutex_lock( &pad_mutex );
     if (!pad_ready)
     {
@@ -79,6 +102,28 @@ static NTSTATUS nx_xinput_get_state_unix( void *args )
         params->state.Gamepad = gamepad;
     }
     pthread_mutex_unlock( &pad_mutex );
+}
+
+int wine_nx_xinput_presented( void )
+{
+    return wine_nx_input_profile.mode != INPUT_KEYBOARD_MOUSE;
+}
+
+int wine_nx_xinput_player( XINPUT_GAMEPAD *gamepad )
+{
+    struct nx_xinput_state_params params = { .index = 0 };
+
+    nx_xinput_read( &params );
+    *gamepad = params.state.Gamepad;
+    return params.connected;
+}
+
+static NTSTATUS nx_xinput_get_state_unix( void *args )
+{
+    struct nx_xinput_state_params *params = args;
+
+    nx_xinput_read( params );
+    nx_xinput_note( params );
     return STATUS_SUCCESS;
 }
 

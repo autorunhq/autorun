@@ -13,6 +13,8 @@
 #include "thread_profile.h"
 #include "compositor_gl.h"
 
+extern int wine_nx_osk_translucent( void ) __attribute__((weak));
+
 struct wine_nx_layer
 {
     struct wine_nx_layer *next;             /* in comp.layers */
@@ -171,6 +173,35 @@ void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, 
     pthread_mutex_lock( &comp.lock );
     request_frame();
     pthread_mutex_unlock( &comp.lock );
+}
+
+int wine_nx_layer_redrawn( struct wine_nx_layer *layer, const uint32_t *pixels, int stride,
+                           int left, int top, int right, int bottom )
+{
+    int redrawn = 0, x, y;
+
+    if (!layer) return 0;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > layer->width) right = layer->width;
+    if (bottom > layer->height) bottom = layer->height;
+    if (left >= right || top >= bottom) return 0;
+
+    pthread_mutex_lock( &layer->pixels_lock );
+    for (y = top; y < bottom && !redrawn && layer->pixels; y++)
+    {
+        const uint32_t *old = layer->pixels + (size_t)y * layer->width;
+        const uint32_t *cur = pixels + (size_t)y * stride;
+
+        for (x = left; x < right; x++)
+            if ((old[x] & 0xffffff) && (old[x] & 0xffffff) != (cur[x] & 0xffffff))
+            {
+                redrawn = 1;
+                break;
+            }
+    }
+    pthread_mutex_unlock( &layer->pixels_lock );
+    return redrawn;
 }
 
 void wine_nx_layer_place_scaled( struct wine_nx_layer *layer, int x, int y, int width, int height,
@@ -469,6 +500,7 @@ static void *presenter_thread( void *arg )
                 quads[i].src_width = quads[i].width;
                 quads[i].src_height = quads[i].height;
             }
+            quads[i].blend = 0;
         }
         if (count < capacity && wine_nx_osk_frame( comp.width, comp.height, &osk ))
         {
@@ -509,6 +541,9 @@ static void *presenter_thread( void *arg )
                 quads[count].width = keyboard->width;
                 quads[count].height = keyboard->height;
                 quads[count].src_x = quads[count].src_y = 0;
+                quads[count].src_width = keyboard->width;
+                quads[count].src_height = keyboard->height;
+                quads[count].blend = wine_nx_osk_translucent && wine_nx_osk_translucent();
                 drawn[count++] = keyboard;
             }
         }
