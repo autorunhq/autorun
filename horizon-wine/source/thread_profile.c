@@ -29,7 +29,12 @@
 #include "thread_profile.h"
 
 #define NX_PROF_MAX_THREADS  128
+#define WINE_NX_STOP_SUSPEND 1
 #define WINE_NX_STOP_END     2
+#define WINE_NX_STOP_KERNEL  4
+#define WINE_NX_STOP_HELD    8
+#define WINE_NX_STOP_LEAVING 16
+#define WINE_NX_STOP_GONE    32
 #define NX_PROF_TARGETS      4
 #define NX_PROF_PERIOD_NS    2000000
 #define NX_PROF_MIN_PERMILLE 30  /* sample threads that used at least 3% of a core */
@@ -70,6 +75,8 @@ struct nx_prof_thread
     uint64_t teb;
     uint64_t last_ticks, balance_ticks;
     volatile int stop[2];
+    const void * volatile frame;
+    const void * volatile changed_contexts;
 };
 
 /* horizon.c: a moved Wine thread's server connection thread follows it. */
@@ -111,6 +118,10 @@ static int profiling;
 static uintptr_t runtime_base, runtime_end;
 
 __thread volatile int *wine_nx_stop_word;
+__thread const void *wine_nx_kernel_frame;
+static __thread struct nx_prof_thread *self_thread;
+
+extern int horizon_futex_wait( const int *addr, int value, long long timeout_ns );
 
 extern Result __real_svcSetThreadCoreMask( Handle handle, s32 core, u32 mask );
 
@@ -322,6 +333,7 @@ void wine_nx_thread_register( char kind, unsigned int tid, void *teb )
         registry[slot].fixed = affinity_fixed;
         registry[slot].last_ticks = registry[slot].balance_ticks = thread_ticks( handle );
         wine_nx_stop_word = registry[slot].stop;
+        self_thread = &registry[slot];
         if (kind == 'c')
         {
             snprintf( registry[slot].name, sizeof(registry[slot].name), "compositor" );
@@ -387,8 +399,14 @@ void wine_nx_thread_unregister( void )
 
     pthread_mutex_lock( &registry_mutex );
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
-        if (registry[i].handle == handle) registry[i].handle = 0;
+        if (registry[i].handle == handle)
+        {
+            __atomic_fetch_or( &registry[i].stop[0], WINE_NX_STOP_GONE, __ATOMIC_SEQ_CST );
+            svcSignalToAddress( (void *)&registry[i].stop[0], SignalType_Signal, 0, -1 );
+            registry[i].handle = 0;
+        }
     wine_nx_stop_word = NULL;
+    self_thread = NULL;
     pthread_mutex_unlock( &registry_mutex );
     pthread_mutex_lock( &profile_mutex );
     for (i = 0; i < NX_PROF_TARGETS; i++)
@@ -414,13 +432,190 @@ int wine_nx_thread_stop_request( const void *teb, unsigned int tid, int set, int
 
         if (!thread->handle || thread->teb != (uintptr_t)teb || thread->tid != tid) continue;
         if (set & WINE_NX_STOP_END) thread->stop[1] = code;
-        __atomic_store_n( &thread->stop[0], (thread->stop[0] | set) & ~clear, __ATOMIC_RELEASE );
-        if (set) svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
+        if (set) __atomic_fetch_or( &thread->stop[0], set, __ATOMIC_SEQ_CST );
+        if (clear) __atomic_fetch_and( &thread->stop[0], ~clear, __ATOMIC_SEQ_CST );
+        svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
         if (handle) *handle = thread->handle;
         found = 1;
     }
     pthread_mutex_unlock( &registry_mutex );
     return found;
+}
+
+static int stop_state( struct nx_prof_thread *thread )
+{
+    return __atomic_load_n( &thread->stop[0], __ATOMIC_SEQ_CST );
+}
+
+static void stop_signal( struct nx_prof_thread *thread )
+{
+    svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
+}
+
+static void wait_while_held( struct nx_prof_thread *thread )
+{
+    int state;
+
+    while (((state = stop_state( thread )) & WINE_NX_STOP_HELD) && !(state & WINE_NX_STOP_END))
+        horizon_futex_wait( (const int *)&thread->stop[0], state, -1 );
+}
+
+static const void *take_changed( struct nx_prof_thread *thread )
+{
+    if (!__atomic_load_n( &thread->changed_contexts, __ATOMIC_ACQUIRE )) return NULL;
+    return __atomic_exchange_n( &thread->changed_contexts, NULL, __ATOMIC_SEQ_CST );
+}
+
+const void *wine_nx_kernel_enter( const void *frame )
+{
+    struct nx_prof_thread *thread = self_thread;
+    int state, next;
+
+    if (!thread) return NULL;
+    if (!frame)
+    {
+        __atomic_fetch_and( &thread->stop[0], ~WINE_NX_STOP_LEAVING, __ATOMIC_SEQ_CST );
+        return NULL;
+    }
+    __atomic_store_n( &thread->frame, frame, __ATOMIC_SEQ_CST );
+    state = stop_state( thread );
+    do
+    {
+        next = (state | WINE_NX_STOP_KERNEL) & ~WINE_NX_STOP_LEAVING;
+        if ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END)) next |= WINE_NX_STOP_HELD;
+    } while (!__atomic_compare_exchange_n( &thread->stop[0], &state, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
+    if (!(next & WINE_NX_STOP_HELD)) return NULL;
+    stop_signal( thread );
+    wait_while_held( thread );
+    return take_changed( thread );
+}
+
+const void *wine_nx_kernel_leave( void )
+{
+    struct nx_prof_thread *thread = self_thread;
+    int state, next;
+
+    if (!thread) return NULL;
+    state = stop_state( thread );
+    for (;;)
+    {
+        if ((state & WINE_NX_STOP_HELD) && !(state & WINE_NX_STOP_END))
+        {
+            wait_while_held( thread );
+            state = stop_state( thread );
+            continue;
+        }
+        if ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END)) next = state | WINE_NX_STOP_HELD;
+        else next = (state & ~(WINE_NX_STOP_KERNEL | WINE_NX_STOP_HELD)) | WINE_NX_STOP_LEAVING;
+        if (!__atomic_compare_exchange_n( &thread->stop[0], &state, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+            continue;
+        if (!(next & WINE_NX_STOP_HELD)) break;
+        stop_signal( thread );
+        state = next;
+    }
+    return take_changed( thread );
+}
+
+int wine_nx_suspend_requested( void )
+{
+    return self_thread && (stop_state( self_thread ) & WINE_NX_STOP_SUSPEND);
+}
+
+static struct nx_prof_thread *registered_locked( const void *teb, unsigned int tid )
+{
+    unsigned int i;
+
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+        if (registry[i].handle && registry[i].teb == (uintptr_t)teb && registry[i].tid == tid) return &registry[i];
+    return NULL;
+}
+
+int wine_nx_thread_state( const void *teb, unsigned int tid, const void **frame )
+{
+    struct nx_prof_thread *thread;
+    int state = -1;
+
+    if (!teb) return -1;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        state = stop_state( thread );
+        if (frame) *frame = thread->frame;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return state;
+}
+
+int wine_nx_thread_hold( const void *teb, unsigned int tid, const void **frame, int *changed )
+{
+    struct nx_prof_thread *thread;
+    int state, held = 0;
+
+    if (!teb) return 0;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        state = stop_state( thread );
+        while ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END))
+        {
+            if (state & WINE_NX_STOP_HELD) held = 1;
+            else if (!(state & WINE_NX_STOP_KERNEL)) break;
+            else if (__atomic_compare_exchange_n( &thread->stop[0], &state, state | WINE_NX_STOP_HELD, 0,
+                                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+            {
+                stop_signal( thread );
+                held = 1;
+            }
+            if (held) break;
+        }
+        if (held)
+        {
+            *frame = thread->frame;
+            *changed = __atomic_load_n( &thread->changed_contexts, __ATOMIC_SEQ_CST ) != NULL;
+        }
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return held;
+}
+
+void wine_nx_thread_signal( const void *teb, unsigned int tid )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        __atomic_fetch_or( &thread->stop[0], WINE_NX_STOP_HELD, __ATOMIC_SEQ_CST );
+        stop_signal( thread );
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
+
+void wine_nx_thread_release( const void *teb, unsigned int tid, const void *changed )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        if (changed) __atomic_store_n( &thread->changed_contexts, changed, __ATOMIC_SEQ_CST );
+        __atomic_fetch_and( &thread->stop[0], ~WINE_NX_STOP_HELD, __ATOMIC_SEQ_CST );
+        stop_signal( thread );
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
+
+void wine_nx_thread_wait_change( const void *teb, unsigned int tid, int observed )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    thread = registered_locked( teb, tid );
+    pthread_mutex_unlock( &registry_mutex );
+    if (thread) horizon_futex_wait( (const int *)&thread->stop[0], observed, -1 );
 }
 
 int wine_nx_stop_state( int *code )
@@ -435,10 +630,11 @@ int wine_nx_stop_state( int *code )
 void wine_nx_stop_sleep( s64 ns )
 {
     volatile int *word = wine_nx_stop_word;
+    int value;
 
     if (!word) svcSleepThread( ns );
-    else if (!__atomic_load_n( word, __ATOMIC_ACQUIRE ))
-        svcWaitForAddress( (void *)word, ArbitrationType_WaitIfEqual, 0, ns );
+    else if (!((value = __atomic_load_n( word, __ATOMIC_ACQUIRE )) & WINE_NX_STOP_END))
+        svcWaitForAddress( (void *)word, ArbitrationType_WaitIfEqual, value, ns );
 }
 
 int wine_nx_in_runtime_code( uint64_t address )
@@ -496,16 +692,50 @@ static unsigned int walk_callers( const ThreadContext *ctx, uint64_t *callers )
                             read_word, callers, NX_PROF_DEPTH );
 }
 
-static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
+static int fex_x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
+{
+    MemoryInfo info;
+    uint64_t thread, frame;
+    uint32_t control;
+
+    if (!readable_size( teb + NX_PROF_TEB_FEX_THREAD, 2 * sizeof(uint64_t), &info )) return 0;
+    thread = read_word( teb + NX_PROF_TEB_FEX_THREAD );
+    control = read_word32( teb + NX_PROF_TEB_FEX_CONTROL );
+    if (!thread || (control & (NX_PROF_FEX_IN_JIT | NX_PROF_FEX_AREA_DIRTY))) return 0;
+    if (!readable_size( thread, sizeof(uint64_t), &info )) return 0;
+    frame = read_word( thread );
+    if (frame <= thread || frame >= thread + NX_PROF_FEX_THREAD_SPAN) return 0;
+    if (!readable_size( frame, NX_PROF_FEX_GREGS + (NX_PROF_FEX_REG_EBP + 1) * sizeof(uint64_t), &info )) return 0;
+    *eip = (uint32_t)read_word( frame + NX_PROF_FEX_RIP );
+    *esp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_ESP * sizeof(uint64_t) );
+    *ebp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_EBP * sizeof(uint64_t) );
+    return read_word32( teb + NX_PROF_TEB_FEX_CONTROL ) == control;
+}
+
+static int x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
 {
     MemoryInfo info;
     uint64_t cpu, context;
 
-    if (!teb || !(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
+    if (!teb || !readable_size( teb + NX_PROF_TEB_CPU_AREA, sizeof(uint64_t), &info )) return 0;
+    if (!(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
     context = cpu + NX_PROF_CPU_CONTEXT;
-    if (!readable( read_word32( context + NX_PROF_I386_ESP ), &info )) return 0;
-    return nx_prof_x86_callers( read_word32( context + NX_PROF_I386_ESP ), read_word32( context + NX_PROF_I386_EBP ),
-                                info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+    if (!readable_size( cpu, NX_PROF_CPU_CONTEXT + NX_PROF_I386_ESP + sizeof(uint32_t), &info )) return 0;
+    if (*(const uint16_t *)(uintptr_t)(cpu + NX_PROF_CPU_MACHINE) != NX_PROF_MACHINE_I386) return 0;
+    if (fex_x86_registers( teb, eip, esp, ebp )) return 1;
+    *eip = 0;
+    *esp = read_word32( context + NX_PROF_I386_ESP );
+    *ebp = read_word32( context + NX_PROF_I386_EBP );
+    return 1;
+}
+
+static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
+{
+    MemoryInfo info;
+    uint32_t eip, esp, ebp;
+
+    if (!x86_registers( teb, &eip, &esp, &ebp ) || !readable( esp, &info )) return 0;
+    return nx_prof_x86_callers( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
 }
 
 /* Inside translated code, the x86 frame chain from the guest's EBP and ESP. */
@@ -724,9 +954,11 @@ void wine_nx_threads_report_stalled( void )
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
         uint64_t callers[NX_PROF_DEPTH];
+        uint32_t x86_callers[NX_PROF_DEPTH], eip = 0, esp = 0, ebp = 0;
         char line[NX_PROF_LINE], where[96], kind;
         Handle handle = registry[i].handle;
-        unsigned int frames, f, tid;
+        unsigned int frames, f, tid, x86_frames = 0;
+        int x86 = 0;
         ThreadContext ctx;
         Result rc;
         int tries, len;
@@ -743,6 +975,8 @@ void wine_nx_threads_report_stalled( void )
         frames = R_SUCCEEDED( rc ) ? walk_callers( &ctx, callers ) : 0;
         tid = registry[i].tid;
         kind = registry[i].kind;
+        if (R_SUCCEEDED( rc ) && kind == 'w' && (x86 = x86_registers( registry[i].teb, &eip, &esp, &ebp )))
+            x86_frames = walk_x86( registry[i].teb, x86_callers );
         svcSetThreadActivity( handle, ThreadActivity_Runnable );
         pthread_mutex_unlock( &profile_mutex );
         if (R_FAILED( rc )) continue;
@@ -753,6 +987,16 @@ void wine_nx_threads_report_stalled( void )
         for (f = 0; f < frames; f++)
         {
             name_address( callers[f], where, sizeof(where) );
+            len = appendf( line, len, " < %s", where );
+        }
+        if (x86)
+        {
+            name_address( eip, where, sizeof(where) );
+            len = appendf( line, len, " | x86 at %s esp=%#x ebp=%#x", where, esp, ebp );
+        }
+        for (f = 0; f < x86_frames; f++)
+        {
+            name_address( x86_callers[f], where, sizeof(where) );
             len = appendf( line, len, " < %s", where );
         }
         wine_nx_runtime_trace( line );

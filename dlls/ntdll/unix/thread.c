@@ -1128,6 +1128,22 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 }
 
 #if defined(__SWITCH__) && defined(__aarch64__)
+unsigned int horizon_contexts_to_server( struct context_data server_contexts[2], CONTEXT *context )
+{
+    contexts_to_server( server_contexts, context );
+    return server_contexts[1].machine && server_contexts[1].flags ? 2 : 1;
+}
+
+void horizon_contexts_from_server( CONTEXT *context, const void *server_contexts )
+{
+    struct context_data contexts[2];
+
+    memcpy( contexts, server_contexts, sizeof(contexts) );
+    memset( context, 0, sizeof(*context) );
+    context->ContextFlags = CONTEXT_ARM64_FULL | CONTEXT_ARM64_X18;
+    contexts_from_server( context, contexts );
+}
+
 void horizon_wait_suspend_arm64ec(void)
 {
     CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;
@@ -1147,9 +1163,16 @@ void horizon_wait_suspend_arm64ec(void)
 /***********************************************************************
  *           pthread_exit_wrapper
  */
+#ifdef __SWITCH__
+extern void carafe_futex_exit_take_out( void );
+#endif
+
 static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
 {
     struct thread_data *data = get_thread_data();
+#ifdef __SWITCH__
+    carafe_futex_exit_take_out();
+#endif
     close( data->alert_fd );
     close( data->wait_fd[0] );
     close( data->wait_fd[1] );

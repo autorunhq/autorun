@@ -45,6 +45,9 @@ fixture = r'''
 static void horizon_trace(const char *fmt, ...) { (void)fmt; }
 #define HORIZON_STOP_SUSPEND 1
 #define HORIZON_STOP_END     2
+#define HORIZON_STOP_KERNEL  4
+#define HORIZON_STOP_HELD    8
+#define HORIZON_STOP_LEAVING 16
 #define R_FAILED(rc) ((rc) != 0)
 typedef unsigned Handle;
 typedef int Result;
@@ -62,6 +65,9 @@ struct horizon_server_object {
     struct context_data *thread_contexts;
     struct context_data *frozen_context;
     Handle frozen;
+    struct context_data *held_contexts;
+    unsigned int held_count;
+    int held, held_changed;
     unsigned thread_context_count;
     int thread_context_valid;
     int ending;
@@ -84,6 +90,10 @@ static struct horizon_server_object *horizon_server_get_thread_locked(unsigned h
 static Handle kernel_thread_handle, next_kernel_thread_handle;
 static int kernel_paused, kernel_in_runtime, kernel_ctx_fail, stop_mask, stop_exit_code, pause_granted = 1;
 static uint64_t kernel_pc = 0x55550000ULL;
+static const void *kernel_frame, *released_changed;
+static int kernel_can_hold, kernel_state_bits;
+static unsigned alert_calls, signal_calls, wait_change_calls;
+static uint64_t kernel_frame_pc = 0x66660000ULL;
 __attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned tid, int set, int clear, int code, Handle *h) {
     (void)t; (void)tid;
     if (!kernel_thread_handle) return 0;
@@ -94,6 +104,54 @@ __attribute__((weak)) int wine_nx_thread_stop_request(const void *t, unsigned ti
 }
 __attribute__((weak)) int wine_nx_in_runtime_code(uint64_t addr) { (void)addr; return kernel_in_runtime; }
 __attribute__((weak)) int wine_nx_thread_pause_granted(void) { return pause_granted; }
+__attribute__((weak)) int wine_nx_thread_hold(const void *t, unsigned tid, const void **frame, int *changed) {
+    (void)t; (void)tid;
+    if (!kernel_can_hold || !kernel_frame) return 0;
+    *frame = kernel_frame;
+    *changed = 0;
+    return 1;
+}
+__attribute__((weak)) void wine_nx_thread_release(const void *t, unsigned tid, const void *changed) {
+    (void)t; (void)tid;
+    released_changed = changed;
+}
+__attribute__((weak)) int wine_nx_thread_state(const void *t, unsigned tid, const void **frame) {
+    (void)t; (void)tid;
+    if (frame) *frame = kernel_frame;
+    return kernel_state_bits;
+}
+__attribute__((weak)) void wine_nx_thread_wait_change(const void *t, unsigned tid, int observed) {
+    (void)t; (void)tid; (void)observed;
+    wait_change_calls++;
+    kernel_can_hold = 1;
+    kernel_frame = (const void *)0xfeedULL;
+}
+__attribute__((weak)) void wine_nx_thread_signal(const void *t, unsigned tid) {
+    (void)t; (void)tid;
+    signal_calls++;
+}
+__attribute__((weak)) void wine_nx_kernel_context(const void *frame, CONTEXT *context) {
+    ARM64_NT_CONTEXT *arm64 = (ARM64_NT_CONTEXT *)context;
+    assert(frame == kernel_frame);
+    memset(arm64, 0, sizeof(*arm64));
+    arm64->ContextFlags = CONTEXT_ARM64_FULL | CONTEXT_ARM64_X18;
+    arm64->Pc = kernel_frame_pc;
+    arm64->Sp = 0x88880000ULL;
+}
+__attribute__((weak)) unsigned horizon_contexts_to_server(struct context_data server_contexts[2], CONTEXT *context) {
+    const ARM64_NT_CONTEXT *arm64 = (const ARM64_NT_CONTEXT *)context;
+    memset(server_contexts, 0, 2 * sizeof(*server_contexts));
+    server_contexts[0].machine = HORIZON_IMAGE_FILE_MACHINE_ARM64;
+    server_contexts[0].flags = SERVER_CTX_CONTROL | SERVER_CTX_INTEGER | SERVER_CTX_EXEC_SPACE;
+    server_contexts[0].ctl.arm64_regs.pc = arm64->Pc;
+    server_contexts[0].ctl.arm64_regs.sp = arm64->Sp;
+    return 1;
+}
+NTSTATUS WINAPI NtAlertThreadByThreadId(HANDLE tid) {
+    assert(tid == ULongToHandle(target.thread.tid));
+    alert_calls++;
+    return STATUS_SUCCESS;
+}
 static Result svcSetThreadActivity(Handle h, int activity) {
     if (activity == ThreadActivity_Paused) { assert(h == kernel_thread_handle && !kernel_paused); kernel_paused = 1; }
     else { assert(kernel_paused); kernel_paused = 0; }
@@ -146,9 +204,12 @@ functions = '\n'.join(block(source, name) for name in (
     'static int horizon_server_stop_request_locked(',
     'static int horizon_server_can_pause(',
     'static void horizon_server_context_from_kernel(',
+    'static int horizon_server_freeze_leaving_locked(',
     'static int horizon_server_freeze_locked(',
     'static void horizon_server_thaw_locked(',
-    'static int horizon_server_snapshot_locked(',
+    'static int horizon_server_hold_locked(',
+    'static void horizon_server_release_locked(',
+    'static void horizon_server_wait_thread_locked(',
     'static int horizon_server_handle_resume_thread(',
     'static int horizon_server_handle_suspend_thread(',
     'static void horizon_server_merge_context(',
@@ -196,7 +257,7 @@ int main(void) {
     target.thread.teb = (uintptr_t)&teb;
     teb.ChpeV2CpuAreaInfo = &area;
     area.SuspendDoorbell = &doorbell;
-    for (unsigned count = 0; count <= 2; ++count) {
+    for (unsigned count = 1; count <= 2; ++count) {
         suspend(); suspend();
         assert(doorbell == 1 && !target.thread_context_valid);
         assert(!pthread_create(&thread, NULL, select_thread, (void *)(uintptr_t)count));
@@ -229,7 +290,7 @@ int main(void) {
     select_thread((void *)1);
     assert(!target.thread_contexts && !target.thread_context_valid);
 
-    /* Non-doorbell thread: freeze outside runtime code, snapshot, terminate. */
+    /* Non-doorbell thread: freeze outside runtime code, resume, then freeze while leaving kernel. */
     teb.ChpeV2CpuAreaInfo = NULL;
     kernel_thread_handle = 42;
     kernel_in_runtime = 0;
@@ -242,33 +303,63 @@ int main(void) {
     assert(reply_status() == STATUS_NOT_SUPPORTED);
     resume();
     assert(!kernel_paused && !target.frozen && !target.thread_context_valid);
-    /* Freeze fails when inside runtime code and falls back to stop-word, then terminates. */
+
+    /* Leaving kernel inside runtime code gives the saved frame context. */
     kernel_in_runtime = 1;
-    {
-        /* Snapshot still succeeds inside runtime code (WaitForSingleObject), but rejects context error, handle reuse, and ending threads. */
-        struct context_data snap;
-        assert(horizon_server_snapshot_locked(&target, &snap) && snap.ctl.arm64_regs.pc == kernel_pc && !kernel_paused);
-        kernel_ctx_fail = 1;
-        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
-        next_kernel_thread_handle = 99;
-        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
-        kernel_thread_handle = 42;
-    }
+    kernel_frame = (const void *)0xdeadULL;
+    kernel_state_bits = HORIZON_STOP_LEAVING;
     suspend();
-    assert(!kernel_paused && !target.frozen && (stop_mask & HORIZON_STOP_SUSPEND));
+    assert(kernel_paused && target.frozen == 42 && target.thread_context_valid);
+    assert(!horizon_server_handle_get_thread_context(&control, (void *)&get) && !reply_status());
+    returned = (void *)replies[0].data;
+    assert(returned->ctl.arm64_regs.pc == kernel_frame_pc);
+    resume();
+    assert(!kernel_paused && !target.frozen && !target.thread_context_valid);
+    kernel_state_bits = 0;
+
+    /* Thread held in kernel: GetThreadContext waits via wait_thread_locked, SetThreadContext edits, Resume releases. */
+    kernel_can_hold = 0;
+    kernel_frame = NULL;
+    suspend();
+    assert(!kernel_paused && !target.frozen && !target.held && (stop_mask & HORIZON_STOP_SUSPEND));
+    assert(!horizon_server_handle_get_thread_context(&control, (void *)&get) && !reply_status());
+    assert(wait_change_calls == 1 && target.held && target.thread_context_valid);
+    returned = (void *)replies[0].data;
+    assert(returned->ctl.arm64_regs.pc == kernel_frame_pc);
+    update.ctl.arm64_regs.pc = 0x33333333;
+    assert(!horizon_server_handle_set_thread_context(&control, (void *)&set, (void *)&update, sizeof(update)) && !reply_status());
+    assert(target.held_changed);
+    released_changed = NULL;
+    resume();
+    assert(!target.held && !target.held_changed && released_changed == target.held_contexts);
+    assert(((const struct context_data *)released_changed)->ctl.arm64_regs.pc == 0x33333333);
+
+    /* Held thread entering server select signals stop word even without doorbell contexts. */
+    kernel_can_hold = 1;
+    suspend();
+    assert(target.held && target.thread_context_valid);
+    target.thread_context_valid = 0;
+    signal_calls = 0;
+    assert(!pthread_create(&thread, NULL, select_thread, (void *)0));
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    while (!target.thread_context_valid) pthread_cond_wait(&changed, &horizon_server_objects_mutex);
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    assert(signal_calls == 1);
+
+    /* Terminate releases held/frozen state, clears suspend, sets END, and alerts the target tid. */
     {
         struct horizon_terminate_thread_request term = {.handle = 1, .exit_code = 77};
-        struct context_data snap;
         assert(!horizon_server_handle_terminate_thread(&control, (void *)&term) && !reply_status());
-        assert(!horizon_server_snapshot_locked(&target, &snap) && !kernel_paused);
+        assert(alert_calls == 1 && !target.held && !kernel_paused);
         assert(target.ending && !target.thread.suspend && (stop_mask & HORIZON_STOP_END));
         assert(!(stop_mask & HORIZON_STOP_SUSPEND) && stop_exit_code == 77);
         assert(target.thread.exit_code == 77);
-        select_thread((void *)0);
+        assert(!pthread_join(thread, NULL));
         assert(((struct horizon_server_reply_header *)replies[1].reply)->error == HORIZON_STATUS_THREAD_IS_TERMINATING);
     }
     free(target.frozen_context);
-    puts("Horizon suspend: safe-point contexts, nested suspend/resume, kernel freeze and terminate passed");
+    free(target.held_contexts);
+    puts("Horizon suspend: safe-point contexts, nested suspend/resume, kernel hold/leaving and terminate passed");
 }
 '''
 
@@ -336,7 +427,7 @@ typedef unsigned Handle;
 typedef int Result;
 typedef struct { struct { uint64_t x; } pc; uint64_t sp, lr; } ThreadContext;
 enum { ThreadActivity_Paused, ThreadActivity_Runnable };
-static struct { Handle handle; unsigned tid; char kind; } registry[] = {{1, 4, 'w'}, {2, 8, 's'}};
+static struct { Handle handle; unsigned tid; char kind; uint64_t teb; } registry[] = {{1, 4, 'w', 0}, {2, 8, 's', 0}};
 static pthread_mutex_t profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned names, logs, paused;
 static int failure;
@@ -358,6 +449,16 @@ static Result svcGetThreadContext3(ThreadContext *ctx, Handle handle) {
 static void svcSleepThread(unsigned long ns) { (void)ns; }
 static unsigned walk_callers(const ThreadContext *ctx, uint64_t *callers) {
     assert(paused); callers[0] = ctx->lr; return 1;
+}
+static int x86_registers(uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp) {
+    (void)teb; (void)eip; (void)esp; (void)ebp;
+    assert(paused);
+    return 0;
+}
+static unsigned walk_x86(uint64_t teb, uint32_t *callers) {
+    (void)teb; (void)callers;
+    assert(paused);
+    return 0;
 }
 static void name_address(uint64_t address, char *buf, size_t size) {
     assert(!paused && !pthread_mutex_trylock(&profile_mutex));

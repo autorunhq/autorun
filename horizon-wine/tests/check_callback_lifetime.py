@@ -42,6 +42,12 @@ void horizon_bind_native_stack(TEB *t) { assert(t == &teb); }
 static ULONG_PTR wine_nx_call_pe_callback(void *func, const void *args, ULONG len, void *t) {
     assert(t == &teb); return ((KERNEL_CALLBACK_PROC)func)((void *)args, len);
 }
+static __thread unsigned enter_depth;
+static const void *enter_program(void) { return (const void *)(uintptr_t)(++enter_depth); }
+static void return_to_kernel(const void *outer) {
+    assert(outer == (const void *)(uintptr_t)enter_depth);
+    --enter_depth;
+}
 '''
 tests = r'''
 static NTSTATUS mutate(void *args, ULONG len) {

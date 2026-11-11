@@ -142,6 +142,37 @@ void horizon_trace( const char *format, ... )
     (void)format;
 }
 
+__thread const void *wine_nx_kernel_frame;
+int horizon_suspend_pending;
+static const void *mock_changed_contexts;
+static int mock_suspend_requested;
+static unsigned int kernel_leave_calls, wait_suspend_calls;
+static CONTEXT changed_from_server, wait_suspend_override;
+static int has_wait_suspend_override;
+
+const void *wine_nx_kernel_leave( void )
+{
+    ++kernel_leave_calls;
+    return mock_changed_contexts;
+}
+
+int wine_nx_suspend_requested( void )
+{
+    return mock_suspend_requested;
+}
+
+void horizon_contexts_from_server( CONTEXT *context, const void *server_contexts )
+{
+    (void)server_contexts;
+    *context = changed_from_server;
+}
+
+void wait_suspend( CONTEXT *context )
+{
+    ++wait_suspend_calls;
+    if (has_wait_suspend_override) *context = wait_suspend_override;
+}
+
 #include "extracted_functions.inc"
 
 static void set_ec( uintptr_t address, int value )
@@ -158,6 +189,12 @@ static void reset_mocks(void)
     memset( &continued, 0, sizeof(continued) );
     write_count = fail_write_call = partial_write_call = continue_count = is_ec_count = 0;
     fail_write_status = 0;
+    wine_nx_kernel_frame = NULL;
+    mock_changed_contexts = NULL;
+    mock_suspend_requested = 0;
+    horizon_suspend_pending = 0;
+    kernel_leave_calls = wait_suspend_calls = 0;
+    has_wait_suspend_override = 0;
 }
 
 static CONTEXT make_context( uintptr_t pc, uintptr_t sp )
@@ -396,6 +433,38 @@ static void test_exception_validation_and_bounds(void)
     pKiUserExceptionDispatcher = (void *)0x24000;
 }
 
+static void test_kernel_leave_and_pending_suspend(void)
+{
+    _Alignas(16) unsigned char stack[0x1000];
+    CONTEXT context = make_context( 0x26000, (uintptr_t)(stack + sizeof(stack)) );
+
+    /* Leaving kernel via NtContinue with server-modified context replaces the resumed context. */
+    reset_mocks();
+    set_ec( 0x27000, 1 );
+    wine_nx_kernel_frame = (const void *)0xdeadbeef;
+    changed_from_server = make_context( 0x27000, (uintptr_t)(stack + sizeof(stack) - 0x100) );
+    mock_changed_contexts = (const void *)0x1;
+    report( "kernel-leave-uses-server-context",
+            signal_set_full_context( &context ) == STATUS_UNSUCCESSFUL &&
+            kernel_leave_calls == 1 && !wine_nx_kernel_frame && !wait_suspend_calls &&
+            continue_count == 1 && continued.Pc == 0x27000 &&
+            continued.Sp == (uintptr_t)(stack + sizeof(stack) - 0x100) );
+    set_ec( 0x27000, 0 );
+
+    /* Outside kernel, pending suspend pauses before resuming the context. */
+    reset_mocks();
+    set_ec( 0x29000, 1 );
+    mock_suspend_requested = 1;
+    has_wait_suspend_override = 1;
+    wait_suspend_override = make_context( 0x29000, (uintptr_t)(stack + sizeof(stack) - 0x200) );
+    report( "program-suspend-wait-before-resume",
+            signal_set_full_context( &context ) == STATUS_UNSUCCESSFUL &&
+            !kernel_leave_calls && wait_suspend_calls == 1 &&
+            continue_count == 1 && continued.Pc == 0x29000 &&
+            continued.Sp == (uintptr_t)(stack + sizeof(stack) - 0x200) );
+    set_ec( 0x29000, 0 );
+}
+
 int main(void)
 {
     address_start = 0x10000;
@@ -412,6 +481,7 @@ int main(void)
     test_exception_on_user_stack();
     test_exception_errors_and_guest_route();
     test_exception_validation_and_bounds();
+    test_kernel_leave_and_pending_suspend();
     printf( "RESULT %s\n", failures ? "FAIL" : "PASS" );
     return failures != 0;
 }

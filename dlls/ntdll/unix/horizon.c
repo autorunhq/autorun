@@ -3384,6 +3384,9 @@ struct horizon_server_object
     struct context_data *thread_contexts;
     struct context_data *frozen_context;
     Handle frozen;
+    struct context_data *held_contexts;
+    unsigned int held_count;
+    int held, held_changed;
 #endif
     unsigned int thread_context_count;
     int thread_context_valid;
@@ -5097,6 +5100,8 @@ static void horizon_server_free_object( struct horizon_server_object *object )
 #ifndef HORIZON_STANDALONE_SYNTAX
         free( object->frozen_context );
         object->frozen_context = NULL;
+        free( object->held_contexts );
+        object->held_contexts = NULL;
 #endif
     }
     while (object->apc_first)
@@ -12654,6 +12659,9 @@ static void *horizon_server_thread( void *param );
 
 #define HORIZON_STOP_SUSPEND 1
 #define HORIZON_STOP_END     2
+#define HORIZON_STOP_KERNEL  4
+#define HORIZON_STOP_HELD    8
+#define HORIZON_STOP_LEAVING 16
 
 #ifndef HORIZON_STANDALONE_SYNTAX
 static void horizon_server_set_suspend_doorbell_locked( struct horizon_server_object *object, int value )
@@ -12669,6 +12677,15 @@ extern int wine_nx_thread_stop_request( const void *teb, unsigned int tid, int s
                                         Handle *handle ) __attribute__((weak));
 extern int wine_nx_in_runtime_code( uint64_t address ) __attribute__((weak));
 extern int wine_nx_thread_pause_granted( void ) __attribute__((weak));
+extern int wine_nx_thread_hold( const void *teb, unsigned int tid, const void **frame, int *changed )
+    __attribute__((weak));
+extern void wine_nx_thread_release( const void *teb, unsigned int tid, const void *changed ) __attribute__((weak));
+extern int wine_nx_thread_state( const void *teb, unsigned int tid, const void **frame ) __attribute__((weak));
+extern void wine_nx_thread_wait_change( const void *teb, unsigned int tid, int observed ) __attribute__((weak));
+extern void wine_nx_thread_signal( const void *teb, unsigned int tid ) __attribute__((weak));
+extern void wine_nx_kernel_context( const void *frame, CONTEXT *context ) __attribute__((weak));
+extern unsigned int horizon_contexts_to_server( struct context_data server_contexts[2], CONTEXT *context )
+    __attribute__((weak));
 
 static int horizon_server_has_doorbell_locked( struct horizon_server_object *object )
 {
@@ -12713,6 +12730,23 @@ static void horizon_server_context_from_kernel( struct context_data *to, const T
     to->exec_space.space.space = EXEC_SPACE_USERMODE;
 }
 
+static int horizon_server_freeze_leaving_locked( struct horizon_server_object *object )
+{
+    const void *frame = NULL;
+    CONTEXT context;
+    int state;
+
+    if (!&wine_nx_thread_state || !&wine_nx_kernel_context || !&horizon_contexts_to_server) return 0;
+    state = wine_nx_thread_state( (const void *)(ULONG_PTR)object->thread.teb, object->thread.tid, &frame );
+    if (state < 0 || !(state & HORIZON_STOP_LEAVING) || (state & HORIZON_STOP_KERNEL) || !frame) return 0;
+    if (!object->held_contexts && !(object->held_contexts = calloc( 2, sizeof(*object->held_contexts) ))) return 0;
+    wine_nx_kernel_context( frame, &context );
+    object->held_count = horizon_contexts_to_server( object->held_contexts, &context );
+    object->thread_contexts = object->held_contexts;
+    object->thread_context_count = object->held_count;
+    return 1;
+}
+
 static int horizon_server_freeze_locked( struct horizon_server_object *object )
 {
     ThreadContext kernel;
@@ -12725,16 +12759,24 @@ static int horizon_server_freeze_locked( struct horizon_server_object *object )
     if (!horizon_server_stop_request_locked( object, 0, 0, 0, &handle ) || !handle) return 0;
     if (!object->frozen_context && !(object->frozen_context = malloc( sizeof(*object->frozen_context) ))) return 0;
     if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) )) return 0;
-    if (R_FAILED( svcGetThreadContext3( &kernel, handle ) ) || wine_nx_in_runtime_code( kernel.pc.x ) ||
+    if (R_FAILED( svcGetThreadContext3( &kernel, handle ) ) ||
         !horizon_server_stop_request_locked( object, 0, 0, 0, &again ) || again != handle)
     {
         svcSetThreadActivity( handle, ThreadActivity_Runnable );
         return 0;
     }
-    horizon_server_context_from_kernel( object->frozen_context, &kernel );
+    if (!wine_nx_in_runtime_code( kernel.pc.x ))
+    {
+        horizon_server_context_from_kernel( object->frozen_context, &kernel );
+        object->thread_contexts = object->frozen_context;
+        object->thread_context_count = 1;
+    }
+    else if (!horizon_server_freeze_leaving_locked( object ))
+    {
+        svcSetThreadActivity( handle, ThreadActivity_Runnable );
+        return 0;
+    }
     object->frozen = handle;
-    object->thread_contexts = object->frozen_context;
-    object->thread_context_count = 1;
     object->thread_context_valid = 1;
     return 1;
 }
@@ -12749,22 +12791,61 @@ static void horizon_server_thaw_locked( struct horizon_server_object *object )
     object->thread_context_valid = 0;
 }
 
-static int horizon_server_snapshot_locked( struct horizon_server_object *object, struct context_data *context )
+static int horizon_server_hold_locked( struct horizon_server_object *object )
 {
-    ThreadContext kernel;
-    Handle handle = 0, again = 0;
-    Result rc;
+    const void *teb = (const void *)(ULONG_PTR)object->thread.teb;
+    const void *frame = NULL;
+    int changed = 0;
+    CONTEXT context;
 
-    if (!horizon_server_can_pause() || !object->thread.started || object->thread.terminated || object->ending)
+    if (object->held || object->frozen) return 1;
+    if (!object->thread.started || object->thread.terminated || object->ending ||
+        !&wine_nx_thread_hold || !&wine_nx_kernel_context || !&horizon_contexts_to_server)
         return 0;
-    if (!horizon_server_stop_request_locked( object, 0, 0, 0, &handle ) || !handle) return 0;
-    if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) )) return 0;
-    rc = svcGetThreadContext3( &kernel, handle );
-    svcSetThreadActivity( handle, ThreadActivity_Runnable );
-    if (R_FAILED( rc ) || !horizon_server_stop_request_locked( object, 0, 0, 0, &again ) || again != handle)
-        return 0;
-    horizon_server_context_from_kernel( context, &kernel );
+    if (!object->held_contexts && !(object->held_contexts = calloc( 2, sizeof(*object->held_contexts) ))) return 0;
+    if (!wine_nx_thread_hold( teb, object->thread.tid, &frame, &changed )) return 0;
+    if (!changed)
+    {
+        wine_nx_kernel_context( frame, &context );
+        object->held_count = horizon_contexts_to_server( object->held_contexts, &context );
+    }
+    object->thread_contexts = object->held_contexts;
+    object->thread_context_count = object->held_count;
+    object->thread_context_valid = 1;
+    object->held = 1;
     return 1;
+}
+
+static void horizon_server_release_locked( struct horizon_server_object *object )
+{
+    if (object->held)
+    {
+        object->held = 0;
+        object->thread_contexts = NULL;
+        object->thread_context_count = 0;
+        object->thread_context_valid = 0;
+    }
+    if (&wine_nx_thread_release)
+        wine_nx_thread_release( (const void *)(ULONG_PTR)object->thread.teb, object->thread.tid,
+                                object->held_changed ? object->held_contexts : NULL );
+    object->held_changed = 0;
+}
+
+static void horizon_server_wait_thread_locked( struct horizon_server_object *object )
+{
+    const void *teb = (const void *)(ULONG_PTR)object->thread.teb;
+    const void *frame;
+    int state = &wine_nx_thread_state ? wine_nx_thread_state( teb, object->thread.tid, &frame ) : -1;
+
+    if (state < 0 || (state & HORIZON_STOP_END) || !&wine_nx_thread_wait_change)
+    {
+        horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+        return;
+    }
+    if (state & (HORIZON_STOP_KERNEL | HORIZON_STOP_HELD)) return;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    wine_nx_thread_wait_change( teb, object->thread.tid, state );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
 }
 #endif
 
@@ -12879,6 +12960,7 @@ static int horizon_server_handle_resume_thread( struct horizon_server_connection
             horizon_server_set_suspend_doorbell_locked( object, 0 );
             horizon_server_thaw_locked( object );
             horizon_server_stop_request_locked( object, 0, HORIZON_STOP_SUSPEND, 0, NULL );
+            horizon_server_release_locked( object );
         }
 #endif
     }
@@ -12903,10 +12985,11 @@ static int horizon_server_handle_suspend_thread( struct horizon_server_connectio
         status = horizon_thread_suspend( &object->thread, &reply.count );
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (!status && object->thread.started && !reply.count)
-            horizon_server_set_suspend_doorbell_locked( object, 1 );
-        if (!status && !reply.count && !horizon_server_has_doorbell_locked( object ) &&
-            !horizon_server_freeze_locked( object ))
+        {
             horizon_server_stop_request_locked( object, HORIZON_STOP_SUSPEND, 0, 0, NULL );
+            horizon_server_set_suspend_doorbell_locked( object, 1 );
+            if (!horizon_server_hold_locked( object )) horizon_server_freeze_locked( object );
+        }
 #endif
     }
     if (!status) horizon_server_signal_changed_locked();
@@ -12973,10 +13056,10 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
         else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
         else
         {
-            while (!object->thread_context_valid && object->thread.suspend &&
-                   !object->thread.terminated && !horizon_server_freeze_locked( object ))
+            while (!object->thread_context_valid && object->thread.suspend && !object->thread.terminated &&
+                   !horizon_server_freeze_locked( object ) && !horizon_server_hold_locked( object ))
             {
-                horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                horizon_server_wait_thread_locked( object );
                 horizon_server_quit_check_locked();
             }
             if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
@@ -12988,12 +13071,6 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
                 context.flags &= request->flags | request->native_flags | SERVER_CTX_EXEC_SPACE;
                 found = 1;
                 break;
-            }
-            if (!found && !status && request->machine == HORIZON_IMAGE_FILE_MACHINE_ARM64 &&
-                horizon_server_snapshot_locked( object, &context ))
-            {
-                context.flags &= request->flags | request->native_flags | SERVER_CTX_EXEC_SPACE;
-                found = 1;
             }
             if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
         }
@@ -13030,9 +13107,9 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
             else
             {
                 while (!object->thread_context_valid && object->thread.suspend &&
-                       !object->thread.terminated)
+                       !object->thread.terminated && !horizon_server_hold_locked( object ))
                 {
-                    horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                    horizon_server_wait_thread_locked( object );
                     horizon_server_quit_check_locked();
                 }
                 if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
@@ -13043,6 +13120,7 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
                         if (contexts[i].machine == object->thread_contexts[j].machine)
                         {
                             horizon_server_merge_context( &object->thread_contexts[j], &contexts[i] );
+                            object->held_changed = object->held;
                             found = 1;
                         }
                 if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
@@ -13102,6 +13180,8 @@ static int horizon_server_handle_terminate_thread( struct horizon_server_connect
                 object->thread.suspend = 0;
                 horizon_server_set_suspend_doorbell_locked( object, 0 );
                 horizon_server_thaw_locked( object );
+                horizon_server_release_locked( object );
+                NtAlertThreadByThreadId( ULongToHandle( object->thread.tid ) );
                 horizon_server_signal_changed_locked();
             }
             else
@@ -17557,7 +17637,7 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
         }
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (connection->thread && connection->thread->thread.started &&
-            connection->thread->thread.suspend)
+            connection->thread->thread.suspend && (suspend_context_count || connection->thread->held))
         {
             struct horizon_server_object *thread = connection->thread;
 
@@ -17576,6 +17656,8 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                             suspend_context_count * sizeof(*suspend_contexts) );
                 thread->thread_context_valid = 1;
                 horizon_server_signal_changed_locked();
+                if (&wine_nx_thread_signal)
+                    wine_nx_thread_signal( (const void *)(ULONG_PTR)thread->thread.teb, thread->thread.tid );
             }
             while (thread->thread.suspend && !thread->thread.terminated)
             {
@@ -18651,6 +18733,7 @@ static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr );
 
 extern int wine_nx_stop_state( int *code ) __attribute__((weak));
 extern void wine_nx_stop_end( void ) __attribute__((weak));
+extern const void *wine_nx_kernel_enter( const void *frame ) __attribute__((weak));
 
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
@@ -18660,6 +18743,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
     char buf[512];
 
 #if defined(__aarch64__)
+    if (&wine_nx_kernel_enter) wine_nx_kernel_enter( NULL );
     if (&wine_nx_stop_state && &wine_nx_stop_end && (wine_nx_stop_state( NULL ) & HORIZON_STOP_END))
     {
         ctx->sp.x = (ctx->sp.x - 0x400) & ~(u64)15;

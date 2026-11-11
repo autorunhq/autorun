@@ -229,6 +229,28 @@ index 8286c14..2f1284d 100644
  
    if (Config.BlockJITNaming() || Config.GlobalJITNaming() || Config.LibraryJITNaming()) {
      // Only initialize symbols file if enabled. Ensures we don't pollute /tmp with empty files.
+@@ -418,7 +428,9 @@
+ }
+ 
+ FEXCore::Core::InternalThreadState* ContextImpl::CreateThread(const FEXCore::Core::CPUState* NewThreadState) {
+-  FEXCore::Core::InternalThreadState* Thread = new FEXCore::Core::InternalThreadState {
++  void* Memory = FEXCore::Allocator::VirtualAlloc(sizeof(FEXCore::Core::InternalThreadState));
++  LOGMAN_THROW_A_FMT(Memory != nullptr, "Couldn't allocate the thread state");
++  FEXCore::Core::InternalThreadState* Thread = ::new (Memory) FEXCore::Core::InternalThreadState {
+     .CTX = this,
+   };
+   FEXCore::Allocator::VirtualName("FEXMem_ThreadState", Thread, sizeof(*Thread));
+@@ -445,8 +457,9 @@
+ 
+ void ContextImpl::DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
+   FEXCore::Allocator::VirtualProtect(&Thread->InterruptFaultPage, sizeof(Thread->InterruptFaultPage),
+                                      Allocator::ProtectOptions::Read | Allocator::ProtectOptions::Write);
+-  delete Thread;
++  Thread->~InternalThreadState();
++  FEXCore::Allocator::VirtualFree(Thread, sizeof(FEXCore::Core::InternalThreadState));
+ }
+ 
+ #ifndef _WIN32
 diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
 index b174dab..38cf000 100644
 --- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp

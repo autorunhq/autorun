@@ -3719,6 +3719,83 @@ static LONGLONG update_timeout( ULONGLONG end )
 }
 #endif
 
+#ifdef __SWITCH__
+#define CARAFE_FUTEX_EXIT_MAGIC 0x46555458
+#define CARAFE_FUTEX_LOCK_HELD  -1
+#define CARAFE_ALERT_STOP_END   2
+
+struct carafe_futex_exit
+{
+    ULONG magic;
+    ULONG pointer_size;
+    ULONG64 entry;
+    ULONG64 lock;
+};
+
+extern int wine_nx_stop_state( int *code ) __attribute__((weak));
+
+static __thread const struct carafe_futex_exit *carafe_futex_exit;
+
+static const struct carafe_futex_exit *carafe_futex_exit_of( const void *address )
+{
+    const struct carafe_futex_exit *ending = address;
+
+    if (!ending || !virtual_check_buffer_for_read( ending, sizeof(*ending) )) return NULL;
+    if (ending->magic != CARAFE_FUTEX_EXIT_MAGIC) return NULL;
+    if (ending->pointer_size != sizeof(UINT) && ending->pointer_size != sizeof(ULONG64)) return NULL;
+    return ending;
+}
+
+static BOOL carafe_thread_ending(void)
+{
+    return &wine_nx_stop_state && (wine_nx_stop_state( NULL ) & CARAFE_ALERT_STOP_END);
+}
+
+static ULONG64 carafe_futex_load( ULONG64 address, ULONG size )
+{
+    if (size == sizeof(UINT)) return *(volatile UINT *)(ULONG_PTR)address;
+    return *(volatile ULONG64 *)(ULONG_PTR)address;
+}
+
+static void carafe_futex_store( ULONG64 address, ULONG size, ULONG64 value )
+{
+    if (size == sizeof(UINT)) *(volatile UINT *)(ULONG_PTR)address = (UINT)value;
+    else *(volatile ULONG64 *)(ULONG_PTR)address = value;
+}
+
+static void carafe_futex_wait_left( void )
+{
+    if (!carafe_thread_ending()) carafe_futex_exit = NULL;
+}
+
+void carafe_futex_exit_take_out( void )
+{
+    const struct carafe_futex_exit *ending = carafe_futex_exit;
+    LONG *lock, free_lock = 0;
+    ULONG64 next, prev;
+    ULONG size;
+
+    if (!ending) return;
+    carafe_futex_exit = NULL;
+    lock = (LONG *)(ULONG_PTR)ending->lock;
+    size = ending->pointer_size;
+    while (!__atomic_compare_exchange_n( lock, &free_lock, CARAFE_FUTEX_LOCK_HELD, FALSE,
+                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+    {
+        free_lock = 0;
+        NtYieldExecution();
+    }
+    if (carafe_futex_load( ending->entry + 2 * size, size ))
+    {
+        next = carafe_futex_load( ending->entry, size );
+        prev = carafe_futex_load( ending->entry + size, size );
+        carafe_futex_store( next + size, size, prev );
+        carafe_futex_store( prev, size, next );
+    }
+    __atomic_store_n( lock, 0, __ATOMIC_SEQ_CST );
+}
+#endif
+
 
 /***********************************************************************
  *             NtWaitForAlertByThreadId (NTDLL.@)
@@ -3744,6 +3821,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
             else
                 end = get_absolute_timeout( timeout );
         }
+#ifdef __SWITCH__
+        carafe_futex_exit = carafe_futex_exit_of( address );
+#endif
 
         while (!InterlockedExchange( futex, 0 ))
         {
@@ -3759,8 +3839,17 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
             else
                 ret = futex_wait( futex, 0, NULL );
 
-            if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
+            if (ret == -1 && errno == ETIMEDOUT)
+            {
+#ifdef __SWITCH__
+                carafe_futex_wait_left();
+#endif
+                return STATUS_TIMEOUT;
+            }
         }
+#ifdef __SWITCH__
+        carafe_futex_wait_left();
+#endif
         return STATUS_ALERTED;
     }
 #elif defined(HAVE_KQUEUE)

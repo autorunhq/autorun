@@ -185,6 +185,18 @@ static inline unsigned int nx_prof_callers( uint64_t lr, uint64_t fp, uint64_t l
 #define NX_PROF_I386_EBP     0xb4
 #define NX_PROF_I386_ESP     0xc4
 
+#define NX_PROF_CPU_MACHINE     2
+#define NX_PROF_MACHINE_I386    0x14c
+#define NX_PROF_TEB_FEX_THREAD  0x1500
+#define NX_PROF_TEB_FEX_CONTROL 0x1508
+#define NX_PROF_FEX_IN_JIT      1
+#define NX_PROF_FEX_AREA_DIRTY  4
+#define NX_PROF_FEX_THREAD_SPAN 0x10000
+#define NX_PROF_FEX_RIP         24
+#define NX_PROF_FEX_GREGS       32
+#define NX_PROF_FEX_REG_ESP     4
+#define NX_PROF_FEX_REG_EBP     5
+
 /* Return addresses on that x86 stack, innermost first: the two words at esp
  * (at a gate, the returns into the stub and into its caller), then the frame
  * chain from ebp ([ebp] the saved ebp, [ebp + 4] the return address) while it
