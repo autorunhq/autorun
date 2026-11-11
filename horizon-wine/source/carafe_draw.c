@@ -261,7 +261,12 @@ void carafeDrawLine(CarafeImage* picture, const char* line, const CarafeTextStyl
 
 static size_t charLength(const char* text) {
     unsigned char first = (unsigned char)text[0];
-    return first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : first >= 0xC0 ? 2 : 1;
+    size_t want = first >= 0xF0 ? 4 : first >= 0xE0 ? 3 : first >= 0xC0 ? 2 : 1;
+    size_t len = 1;
+    while (len < want && (unsigned char)text[len] >= 0x80 && (unsigned char)text[len] < 0xC0) {
+        len++;
+    }
+    return len;
 }
 
 static int flush(CarafeImage* picture, char* line, size_t* used, const CarafeTextStyle* style, int x, int top,

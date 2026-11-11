@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,9 +59,11 @@ static const char* const FILE_SUFFIXES[CarafeFileCount] = { ".wine-nx.txt", ".ke
 
 extern struct input_profile wine_nx_input_profile;
 extern int wine_nx_swkbd_auto_enabled;
+extern void wine_nx_input_profile_set(const struct input_profile* profile) __attribute__((weak));
 extern void wine_nx_graphics_configure(int frame_limit, int vsync) __attribute__((weak));
 extern void wine_nx_request_quit(const char* why) __attribute__((weak));
 
+static pthread_mutex_t g_tick_lock = PTHREAD_MUTEX_INITIALIZER;
 static Change g_changes[MAX_CHANGES];
 static int g_change_count;
 static bool g_changes_loaded;
@@ -69,6 +72,7 @@ static bool g_restart;
 static bool g_trial_active;
 static u64 g_start_tick;
 static bool g_trial_done;
+static bool g_trial_tick_cleared;
 static char* g_effective[CarafeFileCount];
 static char* g_snapshot_disk[CarafeFileCount];
 static int g_swkbd_auto_fallback = 1;
@@ -462,7 +466,7 @@ static void parseChanges(const char* text) {
 }
 
 static void loadChanges(void) {
-    if (g_changes_loaded) {
+    if (__atomic_load_n(&g_changes_loaded, __ATOMIC_ACQUIRE)) {
         return;
     }
     char path[PATH_SIZE];
@@ -471,7 +475,7 @@ static void loadChanges(void) {
         parseChanges(text);
         free(text);
     }
-    g_changes_loaded = true;
+    __atomic_store_n(&g_changes_loaded, true, __ATOMIC_RELEASE);
 }
 
 static Change* findChange(CarafeFile file, const char* key) {
@@ -557,7 +561,7 @@ bool carafeWriteChangesText(const char* text) {
     if (!programFilePath("changes.txt", path, sizeof(path))) {
         return false;
     }
-    g_changes_loaded = false;
+    __atomic_store_n(&g_changes_loaded, false, __ATOMIC_RELEASE);
     if (text == NULL || text[0] == '\0') {
         remove(path);
         return true;
@@ -740,12 +744,14 @@ static void applyEnvironmentFromProgram(void) {
 }
 
 void carafeSettingsSyncProgram(void) {
+    pthread_mutex_lock(&g_tick_lock);
     g_start_tick = armGetSystemTick();
-    g_swkbd_auto_fallback = wine_nx_swkbd_auto_enabled;
-    g_changes_loaded = false;
+    g_swkbd_auto_fallback = __atomic_load_n(&wine_nx_swkbd_auto_enabled, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_changes_loaded, false, __ATOMIC_RELEASE);
     g_change_count = 0;
     g_restart = false;
     g_trial_done = false;
+    __atomic_store_n(&g_trial_tick_cleared, false, __ATOMIC_RELEASE);
     free(g_start_changes);
     g_start_changes = NULL;
     for (int f = 0; f < CarafeFileCount; f++) {
@@ -758,12 +764,12 @@ void carafeSettingsSyncProgram(void) {
         g_start_changes = readWhole(changes_path, FILE_LIMIT);
         parseChanges(g_start_changes);
     }
-    g_changes_loaded = true;
 
     char trial[PATH_SIZE];
     volatilePath("trial.txt", trial, sizeof(trial));
     struct stat st;
     g_trial_active = stat(trial, &st) == 0;
+    __atomic_store_n(&g_changes_loaded, true, __ATOMIC_RELEASE);
 
     if (g_change_count > 0) {
         applyPendingArrayToDisk();
@@ -782,15 +788,18 @@ void carafeSettingsSyncProgram(void) {
     }
 
     applyEnvironmentFromProgram();
+    pthread_mutex_unlock(&g_tick_lock);
 }
 
 void carafeSettingsPrepareError(void) {
+    pthread_mutex_lock(&g_tick_lock);
     g_start_tick = armGetSystemTick();
-    g_swkbd_auto_fallback = wine_nx_swkbd_auto_enabled;
-    g_changes_loaded = false;
+    g_swkbd_auto_fallback = __atomic_load_n(&wine_nx_swkbd_auto_enabled, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_changes_loaded, false, __ATOMIC_RELEASE);
     g_change_count = 0;
     g_restart = false;
     g_trial_done = false;
+    __atomic_store_n(&g_trial_tick_cleared, false, __ATOMIC_RELEASE);
     free(g_start_changes);
     g_start_changes = NULL;
     for (int f = 0; f < CarafeFileCount; f++) {
@@ -811,6 +820,7 @@ void carafeSettingsPrepareError(void) {
             g_snapshot_disk[f] = readWhole(p, FILE_LIMIT);
         }
     }
+    pthread_mutex_unlock(&g_tick_lock);
 }
 
 bool carafeOptionsSummary(char* out, size_t size) {
@@ -1583,13 +1593,20 @@ static void applyKeysLive(void) {
     if (!gameTarget(target, sizeof(target))) {
         return;
     }
-    static struct input_profile profile;
-    static struct launcher_kv kv;
-    if (input_profile_program(RUNTIME_ROOT, target, g_swkbd_auto_fallback, &profile, &kv, path, sizeof(path))) {
-        wine_nx_input_profile = profile;
-        wine_nx_swkbd_auto_enabled = profile.keyboard_auto;
+    struct input_profile* profile = calloc(1, sizeof(*profile));
+    struct launcher_kv* kv = calloc(1, sizeof(*kv));
+    if (profile != NULL && kv != NULL
+        && input_profile_program(RUNTIME_ROOT, target, g_swkbd_auto_fallback, profile, kv, path, sizeof(path))) {
+        if (wine_nx_input_profile_set != NULL) {
+            wine_nx_input_profile_set(profile);
+        } else {
+            wine_nx_input_profile = *profile;
+        }
+        __atomic_store_n(&wine_nx_swkbd_auto_enabled, profile->keyboard_auto, __ATOMIC_RELEASE);
         note("[CARAFE] settings menu: controls changed while the game runs");
     }
+    free(kv);
+    free(profile);
 }
 
 static void applyLive(CarafeCatalog* catalog, const CarafeSetting* setting) {
@@ -1965,7 +1982,7 @@ void carafeRequestRestart(bool trial) {
 }
 
 bool carafeTrialActive(void) {
-    return g_trial_active && !g_trial_done;
+    return g_trial_active && !__atomic_load_n(&g_trial_done, __ATOMIC_ACQUIRE);
 }
 
 bool carafeTrialRead(char* out, size_t size) {
@@ -1984,7 +2001,7 @@ void carafeTrialClear(void) {
     char path[PATH_SIZE];
     volatilePath("trial.txt", path, sizeof(path));
     remove(path);
-    g_trial_done = true;
+    __atomic_store_n(&g_trial_done, true, __ATOMIC_RELEASE);
     carafeRegistryTrialClear();
 }
 
@@ -2016,15 +2033,20 @@ void carafeFailuresClear(void) {
 }
 
 void carafeSettingsTick(void) {
-    static bool cleared;
-    if (!g_changes_loaded || cleared
-        || armTicksToNs(armGetSystemTick() - g_start_tick) < (u64)TRIAL_SECONDS * 1000000000ULL) {
+    if (!__atomic_load_n(&g_changes_loaded, __ATOMIC_ACQUIRE)
+        || __atomic_load_n(&g_trial_tick_cleared, __ATOMIC_ACQUIRE)) {
         return;
     }
-    cleared = true;
-    if (g_trial_active && !g_trial_done) {
-        carafeTrialClear();
-        note("[CARAFE] settings: the trial run lasted %d s, its settings stay", TRIAL_SECONDS);
+    pthread_mutex_lock(&g_tick_lock);
+    if (__atomic_load_n(&g_changes_loaded, __ATOMIC_ACQUIRE)
+        && !__atomic_load_n(&g_trial_tick_cleared, __ATOMIC_ACQUIRE)
+        && armTicksToNs(armGetSystemTick() - g_start_tick) >= (u64)TRIAL_SECONDS * 1000000000ULL) {
+        __atomic_store_n(&g_trial_tick_cleared, true, __ATOMIC_RELEASE);
+        if (g_trial_active && !__atomic_load_n(&g_trial_done, __ATOMIC_ACQUIRE)) {
+            carafeTrialClear();
+            note("[CARAFE] settings: the trial run lasted %d s, its settings stay", TRIAL_SECONDS);
+        }
+        carafeFailuresClear();
     }
-    carafeFailuresClear();
+    pthread_mutex_unlock(&g_tick_lock);
 }

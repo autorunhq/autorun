@@ -5770,15 +5770,18 @@ static void nx_displace_swapchain( struct swapchain *swapchain )
 {
     struct vulkan_device *device = swapchain->nx_device;
 
+    uint64_t acquired = __atomic_load_n( &swapchain->nx_acquired, __ATOMIC_RELAXED );
+
     nx_screen_waiting = TRUE;
     while (nx_screen_users) pthread_cond_wait( &nx_screen_idle, &nx_screen_lock );
-    if (swapchain->nx_acquired && device->p_vkReleaseSwapchainImagesEXT)
+    acquired = __atomic_load_n( &swapchain->nx_acquired, __ATOMIC_RELAXED );
+    if (acquired && device->p_vkReleaseSwapchainImagesEXT)
     {
         VkReleaseSwapchainImagesInfoEXT release = { .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT };
         uint32_t indices[64], count = 0;
 
         for (uint32_t i = 0; i < 64; ++i)
-            if (swapchain->nx_acquired & (1ull << i)) indices[count++] = i;
+            if (acquired & (1ull << i)) indices[count++] = i;
         release.swapchain = swapchain->obj.host.swapchain;
         release.imageIndexCount = count;
         release.pImageIndices = indices;
@@ -5831,6 +5834,7 @@ static VkResult nx_vkCreateSwapchainKHR( VkDevice client_device, const VkSwapcha
     VkResult res;
 
     pthread_mutex_lock( &nx_screen_lock );
+    while (nx_screen_waiting) pthread_cond_wait( &nx_screen_idle, &nx_screen_lock );
     if (!(res = win32u_vkCreateSwapchainKHR( client_device, create_info, allocator, ret )))
     {
         swapchain = swapchain_from_handle( *ret );
@@ -5852,10 +5856,10 @@ static void nx_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR cli
     win32u_vkDestroySwapchainKHR( client_device, client_swapchain, allocator );
 }
 
-static void nx_note_acquired( struct swapchain *swapchain, VkResult res, uint32_t image_index )
+static void nx_note_acquired( struct swapchain *swapchain, VkResult res, const uint32_t *image_index )
 {
-    if ((res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) && image_index < 64)
-        swapchain->nx_acquired |= 1ull << image_index;
+    if ((res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) && *image_index < 64)
+        __atomic_fetch_or( &swapchain->nx_acquired, 1ull << *image_index, __ATOMIC_RELAXED );
 }
 
 static VkResult nx_vkAcquireNextImageKHR( VkDevice client_device, VkSwapchainKHR client_swapchain, uint64_t timeout,
@@ -5867,7 +5871,7 @@ static VkResult nx_vkAcquireNextImageKHR( VkDevice client_device, VkSwapchainKHR
     if (!nx_screen_enter( swapchain )) return VK_ERROR_OUT_OF_DATE_KHR;
     res = win32u_vkAcquireNextImageKHR( client_device, client_swapchain, timeout, client_semaphore, client_fence,
                                         image_index );
-    nx_note_acquired( swapchain, res, *image_index );
+    nx_note_acquired( swapchain, res, image_index );
     nx_screen_leave();
     return res;
 }
@@ -5880,7 +5884,7 @@ static VkResult nx_vkAcquireNextImage2KHR( VkDevice client_device, const VkAcqui
 
     if (!nx_screen_enter( swapchain )) return VK_ERROR_OUT_OF_DATE_KHR;
     res = win32u_vkAcquireNextImage2KHR( client_device, acquire_info, image_index );
-    nx_note_acquired( swapchain, res, *image_index );
+    nx_note_acquired( swapchain, res, image_index );
     nx_screen_leave();
     return res;
 }
@@ -5944,8 +5948,8 @@ static VkResult nx_vkQueuePresentKHR( VkQueue client_queue, const VkPresentInfoK
     {
         for (uint32_t i = 0; i < present_info->swapchainCount; ++i)
             if (present_info->pImageIndices[i] < 64)
-                swapchain_from_handle( present_info->pSwapchains[i] )->nx_acquired &=
-                    ~(1ull << present_info->pImageIndices[i]);
+                __atomic_fetch_and( &swapchain_from_handle( present_info->pSwapchains[i] )->nx_acquired,
+                                    ~(1ull << present_info->pImageIndices[i]), __ATOMIC_RELAXED );
         res = win32u_vkQueuePresentKHR( client_queue, present_info );
     }
     else res = nx_present_refused( client_queue, present_info );

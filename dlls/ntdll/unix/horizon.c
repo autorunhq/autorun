@@ -13056,6 +13056,7 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
         else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
         else
         {
+            object->refs++;
             while (!object->thread_context_valid && object->thread.suspend && !object->thread.terminated &&
                    !horizon_server_freeze_locked( object ) && !horizon_server_hold_locked( object ))
             {
@@ -13073,6 +13074,7 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
                 break;
             }
             if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+            if (!--object->refs) horizon_server_free_object( object );
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -13106,6 +13108,7 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
             else if (!object->thread.started || object->frozen) status = HORIZON_STATUS_NOT_SUPPORTED;
             else
             {
+                object->refs++;
                 while (!object->thread_context_valid && object->thread.suspend &&
                        !object->thread.terminated && !horizon_server_hold_locked( object ))
                 {
@@ -13124,6 +13127,7 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
                             found = 1;
                         }
                 if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+                if (!--object->refs) horizon_server_free_object( object );
             }
         }
         pthread_mutex_unlock( &horizon_server_objects_mutex );

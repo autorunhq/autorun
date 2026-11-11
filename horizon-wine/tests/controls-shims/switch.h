@@ -36,7 +36,8 @@ static inline Result romfsMountFromStorage( FsStorage s, u64 offset, const char 
     return 1;
 }
 
-static inline u64 armGetSystemTick( void ) { return 19200000ull; }
+extern u64 controls_test_tick __attribute__((weak));
+static inline u64 armGetSystemTick( void ) { return &controls_test_tick != NULL ? controls_test_tick : 19200000ull; }
 static inline u64 armTicksToNs( u64 tick ) { return (tick * 1000ull) / 192ull * 10ull; }
 
 typedef enum {

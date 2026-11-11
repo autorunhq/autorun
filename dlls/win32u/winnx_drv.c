@@ -581,14 +581,16 @@ static void wine_nx_surface_set_clip( struct window_surface *surface, const RECT
 }
 
 static BOOL wine_nx_client_lit( struct wine_nx_surface *nx_surface, const RECT *dirty,
-                                const void *color_bits, int stride )
+                                const void *color_bits, int stride, int sh )
 {
     const DWORD *bits = color_bits;
-    RECT area;
+    RECT area, bounds = { 0, 0, stride, sh };
     int x, y;
 
+    if (!bits || stride <= 0 || sh <= 0) return FALSE;
     if (!intersect_rect( &area, dirty, &nx_surface->client_rect )) return FALSE;
     if (!intersect_rect( &area, &area, &nx_surface->present_rect )) return FALSE;
+    if (!intersect_rect( &area, &area, &bounds )) return FALSE;
 
     for (y = area.top; y < area.bottom; y++)
         for (x = area.left; x < area.right; x++)
@@ -615,7 +617,7 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
     (void)rect;
 
     if (drawn && entry && entry->visible && wine_nx_screen_wants_pictures && wine_nx_screen_wants_pictures() &&
-        wine_nx_screen_picture_drawn && wine_nx_client_lit( nx_surface, dirty, color_bits, sw ))
+        wine_nx_screen_picture_drawn && wine_nx_client_lit( nx_surface, dirty, color_bits, sw, sh ))
         wine_nx_screen_picture_drawn( NtUserGetWindowThread( surface->hwnd, NULL ),
                                       wine_nx_layer_redrawn ? wine_nx_layer_redrawn( nx_surface->layer, color_bits, sw,
                                                                                      dirty->left, dirty->top,
@@ -1250,13 +1252,13 @@ static void wine_nx_fit_screen_to_game( void )
     LONG ret;
     char line[160];
 
-    if (wine_nx_fit_thread != GetCurrentThreadId()) return;
+    if (__atomic_load_n( &wine_nx_fit_thread, __ATOMIC_ACQUIRE ) != GetCurrentThreadId()) return;
     if (wine_nx_reply_waits) return;
     if (!InterlockedExchange( &wine_nx_fit_pending, 0 )) return;
     if (!(game = wine_nx_find_game_window( &client ))) return;
     if (NtUserGetWindowThread( game, NULL ) != GetCurrentThreadId())
     {
-        wine_nx_fit_thread = NtUserGetWindowThread( game, NULL );
+        __atomic_store_n( &wine_nx_fit_thread, NtUserGetWindowThread( game, NULL ), __ATOMIC_RELEASE );
         InterlockedExchange( &wine_nx_fit_pending, 1 );
         return;
     }
@@ -1312,7 +1314,7 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
     nxdrv_trace( "[NXDRV] WindowPosChanged surface=%d swp=%x", surface ? 1 : 0, swp_flags, 0, 0 );
     if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
     {
-        wine_nx_fit_thread = NtUserGetWindowThread( hwnd, NULL );
+        __atomic_store_n( &wine_nx_fit_thread, NtUserGetWindowThread( hwnd, NULL ), __ATOMIC_RELEASE );
         InterlockedExchange( &wine_nx_fit_pending, 1 );
     }
     if (swp_flags & SWP_HIDEWINDOW)

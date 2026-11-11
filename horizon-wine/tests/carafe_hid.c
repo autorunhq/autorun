@@ -190,6 +190,14 @@ int main( void )
     status = carafeHidWrite( xi, NULL, 0, &out_size );
     assert( status == (unsigned int)STATUS_INVALID_USER_BUFFER && out_size == 0 );
 
+    /* NULL / invalid handle guards on Ioctl, Read, Write. */
+    status = carafeHidIoctl( NULL, IOCTL_HID_GET_PRODUCT_STRING, NULL, 0, buf, sizeof(buf), &out_size );
+    assert( status == (unsigned int)STATUS_INVALID_HANDLE && out_size == 0 );
+    status = carafeHidRead( NULL, buf, sizeof(buf), &out_size );
+    assert( status == (unsigned int)STATUS_INVALID_HANDLE && out_size == 0 );
+    status = carafeHidWrite( NULL, buf, 8, &out_size );
+    assert( status == (unsigned int)STATUS_INVALID_HANDLE && out_size == 0 );
+
     carafeHidClose( ig );
     carafeHidClose( xi );
     puts( "carafe_hid tests passed" );

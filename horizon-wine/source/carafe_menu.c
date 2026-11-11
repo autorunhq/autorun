@@ -1460,7 +1460,7 @@ static void closeLocked(void) {
     if (!g_open) {
         return;
     }
-    g_open = false;
+    __atomic_store_n(&g_open, false, __ATOMIC_RELEASE);
     carafeCatalogFree(g_catalog);
     g_catalog = NULL;
     regLeave();
@@ -1489,7 +1489,7 @@ static bool openLocked(bool error_mode) {
         return false;
     }
     g_language = carafeLanguage();
-    g_error_mode = error_mode;
+    __atomic_store_n(&g_error_mode, error_mode, __ATOMIC_RELAXED);
     g_tab = error_mode && g_failure != CarafeKindNone ? 0 : (error_mode ? 1 : 0);
     g_focus = g_scroll = 0;
     g_group = -1;
@@ -1508,7 +1508,7 @@ static bool openLocked(bool error_mode) {
     }
     g_title[strcspn(g_title, "\r\n")] = '\0';
     carafeLoadIcon(&g_icon);
-    g_open = true;
+    __atomic_store_n(&g_open, true, __ATOMIC_RELEASE);
     changed();
     note("[CARAFE] settings menu opened%s", error_mode ? " from the error screen" : "");
     return true;
@@ -1601,7 +1601,13 @@ static void editToggleBase(void) {
     if (!regNumber(g_edit_type) || (g_edit_new && g_edit_field != 2)) {
         return;
     }
+    errno = 0;
     unsigned long long value = g_edit_text[0] != '\0' ? strtoull(g_edit_text, NULL, g_edit_hex ? 16 : 10) : 0;
+    if (errno != 0 || (g_edit_type == CARAFE_REG_DWORD && value > 0xFFFFFFFFULL)) {
+        g_edit_error = reg()->too_big;
+        return;
+    }
+    g_edit_error = NULL;
     g_edit_hex = !g_edit_hex;
     if (g_edit_text[0] != '\0') {
         snprintf(g_edit_text, sizeof(g_edit_text), g_edit_hex ? "%llX" : "%llu", value);
@@ -2001,15 +2007,17 @@ static CarafeMenuAction tap(int x, int y) {
     Hit hit = g_hits[index];
     switch (hit.kind) {
     case HitTab:
-        if (g_group < 0 && !g_picker && !g_confirm) {
+        if (g_group < 0 && !g_picker && !g_confirm && hit.value >= 0 && hit.value < tabCount()) {
             g_tab = hit.value;
             g_focus = g_scroll = 0;
             g_pad_focus = STRIP_MAX;
+            g_reset_armed = false;
         }
         break;
     case HitPage:
         g_page = hit.value;
         g_group_focus = g_group_scroll = 0;
+        g_reset_armed = false;
         break;
     case HitRow: {
         Item items[MAX_ITEMS];
@@ -3418,7 +3426,7 @@ void carafeMenuRender(CarafeImage* picture) {
 }
 
 bool carafeMenuVisible(void) {
-    return __atomic_load_n(&g_open, __ATOMIC_ACQUIRE) && !g_error_mode;
+    return __atomic_load_n(&g_open, __ATOMIC_ACQUIRE) && !__atomic_load_n(&g_error_mode, __ATOMIC_RELAXED);
 }
 
 unsigned int carafeMenuGeneration(void) {

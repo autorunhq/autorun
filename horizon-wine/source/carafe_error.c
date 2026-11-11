@@ -1880,8 +1880,13 @@ static int errorScreen(void) {
 }
 
 int __wrap_main(int argc, char** argv) {
-    bool flag = (argc > 1 && argv[1] != NULL && strcmp(argv[1], ERROR_FLAG) == 0)
-        || (argc > 0 && argv[0] != NULL && strcmp(argv[0], ERROR_FLAG) == 0);
+    bool flag = false;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i] != NULL && strcmp(argv[i], ERROR_FLAG) == 0) {
+            flag = true;
+            break;
+        }
+    }
     bool restart_pending = false;
     bool has_pending = readPendingMeta(&restart_pending);
 

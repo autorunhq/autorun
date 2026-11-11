@@ -162,6 +162,7 @@ static HidDevice g_devices[] = {
 enum { DeviceGamepad, DeviceXinput, DeviceCount };
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_poll_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct unix_device* g_xinput;
 static bool g_ready;
 static bool g_failed;
@@ -571,10 +572,17 @@ static unsigned int inputReport(HidFile* file, const unsigned char* in, unsigned
 unsigned int carafeHidIoctl(void* opened, unsigned int code, const unsigned char* in, unsigned int in_size,
     unsigned char* out, unsigned int out_max, unsigned int* out_size) {
     HidFile* file = opened;
-    HIDP_COLLECTION_DESC* collection = &file->device->desc.CollectionDesc[0];
+    HIDP_COLLECTION_DESC* collection;
     unsigned int status;
 
+    if (out_size == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
     *out_size = 0;
+    if (file == NULL || file->device == NULL) {
+        return STATUS_INVALID_HANDLE;
+    }
+    collection = &file->device->desc.CollectionDesc[0];
     pthread_mutex_lock(&g_lock);
     switch (code) {
     case IOCTL_HID_GET_POLL_FREQUENCY_MSEC: {
@@ -662,11 +670,21 @@ unsigned int carafeHidIoctl(void* opened, unsigned int code, const unsigned char
 unsigned int carafeHidRead(void* opened, unsigned char* out, unsigned int out_max, unsigned int* out_size) {
     HidFile* file = opened;
     BYTE next[HID_REPORT_MAX];
-    ULONG length = inputLength(file->device);
+    ULONG length;
     unsigned int status = STATUS_PENDING;
     bool first = false;
 
+    if (out_size == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
     *out_size = 0;
+    if (file == NULL || file->device == NULL) {
+        return STATUS_INVALID_HANDLE;
+    }
+    if (out == NULL && out_max > 0) {
+        return STATUS_INVALID_USER_BUFFER;
+    }
+    length = inputLength(file->device);
     if (out_max < length) {
         return STATUS_INVALID_BUFFER_SIZE;
     }
@@ -686,8 +704,14 @@ unsigned int carafeHidRead(void* opened, unsigned char* out, unsigned int out_ma
 }
 
 unsigned int carafeHidWrite(void* opened, const unsigned char* in, unsigned int size, unsigned int* written) {
-    (void)opened;
+    HidFile* file = opened;
+    if (written == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
     *written = 0;
+    if (file == NULL || file->device == NULL) {
+        return STATUS_INVALID_HANDLE;
+    }
     return in == NULL || !size ? STATUS_INVALID_USER_BUFFER : STATUS_INVALID_PARAMETER;
 }
 
@@ -795,6 +819,7 @@ void carafeHidPoll(void) {
     XINPUT_GAMEPAD pad = { 0 };
     bool changed = false;
 
+    pthread_mutex_lock(&g_poll_lock);
     if (!wine_nx_xinput_player(&pad)) {
         memset(&pad, 0, sizeof(pad));
     }
@@ -810,6 +835,7 @@ void carafeHidPoll(void) {
         }
     }
     pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_poll_lock);
     if (changed && wine_nx_device_reports != NULL) {
         wine_nx_device_reports();
     }

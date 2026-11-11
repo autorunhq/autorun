@@ -220,6 +220,7 @@ struct nx_osk_gl
 };
 static struct nx_osk_gl nx_osk_gl[8];
 static unsigned int nx_osk_gl_next;
+static pthread_mutex_t nx_osk_gl_lock = PTHREAD_MUTEX_INITIALIZER;
 static PFN_glGenFramebuffers p_glGenFramebuffers;
 static PFN_glBindFramebuffer p_glBindFramebuffer;
 static PFN_glFramebufferTexture2D p_glFramebufferTexture2D;
@@ -464,20 +465,33 @@ static void nx_osk_draw( struct opengl_drawable *base )
         !(context = funcs->p_eglGetCurrentContext()))
         return;
     if (overlay_visible && !wine_nx_osk_frame( width, height, &frame ))
-        overlay_visible = FALSE;
-    if (!overlay_visible && !cursor_on) return;
-    if (!p_glBlitFramebuffer)
     {
+        overlay_visible = FALSE;
+        cursor_on = wine_nx_cursor_state && wine_nx_cursor_bitmap &&
+                    wine_nx_cursor_state( &cursor_x, &cursor_y, &cursor_visible ) && cursor_visible;
+    }
+    if (!overlay_visible && !cursor_on) return;
+
+    pthread_mutex_lock( &nx_osk_gl_lock );
+    if (!__atomic_load_n( &p_glBlitFramebuffer, __ATOMIC_ACQUIRE ))
+    {
+        PFN_glBindFramebuffer bind_fb;
+        PFN_glBlitFramebuffer blit;
+
         p_glGenFramebuffers = (void *)funcs->p_eglGetProcAddress( "glGenFramebuffers" );
-        p_glBindFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" );
+        bind_fb = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" );
         p_glFramebufferTexture2D = (void *)funcs->p_eglGetProcAddress( "glFramebufferTexture2D" );
         p_glIsFramebuffer = (void *)funcs->p_eglGetProcAddress( "glIsFramebuffer" );
         p_glBindBuffer = (void *)funcs->p_eglGetProcAddress( "glBindBuffer" );
-        if (!p_glGenFramebuffers || !p_glBindFramebuffer || !p_glFramebufferTexture2D || !p_glIsFramebuffer ||
-            !p_glBindBuffer)
+        blit = (void *)funcs->p_eglGetProcAddress( "glBlitFramebuffer" );
+        if (!p_glGenFramebuffers || !bind_fb || !p_glFramebufferTexture2D || !p_glIsFramebuffer ||
+            !p_glBindBuffer || !blit)
+        {
+            pthread_mutex_unlock( &nx_osk_gl_lock );
             return;
-        p_glBlitFramebuffer = (void *)funcs->p_eglGetProcAddress( "glBlitFramebuffer" );
-        if (!p_glBlitFramebuffer) return;
+        }
+        __atomic_store_n( &p_glBindFramebuffer, bind_fb, __ATOMIC_RELEASE );
+        __atomic_store_n( &p_glBlitFramebuffer, blit, __ATOMIC_RELEASE );
     }
     for (i = 0; i < ARRAY_SIZE(nx_osk_gl) && !osk; i++)
         if (nx_osk_gl[i].context == context) osk = &nx_osk_gl[i];
@@ -550,7 +564,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
                                      frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
             if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
             if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
-            nx_osk_shown = TRUE;
+            __atomic_store_n( &nx_osk_shown, TRUE, __ATOMIC_RELEASE );
         }
     }
     else if (cursor_on)
@@ -571,6 +585,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
     funcs->p_glPixelStorei( GL_UNPACK_SKIP_PIXELS, skip_pixels );
     funcs->p_glPixelStorei( GL_UNPACK_SKIP_ROWS, skip_rows );
     funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, alignment );
+    pthread_mutex_unlock( &nx_osk_gl_lock );
 }
 
 static void nx_screen_clear( void )
@@ -604,17 +619,22 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
     if (!impl_from_opengl_drawable( base )->screen)
         return funcs->p_eglSwapBuffers( egl->display, base->surface );
-    nx_osk_shown = FALSE;
+    __atomic_store_n( &nx_osk_shown, FALSE, __ATOMIC_RELAXED );
     nx_osk_draw( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_gl_swaps, 1, __ATOMIC_RELAXED );
-    if (nx_osk_shown) nx_screen_clears = NX_SCREEN_CLEARS;
-    if (ret && nx_screen_clears && p_glBindFramebuffer)
+    if (__atomic_load_n( &nx_osk_shown, __ATOMIC_ACQUIRE ))
+        __atomic_store_n( &nx_screen_clears, NX_SCREEN_CLEARS, __ATOMIC_RELAXED );
+    if (ret && __atomic_load_n( &p_glBindFramebuffer, __ATOMIC_ACQUIRE ))
     {
-        nx_screen_clears--;
-        nx_screen_clear();
+        unsigned int clears = __atomic_load_n( &nx_screen_clears, __ATOMIC_RELAXED );
+
+        while (clears && !__atomic_compare_exchange_n( &nx_screen_clears, &clears, clears - 1, 1,
+                                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+            ;
+        if (clears) nx_screen_clear();
     }
     return ret;
 }
@@ -640,12 +660,14 @@ static void nx_screen_first_frame( struct nx_gl_drawable *gl, int format )
         nx_log( "[NXGL] first frame: the thread's context could not be made current again, error %#x",
                 funcs->p_eglGetError() );
     funcs->p_eglDestroyContext( egl->display, context );
+    pthread_mutex_lock( &nx_osk_gl_lock );
     for (i = 0; i < ARRAY_SIZE(nx_osk_gl); i++)
     {
         if (nx_osk_gl[i].context != context) continue;
         free( nx_osk_gl[i].pixels );
         memset( &nx_osk_gl[i], 0, sizeof(nx_osk_gl[i]) );
     }
+    pthread_mutex_unlock( &nx_osk_gl_lock );
 }
 
 static const struct opengl_drawable_funcs nx_drawable_funcs =

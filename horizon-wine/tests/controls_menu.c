@@ -36,6 +36,8 @@ static int g_quit_calls;
 static int g_hid_registered;
 static int g_reg_locks;
 static int g_reg_sets;
+static int g_mock_reg_ok;
+u64 controls_test_tick = 19200000ull;
 
 void wine_nx_runtime_trace( const char *msg )
 {
@@ -106,7 +108,7 @@ int wine_nx_registry_key_info( int hive, const unsigned short *path, unsigned in
     (void)hive; (void)path; (void)path_len;
     *subkeys = 0;
     *values = 0;
-    return -1;
+    return g_mock_reg_ok ? 0 : -1;
 }
 
 int wine_nx_registry_subkey( int hive, const unsigned short *path, unsigned int path_len, unsigned int index,
@@ -505,6 +507,182 @@ int main( int argc, char **argv )
         assert( carafeMenuInput( OSK_B, false, 0, 0, 800000000ULL ) == CarafeMenuBack );
         free( menu_px );
         carafeMenuClose();
+
+        /* Test 5: truncated/malformed UTF-8 in carafeWrappedHeight never reads past NUL. */
+        {
+            CarafeTextStyle wrap_style = { 18, CarafeRegular, 24, 0xffffffffu, false };
+            assert( carafeWrappedHeight( "abc\xE4\xB8", &wrap_style, 200 ) > 0 );
+            assert( carafeWrappedHeight( "\xF0\x9F", &wrap_style, 200 ) > 0 );
+            assert( carafeWrappedHeight( "\xC3", &wrap_style, 200 ) > 0 );
+        }
+
+        /* Test 6: carafeRegistryBringBack reloads pending for carafeRegistryPendingLine / carafeRegistryList,
+         * and CRLF in registry-removed.txt is stripped cleanly. */
+        {
+            FILE *rb = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-rollback.txt", "wb" );
+            assert( rb != NULL );
+            fputs( "carafe-registry-pending\t1\nset\tHKCU\tSoftware\\Test\tRestored\t4\t2a000000\n", rb );
+            fclose( rb );
+            carafeRegistryBringBack();
+
+            char pname[64] = "", pfrom[64] = "", pto[64] = "";
+            assert( carafeRegistryPendingLine( 0, pname, sizeof(pname), pfrom, sizeof(pfrom), pto, sizeof(pto) ) );
+            assert( strcmp( pname, "Restored" ) == 0 );
+            assert( strstr( pto, "42" ) != NULL );
+
+            /* BringBack again, then test carafeRegistryList directly without calling PendingCount first. */
+            rb = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-rollback.txt", "wb" );
+            assert( rb != NULL );
+            fputs( "carafe-registry-pending\t1\nset\tHKCU\tSoftware\\Test\tListed\t4\t07000000\n", rb );
+            fclose( rb );
+            carafeRegistryBringBack();
+
+            g_mock_reg_ok = 1;
+            CarafeRegEntry entries[8];
+            int ecount = carafeRegistryList( CARAFE_REG_HIVE_USER, "Software\\Test", entries, 8 );
+            assert( ecount == 1 );
+            assert( strcmp( entries[0].name, "Listed" ) == 0 );
+            assert( entries[0].state == CarafeRegAdded );
+            g_mock_reg_ok = 0;
+
+            /* CRLF registry-removed.txt must still match REMOVED_HEADER. */
+            FILE *rem = fopen( "sdmc:/switch/wine/carafe/0100000000001000/registry-removed.txt", "wb" );
+            assert( rem != NULL );
+            fputs( "carafe-registry-removed\t1\r\ndelete\tHKCU\tSoftware\\Test\tEnabled\r\n", rem );
+            fclose( rem );
+            carafeRegistryUndoPending();
+            carafeRegistryLoaded();
+        }
+
+        /* Test 7: carafeSettingsTick clears trial after 300s AND resets on subsequent carafeSettingsSyncProgram. */
+        {
+            controls_test_tick = 19200000ull;
+            carafeTrialWrite( true );
+            carafeSettingsSyncProgram();
+            assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+            carafeSettingsTick();
+            assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+
+            controls_test_tick = 19200000ull + 301ull * 19200000ull;
+            carafeSettingsTick();
+            assert( !carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+
+            /* Second program session starts with trial.txt again: must wait 300s from new start, then clear it. */
+            carafeTrialWrite( true );
+            carafeSettingsSyncProgram();
+            assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+            carafeSettingsTick();
+            assert( carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+
+            controls_test_tick += 301ull * 19200000ull;
+            carafeSettingsTick();
+            assert( !carafeTrialRead( trial_buf, sizeof(trial_buf) ) );
+        }
+
+        /* Test 8: HitTab disarms reset-confirm, and registry DWORD base toggle rejects >32-bit overflow. */
+        {
+            /* Open registry browser via System tab + enter registry row. */
+            const char *reg_menu =
+                "carafe-menu\t2\n"
+                "languages\tru\ten\tzh-Hans\tja\tko\tzh-Hant\tfr\tfr-CA\tde\tit\tes\tes-419\tnl\tpt\tpt-BR\n"
+                "section\tgraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\tGraphics\n"
+                "setting\tvsync\tprogram\tvsync\trestart\t0\t-\t-\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tVSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\tSync\n"
+                "value\t1\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\tOn\n"
+                "value\t0\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\tOff\n"
+                "section\tsystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\tSystem\n"
+                "reset\n";
+            free( g_custom_menu );
+            g_custom_menu = strdup( reg_menu );
+            assert( g_custom_menu != NULL );
+
+            /* 8a: Arm reset on System tab, tap Graphics tab, tap System tab again -> pressing A must only re-arm, not reset. */
+            wine_nx_menu_poll( 0 );
+            wine_nx_menu_poll( menu_chord );
+            wine_nx_menu_poll( 0 );
+            assert( carafeMenuVisible() );
+            assert( carafeMenuInput( OSK_R, false, 0, 0, 900000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 920000000ULL ) == CarafeMenuStay );
+            /* Move to Reset row (row 0 = registry row when g_mock_reg_ok=1, or row 0 = reset? system section with registry has registry at 0, reset at 1). */
+            assert( carafeMenuInput( OSK_DOWN, false, 0, 0, 940000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 960000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( OSK_A, false, 0, 0, 980000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1000000000ULL ) == CarafeMenuStay );
+            /* Render to populate hit targets for tabs. */
+            uint32_t *tab_px = calloc( 1280 * 720, 4 );
+            assert( tab_px != NULL );
+            CarafeImage tab_img = { tab_px, 1280, 720 };
+            carafeMenuRender( &tab_img );
+            free( tab_px );
+            /* Tap first tab (Graphics, left side of tab strip y=10..42, x=90) then return to System via R. */
+            assert( carafeMenuInput( 0, true, 100, 104, 1020000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1040000000ULL ) == CarafeMenuStay );
+            carafeMenuClose();
+
+            /* 8b: In registry editor for DWORD, enter "4294967296" and press Y (toggle base):
+             * must NOT convert/commit as 0x100000000. */
+            g_mock_reg_ok = 1;
+            wine_nx_menu_poll( menu_chord );
+            wine_nx_menu_poll( 0 );
+            assert( carafeMenuInput( OSK_R, false, 0, 0, 1100000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1110000000ULL ) == CarafeMenuStay );
+            /* Open registry (row 0 = Browse registry), descend to HKCU (down + A). */
+            assert( carafeMenuInput( OSK_A, false, 0, 0, 1120000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1130000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( OSK_DOWN, false, 0, 0, 1140000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1150000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( OSK_A, false, 0, 0, 1160000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1170000000ULL ) == CarafeMenuStay );
+            /* Open New value with OSK_X. */
+            assert( carafeMenuInput( OSK_X, false, 0, 0, 1180000000ULL ) == CarafeMenuStay );
+            assert( carafeMenuInput( 0, false, 0, 0, 1190000000ULL ) == CarafeMenuStay );
+            /* Type name "x" (key index 32 in KEYS_TEXT: row 3 col 2 -> down*3 + right*2). */
+            for (int r = 0; r < 3; r++) {
+                carafeMenuInput( OSK_DOWN, false, 0, 0, 1200000000ULL + (u64)r * 20000000ULL );
+                carafeMenuInput( 0, false, 0, 0, 1210000000ULL + (u64)r * 20000000ULL );
+            }
+            for (int c = 0; c < 2; c++) {
+                carafeMenuInput( OSK_RIGHT, false, 0, 0, 1270000000ULL + (u64)c * 20000000ULL );
+                carafeMenuInput( 0, false, 0, 0, 1280000000ULL + (u64)c * 20000000ULL );
+            }
+            carafeMenuInput( OSK_A, false, 0, 0, 1320000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1330000000ULL );
+            /* Move R twice to Value field (DWORD by default). */
+            carafeMenuInput( OSK_R, false, 0, 0, 1340000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1350000000ULL );
+            carafeMenuInput( OSK_R, false, 0, 0, 1360000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1370000000ULL );
+            /* Enter "4294967296": KEYS_DEC = {1,2,3,4,5,<-, 6,7,8,9,0,CLR}.
+             * Key 4 = index 3 (right*3 from 0). Just enter "9" ten times (index 9 = down + right*3) which overflows 32-bit DWORD! */
+            carafeMenuInput( OSK_DOWN, false, 0, 0, 1380000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1390000000ULL );
+            for (int c = 0; c < 3; c++) {
+                carafeMenuInput( OSK_RIGHT, false, 0, 0, 1400000000ULL + (u64)c * 20000000ULL );
+                carafeMenuInput( 0, false, 0, 0, 1410000000ULL + (u64)c * 20000000ULL );
+            }
+            for (int d = 0; d < 10; d++) {
+                carafeMenuInput( OSK_A, false, 0, 0, 1500000000ULL + (u64)d * 20000000ULL );
+                carafeMenuInput( 0, false, 0, 0, 1510000000ULL + (u64)d * 20000000ULL );
+            }
+            int before_pending = carafeRegistryPendingCount();
+            /* Toggle base with Y -> must keep decimal & reject overflow, and '+' must not commit. */
+            carafeMenuInput( OSK_Y, false, 0, 0, 1800000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1810000000ULL );
+            carafeMenuInput( OSK_PLUS, false, 0, 0, 1820000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1830000000ULL );
+            assert( carafeRegistryPendingCount() == before_pending );
+            /* Now toggle only after removing two digits with X -> fits 32-bit DWORD, Y switches to hex & + commits! */
+            carafeMenuInput( OSK_X, false, 0, 0, 1840000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1850000000ULL );
+            carafeMenuInput( OSK_X, false, 0, 0, 1860000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1870000000ULL );
+            carafeMenuInput( OSK_Y, false, 0, 0, 1880000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1890000000ULL );
+            carafeMenuInput( OSK_PLUS, false, 0, 0, 1900000000ULL );
+            carafeMenuInput( 0, false, 0, 0, 1910000000ULL );
+            assert( carafeRegistryPendingCount() == before_pending + 1 );
+            carafeMenuClose();
+            g_mock_reg_ok = 0;
+        }
 
         carafeCatalogFree( disk_cat );
         assert( chdir( orig_cwd ) == 0 );

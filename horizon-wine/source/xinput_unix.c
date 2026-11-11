@@ -15,7 +15,14 @@
 #include "input_profile.h"
 
 extern struct input_profile wine_nx_input_profile;
+extern void wine_nx_input_profile_get( struct input_profile *out ) __attribute__((weak));
 extern uint64_t wine_nx_input_swallowed;
+
+static void nx_xinput_profile( struct input_profile *out )
+{
+    if (wine_nx_input_profile_get) wine_nx_input_profile_get( out );
+    else *out = wine_nx_input_profile;
+}
 
 _Static_assert( NX_PAD_A == HidNpadButton_A && NX_PAD_B == HidNpadButton_B && NX_PAD_X == HidNpadButton_X &&
                 NX_PAD_Y == HidNpadButton_Y && NX_PAD_STICKL == HidNpadButton_StickL &&
@@ -60,11 +67,13 @@ static void nx_xinput_note( const struct nx_xinput_state_params *params )
 
 static void nx_xinput_read( struct nx_xinput_state_params *params )
 {
+    struct input_profile profile;
     XINPUT_GAMEPAD gamepad;
 
     params->connected = 0;
     memset( &params->state, 0, sizeof(params->state) );
-    if (params->index || wine_nx_input_profile.mode == INPUT_KEYBOARD_MOUSE) return;
+    nx_xinput_profile( &profile );
+    if (params->index || profile.mode == INPUT_KEYBOARD_MOUSE) return;
     pthread_mutex_lock( &pad_mutex );
     if (!pad_ready)
     {
@@ -88,7 +97,7 @@ static void nx_xinput_read( struct nx_xinput_state_params *params )
         if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;
         if ((raw.buttons & controls) == controls) raw.buttons &= ~controls;
         if ((raw.buttons & tasks) == tasks) raw.buttons &= ~tasks;
-        input_map_pad( &wine_nx_input_profile, &raw, &mapped );
+        input_map_pad( &profile, &raw, &mapped );
         nx_xinput_map( mapped.buttons, mapped.axis[0], mapped.axis[1], mapped.axis[2], mapped.axis[3], &gamepad );
         /* The floating keyboard, and the panels, have the controller while
          * any of them is up (osk.c): reading a panel does not play. */
@@ -108,7 +117,10 @@ static void nx_xinput_read( struct nx_xinput_state_params *params )
 
 int wine_nx_xinput_presented( void )
 {
-    return wine_nx_input_profile.mode != INPUT_KEYBOARD_MOUSE;
+    struct input_profile profile;
+
+    nx_xinput_profile( &profile );
+    return profile.mode != INPUT_KEYBOARD_MOUSE;
 }
 
 int wine_nx_xinput_player( XINPUT_GAMEPAD *gamepad )

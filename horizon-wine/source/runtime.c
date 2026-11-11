@@ -315,7 +315,7 @@ static void *log_flusher( void *arg )
         svcSleepThread( sleep_ns );
         wine_nx_runtime_overlay_poll();
         if (carafeLoadingTick) carafeLoadingTick();
-        else if (carafeSettingsTick) carafeSettingsTick();
+        if (carafeSettingsTick) carafeSettingsTick();
         now = armGetSystemTick();
         if (armTicksToNs( now - last_200ms ) < 200000000ULL) continue;
         last_200ms = now;
@@ -639,7 +639,22 @@ static const char *picture_mode_text( int mode )
  * programs to open it themselves through NtUserShowSoftwareKeyboard. */
 int wine_nx_swkbd_auto_enabled = 1;
 struct input_profile wine_nx_input_profile;
+static pthread_mutex_t wine_nx_input_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 uint64_t wine_nx_input_swallowed;
+
+void wine_nx_input_profile_get( struct input_profile *out )
+{
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    *out = wine_nx_input_profile;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+}
+
+void wine_nx_input_profile_set( const struct input_profile *in )
+{
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    wine_nx_input_profile = *in;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+}
 
 /***********************************************************************
  * Framebuffer platform hooks used by the win32u Switch display driver
@@ -1102,13 +1117,15 @@ static char controls_names[INPUT_SOURCE_COUNT][28], controls_values[INPUT_SOURCE
 
 static void controls_panel_build( const char **title, int *count )
 {
-    const struct input_profile *profile = &wine_nx_input_profile;
-    int controller = profile->mode == INPUT_CONTROLLER, n = 0;
+    struct input_profile profile;
+    int controller, n = 0;
     unsigned int i;
 
+    wine_nx_input_profile_get( &profile );
+    controller = profile.mode == INPUT_CONTROLLER;
     for (i = 0; i < INPUT_SOURCE_COUNT && n < INPUT_SOURCE_COUNT; i++)
     {
-        const struct input_binding *binding = controller ? &profile->pad[i] : &profile->keys[i];
+        const struct input_binding *binding = controller ? &profile.pad[i] : &profile.keys[i];
 
         if (!binding->count) continue;   /* what the profile leaves alone sends nothing */
         snprintf( controls_names[n], sizeof(controls_names[0]), "%s", input_sources[i].label );
@@ -1259,7 +1276,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     HidTouchScreenState touch = {0};
     struct input_pad raw = {0};
     struct input_output output = {0};
-    const struct input_profile *profile = &wine_nx_input_profile;
+    struct input_profile profile;
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
     int controls_were_open = 0, tasks_were_open = 0, finger_down = 0;
@@ -1427,6 +1444,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     /* Said once: the profile in force decides whether the stick may move the
      * cursor at all, and a finger is the one pointer that should always
      * work. */
+    wine_nx_input_profile_get( &profile );
     {
         static int profile_told;
 
@@ -1434,10 +1452,10 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         {
             profile_told = 1;
             log_line( "[POINTER] input mode %d, mouse speed %d, deadzone %d/%d",
-                      profile->mode, profile->mouse_speed, profile->deadzone[0], profile->deadzone[1] );
+                      profile.mode, profile.mouse_speed, profile.deadzone[0], profile.deadzone[1] );
         }
     }
-    emulate = !keyboard && !controls_open && !tasks_open && profile->mode == INPUT_KEYBOARD_MOUSE;
+    emulate = !keyboard && !controls_open && !tasks_open && profile.mode == INPUT_KEYBOARD_MOUSE;
 
     /* A mouse plugged into the dock reports relative deltas and wheel turns so
      * mouse-look games (SetCursorPos / ClipCursor) keep turning freely; a
@@ -1574,14 +1592,14 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     if (emulate)
     {
         struct input_output mapped;
-        input_map_keys( profile, &raw, &mapped );
+        input_map_keys( &profile, &raw, &mapped );
         memcpy( output.keys, mapped.keys, sizeof(output.keys) );
         output.buttons |= mapped.buttons;
         output.wheels = mapped.wheels;
         output.mouse_x = mapped.mouse_x;
         output.mouse_y = mapped.mouse_y;
         /* The profile's mouse-speed scales the built-in cursor speed. */
-        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile->mouse_speed / 100.0;
+        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile.mouse_speed / 100.0;
         moved |= pointer_cursor_step( &wine_nx_pointer, output.mouse_x, output.mouse_y, elapsed );
     }
     input_key_edges_update( &runtime_key_edges, output.keys );
@@ -2620,13 +2638,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     {
         char input_path[768];
         struct launcher_kv kv;
+        struct input_profile profile = {0};
+        int swkbd_auto = __atomic_load_n( &wine_nx_swkbd_auto_enabled, __ATOMIC_RELAXED );
         int loaded = target[1] == ':' ?
-            input_profile_global( RUNTIME_DIR, wine_nx_swkbd_auto_enabled, &wine_nx_input_profile,
+            input_profile_global( RUNTIME_DIR, swkbd_auto, &profile,
                                   &kv, input_path, sizeof(input_path) ) :
-            input_profile_program( RUNTIME_DIR, target, wine_nx_swkbd_auto_enabled,
-                                   &wine_nx_input_profile, &kv, input_path, sizeof(input_path) );
+            input_profile_program( RUNTIME_DIR, target, swkbd_auto,
+                                   &profile, &kv, input_path, sizeof(input_path) );
+        wine_nx_input_profile_set( &profile );
         if (!loaded) log_line( "[INPUT] could not read controller settings" );
-        wine_nx_swkbd_auto_enabled = wine_nx_input_profile.keyboard_auto;
+        __atomic_store_n( &wine_nx_swkbd_auto_enabled, profile.keyboard_auto, __ATOMIC_RELEASE );
     }
     /* Its own Box64 options, read when its first x86 code runs: SPEED2.box64.txt. */
     {

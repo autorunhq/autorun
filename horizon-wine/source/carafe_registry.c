@@ -600,7 +600,7 @@ static void writeRollback(void) {
         return;
     }
     fprintf(file, "%s\n", PENDING_HEADER);
-    static uint8_t data[CARAFE_REG_DATA];
+    uint8_t data[CARAFE_REG_DATA];
     for (int i = 0; i < g_pending_count; i++) {
         const Change* c = &g_pending[i];
         if (c->op == OpDeleteKey) {
@@ -645,6 +645,10 @@ static void loadRemoved(void) {
         char* end = strchr(line, '\n');
         if (end != NULL) {
             *end = '\0';
+        }
+        size_t length = strlen(line);
+        if (length > 0 && line[length - 1] == '\r') {
+            line[length - 1] = '\0';
         }
         if (first) {
             first = false;
@@ -739,8 +743,8 @@ static bool noteRemoval(const Change* change) {
 }
 
 static void restoreMissing(char* text) {
-    static uint8_t live[CARAFE_REG_DATA];
-    static uint8_t data[CARAFE_REG_DATA];
+    uint8_t live[CARAFE_REG_DATA];
+    uint8_t data[CARAFE_REG_DATA];
     int restored = 0;
     char* line = text;
     bool first = true;
@@ -943,6 +947,7 @@ static bool currentValue(int hive, const char* path, const char* name, uint32_t*
         wine_nx_registry_unlock();
     }
     pthread_mutex_lock(&g_lock);
+    loadPendingLocked();
     const Change* change = findPendingLocked(hive, path, name, false);
     if (change != NULL) {
         if (change->op == OpSet) {
@@ -986,19 +991,26 @@ int carafeRegistryRowCurrent(int row) {
         return -1;
     }
     const Row* r = &g_rows[row];
-    static uint8_t data[CARAFE_REG_DATA];
-    static uint8_t want[CARAFE_REG_DATA];
+    if (r->field_count <= 0) {
+        return -1;
+    }
+    uint8_t data[CARAFE_REG_DATA];
+    uint8_t want[CARAFE_REG_DATA];
     uint32_t types[MAX_FIELDS];
     uint32_t sizes[MAX_FIELDS];
     bool found[MAX_FIELDS];
-    static uint8_t values[MAX_FIELDS][CARAFE_REG_DATA];
+    uint8_t (*values)[CARAFE_REG_DATA] = calloc((size_t)r->field_count, sizeof(*values));
+    if (values == NULL) {
+        return -1;
+    }
     for (int f = 0; f < r->field_count; f++) {
         found[f] = currentValue(r->fields[f].hive, r->fields[f].path, r->fields[f].name, &types[f], data, &sizes[f]);
         if (found[f]) {
             memcpy(values[f], data, sizes[f]);
         }
     }
-    for (int o = 0; o < r->option_count; o++) {
+    int matched = -1;
+    for (int o = 0; o < r->option_count && matched < 0; o++) {
         bool match = true;
         for (int f = 0; f < r->field_count && match; f++) {
             uint32_t size = 0;
@@ -1011,10 +1023,11 @@ int carafeRegistryRowCurrent(int row) {
             }
         }
         if (match) {
-            return o;
+            matched = o;
         }
     }
-    return -1;
+    free(values);
+    return matched;
 }
 
 bool carafeRegistryRowChanged(int row) {
@@ -1023,6 +1036,7 @@ bool carafeRegistryRowChanged(int row) {
     }
     bool changed = false;
     pthread_mutex_lock(&g_lock);
+    loadPendingLocked();
     for (int f = 0; f < g_rows[row].field_count && !changed; f++) {
         const Field* field = &g_rows[row].fields[f];
         changed = findPendingLocked(field->hive, field->path, field->name, false) != NULL;
@@ -1036,7 +1050,7 @@ void carafeRegistryRowSet(int row, int option) {
         return;
     }
     const Row* r = &g_rows[row];
-    static uint8_t data[CARAFE_REG_DATA];
+    uint8_t data[CARAFE_REG_DATA];
     for (int f = 0; f < r->field_count; f++) {
         uint32_t size = 0;
         const char* hex = r->options[option].data[f];
@@ -1143,6 +1157,7 @@ int carafeRegistryList(int hive, const char* path, CarafeRegEntry* out, int max)
     wine_nx_registry_unlock();
 
     pthread_mutex_lock(&g_lock);
+    loadPendingLocked();
     for (int i = 0; i < g_pending_count; i++) {
         const Change* c = &g_pending[i];
         if (c->hive != hive) {
@@ -1203,7 +1218,7 @@ bool carafeRegistrySetPending(int hive, const char* path, const char* name, uint
     if (size > CARAFE_REG_DATA) {
         return false;
     }
-    static uint8_t live[CARAFE_REG_DATA];
+    uint8_t live[CARAFE_REG_DATA];
     uint32_t live_type = 0;
     uint32_t live_size = 0;
     bool truncated = false;
@@ -1244,7 +1259,7 @@ bool carafeRegistrySetPending(int hive, const char* path, const char* name, uint
 }
 
 bool carafeRegistryDeletePending(int hive, const char* path, const char* name) {
-    static uint8_t live[CARAFE_REG_DATA];
+    uint8_t live[CARAFE_REG_DATA];
     uint32_t type = 0;
     uint32_t size = 0;
     bool exists = false;
@@ -1302,6 +1317,7 @@ int carafeRegistryPendingCount(void) {
 bool carafeRegistryPendingLine(int index, char* name, size_t name_size, char* from, size_t from_size, char* to,
     size_t to_size) {
     pthread_mutex_lock(&g_lock);
+    loadPendingLocked();
     if (index < 0 || index >= g_pending_count) {
         pthread_mutex_unlock(&g_lock);
         return false;
@@ -1314,7 +1330,7 @@ bool carafeRegistryPendingLine(int index, char* name, size_t name_size, char* fr
     } else {
         snprintf(name, name_size, "%s", change.name[0] != '\0' ? change.name : "@");
     }
-    static uint8_t live[CARAFE_REG_DATA];
+    uint8_t live[CARAFE_REG_DATA];
     uint32_t type = 0;
     uint32_t size = 0;
     bool exists = false;
