@@ -263,6 +263,9 @@ int main( void )
     assert( px == 320 && py == 240 );
     /* Left/top edge inside letterboxed screen (280, 0) maps to (0, 0) and hits virtual window. */
     assert( horizon_server_shallow_window_from_point_locked( 280, 0 ) == &wnd );
+    /* The far/right edge must also hit the window: without raw->virt mapping,
+     * x=999 is outside this 640-pixel game window and the game loses the touch. */
+    assert( horizon_server_shallow_window_from_point_locked( 999, 719 ) == &wnd );
 
     /* 2. set_window_pos showing hidden window and moving visible window exposes children (0090). */
     wnd.style = 0; /* initially hidden */

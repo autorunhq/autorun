@@ -80,6 +80,7 @@ typedef struct { DWORD type; union { MOUSEINPUT mi; KEYBDINPUT ki; }; } INPUT;
 static struct input_snapshot state;
 static INPUT sent[128];
 static int sent_count, presents, polls, set_x = -1, set_y = -1;
+static int mouse_flushes;
 static int reenter;
 static DWORD mock_tick;
 BOOL wine_nx_drv_ProcessEvents(DWORD mask);
@@ -118,7 +119,11 @@ static UINT NtUserMapVirtualKeyEx(UINT vk, UINT type, HKL layout) {
 }
 static UINT NtUserSendHardwareInput(HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam) {
     assert(!hwnd && !flags && !lparam && sent_count < 128);
-    if (input->type == INPUT_MOUSE && input->mi.dwFlags == MOUSEEVENTF_MOVE_NOCOALESCE) return TRUE;
+    if (input->type == INPUT_MOUSE && input->mi.dwFlags == MOUSEEVENTF_MOVE_NOCOALESCE)
+    {
+        mouse_flushes++;
+        return TRUE;
+    }
     if (reenter) { reenter = 0; assert(!wine_nx_drv_ProcessEvents(0)); }
     sent[sent_count++] = *input; return TRUE;
 }
@@ -152,9 +157,12 @@ static long long poll(int moved, int x, int y, unsigned int buttons) {
 int main(void) {
     enum { L = WINE_NX_POINTER_LEFT, R = WINE_NX_POINTER_RIGHT };
     const long long ABS = MOUSEEVENTF_ABSOLUTE;
+    int flushes_before;
     assert(poll(0, 640, 360, 0) == -1);
     assert(presents == 2 && polls == 1);  /* presents before and after; polls even with the background thread */
+    flushes_before = mouse_flushes;
     assert(poll(1, 700, 360, 0) == (ABS | MOUSEEVENTF_MOVE));
+    assert(mouse_flushes == flushes_before + 1);  /* otherwise win32u can leave the move coalesced */
     /* A clicks where the cursor is, without a spurious move. */
     assert(poll(0, 700, 360, L) == (ABS | MOUSEEVENTF_LEFTDOWN));
     assert(poll(0, 700, 360, L) == -1);
@@ -166,9 +174,14 @@ int main(void) {
     /* B alone is a right click. */
     assert(poll(0, 720, 380, R) == (ABS | MOUSEEVENTF_RIGHTDOWN));
     assert(poll(0, 720, 380, 0) == (ABS | MOUSEEVENTF_RIGHTUP));
-    /* A touch elsewhere moves and presses in one event; lifting releases. */
+    /* A touch elsewhere moves and presses in one event; lifting releases. Both
+     * touch events must flush too, not just emit MOUSEEVENTF_ABSOLUTE. */
+    flushes_before = mouse_flushes;
     assert(poll(1, 100, 50, L) == (ABS | MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN));
+    assert(mouse_flushes == flushes_before + 1);
+    flushes_before = mouse_flushes;
     assert(poll(0, 100, 50, 0) == (ABS | MOUSEEVENTF_LEFTUP));
+    assert(mouse_flushes == flushes_before + 1);
     /* A tapped between two calls (seen only by the background thread) still clicks. */
     assert(take(0, 100, 50, 0, L, L) == (ABS | MOUSEEVENTF_LEFTDOWN | (ABS | MOUSEEVENTF_LEFTUP) << 32));
     /* ...also while the stick moves, and for B. */
