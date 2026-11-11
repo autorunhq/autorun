@@ -81,8 +81,10 @@ static void nx_xinput_read( struct nx_xinput_state_params *params )
         const u64 keyboard = HidNpadButton_Minus | HidNpadButton_B;
         const u64 controls = HidNpadButton_Minus | HidNpadButton_A;
         const u64 tasks = HidNpadButton_Minus | HidNpadButton_Y;
+        const u64 menu = HidNpadButton_Minus | HidNpadButton_Plus | HidNpadButton_L | HidNpadButton_R;
 
         raw.buttons &= ~__atomic_load_n( &wine_nx_input_swallowed, __ATOMIC_RELAXED );
+        if ((raw.buttons & menu) == menu) raw.buttons &= ~menu;
         if ((raw.buttons & keyboard) == keyboard) raw.buttons &= ~keyboard;
         if ((raw.buttons & controls) == controls) raw.buttons &= ~controls;
         if ((raw.buttons & tasks) == tasks) raw.buttons &= ~tasks;

@@ -71,6 +71,7 @@ static u64 g_start_tick;
 static bool g_trial_done;
 static char* g_effective[CarafeFileCount];
 static char* g_snapshot_disk[CarafeFileCount];
+static int g_swkbd_auto_fallback = 1;
 
 static void note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -735,6 +736,7 @@ static void applyEnvironmentFromProgram(void) {
 
 void carafeSettingsSyncProgram(void) {
     g_start_tick = armGetSystemTick();
+    g_swkbd_auto_fallback = wine_nx_swkbd_auto_enabled;
     g_changes_loaded = false;
     g_change_count = 0;
     g_restart = false;
@@ -1549,7 +1551,7 @@ static void applyKeysLive(void) {
     }
     static struct input_profile profile;
     static struct launcher_kv kv;
-    if (input_profile_program(RUNTIME_ROOT, target, wine_nx_swkbd_auto_enabled, &profile, &kv, path, sizeof(path))) {
+    if (input_profile_program(RUNTIME_ROOT, target, g_swkbd_auto_fallback, &profile, &kv, path, sizeof(path))) {
         wine_nx_input_profile = profile;
         wine_nx_swkbd_auto_enabled = profile.keyboard_auto;
         note("[CARAFE] settings menu: controls changed while the game runs");
@@ -1722,6 +1724,43 @@ bool carafeUndoPending(CarafeCatalog* catalog) {
     return carafeSaveChanges();
 }
 
+static void stripKeysFromFile(const CarafeCatalog* catalog, const char* path) {
+    char* disk = readWhole(path, FILE_LIMIT);
+    if (disk == NULL) {
+        return;
+    }
+    for (int i = 0; i < catalog->setting_count; i++) {
+        if (catalog->settings[i].file == CarafeFileKeys) {
+            char* next = textSet(disk, catalog->settings[i].key, NULL);
+            if (next != NULL) {
+                free(disk);
+                disk = next;
+            }
+        }
+    }
+    for (int s = 0; s < CARAFE_SOURCES; s++) {
+        char k[KEY_SIZE];
+        snprintf(k, sizeof(k), "key.%s", carafe_source_names[s]);
+        char* next = textSet(disk, k, NULL);
+        if (next != NULL) {
+            free(disk);
+            disk = next;
+        }
+        snprintf(k, sizeof(k), "pad.%s", carafe_source_names[s]);
+        next = textSet(disk, k, NULL);
+        if (next != NULL) {
+            free(disk);
+            disk = next;
+        }
+    }
+    if (disk[0] == '\0') {
+        remove(path);
+    } else {
+        writeWhole(path, disk);
+    }
+    free(disk);
+}
+
 bool carafeResetAll(CarafeCatalog* catalog, bool live) {
     carafeRegistryReset();
     g_change_count = 0;
@@ -1741,38 +1780,10 @@ bool carafeResetAll(CarafeCatalog* catalog, bool live) {
         if ((CarafeFile)f == CarafeFileKeys) {
             char path[PATH_SIZE];
             if (filePath(CarafeFileKeys, path, sizeof(path))) {
-                char* disk = readWhole(path, FILE_LIMIT);
-                if (disk != NULL) {
-                    for (int i = 0; i < catalog->setting_count; i++) {
-                        if (catalog->settings[i].file == CarafeFileKeys) {
-                            char* next = textSet(disk, catalog->settings[i].key, NULL);
-                            if (next != NULL) {
-                                free(disk);
-                                disk = next;
-                            }
-                        }
-                    }
-                    for (int s = 0; s < CARAFE_SOURCES; s++) {
-                        char k[KEY_SIZE];
-                        snprintf(k, sizeof(k), "key.%s", carafe_source_names[s]);
-                        char* next = textSet(disk, k, NULL);
-                        if (next != NULL) {
-                            free(disk);
-                            disk = next;
-                        }
-                        snprintf(k, sizeof(k), "pad.%s", carafe_source_names[s]);
-                        next = textSet(disk, k, NULL);
-                        if (next != NULL) {
-                            free(disk);
-                            disk = next;
-                        }
-                    }
-                    if (disk[0] == '\0') {
-                        remove(path);
-                    } else {
-                        writeWhole(path, disk);
-                    }
-                    free(disk);
+                stripKeysFromFile(catalog, path);
+                char prog_path[PATH_SIZE];
+                if (filePath(CarafeFileProgram, prog_path, sizeof(prog_path)) && strcmp(prog_path, path) != 0) {
+                    stripKeysFromFile(catalog, prog_path);
                 }
             }
         }
@@ -1781,7 +1792,8 @@ bool carafeResetAll(CarafeCatalog* catalog, bool live) {
             if (s->file != (CarafeFile)f) {
                 continue;
             }
-            int def = s->default_index >= 0 && s->default_index < s->value_count ? s->default_index : 0;
+            int def = (s->base >= 0 && s->base < s->value_count) ? s->base
+                : (s->default_index >= 0 && s->default_index < s->value_count ? s->default_index : 0);
             if (s->now) {
                 if ((CarafeFile)f != CarafeFileKeys) {
                     applyOneKeyToDisk((CarafeFile)f, s->key, "-");

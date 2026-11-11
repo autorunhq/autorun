@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <switch.h>
 
@@ -240,6 +242,21 @@ int main( int argc, char **argv )
         assert( carafeCatalogFind( catalog, "large-pages" ) >= 0 );
         assert( carafeCatalogFindKey( catalog, CarafeFileProgram, "lazy-file-views" ) >= 0 );
         assert( carafeCatalogFind( catalog, "button-layout" ) >= 0 );
+
+        int four_cores_suggest = 0;
+        for (int i = 0; i < catalog->suggest_count; i++)
+        {
+            const CarafeSuggest *sg = &catalog->suggests[i];
+            const CarafeSetting *st = &catalog->settings[sg->setting];
+            assert( sg->value >= 0 && sg->value < st->value_count );
+            if (strcmp( st->id, "four-cores" ) == 0)
+            {
+                assert( sg->value == 1 );
+                assert( strcmp( st->values[sg->value].text, "0" ) == 0 );
+                four_cores_suggest = 1;
+            }
+        }
+        assert( four_cores_suggest == 1 );
     }
     else
     {
@@ -321,6 +338,71 @@ int main( int argc, char **argv )
     wine_nx_osk_reset();
     assert( !carafeMenuVisible() );
     assert( !wine_nx_osk_visible() );
+
+    if (g_custom_menu)
+    {
+        char orig_cwd[512];
+        char tmp_tpl[] = "/tmp/controls_menu_sd_XXXXXX";
+        assert( getcwd( orig_cwd, sizeof(orig_cwd) ) != NULL );
+        char *tmp_dir = mkdtemp( tmp_tpl );
+        assert( tmp_dir != NULL );
+        assert( chdir( tmp_dir ) == 0 );
+        mkdir( "sdmc:", 0777 );
+        mkdir( "sdmc:/switch", 0777 );
+        mkdir( "sdmc:/switch/wine", 0777 );
+        mkdir( "sdmc:/switch/wine/config", 0777 );
+        mkdir( "sdmc:/switch/wine/carafe", 0777 );
+        mkdir( "sdmc:/switch/wine/drive_c", 0777 );
+        mkdir( "sdmc:/switch/wine/drive_c/Games", 0777 );
+
+        FILE *f = fopen( "sdmc:/switch/wine/config/keys.txt", "wb" );
+        assert( f != NULL );
+        fputs( "button-layout=1\n", f );
+        fclose( f );
+
+        f = fopen( "sdmc:/switch/wine/drive_c/Games/test.wine-nx.txt", "wb" );
+        assert( f != NULL );
+        fputs( "button-layout=0\nvsync=0\n", f );
+        fclose( f );
+
+        f = fopen( "sdmc:/switch/wine/drive_c/Games/test.keys.txt", "wb" );
+        assert( f != NULL );
+        fputs( "keyboard-auto=0\n", f );
+        fclose( f );
+
+        wine_nx_swkbd_auto_enabled = 1;
+        carafeSettingsSyncProgram();
+        CarafeCatalog *disk_cat = carafeCatalogLoad();
+        assert( disk_cat != NULL );
+        int bl_idx = carafeCatalogFind( disk_cat, "button-layout" );
+        int kb_idx = carafeCatalogFind( disk_cat, "keyboard-auto" );
+        assert( bl_idx >= 0 && kb_idx >= 0 );
+        assert( disk_cat->settings[bl_idx].base == 1 );
+
+        assert( carafeSettingSet( disk_cat, kb_idx, 0 ) );
+        assert( wine_nx_swkbd_auto_enabled == 0 );
+
+        assert( carafeResetAll( disk_cat, true ) );
+        assert( disk_cat->settings[bl_idx].current == 1 );
+        assert( disk_cat->settings[bl_idx].start == 1 );
+        assert( wine_nx_swkbd_auto_enabled == 1 );
+
+        /* Legacy button-layout key was stripped from .wine-nx.txt too. */
+        f = fopen( "sdmc:/switch/wine/drive_c/Games/test.wine-nx.txt", "rb" );
+        assert( f != NULL );
+        char buf[256] = "";
+        size_t got = fread( buf, 1, sizeof(buf) - 1, f );
+        buf[got] = '\0';
+        fclose( f );
+        assert( strstr( buf, "button-layout" ) == NULL );
+        assert( fopen( "sdmc:/switch/wine/drive_c/Games/test.keys.txt", "rb" ) == NULL );
+
+        carafeCatalogFree( disk_cat );
+        assert( chdir( orig_cwd ) == 0 );
+        char rm_cmd[600];
+        snprintf( rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", tmp_dir );
+        assert( system( rm_cmd ) == 0 );
+    }
 
     free( g_custom_menu );
     g_custom_menu = NULL;

@@ -516,7 +516,7 @@ def build_menu(horizon_wine: Path) -> str:
          "Cap reported D3D9 texture memory to 512 MiB so the game allocates less."),
         ("memory", "dxvk-dxgi-maxdevicememory", 6,
          "Cap reported DXGI video memory to 1024 MiB."),
-        ("threads", "four-cores", 0,
+        ("threads", "four-cores", 1,
          "Limit workers to 3 cores to reduce concurrent thread pressure."),
         ("threads", "sync", 0,
          "Switch back to standard Wine thread synchronization."),

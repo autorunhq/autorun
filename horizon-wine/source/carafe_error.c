@@ -962,6 +962,7 @@ extern char __end__[];
 extern u32 __nx_applet_exit_mode;
 extern int wine_nx_image_at(const void* addr, void** base, char* name, size_t size) __attribute__((weak));
 extern const char* wine_nx_loader_last_import_dll(void) __attribute__((weak));
+extern void wine_nx_runtime_open_error_log(void) __attribute__((weak));
 int __real_main(int argc, char** argv);
 
 static u64 g_start_tick;
@@ -1147,7 +1148,7 @@ static bool readPendingMeta(bool* restart_pending) {
     bool reopen_launcher = true;
     bool pending = false;
 
-    char line[600];
+    char line[1024];
     while (fgets(line, sizeof(line), file) != NULL) {
         line[strcspn(line, "\r\n")] = '\0';
         char* val = strchr(line, '=');
@@ -1244,12 +1245,45 @@ static bool pushRunNext(const char* target) {
         fclose(file);
     }
     rest[got] = '\0';
+    size_t tlen = strlen(target);
+    if (strncmp(rest, target, tlen) == 0 && (rest[tlen] == '\0' || rest[tlen] == '\n' || rest[tlen] == '\r')) {
+        return true;
+    }
     file = fopen(RUN_NEXT_FILE, "w");
     if (file == NULL) {
         return false;
     }
     bool ok = fprintf(file, "%s\n%s", target, rest) > 0;
     return fclose(file) == 0 && ok;
+}
+
+static void popRunNextIfMatches(const char* target) {
+    if (target == NULL || target[0] == '\0') {
+        return;
+    }
+    char text[2048];
+    size_t got = 0;
+    FILE* file = fopen(RUN_NEXT_FILE, "r");
+    if (file == NULL) {
+        return;
+    }
+    got = fread(text, 1, sizeof(text) - 1, file);
+    fclose(file);
+    text[got] = '\0';
+    size_t tlen = strlen(target);
+    if (strncmp(text, target, tlen) != 0 || (text[tlen] != '\0' && text[tlen] != '\n' && text[tlen] != '\r')) {
+        return;
+    }
+    char* rest = text + tlen;
+    while (*rest == '\r' || *rest == '\n') {
+        rest++;
+    }
+    if (*rest == '\0') {
+        remove(RUN_NEXT_FILE);
+    } else if ((file = fopen(RUN_NEXT_FILE, "w")) != NULL) {
+        fputs(rest, file);
+        fclose(file);
+    }
 }
 
 bool carafeErrorRelaunch(const char* own_nro, unsigned int exit_code) {
@@ -1280,11 +1314,12 @@ bool carafeErrorRestart(unsigned int exit_code) {
     if (!carafeRestartRequested() && !writeReport(exit_code)) {
         return false;
     }
+    bool pushed = false;
+    char target[512] = "";
     if (carafeRestartRequested()) {
-        char target[512] = "";
         if (carafeOverlayProgramTarget != NULL && carafeOverlayProgramTarget(target, sizeof(target))
             && target[0] != '\0') {
-            pushRunNext(target);
+            pushed = pushRunNext(target);
         }
     }
     writePendingMeta(NULL, !carafeRestartRequested());
@@ -1295,6 +1330,9 @@ bool carafeErrorRestart(unsigned int exit_code) {
     Result rc = appletRestartProgram(NULL, 0);
     if (R_FAILED(rc)) {
         remove(PENDING_ERROR_FILE);
+        if (pushed) {
+            popRunNextIfMatches(target);
+        }
         char line[LINE_SIZE];
         snprintf(line, sizeof(line), "[CARAFE] the application cannot restart (rc=0x%08x)", (unsigned int)rc);
         trace(line);
@@ -1836,16 +1874,24 @@ int __wrap_main(int argc, char** argv) {
     bool has_pending = readPendingMeta(&restart_pending);
 
     if (!flag && !(has_pending && restart_pending)) {
+        if (has_pending) {
+            remove(PENDING_ERROR_FILE);
+        }
         return __real_main(argc, argv);
     }
 
     remove(PENDING_ERROR_FILE);
     g_error_mode = true;
+    if (wine_nx_runtime_open_error_log != NULL) {
+        wine_nx_runtime_open_error_log();
+    }
     if (carafeSettingsSyncProgram != NULL) {
         carafeSettingsSyncProgram();
     }
     if (carafeRegistrySyncProgram != NULL) {
         carafeRegistrySyncProgram();
     }
-    return errorScreen();
+    int ret = errorScreen();
+    carafeOverlayCommit("after error screen");
+    return ret;
 }

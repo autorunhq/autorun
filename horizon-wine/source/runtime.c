@@ -534,6 +534,20 @@ void wine_nx_runtime_log_flush( void )
     wine_nx_sd_cache_flush();
 }
 
+void wine_nx_runtime_open_error_log( void )
+{
+    pthread_mutex_lock( &log_mutex );
+    if (!log_file)
+    {
+        mkdir( "sdmc:/switch", 0777 );
+        mkdir( RUNTIME_DIR, 0777 );
+        mkdir( RUNTIME_LOGS, 0777 );
+        if ((log_file = fopen( RUNTIME_LOGS "/autorun_runtime.log", "a" )))
+            setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
+    }
+    pthread_mutex_unlock( &log_mutex );
+}
+
 const char *wine_nx_console_locale( void )
 {
     static const char *cached;
@@ -4398,20 +4412,28 @@ static int return_to_launcher( void )
 
         if (!runtime_components_run && carafeRestartRequested && carafeRestartRequested())
         {
-            if (!still_lent && envHasNextLoad() && own_nro[0] &&
-                runtime_program[0] && run_next_push( runtime_program ) &&
-                R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+            if (!still_lent && envHasNextLoad() && own_nro[0] && runtime_program[0])
             {
-                log_step( "starting the game again with the new settings" );
-                return 0;
+                if (run_next_push( runtime_program ))
+                {
+                    if (R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+                    {
+                        log_step( "starting the game again with the new settings" );
+                        return 0;
+                    }
+                    {
+                        char discarded[512];
+                        run_next_pop( discarded, sizeof(discarded) );
+                    }
+                }
             }
-            if (runtime_program[0]) run_next_push( runtime_program );
             if (carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
             {
                 __nx_applet_exit_mode = 1;
                 log_step( "closing this program; the application starts again with the new settings" );
                 return 0;
             }
+            if (runtime_program[0]) run_next_push( runtime_program );
         }
     }
     if (!still_lent && !runtime_components_run && own_nro[0] && carafeErrorRelaunch &&
@@ -4758,6 +4780,19 @@ int main( int argc, char **argv )
     {
         launch_error = "The shortcut's game is unavailable. Connect its USB drive or use Locate executable in the game's Library settings.";
         forwarded_game = -1;
+    }
+    if (forwarded_game > 0)
+    {
+        char queued[512];
+        FILE *rn = fopen( RUN_NEXT, "r" );
+        if (rn)
+        {
+            size_t got = fread( queued, 1, sizeof(queued) - 1, rn );
+            fclose( rn );
+            queued[got] = 0;
+            queued[strcspn( queued, "\r\n" )] = 0;
+            if (!strcmp( queued, target )) run_next_pop( queued, sizeof(queued) );
+        }
     }
     if (!forwarded_game && run_next_pop( target, sizeof(target) ))
     {
@@ -5267,8 +5302,10 @@ int main( int argc, char **argv )
     if (!low_window_available) hold_thread_local_pages();
     else log_line( "[TLS] kernel TLS stays above 4 GiB; placeholder threads not needed" );
     {
+        extern void carafeErrorResetStartTick( void ) __attribute__((weak));
         extern void carafeLoadingStart( void ) __attribute__((weak));
 
+        if (!runtime_components_run && carafeErrorResetStartTick) carafeErrorResetStartTick();
         if (wine_nx_compositor_mode && !runtime_components_run && carafeLoadingStart) carafeLoadingStart();
     }
     __atomic_store_n( &wine_nx_overlay_poll_armed, 1, __ATOMIC_RELEASE );
