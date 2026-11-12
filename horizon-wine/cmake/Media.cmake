@@ -13,7 +13,11 @@ endif()
 # plays (winedmo). The lines after them are what DirectShow and the Windows
 # Media reader play through the parser in source/media_unix.c: the containers
 # and codecs of the videos and music that DirectX 7 to 9 games ship. That list
-# is Carafe's (runtime/media/configure.in).
+# is Carafe's (runtime/media/configure.in). The decoder line of big-endian
+# samples is not in Carafe's list and was added here: AIFF and AU files hold
+# their samples big-endian, and without those decoders the two demuxers open a
+# file that then has no stream to play (tests/check_media_parser.py plays one
+# of each).
 ExternalProject_Add(wine-media
     SOURCE_DIR "${WINE_NX_FFMPEG_SOURCE}"
     DOWNLOAD_COMMAND ""
@@ -35,6 +39,7 @@ ExternalProject_Add(wine-media
         --enable-decoder=cinepak,msvideo1,msrle,indeo3,indeo4,indeo5,rawvideo
         --enable-decoder=mp1,mp2,mp3,pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_alaw,pcm_mulaw
         --enable-decoder=adpcm_ms,adpcm_ima_wav,gsm_ms
+        --enable-decoder=pcm_s8,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be,pcm_f64be
         --enable-parser=mpegvideo,mpegaudio,mpeg4video,vc1,h263
         --enable-bsf=extract_extradata
         "--extra-cflags=-O2 -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffixed-x18 -ffunction-sections -fdata-sections -D__SWITCH__ -I${LIBNX}/include"

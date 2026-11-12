@@ -98,6 +98,53 @@ parser and filter name against FFmpeg 7.1.5 at the pinned revision;
 `tests/thread_profile.c`; the host test suite against its count before the
 change; the `build` workflow.
 
+Added later: `tests/check_media_parser.py` plays files through the parser on
+the build machine. `media_unix.c` is compiled as it is and linked with FFmpeg
+7.1.5 configured with the lines of `cmake/Media.cmake` and nothing more, so a
+file plays there only if the console's build has its demuxer and decoders. A
+second FFmpeg build writes 31 files (every demuxer of the list, 31 of its 43
+decoders) and decodes each one itself, and `tests/media_parser.c` calls the
+parser through both call tables the way `winegstreamer.dll` does and holds
+what comes out against that: every picture and every sample, each buffer's
+time and length, what follows a move in the file (to a time, to a key frame,
+past the end), a stop position, one stream alone, a stream switched off,
+every picture of each of the thirteen picture formats, three sound formats,
+compressed packets byte for byte, times counted from zero, reads of 1000
+bytes, files cut short, files that are no media, a stream with no decoder,
+and a disconnect while a read is not answered. 558 runs, under the address
+and undefined-behaviour sanitizers, in the `build` workflow's `media` job.
+46 errors put into the parser one at a time each made it fail.
+
+It found four faults in what stage 1 took, all fixed with it:
+
+1. AIFF and AU files opened with no stream to play. Carafe's list has their
+   two demuxers but no decoder for big-endian samples, which is what they
+   hold. `Media.cmake` has one more decoder line (`pcm_s8`, `pcm_s16be`,
+   `pcm_s24be`, `pcm_s32be`, `pcm_f32be`, `pcm_f64be`).
+2. The last picture of a bare MPEG video file came out without a time: the
+   decoder holds it back until the end, where no packet is left to take a
+   time from. It now starts where the picture before it ended.
+3. Compressed MPEG packets came out of order among the streams. MPEG writes a
+   time once for each packet of the file, not for each picture, and a packet
+   without one was handed out after every packet that had one: pictures of
+   0.86 s after sound of 2.5 s. A packet now has its place by the time it is
+   decoded at.
+4. After a move in an MPEG file, which has no list of its pictures, the first
+   compressed packets were the end of a picture, then pictures that need an
+   earlier one, and a frame of sound with the end of another before it. The
+   pictures now start at one that needs no other, from its first byte, and
+   the frame of sound is cut to itself. (No file could be told to put a key
+   picture right behind the place a move lands in, so that cut is checked on
+   bytes made in the test.)
+
+What the check cannot say: twelve decoders are not played because FFmpeg has
+no encoder for them (H.264, WMV3, VC-1, WMA Pro and Lossless, MS-MPEG4 v1,
+Indeo 3 to 5, MP1, MP3, GSM); a decoder of the list that is neither played
+nor among those twelve fails the check, so the list cannot grow unnoticed.
+FFmpeg is plain C there and has its ARM64 routines on the console. And
+nothing of Windows is in it: neither quartz, nor the Windows Media reader,
+nor a program.
+
 Not checked, because it needs a console: that a game's video plays.
 
 What it rests on outside this repository: the Windows half is the downloaded
@@ -226,7 +273,7 @@ off), with five errors put into the orchestrator to see each one fail;
 with Carafe's two questions and checks the strings of the settings, with six
 errors put into the code to see each one fail; `tests/launcher_settings.c` for
 the two keys; the host suite, 83 passing (the 82 of before and the new check)
-with the same 30 failing as before; the changed C files and the launcher
+with the same tests failing as before; the changed C files and the launcher
 compiled for AArch64; the `build` workflow.
 
 Added later: the core the orchestrator keeps for the busiest thread had no
@@ -693,7 +740,7 @@ fork has it in its own form, which the last column names.
 | 0092 | xinput notes the first read and press | 16 | 100 % | in the fork |
 | 0094 | winnx game window repainted after the screen follows it | 1 | 100 % | in the fork |
 | 0095 | ntdll system locale follows the console language | 9 | 66 % | in the fork, as `wine_nx_console_locale` (`runtime.c`): the same table of languages, except that British English gives `en-GB` here and `en-US` in Carafe |
-| 0096 | media ffmpeg parser for directshow | 808 | 100 % | ported in stage 1 (parser, codecs, filter registration) |
+| 0096 | media ffmpeg parser for directshow | 808 | 98 % | ported in stage 1 (parser, codecs, filter registration); thirteen lines differ since the host check: where a packet without a time has its place, MPEG after a move, the last picture's time |
 | 0097 | winnx screen follows the window on its own thread | 8 | 62 % | in the fork, with atomic loads and stores |
 | 0098 | win32u a thread counts its waits for a reply | 6 | 100 % | in the fork |
 | 0099 | horizon server low level input hooks | 94 | 95 % | in the fork, in upstream's later form (wheel data only for wheel messages) |

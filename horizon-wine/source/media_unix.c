@@ -505,11 +505,11 @@ struct parser_stream
     struct parser_packet *head, *tail;
     size_t queued;
     struct wg_format codec_format, current_format, desired;
-    BOOL has_codec_format, video, passthrough, enabled, eos, drain_sent, flushed, discontinuity;
+    BOOL has_codec_format, video, passthrough, enabled, eos, drain_sent, flushed, discontinuity, resync;
     enum AVSampleFormat pcm_format;
     unsigned int errors;
     UINT64 duration;
-    INT64 drop_before, next_time;
+    INT64 drop_before, next_time, order;
     struct SwsContext *scaler;
     SwrContext *resampler;
     AVChannelLayout resampler_layout;
@@ -685,10 +685,13 @@ static BYTE *parser_reserve(struct parser_stream *s, size_t size)
     return s->data;
 }
 
-static void parser_emit(struct parser_stream *s, UINT32 size, INT64 pts, INT64 duration, BOOL delta)
+/* order is the time the buffer has its place by among the streams' buffers.
+ * One that has none keeps the place of the one before it in its stream. */
+static void parser_emit(struct parser_stream *s, UINT32 size, INT64 pts, INT64 duration, BOOL delta, INT64 order)
 {
     struct wg_parser_buffer *buffer = &s->buffer;
 
+    if (order != AV_NOPTS_VALUE) s->order = order;
     pthread_mutex_lock(&s->parser->mutex);
     memset(buffer, 0, sizeof(*buffer));
     if ((buffer->has_pts = pts != AV_NOPTS_VALUE)) buffer->pts = max(pts, 0);
@@ -777,6 +780,11 @@ static BOOL parser_output_video(struct parser_stream *s, const AVFrame *frame)
 
     if (frame->duration > 0) duration = av_rescale_q(frame->duration, s->av_stream->time_base, media_time_base);
     else if (rate.num > 0 && rate.den > 0) duration = av_rescale(10000000, rate.den, rate.num);
+    /* A frame without a time starts where the one before it ended: the last
+     * frame of a bare MPEG video stream, which the decoder holds back until
+     * the end, where no packet is left to take a time from. */
+    if (pts == AV_NOPTS_VALUE) pts = s->next_time;
+    s->next_time = pts != AV_NOPTS_VALUE && duration > 0 ? pts + duration : AV_NOPTS_VALUE;
     if (!desc || frame->width <= 0 || frame->height <= 0 || !parser_keep(s, pts, duration)) return FALSE;
     if (!width || !height)
     {
@@ -802,7 +810,7 @@ static BOOL parser_output_video(struct parser_stream *s, const AVFrame *frame)
                                      width, height, pixel, SWS_BILINEAR, NULL, NULL, NULL);
     if (!s->scaler || sws_scale(s->scaler, source, source_strides, 0, frame->height, target, strides) <= 0)
         return FALSE;
-    parser_emit(s, size, pts, duration, !(frame->flags & AV_FRAME_FLAG_KEY));
+    parser_emit(s, size, pts, duration, !(frame->flags & AV_FRAME_FLAG_KEY), pts);
     return TRUE;
 }
 
@@ -906,7 +914,7 @@ static BOOL parser_output_audio(struct parser_stream *s, const uint8_t **input, 
     duration = av_rescale(count, 10000000, rate);
     s->next_time = time == AV_NOPTS_VALUE ? time : time + duration;
     if (!parser_keep(s, time, duration)) return FALSE;
-    parser_emit(s, count * channels * sample_size, time, duration, FALSE);
+    parser_emit(s, count * channels * sample_size, time, duration, FALSE, time);
     return TRUE;
 }
 
@@ -921,14 +929,93 @@ static BOOL parser_output_pcm(struct parser_stream *s, const AVPacket *packet)
                                &par->ch_layout, parser_time(s, packet->pts));
 }
 
+/* Where the first picture that starts in MPEG video data starts: at its
+ * sequence header, its group header or its own header, whichever is first. */
+static int parser_mpeg_picture_start(const uint8_t *data, int size)
+{
+    int i;
+
+    for (i = 0; i + 3 < size; i++)
+        if (!data[i] && !data[i + 1] && data[i + 2] == 1
+                && (data[i + 3] == 0xb3 || data[i + 3] == 0xb8 || !data[i + 3])) return i;
+    return size;
+}
+
+/* How many bytes the MPEG audio frame with this header has, 0 when it is no
+ * header or does not say. */
+static int parser_mpeg_audio_frame_size(const uint8_t *data)
+{
+    static const unsigned short rates[3] = {44100, 48000, 32000};
+    static const unsigned short kbits[5][15] =
+    {
+        {0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448},  /* MPEG-1 layer I */
+        {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384},     /* MPEG-1 layer II */
+        {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320},      /* MPEG-1 layer III */
+        {0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256},     /* MPEG-2 layer I */
+        {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160},          /* MPEG-2 layers II, III */
+    };
+    unsigned int version = (data[1] >> 3) & 3, layer = 4 - ((data[1] >> 1) & 3);
+    unsigned int bits = data[2] >> 4, rate = (data[2] >> 2) & 3, padding = (data[2] >> 1) & 1;
+    unsigned int hertz, kbit;
+
+    if (data[0] != 0xff || (data[1] & 0xe0) != 0xe0 || version == 1 || layer == 4 || !bits || bits == 15 || rate == 3)
+        return 0;
+    hertz = rates[rate] >> (version == 3 ? 0 : version == 2 ? 1 : 2);
+    kbit = kbits[version == 3 ? layer - 1 : layer == 1 ? 3 : 4][bits];
+    if (layer == 1) return (12000 * kbit / hertz + padding) * 4;
+    return (layer == 3 && version != 3 ? 72000 : 144000) * kbit / hertz + padding;
+}
+
+/* The first packet of an MPEG stream after a move. The file has no list of
+ * its pictures, so reading goes on from the middle of something, and the
+ * first packet is the end of one picture or frame of sound with the next one
+ * behind it. Says whether the packet is to be handed out, and from where. */
+static BOOL parser_resync(struct parser_stream *s, BOOL key, const uint8_t **data, int *size)
+{
+    int i;
+
+    if (!s->resync) return TRUE;
+    if (s->video)
+    {
+        /* Nothing can be decoded before a picture that needs no other, so
+         * that is the first one handed out, from its first byte. */
+        if (!key || (i = parser_mpeg_picture_start(*data, *size)) == *size) return FALSE;
+        *data += i;
+        *size -= i;
+    }
+    else if (*size >= 4 && !parser_mpeg_audio_frame_size(*data))
+    {
+        /* A decoder takes a packet for one frame and would fail on this one.
+         * When the packet does not start with a frame but ends in one that
+         * is as long as its header says, it is cut to that frame; any other
+         * packet is left as it is. */
+        for (i = 1; i + 4 <= *size; i++)
+        {
+            if (parser_mpeg_audio_frame_size(*data + i) != *size - i) continue;
+            *data += i;
+            *size -= i;
+            break;
+        }
+    }
+    s->resync = FALSE;
+    return TRUE;
+}
+
 static BOOL parser_output_packet(struct parser_stream *s, const AVPacket *packet)
 {
     INT64 pts = parser_time(s, packet->pts), duration = 0;
+    const uint8_t *data = packet->data;
+    int size = packet->size;
 
+    if (!parser_resync(s, !!(packet->flags & AV_PKT_FLAG_KEY), &data, &size)) return FALSE;
     if (packet->duration > 0) duration = av_rescale_q(packet->duration, s->av_stream->time_base, media_time_base);
-    if (!parser_keep(s, pts, duration) || !parser_reserve(s, packet->size)) return FALSE;
-    memcpy(s->data, packet->data, packet->size);
-    parser_emit(s, packet->size, pts, duration, !(packet->flags & AV_PKT_FLAG_KEY));
+    if (!parser_keep(s, pts, duration) || !parser_reserve(s, size)) return FALSE;
+    memcpy(s->data, data, size);
+    /* MPEG writes a time once for each packet of the file and not for each
+     * picture, so many packets have none to show. Each has one to be decoded
+     * at, and that gives it its place among the other streams' packets. */
+    parser_emit(s, size, pts, duration, !(packet->flags & AV_PKT_FLAG_KEY),
+                packet->dts != AV_NOPTS_VALUE ? parser_time(s, packet->dts) : pts);
     return TRUE;
 }
 
@@ -1003,7 +1090,7 @@ static void parser_flush_stream(struct parser_stream *s)
     s->eos = s->drain_sent = s->flushed = FALSE;
     s->errors = 0;
     s->discontinuity = TRUE;
-    s->next_time = AV_NOPTS_VALUE;
+    s->next_time = s->order = AV_NOPTS_VALUE;
     pthread_mutex_lock(&s->parser->mutex);
     s->has_buffer = s->returned = FALSE;
     pthread_mutex_unlock(&s->parser->mutex);
@@ -1203,7 +1290,7 @@ static BOOL parser_init_stream(struct media_parser *p, struct parser_stream *s, 
     s->av_stream = st;
     s->video = par->codec_type == AVMEDIA_TYPE_VIDEO;
     s->pcm_format = AV_SAMPLE_FMT_NONE;
-    s->drop_before = s->next_time = AV_NOPTS_VALUE;
+    s->drop_before = s->next_time = s->order = AV_NOPTS_VALUE;
     s->has_codec_format = parser_codec_format(st, &s->codec_format);
     if (p->output_compressed && (s->has_codec_format || pcm != WG_AUDIO_FORMAT_UNKNOWN))
     {
@@ -1505,9 +1592,9 @@ static NTSTATUS parser_disable(void *args)
     return S_OK;
 }
 
-static UINT64 parser_sort_time(const struct parser_stream *s)
+static INT64 parser_sort_time(const struct parser_stream *s)
 {
-    return s->buffer.has_pts ? s->buffer.pts : UINT64_MAX;
+    return s->order != AV_NOPTS_VALUE ? s->order : INT64_MAX;
 }
 
 static NTSTATUS parser_get_buffer(void *args)
@@ -1603,7 +1690,7 @@ static NTSTATUS parser_seek(void *args)
     const struct wg_parser_stream_seek_params *params = args;
     struct parser_stream *stream = parser_stream_from_handle(params->stream);
     struct media_parser *p = stream->parser;
-    BOOL key = !!(params->start_flags & AM_SEEKING_SeekToKeyFrame);
+    BOOL key = !!(params->start_flags & AM_SEEKING_SeekToKeyFrame), moved = FALSE;
     INT64 start = params->start_pos, position;
     unsigned int i;
 
@@ -1624,13 +1711,19 @@ static NTSTATUS parser_seek(void *args)
             if (avformat_seek_file(p->context, -1, INT64_MIN, position, position, 0) < 0)
                 av_seek_frame(p->context, -1, position, AVSEEK_FLAG_BACKWARD);
             p->fresh = FALSE;
+            moved = TRUE;
         }
         p->demux_eof = FALSE;
         for (i = 0; i < p->stream_count; i++)
         {
             struct parser_stream *s = p->streams[i];
+            enum AVCodecID id = s->av_stream->codecpar->codec_id;
+
             parser_flush_stream(s);
             s->drop_before = s->passthrough || key ? AV_NOPTS_VALUE : start;
+            s->resync = moved && s->passthrough
+                    && (id == AV_CODEC_ID_MPEG1VIDEO || id == AV_CODEC_ID_MPEG2VIDEO || id == AV_CODEC_ID_MP1
+                        || id == AV_CODEC_ID_MP2 || id == AV_CODEC_ID_MP3);
         }
     }
     pthread_mutex_unlock(&p->demux);

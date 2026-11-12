@@ -4,8 +4,10 @@ name: build
 # built the way build.sh builds it: in the switch-dev image named in
 # horizon-wine/switch-dev.txt. Beside it, the floating keyboard's host test,
 # which needs SDL2 and no toolchain at all, so it says at once whether the
-# keyboard still does what it should, and the one of the Carafe DLLs, which
-# downloads them from this repository's releases the way a card does.
+# keyboard still does what it should, the one of the Carafe DLLs, which
+# downloads them from this repository's releases the way a card does, and the
+# one of the media parser, which plays files through the runtime's own code
+# and FFmpeg configured as the runtime's.
 #
 # Run it from the Actions tab, or push to a branch. The build is Linux only:
 # build.sh has no toolchain download for other machines, and this is where the
@@ -167,6 +169,50 @@ jobs:
         # downloaded, checked against GitHub's digest, unpacked and installed.
         # What it took is in the run's annotations.
         run: python3 horizon-wine/tests/check_carafe_dlls.py --live
+
+  media:
+    name: media parser (host test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: FFmpeg's source
+        # The revision the runtime builds, into horizon-wine/vendor/ffmpeg.
+        run: sh horizon-wine/tools/bootstrap-wma.sh
+
+      - name: FFmpeg and widl for this machine
+        # Two builds of FFmpeg and one of widl, kept until the revision, the
+        # configure lines or the script that builds them change. The script
+        # checks that itself, so an old cache costs a rebuild and no more.
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/wine-nx-media-host/ship
+            /tmp/wine-nx-media-host/ship.key
+            /tmp/wine-nx-media-host/tool
+            /tmp/wine-nx-media-host/tool.key
+            /tmp/wine-nx-media-host/widl-build/widl
+            /tmp/wine-nx-media-host/widl.key
+          key: media-host-${{ runner.os }}-${{ hashFiles('horizon-wine/cmake/Media.cmake', 'horizon-wine/tests/media_host.py', 'horizon-wine/tools/bootstrap-wma.sh') }}
+
+      - name: Files played through the parser
+        # Stage 1 of PORTING.md: source/media_unix.c, built against FFmpeg
+        # with the configure lines of cmake/Media.cmake, plays files FFmpeg
+        # wrote, and every picture, sample and packet is held against what
+        # FFmpeg decodes of the same file.
+        run: |
+          python3 horizon-wine/tests/media_host.py --widl
+          python3 horizon-wine/tests/media_host.py || {
+            tail -n 40 /tmp/wine-nx-media-host/ship.log /tmp/wine-nx-media-host/tool.log
+            exit 1
+          }
+          python3 horizon-wine/tests/check_media_parser.py > "$RUNNER_TEMP/check_media_parser.log" 2>&1 || {
+            echo "::error::horizon-wine/tests/check_media_parser.py failed: $(head -c 900 "$RUNNER_TEMP/check_media_parser.log" | tr '\n' ' ')"
+            cat "$RUNNER_TEMP/check_media_parser.log"
+            exit 1
+          }
+          cat "$RUNNER_TEMP/check_media_parser.log"
 
   runtime:
     name: card archive
