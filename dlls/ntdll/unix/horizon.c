@@ -19532,6 +19532,59 @@ static void horizon_native_failure_exit( void )
     for (;;) svcSleepThread( 1000ULL * 1000ULL * 1000ULL );
 }
 
+/* The runtime's own code named in a fault (source/runtime_symbols.c): the
+ * function the fault is in and the one it was to return to, from the symbol
+ * file beside the NRO, or their offsets in the runtime without one. */
+extern int wine_nx_runtime_symbol( uintptr_t address, char *out, size_t size ) __attribute__((weak));
+
+static void horizon_trace_native_where( const ThreadExceptionDump *ctx )
+{
+    char pc[160], lr[160], line[360];
+
+    if (!wine_nx_runtime_symbol) return;
+    wine_nx_runtime_symbol( ctx->pc.x, pc, sizeof(pc) );
+    wine_nx_runtime_symbol( ctx->lr.x, lr, sizeof(lr) );
+    if (!pc[0] && !lr[0]) return;
+    snprintf( line, sizeof(line), "[EXC] in %s, from %s", pc[0] ? pc : "code outside the runtime",
+              lr[0] ? lr : "code outside the runtime" );
+    wine_nx_runtime_trace( line );
+}
+
+/* Whether a frame record at addr can be read: in mapped, readable memory. */
+static BOOL horizon_frame_readable( u64 addr )
+{
+    MemoryInfo info;
+    u32 page_info;
+
+    if (!addr || (addr & 15)) return FALSE;
+    if (R_FAILED( svcQueryMemory( &info, &page_info, addr ) )) return FALSE;
+    return info.type != MemType_Unmapped && (info.perm & Perm_R) && addr + 16 <= info.addr + info.size;
+}
+
+/* The calls that led to a fatal fault, by the frame records x29 chains: the
+ * runtime's functions by name, anything else by address. */
+static void horizon_trace_native_backtrace( const ThreadExceptionDump *ctx )
+{
+    char line[1024], where[160];
+    u64 fp = ctx->fp.x;
+    unsigned int depth;
+    int len = snprintf( line, sizeof(line), "[EXC] native calls:" );
+
+    for (depth = 0; depth < 16 && horizon_frame_readable( fp ); depth++)
+    {
+        const u64 *record = (const u64 *)(ULONG_PTR)fp;
+        u64 next = record[0], ret = record[1];
+
+        if (!ret) break;
+        if (!wine_nx_runtime_symbol || (!wine_nx_runtime_symbol( ret, where, sizeof(where) ) && !where[0]))
+            snprintf( where, sizeof(where), "%#llx", (unsigned long long)ret );
+        len += snprintf( line + len, sizeof(line) - len, " < %s", where );
+        if (len >= (int)sizeof(line) - 1 || next <= fp) break;
+        fp = next;
+    }
+    if (depth) wine_nx_runtime_trace( line );
+}
+
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -19688,6 +19741,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
      * the source of an alias without recording anything a later query shows. */
     alias_source_report( (const void *)(ULONG_PTR)ctx->far.x, buf, sizeof(buf) );
     wine_nx_runtime_trace( buf );
+    horizon_trace_native_where( ctx );
     snprintf( buf, sizeof(buf),
               "[EXC] x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x18=0x%llx",
               (unsigned long long)ctx->cpu_gprs[0].x, (unsigned long long)ctx->cpu_gprs[1].x,
@@ -19747,6 +19801,7 @@ unhandled_exception:
         if (wine_nx_box64_describe_native_pc &&
             wine_nx_box64_describe_native_pc( ctx->pc.x, x, buf, sizeof(buf) ))
             wine_nx_runtime_trace( buf );
+        horizon_trace_native_backtrace( ctx );
         /* ESR.FnV invalidates FAR. Only data aborts enter the guest fault boundary. */
         if ((exception_class == 0x24 || exception_class == 0x25) && !(esr & (1u << 10)) &&
             wine_nx_box64_handle_fault)

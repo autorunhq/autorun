@@ -294,6 +294,21 @@ if args.nxvk:
     shutil.copy2(nxvk_nro, stage / 'wine-nx-runtime-nxvk.nro')
     shutil.copytree(nxvk_pkg / 'licenses', licenses / 'nxvk')
     print('nxvk runtime staged')
+# The runtime's function names beside each NRO, for its own log's faults and
+# stall reports (tools/runtime_symbols.py, source/runtime_symbols.c).
+sys.path.insert(0, str(tools))
+import runtime_symbols  # noqa: E402
+for nro_name, build_dir in (('wine-nx-runtime', 'build-switch-wow64-mesa-switch' if args.x86 else 'build-switch-amd64'),
+                            ('wine-nx-runtime-nxvk', 'build-switch-amd64-nxvk')):
+    elf = horizon_wine / build_dir / 'wine-nx-runtime.elf'
+    nro = horizon_wine / build_dir / 'wine-nx-runtime.nro'
+    if not (stage / f'{nro_name}.nro').is_file():
+        continue
+    # The NRO is made from the ELF; one older than it is another build's.
+    if elf.is_file() and nro.is_file() and elf.stat().st_mtime <= nro.stat().st_mtime + 1:
+        print(f'{nro_name}.sym: {runtime_symbols.write(elf, stage / f"{nro_name}.sym")} functions')
+    else:
+        print(f'{nro_name}.sym: no ELF of this build in {build_dir}; faults will give offsets only')
 subprocess.run([sys.executable, str(tools / 'verify-package.py'), str(stage), '--dlls', str(args.dlls)],
                check=True)
 

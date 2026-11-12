@@ -54,6 +54,7 @@
 #include "game_fixes.h"
 #ifdef WINE_NX_SWAP_POC
 #include "swap_file.h"
+#include "runtime_symbols.h"
 #include "horizon_swap.h"
 static struct swap_file game_swap;
 static int game_swap_open;
@@ -4451,6 +4452,12 @@ static int return_to_launcher( void )
         log_line( "[FEX] code memory retained at exit: %zu bytes", retained );
     }
 #endif
+    {
+        /* Mesa's messages from the program's run (source/graphics_selftest.c). */
+        extern void wine_nx_mesa_log_copy( const char *why ) __attribute__((weak));
+
+        if (&wine_nx_mesa_log_copy) wine_nx_mesa_log_copy( NULL );
+    }
     socketExit();
     stop_log_flusher();
 #ifdef WINE_NX_SWAP_POC
@@ -4787,6 +4794,28 @@ int main( int argc, char **argv )
 #else
     log_line( "[GRAPHICS] this runtime is linked with mesa-switch" );
 #endif
+    {
+        /* The runtime's function names for faults and stall reports, from the
+         * file the packager writes beside the NRO (tools/runtime_symbols.py). */
+        char symbols[520];
+        MemoryInfo info;
+        u32 page_info;
+        size_t length = strlen( own_nro );
+        int named = 0;
+
+        if (length > 4 && !strcasecmp( own_nro + length - 4, ".nro" ) && length < sizeof(symbols))
+        {
+            memcpy( symbols, own_nro, length - 4 );
+            strcpy( symbols + length - 4, ".sym" );
+            if (R_SUCCEEDED( svcQueryMemory( &info, &page_info, (u64)(uintptr_t)&return_to_launcher ) ))
+                named = wine_nx_runtime_symbols_open( symbols, (uintptr_t)info.addr );
+            if (named)
+                log_line( "[SYMBOLS] %d functions named from %s, code at %#lx", named, symbols,
+                          (unsigned long)info.addr );
+            else
+                log_line( "[SYMBOLS] none: %s is not on the card; faults give offsets in the runtime", symbols );
+        }
+    }
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
     {
@@ -4879,7 +4908,10 @@ int main( int argc, char **argv )
     /* This runtime links mesa-switch (switch-dev image); vulkan-probe.txt
      * reports what its NVK offers, for Vulkan and DXVK (vulkan_probe.c). */
     {
-        int vulkan_probe = config_bool( "vulkan-probe", 0, "vulkan-probe.txt", 0 );
+        /* The nxvk runtime tries Vulkan and OpenGL step by step every time:
+         * it is new, and a black screen says nothing of where it stopped. */
+        int vulkan_probe = config_bool( "vulkan-probe", runtime_is_nxvk, "vulkan-probe.txt", 0 );
+        int graphics_test = config_bool( "graphics-selftest", runtime_is_nxvk, "graphics-selftest.txt", 0 );
 
 #ifdef WINE_NX_NXVK
         log_line( "[INIT] Mesa from nxvk: OpenGL through Zink, Vulkan through NVK; Mesa's own log in %s; "
@@ -4895,6 +4927,13 @@ int main( int argc, char **argv )
 
             wine_nx_vulkan_probe();
             log_lent_memory( "the Vulkan probe" );
+        }
+        if (graphics_test)
+        {
+            extern int wine_nx_graphics_selftest( void );
+
+            wine_nx_graphics_selftest();
+            log_lent_memory( "the graphics test" );
         }
     }
 #endif

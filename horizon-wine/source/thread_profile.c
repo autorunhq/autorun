@@ -1314,6 +1314,9 @@ static int image_at( uint64_t address, void **base, char *name, size_t size )
     return &wine_nx_image_at && wine_nx_image_at( (void *)(uintptr_t)address, base, name, size );
 }
 
+/* The runtime's own functions by name (source/runtime_symbols.c). */
+extern int wine_nx_runtime_symbol( uintptr_t address, char *out, size_t size ) __attribute__((weak));
+
 static void name_address( uint64_t address, char *buf, size_t size )
 {
     char module[64];
@@ -1321,7 +1324,7 @@ static void name_address( uint64_t address, char *buf, size_t size )
 
     if (image_at( address, &base, module, sizeof(module) ))
         snprintf( buf, size, "%s+%#lx", module[0] ? module : "exe", (unsigned long)(address - (uintptr_t)base) );
-    else
+    else if (!wine_nx_runtime_symbol || (!wine_nx_runtime_symbol( (uintptr_t)address, buf, size ) && !buf[0]))
         snprintf( buf, size, "%#lx", (unsigned long)address );
 }
 

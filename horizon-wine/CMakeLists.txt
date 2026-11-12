@@ -626,6 +626,7 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
+    source/runtime_symbols.c
     source/dxvk_releases.c
     source/fex_build.c
     source/runtime_platform.c
@@ -1050,7 +1051,7 @@ if(WINE_NX_MESA_SWITCH_DIR)
     target_link_options(wine-nx-runtime PRIVATE
         -Wl,-u,vk_icdGetInstanceProcAddr -Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion -pthread)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_MESA_SWITCH)
-    target_sources(wine-nx-runtime PRIVATE source/vulkan_probe.c)
+    target_sources(wine-nx-runtime PRIVATE source/vulkan_probe.c source/graphics_selftest.c)
     # The log says which thread pools Mesa starts and how large (source/carafe_mesa.c).
     target_sources(wine-nx-runtime PRIVATE source/carafe_mesa.c)
     target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=util_queue_init)
