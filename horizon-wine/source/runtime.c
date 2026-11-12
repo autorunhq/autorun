@@ -52,9 +52,9 @@
 #include "horizon_dlls.h"
 #include "horizon_dll_features.h"
 #include "game_fixes.h"
+#include "runtime_symbols.h"
 #ifdef WINE_NX_SWAP_POC
 #include "swap_file.h"
-#include "runtime_symbols.h"
 #include "horizon_swap.h"
 static struct swap_file game_swap;
 static int game_swap_open;
