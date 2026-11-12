@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <switch.h>
 #include <EGL/egl.h>
 
@@ -87,6 +88,21 @@ static void environment( void )
     }
     step( "%s", len > 12 ? line : "environment: no Mesa variables set" );
 }
+
+#ifdef WINE_NX_NXVK
+/* The memory nxvk's Mesa sizes the GPU's heap from, as it will see it: it asks
+ * sysconf (os_get_total_physical_memory), and NVK refuses a GPU it cannot size,
+ * which Zink reports only as vkEnumeratePhysicalDevices failing. */
+static void memory( void )
+{
+    long pages = sysconf( _SC_PHYS_PAGES ), page = sysconf( _SC_PAGESIZE );
+
+    if (pages > 0 && page > 0)
+        step( "memory Mesa sees: %ld pages of %ld bytes, %lld MB", pages, page, (long long)pages * page >> 20 );
+    else
+        step( "memory Mesa sees: none (sysconf: %ld pages of %ld bytes), and NVK will refuse the GPU", pages, page );
+}
+#endif
 
 static int run( void )
 {
@@ -193,6 +209,9 @@ int wine_nx_graphics_selftest( void )
 
     selftest_start = armGetSystemTick();
     environment();
+#ifdef WINE_NX_NXVK
+    memory();
+#endif
     ok = run();
     step( ok ? "OpenGL came up and went down again" : "OpenGL could not be brought up; Mesa's reasons follow" );
     wine_nx_mesa_log_copy( "after the graphics test" );
