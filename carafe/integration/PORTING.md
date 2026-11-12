@@ -44,10 +44,12 @@ Compared trees:
      the options that only Carafe's FEX and DXVK builds read.
 4. **FEX, DXVK and every other Windows module do not come from this
    repository.** The card archive holds none; the launcher downloads them from
-   `autorunhq/autorun-horizon-dlls`. Carafe's 25 FEX patches, 22 DXVK patches
-   and dxwrapper can only reach a console through a DLL repository of this
-   fork's own, or by shipping those few DLLs inside the card archive. That is
-   stage 5 and needs a decision first.
+   `autorunhq/autorun-horizon-dlls`. Carafe starts from that repository's set and
+   replaces a few files in it. Its 25 FEX patches, 22 DXVK patches, four
+   patches to Wine's own DLLs (`runtime/patches/wine-pe`) and dxwrapper can
+   only reach a console through a DLL repository of this fork's own, or by
+   shipping those few DLLs inside the card archive. That is stage 5 and needs
+   a decision first.
 5. **Licences.** Carafe's overlay (`runtime/overlay`) and its Autorun patches
    are LGPL-2.1-or-later like Wine; its FEX patches are MIT and its DXVK
    patches Zlib, as the files they change. Everything else in Carafe,
@@ -398,7 +400,11 @@ Still open in stage 5:
 |---|---|
 | FEX for 64-bit programs (`libarm64ecfex.dll`) | Carafe's patch set is built here for `wow64fex` only; the ARM64EC target was not tried |
 | Carafe's DXVK as the system Direct3D (`0105`, `0133`) | Here it is a source like the others, in a folder put in front of system32, which is what this fork does for every DXVK |
-| dxwrapper, Wine Mono, the WinRT classes, patch `0006` | Each needs Windows DLLs other than these two |
+| Carafe's four changes to Wine's own DLLs (`runtime/patches/wine-pe`: `wow64.dll`, both `ntdll.dll`, both `dinput.dll` and `dinput8.dll`) | This tree's Wine source has had them since the base commit, but a console runs the DLLs of `autorunhq/autorun-horizon-dlls`, which are built without them. Read in its files at `67e2303`: `wow64.dll` does not name `BTCpuSuspendLocalThread`, neither `ntdll.dll` holds `0x46555458`, and all four DirectInput DLLs still hold `nx_joystick_create_device`. So on a console `0126` and `0127` are never handed a wait to take out, a 32-bit thread is suspended without asking FEX, and DirectInput reads the pad through `joystick_nx.c`, not the HID gamepad of `0128` to `0131`. Nothing here builds or releases these seven DLLs yet |
+| dxwrapper | Carafe builds `elishacloud/dxwrapper` with its five patches using MSVC and the Windows SDK, fetched by `mstorsjo/msvc-wine` under Microsoft's licence; nothing here builds it |
+| Wine Mono | A ready archive, `wine-mono-11.3.0-arm64.tar.xz`, which `tools/wine_mono_payload.py` pins and stages; no build passes it to a card and the launcher has no download for it |
+| The WinRT classes | No new DLL: registry lines for DLLs system32 already has. `classes.reg` comes from the DLL repository, so the runtime would have to add the lines itself |
+| Patch `0006` | Its Windows half is rebuilt Wine DLLs; not needed on the fork's own paths, see the row for it below |
 
 ### Stage 6: the server thread pool, done
 
