@@ -504,6 +504,14 @@ int main(void) {
     ctx.Eip += 32;
     assert(!set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
     assert(stop_waits == 4 && other_saved.Eip == ctx.Eip && saved.Eip != ctx.Eip);
+    /* The handle has to grant the access, and is refused before the thread is asked to stop. */
+    entry->access = THREAD_GET_CONTEXT;
+    assert(set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_ACCESS_DENIED);
+    assert(!get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    entry->access = THREAD_SET_CONTEXT;
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_ACCESS_DENIED);
+    assert(!set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    assert(stop_waits == 6);
     assert(NtQueryObject((HANDLE)0xdead, ObjectBasicInformation, &info, sizeof(info), &size) == STATUS_INVALID_HANDLE && !size);
     assert(NtQueryObject(alias, ObjectBasicInformation, &info, sizeof(info) - 1, &size) == STATUS_INFO_LENGTH_MISMATCH && !size);
     assert(NtCompareObjects((HANDLE)0xdead, (HANDLE)0xdead) == STATUS_INVALID_HANDLE);

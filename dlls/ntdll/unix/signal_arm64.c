@@ -280,10 +280,14 @@ static NTSTATUS check_current_thread_context_access( HANDLE handle, ACCESS_MASK 
 static NTSTATUS wow64_context_thread( HANDLE handle, ACCESS_MASK access, struct thread_data **data )
 {
     NTSTATUS status = check_current_thread_context_access( handle, access );
+    OBJECT_BASIC_INFORMATION info;
     TEB *teb = NULL;
 
     *data = get_thread_data();
     if (status != STATUS_NOT_IMPLEMENTED) return status;
+    /* A handle to another thread has to grant the access too, as one to this thread does. */
+    if ((status = NtQueryObject( handle, ObjectBasicInformation, &info, sizeof(info), NULL ))) return status;
+    if ((info.GrantedAccess & access) != access) return STATUS_ACCESS_DENIED;
     SERVER_START_REQ( get_thread_info )
     {
         req->handle = wine_server_obj_handle( handle );
