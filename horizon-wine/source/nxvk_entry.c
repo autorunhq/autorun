@@ -37,6 +37,12 @@ extern PFN_vkVoidFunction vk_icdGetInstanceProcAddr( VkInstance instance, const 
 __attribute__((constructor)) static void nxvk_take_maxwell( void )
 {
     setenv( "NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 0 );
+    /* Mesa's own messages -- Zink's and NVK's reasons for refusing a screen
+     * or a device, EGL's errors -- go to stderr, which nothing reads here.
+     * They go to a file beside the runtime's log instead, every run anew. */
+    setenv( "MESA_LOG_FILE", "sdmc:/switch/wine/logs/mesa-nxvk.log", 0 );
+    setenv( "MESA_LOG_LEVEL", "info", 0 );
+    setenv( "EGL_LOG_LEVEL", "info", 0 );
 }
 
 /* The newest instance the runtime asked for anything of: device functions are

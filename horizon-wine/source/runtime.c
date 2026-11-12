@@ -4881,8 +4881,14 @@ int main( int argc, char **argv )
     {
         int vulkan_probe = config_bool( "vulkan-probe", 0, "vulkan-probe.txt", 0 );
 
+#ifdef WINE_NX_NXVK
+        log_line( "[INIT] Mesa from nxvk: OpenGL through Zink, Vulkan through NVK; Mesa's own log in %s; "
+                  "Vulkan probe %s", getenv( "MESA_LOG_FILE" ) ? getenv( "MESA_LOG_FILE" ) : "none",
+                  vulkan_probe ? "on" : "off" );
+#else
         log_line( "[INIT] Mesa from mesa-switch: OpenGL through nvc0, Vulkan through NVK; Vulkan probe %s",
                   vulkan_probe ? "on" : "off" );
+#endif
         if (vulkan_probe)
         {
             extern void wine_nx_vulkan_probe( void );
@@ -5018,6 +5024,21 @@ int main( int argc, char **argv )
         };
         int chosen;
 
+#ifdef WINE_NX_NXVK
+        /* The nxvk runtime runs the programs set to it and nothing else: the
+         * launcher is the card's own runtime's, which a program chosen there
+         * comes back here from (runtime_switch_graphics_runtime). Started on
+         * its own, from the album or a shortcut to this NRO, it hands over. */
+        if (envHasNextLoad() && !access( RUNTIME_NRO_MESA_SWITCH, F_OK ) &&
+            R_SUCCEEDED( envSetNextLoad( RUNTIME_NRO_MESA_SWITCH, RUNTIME_NRO_MESA_SWITCH ) ))
+        {
+            log_line( "[GRAPHICS] the nxvk runtime has no launcher of its own; starting %s",
+                      RUNTIME_NRO_MESA_SWITCH );
+            consoleExit( NULL );
+            leave_cleanly();
+            return 0;
+        }
+#endif
         /* Without a program on the command line, let the user choose one;
          * target.txt only preselects the last choice. The launcher draws with
          * SDL, so the console gives up the screen until it returns. */

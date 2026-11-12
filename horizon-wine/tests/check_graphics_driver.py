@@ -51,6 +51,15 @@ assert 'if (wants_nxvk == runtime_is_nxvk) return 0;' in hop
 assert 'access( other, F_OK )' in hop and 'run_next_push( target )' in hop
 assert re.search(r'!runtime_components_run &&\s+runtime_switch_graphics_runtime\(', runtime)
 assert '"/wine-nx-runtime-nxvk.nro"' in runtime
+# Started without a program, the nxvk runtime starts the card's own runtime
+# for the launcher rather than draw one through a Mesa it cannot vouch for.
+handover = runtime[runtime.index('#ifdef WINE_NX_NXVK\n        /* The nxvk runtime runs the programs set to it'):]
+handover = handover[:handover.index('#endif')]
+assert 'envSetNextLoad( RUNTIME_NRO_MESA_SWITCH, RUNTIME_NRO_MESA_SWITCH )' in handover
+assert handover.index('envSetNextLoad') < runtime.index('chosen = wine_nx_launcher_run(') - runtime.index(handover)
+# The console menu's catalog is not on the stack (some 560 KB of it).
+console = (source / 'launcher_console.c').read_text()
+assert 'static struct launcher_catalog catalog;' in console
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')
