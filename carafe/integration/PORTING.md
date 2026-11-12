@@ -727,7 +727,7 @@ fork has it in its own form, which the last column names.
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |
 | 0018 | horizon mouse hit test in program coordinates | 39 | 94 % | in the fork; it falls back to the first active monitor instead of the first |
 | 0019 | horizon thread budget and server requests | 91 | 96 % | taken (stage 2); its `[BUDGET]` line is now the one of `0023`, with `pool=` |
-| 0020 | horizon thread creation waits for a place | 42 | 57 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
+| 0020 | horizon thread creation waits for a place | 42 | 59 % | in the fork as horizon_thread_may_wait and HORIZON_THREAD_WAIT_*; the wait counters taken (stage 2) |
 | 0021 | horizon handle fd on the calling thread | 4 | 100 % | in the fork |
 | 0022 | server handle fd on the calling thread | 1 | 100 % | in the fork |
 | 0023 | horizon server thread pool | 180 | 98 % | taken (stage 6), behind a program's setting; the pipe's count and writer's end are stored atomically |
@@ -735,7 +735,7 @@ fork has it in its own form, which the last column names.
 | 0025 | horizon thread creation takes a tls holders place | 6 | 33 % | in the fork as horizon_tls_give_place |
 | 0026 | thread join an ended thread without waiting | 23 | 100 % | in the fork |
 | 0027 | horizon thread creation at the limit skips the kernel wait | 41 | 95 % | in the fork, as `horizon_thread_may_wait` |
-| 0028 | horizon thread creation waits longer for a place | 39 | 58 % | in the fork (20 s wait, 2 ms then 20 ms steps); the caller report taken (stage 2) |
+| 0028 | horizon thread creation waits longer for a place | 39 | 61 % | in the fork (20 s wait, 2 ms then 20 ms steps); the caller report taken (stage 2) |
 | 0029 | runtime stall report names native callers | 36 | 94 % | taken (stage 2) |
 | 0030 | runtime stall watch reports on request | 6 | 100 % | taken (stage 2) |
 | 0031 | runtime threads carry a stop request | 32 | 87 % | in the fork; the lines not found were rewritten by later Carafe patches |

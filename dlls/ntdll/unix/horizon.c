@@ -7461,6 +7461,24 @@ static int horizon_server_handle_set_hook( struct horizon_server_connection *con
         free( hook->module );
         free( hook );
     }
+    {
+        /* Said without the verbose log, a few times. DirectInput puts a hook
+         * on the thread of the window a device was taken for, and gives the
+         * device up when that window stops being the active one: with the
+         * lines of [ACTIVE] and [RAWINPUT] this shows a mouse lost that way. */
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[128];
+
+            told++;
+            snprintf( line, sizeof(line), "[HOOK] thread %04x sets hook %d for thread %04x: %08x, status %08x",
+                      connection->tid, request->id, request->tid, reply.handle, reply.header.error );
+            wine_nx_runtime_trace( line );
+        }
+    }
     horizon_trace( "[HZHOOK] set id=%d tid=%04x owner=%04x module=%u -> %08x err=%08x\n",
                    request->id, request->tid, connection->tid, data_size, reply.handle, reply.header.error );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
@@ -7494,6 +7512,20 @@ static int horizon_server_handle_remove_hook( struct horizon_server_connection *
         horizon_server_publish_all_hooks_locked();
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[96];
+
+            told++;
+            snprintf( line, sizeof(line), "[HOOK] thread %04x removes hook %08x, status %08x",
+                      connection->tid, request->handle, reply.error );
+            wine_nx_runtime_trace( line );
+        }
+    }
     horizon_trace( "[HZHOOK] remove %08x err=%08x\n", request->handle, reply.error );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
@@ -10739,6 +10771,21 @@ static int horizon_server_handle_set_foreground_window( struct horizon_server_co
         horizon_server_flush_input_locked( input->shared );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[128];
+
+            told++;
+            snprintf( line, sizeof(line), "[ACTIVE] thread %04x puts hwnd=%08x in front, status %08x; "
+                      "the active window was %08x",
+                      connection->tid, request->handle, reply.header.error, reply.previous );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -10767,6 +10814,21 @@ static int horizon_server_handle_set_input_window( struct horizon_server_connect
         horizon_server_flush_input_locked( input );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (which == HORIZON_REQ_SET_ACTIVE_WINDOW && !reply.header.error && reply.previous != request->handle)
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 24 && &wine_nx_runtime_trace)
+        {
+            char line[96];
+
+            told++;
+            snprintf( line, sizeof(line), "[ACTIVE] thread %04x: active window %08x, was %08x",
+                      connection->tid, request->handle, reply.previous );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -10935,6 +10997,31 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
             offsetof( struct horizon_shared_object, shm ) + sizeof(struct horizon_desktop_shm) );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (!reply.header.error &&
+        (request->flags & (HORIZON_SET_CURSOR_POS | HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)))
+    {
+        /* Said without the verbose log, a few times: DirectInput centres and
+         * clips the cursor when a program takes the mouse for itself and frees
+         * it when the mouse is given up, so these lines date both. */
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int clips, places;
+        int clip = !!(request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP));
+
+        if (&wine_nx_runtime_trace && (clip ? clips < 24 : places < 12))
+        {
+            char line[320];
+
+            if (clip) clips++;
+            else places++;
+            snprintf( line, sizeof(line), "[CURSOR] thread %04x, flags %x: asked for %d,%d and clip %d,%d-%d,%d; "
+                      "the cursor was at %d,%d and is at %d,%d, clip %d,%d-%d,%d",
+                      connection->tid, request->flags, request->x, request->y,
+                      request->clip.left, request->clip.top, request->clip.right, request->clip.bottom,
+                      reply.prev_x, reply.prev_y, reply.new_x, reply.new_y,
+                      reply.new_clip.left, reply.new_clip.top, reply.new_clip.right, reply.new_clip.bottom );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
