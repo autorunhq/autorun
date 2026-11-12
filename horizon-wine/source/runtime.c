@@ -5098,6 +5098,23 @@ int main( int argc, char **argv )
                 log_line( "[INIT] the program's own picture: %s", picture_mode_text( wine_nx_picture_mode ) );
             }
 #ifdef WINE_NX_MESA_SWITCH
+            {
+                /* OpenGL through Zink on NVK instead of nvc0: gl-driver=zink in
+                 * the program's settings. mesa-switch's EGL reads the variable
+                 * when the screen's display is set up, so the compositor and the
+                 * program's own OpenGL both take it; a Mesa built without Zink
+                 * refuses the display, and the log then says so. */
+                char driver[16];
+
+                if (launcher_kv_get( &kv, "gl-driver", driver, sizeof(driver) ) &&
+                    (!strcmp( driver, "zink" ) || !strcmp( driver, "nvc0" )))
+                {
+                    setenv( "MESA_SWITCH_GL_DRIVER", driver, 1 );
+                    log_line( "[NXGL] OpenGL through %s, from the program's settings",
+                              !strcmp( driver, "zink" ) ? "Zink on NVK" : "nvc0" );
+                }
+                else unsetenv( "MESA_SWITCH_GL_DRIVER" );
+            }
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;
             runtime_dxvk_hud = settings.dxvk_hud;
