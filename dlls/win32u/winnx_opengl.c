@@ -775,9 +775,28 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
         const char *vendor = funcs->p_eglQueryString( egl->display, EGL_VENDOR );
         const char *version = funcs->p_eglQueryString( egl->display, EGL_VERSION );
 
-        /* raw 0: win32u draws through its framebuffer surface (DPI scaling or gamma) */
-        if (!logged) nx_log( "[NXGL] EGL %s %s, %u configs; window surface for format %d, raw %u",
-                             vendor ? vendor : "?", version ? version : "?", egl->config_count, format, client->raw );
+        EGLConfig config = nx_config_for_format( format );
+        EGLint id = 0, r = 0, g = 0, b = 0, a = 0, depth = 0, stencil = 0, samples = 0;
+
+        /* raw 0: win32u draws through its framebuffer surface (DPI scaling or gamma).
+         * What the format has, too: a game that draws in passes over an equal
+         * depth, as Doom 3 does, shows stripes and patches on a shallow depth
+         * buffer, and the log is the only place that says which one it got. */
+        if (!logged)
+        {
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_CONFIG_ID, &id );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_RED_SIZE, &r );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_GREEN_SIZE, &g );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_BLUE_SIZE, &b );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_ALPHA_SIZE, &a );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_DEPTH_SIZE, &depth );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_STENCIL_SIZE, &stencil );
+            funcs->p_eglGetConfigAttrib( egl->display, config, EGL_SAMPLES, &samples );
+            nx_log( "[NXGL] EGL %s %s, %u configs; window surface for format %d, raw %u; "
+                    "config %d: rgba %d%d%d%d, depth %d, stencil %d, samples %d",
+                    vendor ? vendor : "?", version ? version : "?", egl->config_count, format, client->raw,
+                    id, r, g, b, a, depth, stencil, samples );
+        }
         logged = TRUE;
     }
     *drawable = &gl->base;
