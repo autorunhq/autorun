@@ -41,7 +41,7 @@ static TEB remote_teb;
 static struct thread_data *get_thread_data(void) { return &thread_data; }
 static NTSTATUS get_thread_context(HANDLE handle, void *context, BOOL *self, USHORT machine) {
     CONTEXT *ctx = context;
-    assert(handle == (HANDLE)16 && machine == IMAGE_FILE_MACHINE_ARM64 && ctx->ContextFlags == CONTEXT_ARM64_CONTROL);
+    assert((handle == (HANDLE)16 || handle == (HANDLE)20) && machine == IMAGE_FILE_MACHINE_ARM64 && ctx->ContextFlags == CONTEXT_ARM64_CONTROL);
     (void)self;
     wait_stopped_calls++;
     return STATUS_SUCCESS;
@@ -59,7 +59,7 @@ static void *wine_server_get_ptr(ULONG64 ptr) { return (void *)(uintptr_t)ptr; }
 static NTSTATUS wine_server_call(void *r) {
     (void)r;
     server_info_calls++;
-    if (req->handle == 16 && !server_info_error) {
+    if ((req->handle == 16 || req->handle == 20) && !server_info_error) {
         reply->teb = (ULONG64)(uintptr_t)&remote_teb;
         return STATUS_SUCCESS;
     }
@@ -69,7 +69,7 @@ NTSTATUS WINAPI NtCompareObjects(HANDLE first, HANDLE second) {
     assert(second == GetCurrentThread());
     comparisons++;
     if (first == (HANDLE)4 || first == (HANDLE)8 || first == (HANDLE)12) return STATUS_SUCCESS;
-    if (first == (HANDLE)16) return STATUS_NOT_SAME_OBJECT;
+    if (first == (HANDLE)16 || first == (HANDLE)20) return STATUS_NOT_SAME_OBJECT;
     return STATUS_INVALID_HANDLE;
 }
 NTSTATUS WINAPI NtQueryObject(HANDLE handle, OBJECT_INFORMATION_CLASS type, void *buffer, ULONG size, ULONG *retlen) {
@@ -81,6 +81,8 @@ NTSTATUS WINAPI NtQueryObject(HANDLE handle, OBJECT_INFORMATION_CLASS type, void
     if (handle == (HANDLE)4) info->GrantedAccess = THREAD_GET_CONTEXT | THREAD_SET_CONTEXT;
     else if (handle == (HANDLE)8) info->GrantedAccess = THREAD_GET_CONTEXT;
     else if (handle == (HANDLE)12) info->GrantedAccess = THREAD_SET_CONTEXT;
+    else if (handle == (HANDLE)16) info->GrantedAccess = THREAD_GET_CONTEXT | THREAD_SET_CONTEXT;
+    else if (handle == (HANDLE)20) info->GrantedAccess = THREAD_GET_CONTEXT;
     else assert(0);
     return STATUS_SUCCESS;
 }
@@ -146,6 +148,16 @@ int main(void) {
     ctx.Eax = 0xcafebabe;
     assert(!set_thread_wow64_context((HANDLE)16, &ctx, sizeof(ctx)) && remote_saved.Eax == 0xcafebabe);
     assert(wait_stopped_calls == 2);
+    /* Another thread's handle is held to its access as this thread's is,
+     * before the server is asked and before the thread is stopped. */
+    count = server_info_calls;
+    before = remote_saved;
+    assert(set_thread_wow64_context((HANDLE)20, &ctx, sizeof(ctx)) == STATUS_ACCESS_DENIED);
+    assert(!memcmp(&before, &remote_saved, sizeof(remote_saved)));
+    assert(server_info_calls == count && wait_stopped_calls == 2);
+    assert(!get_thread_wow64_context((HANDLE)20, &ctx, sizeof(ctx)) && ctx.Eax == 0xcafebabe);
+    assert(wait_stopped_calls == 3);
+    count = queries;
     server_info_error = STATUS_NOT_IMPLEMENTED;
     assert(get_thread_wow64_context(NULL, &ctx, sizeof(ctx)) == STATUS_INVALID_HANDLE);
     assert(set_thread_wow64_context(NULL, &ctx, sizeof(ctx)) == STATUS_INVALID_HANDLE);
