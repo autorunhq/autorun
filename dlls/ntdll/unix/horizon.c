@@ -10486,8 +10486,12 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         if (target) target_handle = target->handle;
         horizon_server_log_mouse_target_locked( target, x, y, input ? input->capture : 0 );
         if (target) input = horizon_server_input_shared_locked( target->tid );
-        horizon_server_queue_mouse_hook_ll_locked( flags, mouse->data, legacy ? 0 : dx, legacy ? 0 : dy,
-                                                   time, mouse->info );
+        /* The hook's point is the cursor's when the hook runs plus this
+         * movement (horizon_server_hook_ll_point_locked). The cursor has moved
+         * already, so without the movement the point is where the cursor is,
+         * and DirectInput, which reads a low-level hook's point less the
+         * cursor's as the mouse's motion, saw none: Doom 3 had no mouse. */
+        horizon_server_queue_mouse_hook_ll_locked( flags, mouse->data, dx, dy, time, mouse->info );
 
         if (raw_device)
         {

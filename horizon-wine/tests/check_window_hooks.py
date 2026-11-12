@@ -37,6 +37,14 @@ while depth:
     pos += 1
 hook_block = horizon[start_hook:pos]
 
+# The handler of a mouse event hands its hook the movement whether or not the
+# cursor follows it: the point is made from it and the cursor, and DirectInput
+# reads the point less the cursor as the motion. With 0 for a mouse that moves
+# the cursor, Doom 3's DirectInput mouse saw none.
+handler = extract_function(horizon, 'horizon_server_handle_send_hardware_message')
+assert 'horizon_server_queue_mouse_hook_ll_locked( flags, mouse->data, dx, dy, time, mouse->info );' in handler, \
+    'the low-level mouse hook must get the movement'
+
 ll_helpers = '\n\n'.join([
     extract_function(horizon, 'horizon_server_queue_mouse_hook_ll_locked'),
     extract_function(horizon, 'horizon_server_queue_key_hook_ll_locked'),
