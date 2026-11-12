@@ -144,6 +144,15 @@ extern void wine_nx_sd_cache_flush(void);
 extern int wine_nx_usb_list( struct wine_nx_launcher_usb_volume *volumes, int max );
 #endif
 
+/* Which Mesa this runtime is linked with: mesa-switch, the card's own, or
+ * nxvk, a second runtime a program can be set to (runtime_switch_graphics_runtime). */
+#ifdef WINE_NX_NXVK
+static const int runtime_is_nxvk = 1;
+extern const char wine_nx_graphics_runtime[];  /* source/nxvk_entry.c */
+#else
+static const int runtime_is_nxvk = 0;
+#endif
+
 static FILE *log_file;
 /* A second copy, kept from the moment a program starts. The next run of the
  * launcher opens autorun_runtime.log afresh and what the program did is gone
@@ -463,10 +472,11 @@ static void open_game_log( const char *target )
     }
     name[i] = 0;
     if ((len = strlen( name )) > 4 && !strcasecmp( name + len - 4, ".exe" )) name[len - 4] = 0;
-    /* Beside the runtime's own log, named after the program and the diagnostics
-     * the run had on, so a verbose or profiled run does not replace the plain
-     * one it is being compared with: Sims2EP9.log, Sims2EP9_verbose_profiler.log. */
-    snprintf( path, sizeof(path), "%s/%s%s%s.log", RUNTIME_LOGS, name,
+    /* Beside the runtime's own log, named after the program, the Mesa and the
+     * diagnostics the run had on, so a run on nxvk, verbose or profiled does not
+     * replace the plain one it is being compared with: Sims2EP9.log,
+     * Sims2EP9_nxvk.log, Sims2EP9_verbose_profiler.log. */
+    snprintf( path, sizeof(path), "%s/%s%s%s%s.log", RUNTIME_LOGS, name, runtime_is_nxvk ? "_nxvk" : "",
               wine_nx_runtime_verbose ? "_verbose" : "", runtime_profile ? "_profiler" : "" );
 
     pthread_mutex_lock( &log_mutex );
@@ -2215,12 +2225,6 @@ static int run_next_pop( char *target, size_t size )
  * it is not this runtime again. */
 static char runtime_next_nro[512];
 
-#ifdef WINE_NX_NXVK
-static const int runtime_is_nxvk = 1;
-extern const char wine_nx_graphics_runtime[];  /* source/nxvk_entry.c */
-#else
-static const int runtime_is_nxvk = 0;
-#endif
 
 /* Queues target for the runtime linked with the Mesa it wants, when that is
  * not this one, and says whether it did: the caller then goes back the way a

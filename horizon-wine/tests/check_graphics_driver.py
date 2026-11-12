@@ -60,6 +60,12 @@ assert handover.index('envSetNextLoad') < runtime.index('chosen = wine_nx_launch
 # The console menu's catalog is not on the stack (some 560 KB of it).
 console = (source / 'launcher_console.c').read_text()
 assert 'static struct launcher_catalog catalog;' in console
+# nxvk's Mesa sizes the GPU's memory from sysconf(_SC_PHYS_PAGES), which
+# newlib does not answer; without it NVK refuses the GPU and Zink has none.
+platform = (source / 'runtime_platform.c').read_text()
+sysconf = platform[platform.index('long sysconf( int name )\n{'):]
+sysconf = sysconf[:sysconf.index('\n}\n')]
+assert '_SC_PHYS_PAGES' in sysconf and 'InfoType_TotalMemorySize' in sysconf
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')
