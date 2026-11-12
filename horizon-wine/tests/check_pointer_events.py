@@ -281,6 +281,30 @@ int main(void) {
     assert(sent[before_rel].mi.dwFlags == MOUSEEVENTF_MOVE);
     assert(sent[before_rel].mi.dx == 25 && sent[before_rel].mi.dy == -10);
 
+    /* A pressed after the stick moved, both seen since the last call: the
+     * movement goes first, so the press is where the arrow is drawn. */
+    sent_count = 0;
+    state = (struct input_snapshot){ .x = 300, .y = 200, .dx = 40, .dy = 12, .moved = 1, .buttons = L, .pressed = L };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 2);
+    assert(sent[0].mi.dwFlags == MOUSEEVENTF_MOVE && sent[0].mi.dx == 40 && sent[0].mi.dy == 12);
+    assert(sent[1].mi.dwFlags == (ABS | MOUSEEVENTF_LEFTDOWN));
+    /* ...and a tap during it is a click there, not a drag across what the stick covered. */
+    sent_count = 0;
+    state = (struct input_snapshot){ .x = 320, .y = 200, .dx = 20, .moved = 1, .pressed = R, .released = R };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 3);
+    assert(sent[0].mi.dwFlags == MOUSEEVENTF_MOVE && sent[0].mi.dx == 20 && !sent[0].mi.dy);
+    assert(sent[1].mi.dwFlags == (ABS | MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTDOWN));  /* A let go where the drag ended */
+    assert(sent[2].mi.dwFlags == (ABS | MOUSEEVENTF_RIGHTUP));
+    /* A finger places the cursor; what the stick did is added after it. */
+    sent_count = 0;
+    state = (struct input_snapshot){ .x = 500, .y = 400, .dx = 3, .dy = 4, .moved = 1, .placed = 1, .buttons = L, .pressed = L };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 2);
+    assert(sent[0].mi.dwFlags == (ABS | MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN) && sent[0].mi.dx == 500 && sent[0].mi.dy == 400);
+    assert(sent[1].mi.dwFlags == MOUSEEVENTF_MOVE && sent[1].mi.dx == 3 && sent[1].mi.dy == 4);
+    sent_count = 0;
+    state = (struct input_snapshot){ .x = 500, .y = 400 };
+    assert(wine_nx_drv_ProcessEvents(0) && sent_count == 1 && sent[0].mi.dwFlags == (ABS | MOUSEEVENTF_LEFTUP));
+
     puts("PASS: stick moves, A left and B right clicks, drag, touch press, clicks between calls, cursor visibility, "
          "relative dock mouse motion and SetCursorPos");
     return 0;

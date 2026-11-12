@@ -1036,8 +1036,15 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     while (key_after && !key_events[key_after - 1].down) key_after--;
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
+    /* The arrow is drawn where the stick has taken it, so that is where a
+     * button has to land: the movement goes first, or a press made after the
+     * stick came to rest is taken at the place the cursor had a pass ago,
+     * which is far off under a program that looks for input a few times a
+     * second. A finger says where it is by itself, and what the stick did
+     * meanwhile is added to that. */
+    if (stepped && !placed) wine_nx_send_mouse_motion( dx, dy );
     if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
-    if (stepped) wine_nx_send_mouse_motion( dx, dy );
+    if (stepped && placed) wine_nx_send_mouse_motion( dx, dy );
     if (second) wine_nx_send_mouse( x, y, second );
     if (placed || first || stepped || second) wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
