@@ -304,3 +304,16 @@ jobs:
           path: horizon-wine/build-autorun/autorun-*.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload the runtime's symbols
+        # The NRO on the card has no symbols, so a [STALL] line's runtime
+        # addresses (Mesa's among them) can only be named from the ELF it was
+        # made from, of this same build.
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-runtime-elf-${{ github.sha }}
+          path: |
+            horizon-wine/build-switch-*/wine-nx-runtime.elf
+            horizon-wine/build-switch-*/wine-nx-runtime
+          if-no-files-found: warn
+          retention-days: 14
