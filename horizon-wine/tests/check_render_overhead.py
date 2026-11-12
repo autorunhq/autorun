@@ -170,11 +170,12 @@ struct vk_device { void *vk_device; int (*p_vkFlushMappedMemoryRanges)(void *,un
 struct buffer {
     void *vk_memory, *map_ptr, *host_ptr;
     struct vk_device *vk_device;
-    int pinned, explicit_flush;
+    int pinned, explicit_flush, copy_on_flush;
     size_t map_length;
     unsigned map_access;
 };
 static unsigned wine_nx_gl_explicit_flushes;
+static unsigned long long wine_nx_gl_copy_bytes;
 static int error;
 static void *clean_ptr; static size_t clean_size;
 static void set_gl_error(TEB *teb, int e) { error=e; }
@@ -198,6 +199,15 @@ int main(void) {
     flush_buffer(NULL,&b,0,4); assert(error==GL_INVALID_OPERATION);
     b.map_ptr=bytes; b.explicit_flush=0; error=0;
     flush_buffer(NULL,&b,0,4); assert(!error && wine_nx_gl_explicit_flushes==1);
+    /* A mapping that is a copy: the flushed range, and only it, goes to the host's memory. */
+    char host[64]={0}, copy[64];
+    struct buffer c={.copy_on_flush=1,.map_ptr=copy,.host_ptr=host,.map_length=sizeof(copy)};
+    memset(copy,0x5a,sizeof(copy)); error=0;
+    flush_buffer(NULL,&c,8,16);
+    assert(!error && wine_nx_gl_copy_bytes==16 && !host[7] && host[8]==0x5a && host[23]==0x5a && !host[24]);
+    flush_buffer(NULL,&c,60,5); assert(error==GL_INVALID_VALUE && wine_nx_gl_copy_bytes==16 && !host[60]);
+    error=0; flush_buffer(NULL,&c,(size_t)-1,4); assert(error==GL_INVALID_VALUE);
+    c.map_ptr=NULL; error=0; flush_buffer(NULL,&c,0,4); assert(error==GL_INVALID_VALUE);
 }
 '''
 run('Pinned flush mapping offsets, bounds, overflow, unmapped and conservative fallback',prefix+function(s,'flush_buffer')+test)
