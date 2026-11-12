@@ -113,7 +113,10 @@ compressed packets byte for byte, times counted from zero, reads of 1000
 bytes, files cut short, files that are no media, a stream with no decoder,
 and a disconnect while a read is not answered. 558 runs, under the address
 and undefined-behaviour sanitizers, in the `build` workflow's `media` job.
-46 errors put into the parser one at a time each made it fail.
+60 errors were put into the parser one at a time: 59 made it fail, and one
+changes nothing a file here can show (BGRA pictures without their fourth
+byte set: no file here is see-through, and FFmpeg writes 255 there either
+way).
 
 It found four faults in what stage 1 took, all fixed with it:
 
@@ -144,6 +147,47 @@ nor among those twelve fails the check, so the list cannot grow unnoticed.
 FFmpeg is plain C there and has its ARM64 routines on the console. And
 nothing of Windows is in it: neither quartz, nor the Windows Media reader,
 nor a program.
+
+The decoder beside it. `media_unix.c` had one half before the port: the
+decoder behind Media Foundation's H.264 and AAC decoders, this fork's own
+code. Stage 1 put the parser into the same file, so that half was checked the
+same way: `tests/check_media_decoder.py`, 358 runs in the same job, with the
+same two FFmpeg builds. Five AAC files that hold a tone go through it packet
+by packet. Every sample is the one the other build decodes, as float and as
+16 bits, with the channels as they are or mixed, into buffers of any size,
+with any queue length, through both call tables, from frames with a header
+and without, and from packets that hold two frames. Every buffer's time is
+held against the tone itself: a sample is a point of the sine at the time its
+buffer says, so one sample out of place shows. That found three faults, none
+of them the port's, all fixed with it:
+
+1. A packet the decoder could not read stayed first in the queue. Every read
+   after it failed, and once the queue behind it was full every packet was
+   refused: one damaged packet ended the sound for good. It is now left out;
+   what it held is lost and the packets after it play at their times (checked
+   with five kinds of damage, at the start, in the middle and at the end, up
+   to twenty packets in a row).
+2. A stream whose channels or rate change on the way was refused from there
+   on. The output stays what was asked for: the rest of the old sound comes
+   out, and the new sound is converted to the same output.
+3. Sound played at another rate than the file's was stamped up to one sample
+   of the file off (23 millionths of a second at 44.1 kHz), since what the
+   converter holds back was counted in whole samples.
+
+`tests/media_decoder.c` was there before and run by nothing. On AAC in MP4 it
+failed by its own fault (it went back to time zero, which in such a file is
+the second packet, and compared that with the first pass); it is rewritten as
+the test this check runs. 63 errors were put into the decoder one at a time:
+61 made the check fail, and two change nothing AAC can show (the end not
+passed on to FFmpeg's decoder, which holds no AAC frame back; a frame not
+released when the decoder is emptied, which the next frame releases).
+
+What that check cannot say: no picture goes through the H.264 half, for the
+same lack of an encoder (it is created, refused wrong formats, and emptied;
+`media_decoder file` plays a file brought from elsewhere). The AAC is the
+plain kind; no HE-AAC. One line has no test: a frame the converter refuses is
+dropped rather than offered again, and nothing here makes the converter
+refuse one.
 
 Not checked, because it needs a console: that a game's video plays.
 
@@ -320,6 +364,11 @@ the launcher opens, the stock DLL goes back before the Windows DLLs check runs,
 so that check never finds a file it would want to replace. If a DLL update
 replaces the file anyway, what is in system32 no longer matches the record and
 is taken for the stock DLL, which it is.
+
+The default renderer was not touched: a program with no `d3d` line runs on
+DXVK (`runtime.c`), and the settings menu's row that writes nothing reads
+"DXVK". A game added while the launcher's "Give a new game DXVK" is off gets
+`d3d=wine` written, which the menu shows as the choice it is.
 
 The options. FEX has each of Carafe's nine switches off unless told otherwise,
 and three more (`DiskCache`, `DiskCacheFileMapping`, `GDBSymbols`) exist in
@@ -605,8 +654,9 @@ use: `dxvk_option_supported` over every version a release can have, for
 each of the 81 options and four builds; `nx_fex_option_carafe`; and the
 launcher's reader of a program's file for what each new value turns on.
 Fourteen mistakes made in the generator on purpose: twelve made it fail,
-and two change nothing with today's options (both are parts of the rule
-for DXVK-Sarek that no option needs at present).
+and two change nothing with today's options: the catalog made with either
+of them is the same file byte for byte (both are parts of the rule for
+DXVK-Sarek that no option needs at present).
 
 The graphics hunks. Eight of Carafe's patches have lines in
 `dlls/win32u/winnx_drv.c`, `winnx_opengl.c` or `vulkan.c` that are not in

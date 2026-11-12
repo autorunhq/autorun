@@ -290,6 +290,7 @@ python3 horizon-wine/tests/check_server_pool.py   # Carafe's server thread pool 
 python3 horizon-wine/tests/check_horizon_suspend.py  # the server's suspend, resume, thread context and terminate handlers, and where the stall report may take locks
 python3 horizon-wine/tests/check_core_affinity.py    # which cores the runtime gives graphics and shader threads, and the core the orchestrator keeps
 sh horizon-wine/tools/bootstrap-wma.sh && python3 horizon-wine/tests/media_host.py --widl && python3 horizon-wine/tests/check_media_parser.py   # the media parser plays files FFmpeg wrote, against FFmpeg built with the runtime's configure lines (builds FFmpeg twice on its first run)
+python3 horizon-wine/tests/check_media_decoder.py   # the AAC and H.264 decoder of Media Foundation: AAC that FFmpeg wrote, sample for sample and at its times; damaged packets; a stream that changes (uses the builds of the line above)
 python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
 python3 horizon-wine/tests/check_menu_languages.py   # the settings menu's catalog, shown by the menu's own reader under each of the fifteen console languages and held against Carafe's texts
 python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu shows for each DXVK and FEX build, against the launcher's own rules

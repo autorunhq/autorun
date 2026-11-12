@@ -171,7 +171,7 @@ jobs:
         run: python3 horizon-wine/tests/check_carafe_dlls.py --live
 
   media:
-    name: media parser (host test)
+    name: media parser and decoder (host test)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -213,6 +213,19 @@ jobs:
             exit 1
           }
           cat "$RUNNER_TEMP/check_media_parser.log"
+
+      - name: Sound played through the decoder
+        # The other half of source/media_unix.c, behind Media Foundation's
+        # AAC and H.264 decoders: AAC that FFmpeg wrote comes out sample for
+        # sample at its times, packets that are not AAC cost what they held,
+        # and a stream that changes its channels or rate plays on.
+        run: |
+          python3 horizon-wine/tests/check_media_decoder.py > "$RUNNER_TEMP/check_media_decoder.log" 2>&1 || {
+            echo "::error::horizon-wine/tests/check_media_decoder.py failed: $(head -c 900 "$RUNNER_TEMP/check_media_decoder.log" | tr '\n' ' ')"
+            cat "$RUNNER_TEMP/check_media_decoder.log"
+            exit 1
+          }
+          cat "$RUNNER_TEMP/check_media_decoder.log"
 
   runtime:
     name: card archive

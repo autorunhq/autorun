@@ -249,8 +249,13 @@ done:
     return STATUS_SUCCESS;
 }
 
+/* A packet the decoder cannot read is left out and the next one is tried: it
+ * is taken off the queue whatever the decoder says of it. Kept there, the same
+ * packet would be offered again at every read, and once the queue behind it
+ * was full nothing more could be pushed either. */
 static HRESULT receive_frame(struct media_decoder *d)
 {
+    unsigned int refused = 0;
     int ret;
     if (d->have_frame) return S_OK;
     for (;;)
@@ -262,25 +267,36 @@ static HRESULT receive_frame(struct media_decoder *d)
             d->eof = TRUE;
             return MF_E_TRANSFORM_NEED_MORE_INPUT;
         }
-        if (ret != AVERROR(EAGAIN)) return E_FAIL;
+        if (ret != AVERROR(EAGAIN))
+        {
+            /* A frame that came to nothing; what was sent for it is used up. */
+            if (++refused > PACKET_LIMIT) return E_FAIL;
+            continue;
+        }
         if (d->count)
         {
             AVPacket **packet = &d->packets[d->head];
             ret = avcodec_send_packet(d->codec, *packet);
-            if (ret < 0) return E_FAIL;
+            /* Not taken because a frame waits: it is fetched first, above. */
+            if (ret == AVERROR(EAGAIN) && ++refused <= PACKET_LIMIT) continue;
             av_packet_free(packet);
             d->head = (d->head + 1) % PACKET_LIMIT;
             d->count--;
+            if (ret == AVERROR(ENOMEM)) return E_OUTOFMEMORY;
         }
         else if (d->draining && !d->drain_sent)
         {
-            if (avcodec_send_packet(d->codec, NULL) < 0) return E_FAIL;
             d->drain_sent = TRUE;
+            /* Without the end told there is nothing left to wait for. */
+            if (avcodec_send_packet(d->codec, NULL) < 0)
+            {
+                d->eof = TRUE;
+                return MF_E_TRANSFORM_NEED_MORE_INPUT;
+            }
         }
         else return MF_E_TRANSFORM_NEED_MORE_INPUT;
     }
 }
-
 static HRESULT read_video(struct media_decoder *d, struct wg_sample *sample)
 {
     AVFrame *frame = d->frame;
@@ -341,6 +357,13 @@ static HRESULT convert_audio(struct media_decoder *d, BOOL flush)
     WAVEFORMATEX *out = &d->audio_type.Format;
     int count, ret, samples = flush ? 0 : frame->nb_samples;
     INT64 time = d->next_audio_time;
+    /* The sound changes its rate, its channels or its sample format inside
+     * the stream. The output stays as it was asked for: what the converter
+     * still holds of the old sound goes out first, and the frame waits for a
+     * converter of its own, made at the next call. */
+    BOOL changed = !flush && d->resampler && (frame->sample_rate != d->input_rate || frame->format != d->input_format
+            || av_channel_layout_compare(&frame->ch_layout, &d->input_layout));
+    if (changed) { flush = TRUE; samples = 0; }
     if (flush && !d->resampler) return S_OK;
     if (!d->resampler)
     {
@@ -357,14 +380,10 @@ static HRESULT convert_audio(struct media_decoder *d, BOOL flush)
         d->input_rate = frame->sample_rate;
         d->input_format = frame->format;
     }
-    if (!flush)
-    {
-        if (frame->sample_rate != d->input_rate || frame->format != d->input_format
-                || av_channel_layout_compare(&frame->ch_layout, &d->input_layout)) return MF_E_INVALIDMEDIATYPE;
-        if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-            time = frame->best_effort_timestamp - av_rescale(swr_get_delay(d->resampler, d->input_rate),
-                                                           10000000, d->input_rate);
-    }
+    /* What the converter holds back, asked for in the unit of the time
+     * stamps: counted in samples it comes rounded to whole ones. */
+    if (!flush && frame->best_effort_timestamp != AV_NOPTS_VALUE)
+        time = frame->best_effort_timestamp - swr_get_delay(d->resampler, 10000000);
     count = swr_get_out_samples(d->resampler, samples);
     if (count < 0 || count > INT_MAX / out->nBlockAlign) return E_FAIL;
     av_fast_malloc(&d->pcm, &d->pcm_capacity, count * out->nBlockAlign);
@@ -375,6 +394,12 @@ static HRESULT convert_audio(struct media_decoder *d, BOOL flush)
     d->next_audio_time = time == AV_NOPTS_VALUE ? time : time + av_rescale(ret, 10000000, out->nSamplesPerSec);
     d->pcm_size = ret * out->nBlockAlign;
     d->pcm_offset = 0;
+    if (changed)
+    {
+        swr_free(&d->resampler);
+        av_channel_layout_uninit(&d->input_layout);
+        return S_OK;
+    }
     d->have_frame = FALSE;
     av_frame_unref(frame);
     return S_OK;
@@ -389,7 +414,13 @@ static HRESULT read_audio(struct media_decoder *d, struct wg_sample *s)
     {
         hr = receive_frame(d);
         if (FAILED(hr) && !d->eof) return hr;
-        if (FAILED(hr = convert_audio(d, d->eof))) return hr;
+        if (FAILED(hr = convert_audio(d, d->eof)))
+        {
+            /* A frame that cannot be converted is not offered again. */
+            av_frame_unref(d->frame);
+            d->have_frame = FALSE;
+            return hr;
+        }
         if (d->eof && !d->pcm_size) return MF_E_TRANSFORM_NEED_MORE_INPUT;
     }
     size = min(d->pcm_size - d->pcm_offset, s->max_size);

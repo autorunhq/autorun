@@ -133,8 +133,12 @@ MIXED = Clip('mixed.avi', 'avi', picture('mjpeg'), ('pcm_s16le', 22050, 2))
 MOTION = Clip('motion.avi', 'avi', picture('mjpeg'))
 
 
+# check_media_decoder.py builds its test with what is here, under its own name.
+NAME = 'check_media_parser'
+
+
 def fail(text):
-    sys.exit('check_media_parser: ' + text)
+    sys.exit('%s: %s' % (NAME, text))
 
 
 def run(command, **options):
@@ -149,7 +153,7 @@ def must(command, what):
     return result.stdout
 
 
-def generated_headers(compiler, flags, folder):
+def generated_headers(compiler, flags, folder, test):
     """The headers widl makes of include/*.idl, as far as media_unix.c reaches them."""
     built = os.environ.get('WINE_NX_PE_BUILD_DIR')
     if built and (Path(built) / 'include/mfobjects.h').exists():
@@ -173,12 +177,12 @@ def generated_headers(compiler, flags, folder):
     fail('the includes of media_unix.c never settle')
 
 
-def build_test(ship, folder):
+def build_test(ship, folder, test=test):
     compiler = os.environ.get('WINE_NX_HOST_CC', 'cc')
     flags = ['-std=gnu11', '-D__WINESRC__', '-DWINE_UNIX_LIB', '-D_WIN64', '-I', root / 'include',
              '-I', ship / 'include']
-    headers = generated_headers(compiler, flags, folder)
-    program = folder / 'media_parser'
+    headers = generated_headers(compiler, flags, folder, test)
+    program = folder / test.stem
     # The warnings left off are ones the runtime's own build of media_unix.c
     # leaves off; the last two lines are the same ones by clang's names.
     result = run([compiler] + flags + [
@@ -188,10 +192,10 @@ def build_test(ship, folder):
         '-I', headers, test, '-L', ship / 'lib', '-lavformat', '-lavcodec', '-lswscale', '-lswresample', '-lavutil',
         '-lm', '-lpthread', '-o', program])
     if result.returncode:
-        fail('tests/media_parser.c did not build:\n' + result.stdout[-4000:])
-    mine = [line for line in result.stdout.splitlines() if 'warning' in line and 'media_parser.c' in line]
+        fail('tests/%s did not build:\n%s' % (test.name, result.stdout[-4000:]))
+    mine = [line for line in result.stdout.splitlines() if 'warning' in line and test.name in line]
     if mine:
-        fail('tests/media_parser.c builds with warnings:\n' + '\n'.join(mine[:10]))
+        fail('tests/%s builds with warnings:\n%s' % (test.name, '\n'.join(mine[:10])))
     return program
 
 
@@ -345,7 +349,7 @@ def main():
             for hold in (0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89):
                 said = check('abort', path, hold=hold, chunk=1500)
                 held.add((said.split(':')[1].strip().startswith('no answer'), ', opened' in said))
-            
+
         if not names:
             # Not a media file at all.
             noise = random.Random(96)
