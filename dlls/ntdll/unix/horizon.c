@@ -10460,9 +10460,38 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         if (raw_device)
         {
             raw_target = raw_device->target ? horizon_server_find_window_locked( raw_device->target ) : target;
+            {
+                static unsigned int told;
+
+                if (told < 4 && (flags & HORIZON_MOUSEEVENTF_MOVE))
+                {
+                    char line[160];
+
+                    told++;
+                    snprintf( line, sizeof(line), "[RAWINPUT] mouse moved %d,%d: raw to hwnd=%08x (asked %08x) "
+                              "tid=%u, flags %x, messages %s", dx, dy, raw_target ? raw_target->handle : 0,
+                              raw_device->target, raw_target ? raw_target->tid : 0, raw_device->flags,
+                              legacy ? "too" : "off" );
+                    wine_nx_runtime_trace( line );
+                }
+            }
             horizon_raw_mouse_event_data( flags, mouse->data, dx, dy, mouse->info, &raw );
             if ((status = horizon_server_queue_raw_mouse_locked( raw_target, x, y, time, mouse->info, &raw )))
                 goto done;
+        }
+        else if (flags & HORIZON_MOUSEEVENTF_MOVE)
+        {
+            static unsigned int told;
+
+            if (!told)
+            {
+                char line[96];
+
+                told = 1;
+                snprintf( line, sizeof(line), "[RAWINPUT] mouse moved %d,%d: no raw mouse registration (%u devices)",
+                          dx, dy, horizon_rawinput_device_count );
+                wine_nx_runtime_trace( line );
+            }
         }
         if (legacy && (flags & HORIZON_MOUSEEVENTF_MOVE) &&
             (status = horizon_server_queue_mouse_locked( target, HORIZON_WM_MOUSEMOVE,
@@ -10552,6 +10581,30 @@ static int horizon_server_handle_update_rawinput_devices( struct horizon_server_
         horizon_rawinput_devices = devices;
         horizon_rawinput_device_count = count;
         pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    {
+        /* Said without the verbose log, a few times: a program that reads the
+         * mouse through raw input, as DirectInput 8 does, gets no movement at
+         * all when its registration is not here, and the log has to show it. */
+        static unsigned int told;
+
+        if (told < 16)
+        {
+            char line[160];
+
+            told++;
+            snprintf( line, sizeof(line), "[RAWINPUT] thread %04x registers %u device(s), status %08x",
+                      connection->tid, count, status );
+            wine_nx_runtime_trace( line );
+            for (i = 0; !status && i < count && i < 4; i++)
+            {
+                snprintf( line, sizeof(line), "[RAWINPUT]   usage %08x flags %x target %08x",
+                          ((const struct horizon_rawinput_device *)data)[i].usage,
+                          ((const struct horizon_rawinput_device *)data)[i].flags,
+                          ((const struct horizon_rawinput_device *)data)[i].target );
+                wine_nx_runtime_trace( line );
+            }
+        }
     }
     horizon_trace( "[HZINPUT] update_rawinput_devices count=%u err=%08x\n", count, status );
     for (i = 0; devices && i < count; i++)
@@ -12212,6 +12265,20 @@ static int horizon_server_handle_get_message( struct horizon_server_connection *
             else if (queued->raw_mouse)
             {
                 /* And RAWMOUSE for one, the same way. */
+                {
+                    static unsigned int told;
+
+                    if (told < 4)
+                    {
+                        char line[128];
+
+                        told++;
+                        snprintf( line, sizeof(line), "[RAWINPUT] thread %04x takes raw mouse %d,%d for hwnd=%08x%s",
+                                  connection->tid, (int)queued->raw_m.last_x, (int)queued->raw_m.last_y, queued->win,
+                                  (request->flags & HORIZON_PM_REMOVE) ? "" : " (peek)" );
+                        wine_nx_runtime_trace( line );
+                    }
+                }
                 hardware.size += sizeof(queued->raw_m);
                 hardware.rawinput.type = HORIZON_RIM_TYPEMOUSE;
                 hardware.rawinput.device = HORIZON_WINE_MOUSE_HANDLE;
