@@ -799,7 +799,7 @@ fork has it in its own form, which the last column names.
 | 0096 | media ffmpeg parser for directshow | 808 | 98 % | ported in stage 1 (parser, codecs, filter registration); thirteen lines differ since the host check: where a packet without a time has its place, MPEG after a move, the last picture's time |
 | 0097 | winnx screen follows the window on its own thread | 8 | 62 % | in the fork, with atomic loads and stores |
 | 0098 | win32u a thread counts its waits for a reply | 6 | 100 % | in the fork |
-| 0099 | horizon server low level input hooks | 94 | 95 % | in the fork, in upstream's later form (wheel data only for wheel messages) |
+| 0099 | horizon server low level input hooks | 94 | 96 % | in the fork, in upstream's later form (wheel data only for wheel messages) |
 | 0100 | win32u the cursor stays on the programs screen | 3 | 100 % | in the fork |
 | 0101 | horizon server clipping moves the cursor inside | 12 | 75 % | in the fork, in upstream's wider form (also after a move); the automatic merge would have added it twice |
 | 0104 | runtime the log is written out before the game closes | 6 | 100 % | in the fork |
