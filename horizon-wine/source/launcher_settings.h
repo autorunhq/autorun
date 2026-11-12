@@ -178,6 +178,17 @@ enum launcher_d3d_renderer
     LAUNCHER_D3D_DXVK_VKD3D
 };
 
+enum launcher_graphics_driver
+{
+    LAUNCHER_GRAPHICS_NVC0,
+    LAUNCHER_GRAPHICS_ZINK,
+    LAUNCHER_GRAPHICS_NXVK,
+    LAUNCHER_GRAPHICS_COUNT
+};
+static const char *const launcher_graphics_labels[] =
+    { "mesa-switch (nvc0)", "mesa-switch (Zink)", "nxvk (Zink + NVK)" };
+static const char *const launcher_graphics_values[] = { NULL, "zink", "nxvk" };
+
 struct launcher_settings
 {
     char title[128];  /* empty: the title from the program's resources */
@@ -207,6 +218,10 @@ struct launcher_settings
      * picture with black bars, 1 filling the screen with its edges cropped,
      * 2 stretched to it, 3 at its own size in the middle. */
     int picture_mode;
+    /* Which Mesa draws: mesa-switch with OpenGL through nvc0 (the default) or
+     * through Zink, or nxvk, Vulkan and OpenGL (through Zink) from another
+     * runtime on the card, wine-nx-runtime-nxvk.nro (source/runtime.c). */
+    enum launcher_graphics_driver graphics_driver;
     enum launcher_d3d_renderer d3d;
     enum dxvk_source dxvk_source;
     char vkd3d_version[32];
@@ -446,6 +461,13 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         else if (!strcasecmp( value, "stretched" )) settings->picture_mode = 2;
         else if (!strcasecmp( value, "own-size" )) settings->picture_mode = 3;
     }
+    settings->graphics_driver = LAUNCHER_GRAPHICS_NVC0;
+    if (launcher_kv_get( kv, "graphics-driver", value, sizeof(value) ) ||
+        launcher_kv_get( kv, "gl-driver", value, sizeof(value) ))  /* the key it had first */
+    {
+        if (!strcasecmp( value, "zink" )) settings->graphics_driver = LAUNCHER_GRAPHICS_ZINK;
+        else if (!strcasecmp( value, "nxvk" )) settings->graphics_driver = LAUNCHER_GRAPHICS_NXVK;
+    }
     if (!launcher_kv_get( kv, "d3d", value, sizeof(value) ) &&
         !launcher_kv_get( kv, "d3d9", value, sizeof(value) )) value[0] = 0;
     settings->d3d = !strcasecmp( value, "wine" ) ? LAUNCHER_D3D_WINE :
@@ -510,7 +532,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
 {
     static const char *states[] = { NULL, "0", "1" };
 
-    if (settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
+    if (settings->graphics_driver < 0 || settings->graphics_driver >= LAUNCHER_GRAPHICS_COUNT ||
+        settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
         settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
@@ -538,6 +561,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                                       settings->picture_mode == 1 ? "edges" :
                                       settings->picture_mode == 2 ? "stretched" :
                                       settings->picture_mode == 3 ? "own-size" : "whole" ) &&
+           launcher_kv_set( kv, "gl-driver", NULL ) &&
+           launcher_kv_set( kv, "graphics-driver", launcher_graphics_values[settings->graphics_driver] ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&
            launcher_kv_set( kv, "d3d", settings->d3d == LAUNCHER_D3D_WINE ? "wine" :
                             settings->d3d == LAUNCHER_D3D_DXVK_VKD3D ? "dxvk+vkd3d" : NULL ) &&

@@ -1758,7 +1758,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_PICTURE, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
@@ -2596,6 +2596,23 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         snprintf( row->value, sizeof(row->value), "%s",
                   picture_text( p->settings.picture_mode, l->options->picture_mode, buffer, sizeof(buffer) ) );
 
+        if (l->options->vulkan)
+        {
+            char nxvk[512];
+
+            runtime_file( l, "wine-nx-runtime-nxvk.nro", nxvk, sizeof(nxvk) );
+            ADD_ROW( ROW_GRAPHICS_DRIVER, SECTION_GRAPHICS, "Graphics driver",
+                     "The Mesa that draws the game. mesa-switch (nvc0) is the default and the fastest for "
+                     "OpenGL. mesa-switch (Zink) draws OpenGL through Vulkan instead, for games nvc0 draws "
+                     "wrong. nxvk is another Mesa for the Switch, Vulkan and OpenGL (through Zink): the game "
+                     "starts in a second runtime, wine-nx-runtime-nxvk.nro, without frame generation." );
+            row->kind = UI_ROW_DROPDOWN;
+            snprintf( row->value, sizeof(row->value), "%s%s",
+                      launcher_graphics_labels[p->settings.graphics_driver],
+                      p->settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK && !file_exists( nxvk ) ?
+                      " (not on the card)" : "" );
+        }
+
         if (l->options->vulkan && (x86 || x64))
         {
             ADD_ROW( ROW_D3D9, SECTION_GRAPHICS, "Direct3D renderer",
@@ -2900,6 +2917,29 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                                        next_picture_state( p->settings.picture_mode, action == UI_ACTION_LEFT ? -1 : 1 );
             save_program_settings( l, p );
             break;
+
+        case ROW_GRAPHICS_DRIVER:
+        {
+            struct ui_row items[LAUNCHER_GRAPHICS_COUNT] = {0};
+            char nxvk[512];
+            int selected;
+
+            if (action == UI_ACTION_RESET) selected = LAUNCHER_GRAPHICS_NVC0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                runtime_file( l, "wine-nx-runtime-nxvk.nro", nxvk, sizeof(nxvk) );
+                for (i = 0; i < LAUNCHER_GRAPHICS_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s%s", launcher_graphics_labels[i],
+                              i == LAUNCHER_GRAPHICS_NXVK && !file_exists( nxvk ) ? " (not on the card)" : "" );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_GRAPHICS_COUNT,
+                                                 p->settings.graphics_driver );
+                if (selected < 0) break;
+            }
+            else break;
+            p->settings.graphics_driver = selected;
+            save_program_settings( l, p );
+            break;
+        }
 
         case ROW_D3D9:
         {

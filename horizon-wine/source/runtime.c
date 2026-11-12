@@ -2206,6 +2206,53 @@ static int run_next_pop( char *target, size_t size )
     return target[0] != 0;
 }
 
+/* The other runtime on the card: the one linked with nxvk, or from that one,
+ * the card's own. */
+#define RUNTIME_NRO_MESA_SWITCH RUNTIME_DIR "/wine-nx-runtime.nro"
+#define RUNTIME_NRO_NXVK RUNTIME_DIR "/wine-nx-runtime-nxvk.nro"
+/* What return_to_launcher starts for a program queued in run-next.txt, when
+ * it is not this runtime again. */
+static char runtime_next_nro[512];
+
+#ifdef WINE_NX_NXVK
+static const int runtime_is_nxvk = 1;
+#else
+static const int runtime_is_nxvk = 0;
+#endif
+
+/* Queues target for the runtime linked with the Mesa it wants, when that is
+ * not this one, and says whether it did: the caller then goes back the way a
+ * finished program does, and that runtime starts it. A card without the other
+ * runtime runs the program here, and the log says so. */
+static int runtime_switch_graphics_runtime( const char *target, int wants_nxvk )
+{
+    const char *other = wants_nxvk ? RUNTIME_NRO_NXVK : RUNTIME_NRO_MESA_SWITCH;
+
+    if (wants_nxvk == runtime_is_nxvk) return 0;
+    if (access( other, F_OK ))
+    {
+        log_line( "[GRAPHICS] the program is set to %s, but %s is not on the card; it runs on %s",
+                  wants_nxvk ? "nxvk" : "mesa-switch", other, runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    if (!envHasNextLoad())
+    {
+        log_line( "[GRAPHICS] the loader cannot start %s; the program runs on %s",
+                  other, runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    if (!run_next_push( target ))
+    {
+        log_line( "[GRAPHICS] could not write run-next.txt; the program runs on %s",
+                  runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    snprintf( runtime_next_nro, sizeof(runtime_next_nro), "%s", other );
+    log_line( "[GRAPHICS] the program is set to %s: starting %s for it",
+              wants_nxvk ? "nxvk" : "mesa-switch", other );
+    return 1;
+}
+
 static int read_bool_file( const char *path )
 {
     char line[32];
@@ -4476,6 +4523,13 @@ static int return_to_launcher( void )
             game_fixes_finish( RUNTIME_DIR, runtime_program, wine_nx_program_exit_code, line, sizeof(line) ))
             log_line( "%s", line );
     }
+    /* The other graphics runtime, for the program it was queued for. */
+    if (!still_lent && runtime_next_nro[0] && !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK ) &&
+        envHasNextLoad() && R_SUCCEEDED( envSetNextLoad( runtime_next_nro, runtime_next_nro ) ))
+    {
+        log_step( "starting the other graphics runtime for the program" );
+        return 0;
+    }
     {
         extern _Bool carafeRestartRequested( void ) __attribute__((weak));
 
@@ -4727,6 +4781,7 @@ int main( int argc, char **argv )
     log_line( "[BUILD] %s%s%s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD,
               WINE_NX_BUILD_ID[0] ? " made from " : "", WINE_NX_BUILD_ID, own_nro,
               runtime_address_space_bits() );
+    log_line( "[GRAPHICS] this runtime is linked with %s", runtime_is_nxvk ? "nxvk" : "mesa-switch" );
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
     {
@@ -5098,23 +5153,29 @@ int main( int argc, char **argv )
                 log_line( "[INIT] the program's own picture: %s", picture_mode_text( wine_nx_picture_mode ) );
             }
 #ifdef WINE_NX_MESA_SWITCH
+            /* Which Mesa draws the program (settings.graphics_driver). Two
+             * Mesas cannot be linked into one program, so nxvk's is another
+             * runtime on the card: a program set to the other one than this
+             * build has is queued in run-next.txt and that runtime is started
+             * for it, which leaves the launcher out and starts it at once. */
+            if (!runtime_components_run &&
+                runtime_switch_graphics_runtime( target, settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK ))
             {
-                /* OpenGL through Zink on NVK instead of nvc0: gl-driver=zink in
-                 * the program's settings. mesa-switch's EGL reads the variable
-                 * when the screen's display is set up, so the compositor and the
-                 * program's own OpenGL both take it; a Mesa built without Zink
-                 * refuses the display, and the log then says so. */
-                char driver[16];
-
-                if (launcher_kv_get( &kv, "gl-driver", driver, sizeof(driver) ) &&
-                    (!strcmp( driver, "zink" ) || !strcmp( driver, "nvc0" )))
-                {
-                    setenv( "MESA_SWITCH_GL_DRIVER", driver, 1 );
-                    log_line( "[NXGL] OpenGL through %s, from the program's settings",
-                              !strcmp( driver, "zink" ) ? "Zink on NVK" : "nvc0" );
-                }
-                else unsetenv( "MESA_SWITCH_GL_DRIVER" );
+                runtime_program[0] = 0;  /* it has not run: nothing of it to finish */
+                return return_to_launcher();
             }
+#ifndef WINE_NX_NXVK
+            /* mesa-switch's EGL takes Zink on NVK instead of nvc0 from this
+             * variable when the screen's display is set up, so the compositor
+             * and the program's own OpenGL both take it; a Mesa built without
+             * Zink refuses the display, and the log then says so. */
+            if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)
+            {
+                setenv( "MESA_SWITCH_GL_DRIVER", "zink", 1 );
+                log_line( "[NXGL] OpenGL through Zink on NVK, from the program's settings" );
+            }
+            else unsetenv( "MESA_SWITCH_GL_DRIVER" );
+#endif
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;
             runtime_dxvk_hud = settings.dxvk_hud;

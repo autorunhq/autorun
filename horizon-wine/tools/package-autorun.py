@@ -38,6 +38,8 @@ parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('--amd64', type=Path,
                     default=Path(os.environ.get('WINE_NX_AMD64_PACKAGE', default_amd64)))
 parser.add_argument('--x86', action='store_true', help='ship the x86-only runtime instead of the AMD64 one')
+parser.add_argument('--nxvk', action='store_true',
+                    help='also ship the runtime linked with nxvk, wine-nx-runtime-nxvk.nro (build.sh --nxvk)')
 parser.add_argument('--dlls', type=Path, default=root / 'horizon-dlls/switch/wine',
                     help="the DLL repository's card tree, to check the package against")
 parser.add_argument('--fixes', type=Path, default=root / 'game-fixes/switch/wine/game-fixes/index.json',
@@ -272,6 +274,26 @@ if args.x86:
 else:
     assert args.amd64.is_file(), f'{args.amd64} is missing; run build-amd64-components.sh, or pass --x86'
     print(f'AMD64 runtime build {merge_amd64(args.amd64, stage_root)} merged')
+if args.nxvk:
+    # The same runtime linked with nxvk instead of mesa-switch: a game set to
+    # it (Graphics driver) is started in it (source/runtime.c). nxvk's files
+    # are GPL-2.0-or-later and it is linked statically, so its licenses and its
+    # note on what that means go with it.
+    assert not args.x86, 'the nxvk runtime is an AMD64 one'
+    nxvk_nro = horizon_wine / 'build-switch-amd64-nxvk/wine-nx-runtime.nro'
+    nxvk_pkg = horizon_wine / 'vendor/nxvk/switch/build/pkg'
+    assert nxvk_nro.is_file(), f'{nxvk_nro} is missing; build it with build.sh --nxvk'
+    data = nxvk_nro.read_bytes()
+    assert data[16:20] == b'NRO0', f'{nxvk_nro} is not an NRO'
+    assert b'autorun-graphics-runtime: nxvk\0' in data, f'{nxvk_nro} is not linked with nxvk'
+    assert b'autorun-graphics-runtime: nxvk\0' not in (stage / 'wine-nx-runtime.nro').read_bytes(), \
+        'the card\'s own runtime is the nxvk one'
+    main = (stage / 'wine-nx-runtime.nro').read_bytes()
+    build_name = re.search(rb'nx-amd64-fex-\d+\0', main)
+    assert build_name and build_name.group(0) in data, f'{nxvk_nro} is not the same runtime build as the card\'s'
+    shutil.copy2(nxvk_nro, stage / 'wine-nx-runtime-nxvk.nro')
+    shutil.copytree(nxvk_pkg / 'licenses', licenses / 'nxvk')
+    print('nxvk runtime staged')
 subprocess.run([sys.executable, str(tools / 'verify-package.py'), str(stage), '--dlls', str(args.dlls)],
                check=True)
 

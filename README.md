@@ -342,6 +342,7 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [DXVK](https://github.com/doitsujin/dxvk) | zlib/libpng | Direct3D 8 to 11 over Vulkan |
 | [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton) | LGPL-2.1-or-later | Direct3D 12 over Vulkan |
 | [Mesa](https://mesa3d.org) and [mesa-switch](https://github.com/danfromtico/mesa-switch) | MIT (mostly) | OpenGL and Vulkan on the Switch's GPU |
+| [nxvk](https://github.com/PalindromicBreadLoaf/nxvk) | GPL-2.0-or-later (its own files; Mesa's keep theirs) | The second graphics runtime, `wine-nx-runtime-nxvk.nro`: Vulkan through NVK and OpenGL through Zink, for a game set to it under Graphics driver |
 | [LSFG-VK](https://git.lsfg-vk.dev/lsfg-vk-archive.git) | GPL-3.0-or-later | Frame generation |
 | [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches); GPL-3.0-or-later (the thread orchestrator, `horizon-wine/source/orchestrator*.c`, and the settings menu's texts in fourteen languages, `horizon-wine/tools/carafe-menu-texts.json`) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg, the thread orchestrator and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
 | [libusbhsfs](https://github.com/ITotalJustice/libusbhsfs) | ISC | USB drives |

@@ -41,6 +41,13 @@ One source tree builds each runtime. The CMake options pick which:
 |---|---|---|
 | x86 (`nx-wow64-dynarec-*`) | 32-bit games through WoW64 and Box64, with OpenGL and Vulkan from mesa-switch | `WINE_NX_BOX64_DYNAREC`, `WINE_NX_MESA_SWITCH_DIR` |
 | AMD64 (`nx-amd64-fex-*`) | 32- and 64-bit games through FEX (WoW64 and ARM64EC) | `WINE_NX_AMD64`, `WINE_NX_FEX` |
+| AMD64 with nxvk (`wine-nx-runtime-nxvk.nro`) | The same, with nxvk's Mesa instead of mesa-switch: NVK for Vulkan, Zink for OpenGL, no nvc0 and no frame generation | `WINE_NX_NXVK_DIR` (`build.sh --nxvk`, `build-nxvk.sh`) |
+
+A game's Graphics driver setting picks mesa-switch with OpenGL through nvc0 or
+Zink, or nxvk. Two Mesas cannot be linked into one program, so nxvk is a second
+runtime on the card: a game set to it is queued in `run-next.txt` and that NRO
+is started for it, and the other way round (`source/runtime.c`,
+`runtime_switch_graphics_runtime`).
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup

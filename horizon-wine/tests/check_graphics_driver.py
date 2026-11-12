@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""A program's Graphics driver setting (launcher_settings.h): read from its
+settings file, written back, the key it had first moved over, and anything else
+read as the default; and the runtime's choice of the runtime to start it in."""
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+root = Path(__file__).resolve().parents[2]
+source = root / 'horizon-wine/source'
+test = r'''
+#include <assert.h>
+#include <stdio.h>
+#include "launcher_settings.h"
+static void roundtrip(const char *text, int want, const char *key_after) {
+    struct launcher_kv kv = {{0}, 0}; struct launcher_settings s;
+    snprintf(kv.text, sizeof(kv.text), "%s", text); kv.size = strlen(kv.text);
+    launcher_settings_read(&kv, &s);
+    assert((int)s.graphics_driver == want);
+    assert(launcher_settings_write(&kv, &s));
+    if (key_after) assert(strstr(kv.text, key_after)); else assert(!strstr(kv.text, "graphics-driver"));
+    assert(!strstr(kv.text, "gl-driver"));
+}
+int main(void) {
+    struct launcher_kv kv = {{0}, 0}; struct launcher_settings s;
+    roundtrip("", LAUNCHER_GRAPHICS_NVC0, NULL);
+    roundtrip("graphics-driver=zink\n", LAUNCHER_GRAPHICS_ZINK, "graphics-driver=zink");
+    roundtrip("graphics-driver=nxvk\n", LAUNCHER_GRAPHICS_NXVK, "graphics-driver=nxvk");
+    roundtrip("gl-driver=zink\n", LAUNCHER_GRAPHICS_ZINK, "graphics-driver=zink");
+    roundtrip("graphics-driver=bogus\n", LAUNCHER_GRAPHICS_NVC0, NULL);
+    launcher_settings_read(&kv, &s);
+    s.graphics_driver = LAUNCHER_GRAPHICS_COUNT;
+    assert(!launcher_settings_write(&kv, &s));
+    return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='autorun-graphics-driver-') as tmp:
+    c, exe = Path(tmp) / 'test.c', Path(tmp) / 'test'
+    c.write_text(test)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                    '-I', str(source), str(c), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+# The runtime goes to the other runtime only for a program, never for the
+# components setup, and only with the other runtime on the card.
+runtime = (source / 'runtime.c').read_text()
+hop = runtime[runtime.index('static int runtime_switch_graphics_runtime('):]
+hop = hop[:hop.index('\n}\n')]
+assert 'if (wants_nxvk == runtime_is_nxvk) return 0;' in hop
+assert 'access( other, F_OK )' in hop and 'run_next_push( target )' in hop
+assert re.search(r'!runtime_components_run &&\s+runtime_switch_graphics_runtime\(', runtime)
+assert '"/wine-nx-runtime-nxvk.nro"' in runtime
+launcher = (source / 'launcher.c').read_text()
+assert '"wine-nx-runtime-nxvk.nro"' in launcher
+print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')

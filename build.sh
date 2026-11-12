@@ -2,10 +2,12 @@
 # Build Autorun: the runtime, in the switch-dev image, and the SD card archive,
 # horizon-wine/build-autorun/autorun-NNN.zip.
 #
-#   sh build.sh [--x86] [--dlls] [--clean] [--jobs N]
+#   sh build.sh [--x86] [--dlls] [--nxvk] [--clean] [--jobs N]
 #
 #   --x86    ship the x86-only runtime (Box64, no FEX) instead of the AMD64 one
 #   --dlls   also build the DLL repository's DLLs (horizon-dlls) that changed
+#   --nxvk   also build a second runtime linked with nxvk (NVK and Zink), which
+#            a game can be set to in its settings (Graphics driver)
 #   --clean  remove the runtime's build folders first
 #   --jobs   parallel jobs (default: the machine's cores)
 #
@@ -18,15 +20,16 @@
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 hw="$root/horizon-wine"
-x86=0 dlls=0 clean=0
+x86=0 dlls=0 clean=0 nxvk=0
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
 while [ $# -gt 0 ]; do
     case "$1" in
         --x86) x86=1 ;;
         --dlls) dlls=1 ;;
+        --nxvk) nxvk=1 ;;
         --clean) clean=1 ;;
         --jobs) jobs="$2"; shift ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option $1; see --help." >&2; exit 1 ;;
     esac
     shift
@@ -85,7 +88,8 @@ fi
 
 if [ "$clean" = 1 ]; then
     step "Removing the runtime's build folders"
-    rm -rf "$hw/build-switch-amd64" "$hw/build-switch-wow64-mesa-switch" "$hw/build-autorun"
+    rm -rf "$hw/build-switch-amd64" "$hw/build-switch-amd64-nxvk" "$hw/build-switch-wow64-mesa-switch" \
+           "$hw/build-autorun"
 fi
 
 # The AMD64 runtime; its build also configures the Wine tree both runtimes
@@ -98,6 +102,23 @@ if [ "$x86" = 1 ]; then
     step "Building the x86 runtime"
     sh "$hw/build-x86.sh"
 fi
+if [ "$nxvk" = 1 ] && [ "$x86" = 0 ]; then
+    # The nxvk runtime is a second one: when it cannot be built, the card
+    # archive still is, without it, and the build says so.
+    rm -f "$hw/build-switch-amd64-nxvk/wine-nx-runtime.nro"
+    step "Building nxvk (NVK and Zink), once for its pinned commit"
+    if ! sh "$hw/build-nxvk.sh"; then
+        echo "::warning::nxvk could not be built; the card archive has no nxvk runtime"
+        nxvk=0
+    else
+        step "Building the AMD64 runtime again, linked with nxvk"
+        if ! WINE_NX_FEX=1 WINE_NX_BUILD_DIR="$hw/build-switch-amd64-nxvk" \
+             WINE_NX_NXVK_DIR="$hw/vendor/nxvk/switch/build/pkg" sh "$hw/build-amd64-components.sh"; then
+            echo "::warning::the runtime linked with nxvk could not be built; the card archive has no nxvk runtime"
+            nxvk=0
+        fi
+    fi
+fi
 
 if [ "$dlls" = 1 ]; then
     step "Building the DLL repository's changed DLLs"
@@ -107,6 +128,8 @@ fi
 step "Packaging"
 if [ "$x86" = 1 ]; then
     python3 "$hw/tools/package-autorun.py" --x86
+elif [ "$nxvk" = 1 ]; then
+    python3 "$hw/tools/package-autorun.py" --nxvk
 else
     python3 "$hw/tools/package-autorun.py"
 fi

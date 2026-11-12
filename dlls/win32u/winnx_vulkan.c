@@ -51,19 +51,23 @@ extern VkResult wine_nx_vkCreateViSurfaceNN( VkInstance instance, const struct n
                                              const VkAllocationCallbacks *allocator, VkSurfaceKHR *surface )
     __asm__("vkCreateViSurfaceNN");
 
+/* mesa-switch's NVK shares memory between devices through nvmap ids, which
+ * D3DKMT's shared resources use; nxvk's has no such calls, and there a shared
+ * resource cannot be made (CMakeLists.txt, WINE_NX_NXVK_DIR). */
 extern VkResult nvk_switch_allocate_shared_memory(
     VkDevice device, const VkMemoryAllocateInfo *allocate_info,
     const VkAllocationCallbacks *allocator, uint32_t nvmap_id,
-    VkDeviceMemory *memory_out );
+    VkDeviceMemory *memory_out ) __attribute__((weak));
 extern bool nvk_switch_export_memory( VkDeviceMemory memory,
                                       uint32_t *nvmap_id_out,
-                                      void **reference_out );
-extern void nvk_switch_release_memory_reference( void *reference );
+                                      void **reference_out ) __attribute__((weak));
+extern void nvk_switch_release_memory_reference( void *reference ) __attribute__((weak));
 
 VkResult wine_nx_vk_allocate_shared_memory(
     VkDevice device, const VkMemoryAllocateInfo *allocate_info,
     uint32_t nvmap_id, VkDeviceMemory *memory_out )
 {
+    if (!nvk_switch_allocate_shared_memory) return VK_ERROR_FEATURE_NOT_PRESENT;
     return nvk_switch_allocate_shared_memory( device, allocate_info, NULL,
                                                nvmap_id, memory_out );
 }
@@ -71,12 +75,13 @@ VkResult wine_nx_vk_allocate_shared_memory(
 BOOL wine_nx_vk_export_memory( VkDeviceMemory memory, uint32_t *nvmap_id,
                                void **reference )
 {
+    if (!nvk_switch_export_memory) return FALSE;
     return nvk_switch_export_memory( memory, nvmap_id, reference );
 }
 
 void wine_nx_vk_release_memory_reference( void *reference )
 {
-    nvk_switch_release_memory_reference( reference );
+    if (nvk_switch_release_memory_reference) nvk_switch_release_memory_reference( reference );
 }
 
 static void nx_log( const char *format, ... )

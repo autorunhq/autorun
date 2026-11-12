@@ -1019,6 +1019,31 @@ if(WINE_NX_MESA_SWITCH_DIR)
     endif()
     find_library(SWITCH_EXPAT expat HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
     list(APPEND SWITCH_EGL ${SWITCH_ELF} ${SWITCH_EXPAT} ${SWITCH_ZSTD} ${SWITCH_Z} -Wl,--end-group)
+    # nxvk (https://github.com/PalindromicBreadLoaf/nxvk): another Mesa for the
+    # Switch, NVK for Vulkan and Zink over it for OpenGL, with no nvc0. A runtime
+    # linked with it instead of mesa-switch is a second NRO on the card,
+    # wine-nx-runtime-nxvk.nro, which a program set to it is started in
+    # (source/runtime.c). Two Mesas cannot share one program: they define the
+    # same symbols. mesa-switch's headers still compile the runtime; the APIs
+    # are the same, and what only mesa-switch has is weak or shimmed
+    # (source/nxvk_entry.c). Built by build-nxvk.sh; the folder is its pkg.
+    set(WINE_NX_NXVK_DIR "" CACHE PATH "nxvk's staged package (lib/libnvk.a, libnvk_support.a, libnvk_gl.a), to link instead of mesa-switch")
+    if(WINE_NX_NXVK_DIR)
+        foreach(lib nvk nvk_support nvk_gl)
+            if(NOT EXISTS "${WINE_NX_NXVK_DIR}/lib/lib${lib}.a")
+                message(FATAL_ERROR "nxvk package is missing lib/lib${lib}.a; run build-nxvk.sh")
+            endif()
+        endforeach()
+        message(STATUS "Mesa: nxvk, ${WINE_NX_NXVK_DIR} (mesa-switch's headers)")
+        set(SWITCH_EGL
+            -Wl,--whole-archive "${WINE_NX_NXVK_DIR}/lib/libnvk_gl.a" "${WINE_NX_NXVK_DIR}/lib/libnvk.a"
+            -Wl,--no-whole-archive
+            -Wl,--start-group "${WINE_NX_NXVK_DIR}/lib/libnvk_support.a" ${SWITCH_EXPAT} ${SWITCH_ZSTD} ${SWITCH_Z}
+            -Wl,--end-group)
+        target_sources(wine-nx-runtime PRIVATE source/nxvk_entry.c)
+        target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_NXVK)
+        target_compile_definitions(wine-win32u-real PRIVATE WINE_NX_NXVK)
+    endif()
     set(SWITCH_GLAPI "")
     set(SWITCH_DRM_NOUVEAU "")
     target_include_directories(wine-nx-runtime BEFORE PRIVATE "${WINE_NX_MESA_SWITCH_DIR}/../include")
@@ -1069,7 +1094,8 @@ if(WINE_NX_MESA_SWITCH_DIR)
             APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_SHADER_ALLOC_CACHE)
     endif()
     option(WINE_NX_LSFG "Enable the GPL LSFG-VK frame-generation backend" ON)
-    if(WINE_NX_LSFG)
+    # LSFG-VK comes built against mesa-switch's NVK, not nxvk's.
+    if(WINE_NX_LSFG AND NOT WINE_NX_NXVK_DIR)
         include(cmake/LsfgVk.cmake)
     endif()
 endif()

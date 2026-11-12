@@ -263,6 +263,16 @@ jobs:
           key: wine-pe-${{ github.sha }}
           restore-keys: wine-pe-
 
+      - name: nxvk's package
+        # The second runtime's Mesa (build-nxvk.sh): NVK and Zink from nxvk,
+        # built in nxvk's own toolchain image, which takes the better part of
+        # an hour; kept until the pinned commit or the script changes.
+        if: ${{ inputs.x86 != true }}
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/vendor/nxvk/switch/build/pkg
+          key: nxvk-pkg-${{ hashFiles('horizon-wine/build-nxvk.sh') }}
+
       - name: Build
         env:
           X86: ${{ inputs.x86 }}
@@ -271,7 +281,7 @@ jobs:
             sh build.sh --x86 --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
             exit "${PIPESTATUS[0]}"
           else
-            sh build.sh --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            sh build.sh --nxvk --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
             exit "${PIPESTATUS[0]}"
           fi
 
@@ -290,7 +300,7 @@ jobs:
         # The switch-dev container writes as root, so what it wrote is not the
         # runner's until it is given back: the steps after this one read and
         # write that tree, and the PE cache saves it as the runner.
-        run: sudo chown -R "$(id -u):$(id -g)" horizon-wine/toolchains horizon-wine/build-* || true
+        run: sudo chown -R "$(id -u):$(id -g)" horizon-wine/toolchains horizon-wine/build-* horizon-wine/vendor || true
 
       - name: What was built
         run: |
