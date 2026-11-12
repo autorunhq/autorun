@@ -47,6 +47,14 @@ typedef struct mock_surface { int window, width, height; } *EGLSurface;
 #define EGL_HEIGHT 2
 #define EGL_VENDOR 3
 #define EGL_VERSION 4
+#define EGL_CONFIG_ID 5
+#define EGL_RED_SIZE 6
+#define EGL_GREEN_SIZE 7
+#define EGL_BLUE_SIZE 8
+#define EGL_ALPHA_SIZE 9
+#define EGL_DEPTH_SIZE 10
+#define EGL_STENCIL_SIZE 11
+#define EGL_SAMPLES 12
 #define GL_FRONT_LEFT 0x400
 #define GL_FRONT 0x404
 #define GL_BACK 0x405
@@ -189,10 +197,18 @@ struct opengl_funcs {
     const char *(*p_eglQueryString)(void *, int);
     BOOL (*p_eglSwapBuffers)(void *, EGLSurface);
     void (*p_eglSwapInterval)(void *, int);
+    BOOL (*p_eglGetConfigAttrib)(void *, EGLConfig, EGLint, EGLint *);
 };
+/* What the first window's log line says of its config. */
+static BOOL mock_config_attrib(void *display, EGLConfig config, EGLint attribute, EGLint *value) {
+    (void)display;
+    *value = attribute == EGL_CONFIG_ID ? config : attribute == EGL_DEPTH_SIZE ? 24 :
+             attribute == EGL_STENCIL_SIZE ? 8 : attribute == EGL_SAMPLES ? 0 : 8;
+    return TRUE;
+}
 static const struct egl_platform platform = { .configs = {1, 2}, .config_count = 2 };
 static const struct egl_platform *egl = &platform;
-static const struct opengl_funcs functions = {mock_create_pbuffer, mock_create_window, mock_destroy_surface, mock_error, mock_string, mock_swap, mock_interval};
+static const struct opengl_funcs functions = {mock_create_pbuffer, mock_create_window, mock_destroy_surface, mock_error, mock_string, mock_swap, mock_interval, mock_config_attrib};
 static const struct opengl_funcs *funcs = &functions;
 '''
 
