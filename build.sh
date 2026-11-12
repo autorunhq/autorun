@@ -129,7 +129,10 @@ step "Packaging"
 if [ "$x86" = 1 ]; then
     python3 "$hw/tools/package-autorun.py" --x86
 elif [ "$nxvk" = 1 ]; then
-    python3 "$hw/tools/package-autorun.py" --nxvk
+    if ! python3 "$hw/tools/package-autorun.py" --nxvk; then
+        echo "::warning::the nxvk runtime could not be packaged; the card archive is made without it"
+        python3 "$hw/tools/package-autorun.py"
+    fi
 else
     python3 "$hw/tools/package-autorun.py"
 fi

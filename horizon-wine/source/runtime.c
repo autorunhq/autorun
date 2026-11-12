@@ -2216,6 +2216,7 @@ static char runtime_next_nro[512];
 
 #ifdef WINE_NX_NXVK
 static const int runtime_is_nxvk = 1;
+extern const char wine_nx_graphics_runtime[];  /* source/nxvk_entry.c */
 #else
 static const int runtime_is_nxvk = 0;
 #endif
@@ -4781,7 +4782,11 @@ int main( int argc, char **argv )
     log_line( "[BUILD] %s%s%s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD,
               WINE_NX_BUILD_ID[0] ? " made from " : "", WINE_NX_BUILD_ID, own_nro,
               runtime_address_space_bits() );
-    log_line( "[GRAPHICS] this runtime is linked with %s", runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+#ifdef WINE_NX_NXVK
+    log_line( "[GRAPHICS] this runtime is linked with nxvk (%s)", wine_nx_graphics_runtime );
+#else
+    log_line( "[GRAPHICS] this runtime is linked with mesa-switch" );
+#endif
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
     {

@@ -25,8 +25,10 @@
 #undef VK_USE_PLATFORM_VI_NN
 #include <vulkan/vulkan.h>
 
-/* What tools/package-autorun.py --nxvk looks for in the NRO it ships. */
-__attribute__((used)) static const char nxvk_marker[] = "autorun-graphics-runtime: nxvk";
+/* What tools/package-autorun.py --nxvk looks for in the NRO it ships. The
+ * runtime logs it at start (source/runtime.c), which is also what keeps it
+ * from the linker's --gc-sections. */
+const char wine_nx_graphics_runtime[] = "autorun-graphics-runtime: nxvk";
 
 extern PFN_vkVoidFunction vk_icdGetInstanceProcAddr( VkInstance instance, const char *name );
 
