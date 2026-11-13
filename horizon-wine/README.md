@@ -44,7 +44,9 @@ One source tree builds each runtime. The CMake options pick which:
 | AMD64 with nxvk (`wine-nx-runtime-nxvk.nro`) | The same, with nxvk's Mesa instead of mesa-switch: NVK for Vulkan, Zink for OpenGL, no nvc0 and no frame generation | `WINE_NX_NXVK_DIR` (`build.sh --nxvk`, `build-nxvk.sh`) |
 
 A game's Graphics driver setting picks mesa-switch with OpenGL through nvc0 or
-Zink, or nxvk. Two Mesas cannot be linked into one program, so nxvk is a second
+Zink, or nxvk. The switch-dev image's mesa-switch is built without Zink, so a
+game set to Zink runs on nxvk, which is Zink on NVK, and on nvc0 when nxvk is
+not on the card either; the launcher says which. Two Mesas cannot be linked into one program, so nxvk is a second
 runtime on the card: a game set to it is queued in `run-next.txt` and that NRO
 is started for it, and the other way round (`source/runtime.c`,
 `runtime_switch_graphics_runtime`). When the game ends, the nxvk runtime starts

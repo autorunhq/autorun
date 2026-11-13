@@ -27,6 +27,7 @@ struct wine_nx_launcher_options
     int (*machine_of)( const char *path, unsigned short *machine );
     int (*list_usb)( struct wine_nx_launcher_usb_volume *volumes, int max );
     int vulkan;                /* the runtime has Vulkan for DXVK */
+    int mesa_zink;             /* its mesa-switch has Zink; without, a game set to it runs on nxvk */
     /* The forwarder's host address-space width, or 0 if unavailable. */
     int address_space_bits;
     int low_window;

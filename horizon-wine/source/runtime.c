@@ -2312,6 +2312,22 @@ static int config_bool( const char *key, int fallback, const char *was, int flip
 }
 
 #ifdef WINE_NX_MESA_SWITCH
+/* Whether this runtime's Mesa has Zink. mesa-switch's has it only when its SDK
+ * was built with it (egl_switch.c, HAVE_SWITCH_ZINK); the switch-dev image's is
+ * not, and its EGL then refuses a display set to Zink: a game set to it drew
+ * nothing at all. Its EGL refers to zink_create_screen when it has Zink, which
+ * brings it into the link; a weak reference alone does not. nxvk always has. */
+static int runtime_mesa_has_zink( void )
+{
+#ifdef WINE_NX_NXVK
+    return 1;
+#else
+    extern void zink_create_screen( void ) __attribute__((weak));
+
+    return &zink_create_screen != NULL;
+#endif
+}
+
 /* NVK compresses the images a program draws into, each in an allocation of its
  * own, padded to the GPU's big page and holding compression tags, of which the
  * GPU has only so many. Zink makes an image of that kind for every texture: in
@@ -5173,6 +5189,7 @@ int main( int argc, char **argv )
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
 #ifdef WINE_NX_MESA_SWITCH
             .vulkan = 1,
+            .mesa_zink = runtime_mesa_has_zink(),
 #endif
             .verbose = wine_nx_runtime_verbose,
             .profile = runtime_profile,
@@ -5363,24 +5380,42 @@ int main( int argc, char **argv )
              * runtime on the card: a program set to the other one than this
              * build has is queued in run-next.txt and that runtime is started
              * for it, which leaves the launcher out and starts it at once. */
-            if (!runtime_components_run &&
-                runtime_switch_graphics_runtime( target, settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK ))
             {
-                runtime_program[0] = 0;  /* it has not run: nothing of it to finish */
-                return return_to_launcher();
+                /* Zink is nxvk's wherever this runtime's Mesa has none: nxvk
+                 * is Zink on NVK. The nxvk runtime keeps a program set to Zink,
+                 * so the two never pass one back and forth. */
+                int zink = settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK;
+                int wants_nxvk = settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK ||
+                                 (zink && (runtime_is_nxvk || !runtime_mesa_has_zink()));
+
+                if (zink && wants_nxvk && !runtime_is_nxvk)
+                    log_line( "[GRAPHICS] the program is set to Zink, which this runtime's mesa-switch was built "
+                              "without; nxvk is Zink on NVK" );
+                if (!runtime_components_run && runtime_switch_graphics_runtime( target, wants_nxvk ))
+                {
+                    runtime_program[0] = 0;  /* it has not run: nothing of it to finish */
+                    return return_to_launcher();
+                }
             }
 #ifndef WINE_NX_NXVK
             /* mesa-switch's EGL takes Zink on NVK instead of nvc0 from this
              * variable when the screen's display is set up, so the compositor
-             * and the program's own OpenGL both take it; a Mesa built without
-             * Zink refuses the display, and the log then says so. */
-            if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)
+             * and the program's own OpenGL both take it. A Mesa built without
+             * Zink refuses the display and nothing is drawn at all, so without
+             * it, and without nxvk on the card, the program has nvc0. */
+            if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK && runtime_mesa_has_zink())
             {
                 setenv( "MESA_SWITCH_GL_DRIVER", "zink", 1 );
                 log_line( "[NXGL] OpenGL through Zink on NVK, from the program's settings" );
                 runtime_nvk_compression( "OpenGL through Zink" );
             }
-            else unsetenv( "MESA_SWITCH_GL_DRIVER" );
+            else
+            {
+                if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)
+                    log_line( "[NXGL] the program is set to Zink, which neither this runtime's mesa-switch nor "
+                              "the card has; OpenGL through nvc0" );
+                unsetenv( "MESA_SWITCH_GL_DRIVER" );
+            }
 #endif
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;

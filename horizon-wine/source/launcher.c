@@ -358,6 +358,17 @@ static void runtime_file( const struct launcher *l, const char *name, char *out,
     snprintf( out, size, "%s/%s", l->options->runtime_dir, name );
 }
 
+/* What a Graphics driver choice comes to on this card, after its label: nxvk
+ * missing, or a mesa-switch built without Zink, whose games set to Zink then
+ * run on nxvk, which is Zink on NVK (runtime.c). */
+static const char *launcher_graphics_note( const struct launcher *l, int driver, int nxvk_on_card )
+{
+    if (driver == LAUNCHER_GRAPHICS_NXVK && !nxvk_on_card) return " (not on the card)";
+    if (driver == LAUNCHER_GRAPHICS_ZINK && !l->options->mesa_zink)
+        return nxvk_on_card ? " (not in this build: runs on nxvk)" : " (not in this build: runs on nvc0)";
+    return "";
+}
+
 /* Nonzero when the line reached the card, which the handoff in start_program
  * has to know before it gives the console away. */
 static int write_line( const char *path, const char *text )
@@ -2604,13 +2615,13 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             ADD_ROW( ROW_GRAPHICS_DRIVER, SECTION_GRAPHICS, "Graphics driver",
                      "The Mesa that draws the game. mesa-switch (nvc0) is the default and the fastest for "
                      "OpenGL. mesa-switch (Zink) draws OpenGL through Vulkan instead, for games nvc0 draws "
-                     "wrong. nxvk is another Mesa for the Switch, Vulkan and OpenGL (through Zink): the game "
-                     "starts in a second runtime, wine-nx-runtime-nxvk.nro, without frame generation." );
+                     "wrong; a mesa-switch built without Zink runs such a game on nxvk. nxvk is another Mesa "
+                     "for the Switch, Vulkan and OpenGL (through Zink): the game starts in a second runtime, "
+                     "wine-nx-runtime-nxvk.nro, without frame generation." );
             row->kind = UI_ROW_DROPDOWN;
             snprintf( row->value, sizeof(row->value), "%s%s",
                       launcher_graphics_labels[p->settings.graphics_driver],
-                      p->settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK && !file_exists( nxvk ) ?
-                      " (not on the card)" : "" );
+                      launcher_graphics_note( l, p->settings.graphics_driver, file_exists( nxvk ) ) );
         }
 
         if (l->options->vulkan && (x86 || x64))
@@ -2930,7 +2941,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                 runtime_file( l, "wine-nx-runtime-nxvk.nro", nxvk, sizeof(nxvk) );
                 for (i = 0; i < LAUNCHER_GRAPHICS_COUNT; i++)
                     snprintf( items[i].label, sizeof(items[i].label), "%s%s", launcher_graphics_labels[i],
-                              i == LAUNCHER_GRAPHICS_NXVK && !file_exists( nxvk ) ? " (not on the card)" : "" );
+                              launcher_graphics_note( l, i, file_exists( nxvk ) ) );
                 selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_GRAPHICS_COUNT,
                                                  p->settings.graphics_driver );
                 if (selected < 0) break;

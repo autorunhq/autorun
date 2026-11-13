@@ -84,9 +84,16 @@ compression = compression[:compression.index('\n}\n')]
 assert 'config_bool( "nvk-compression", 0,' in compression and 'no_compression' in compression
 init = runtime[runtime.index('log_line( "[INIT] Mesa from nxvk:'):]
 assert init.index('runtime_nvk_compression(') < init.index('wine_nx_vulkan_probe();') < init.index('wine_nx_graphics_selftest();')
-zink = runtime[runtime.index('if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)'):]
-zink = zink[:zink.index('else unsetenv( "MESA_SWITCH_GL_DRIVER" );')]
-assert 'runtime_nvk_compression(' in zink
+zink = runtime[runtime.index('if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK && runtime_mesa_has_zink())'):]
+zink = zink[:zink.index('unsetenv( "MESA_SWITCH_GL_DRIVER" );')]
+assert 'runtime_nvk_compression(' in zink and 'setenv( "MESA_SWITCH_GL_DRIVER", "zink", 1 );' in zink
+# The switch-dev image's mesa-switch has no Zink, and its EGL then refuses the
+# display: a game set to Zink runs on nxvk, Zink on NVK, which keeps it.
+has = runtime[runtime.index('static int runtime_mesa_has_zink( void )'):]
+has = has[:has.index('\n}\n')]
+assert "extern void zink_create_screen( void ) __attribute__((weak));" in has
+assert '(zink && (runtime_is_nxvk || !runtime_mesa_has_zink()))' in runtime
+assert '.mesa_zink = runtime_mesa_has_zink(),' in runtime
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')
