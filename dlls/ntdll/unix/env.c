@@ -62,6 +62,9 @@
 #include "unix_private.h"
 #include "locale_private.h"
 #include "error.h"
+#ifdef __SWITCH__
+#include "horizon_runtime_paths.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(environ);
 
@@ -1084,6 +1087,19 @@ static void add_dynamic_environment( WCHAR **env, SIZE_T *pos, SIZE_T *size )
 
     if (build_dir) unix_to_nt_file_name( build_dir, &nt_build_dir, FILE_OPEN );
     if (data_dir) unix_to_nt_file_name( data_dir, &nt_data_dir, FILE_OPEN );
+#ifdef __SWITCH__
+    /* The card has no dosdevices links, so unix_to_nt_file_name finds no
+     * drive for share/wine and WINEDATADIR was never set: mscoree then never
+     * looked for Wine Mono in share/wine/mono/wine-mono-<version>. It is
+     * Z:\switch\wine\share\wine, as nt_to_unix_file_name maps Z: to the card. */
+    if (data_dir && !nt_data_dir)
+    {
+        static const char dos_data_dir[] = WINE_NX_RUNTIME_DOS_ROOT "\\share\\wine";
+
+        if ((nt_data_dir = malloc( sizeof(dos_data_dir) * sizeof(WCHAR) )))
+            ascii_to_unicode( nt_data_dir, dos_data_dir, sizeof(dos_data_dir) );
+    }
+#endif
 
     append_envW( env, pos, size, "WINEBUILDDIR", nt_build_dir );
     append_envW( env, pos, size, "WINEDATADIR", nt_data_dir );

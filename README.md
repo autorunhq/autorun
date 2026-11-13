@@ -257,6 +257,17 @@ that NetherSX2_nx uses. Started from the album, Autorun is not an application
 and FPSLocker does not follow it. `[FPSLOCKER]` lines in the game's log show
 what Autorun found; `"fpslocker": false` in `config/settings.json` turns it off.
 
+### .NET programs (Wine Mono)
+
+A program written for .NET, as many games' configurators are, needs Wine Mono,
+which Autorun does not include. Download `wine-mono-11.3.0-x86.tar.xz` from
+[Wine Mono's releases](https://github.com/wine-mono/wine-mono/releases/tag/wine-mono-11.3.0),
+unpack it, and copy the folder `wine-mono-11.3.0` (with `bin`, `etc`, `lib` and
+`support` in it) to `switch/wine/share/wine/mono/`, so that
+`switch/wine/share/wine/mono/wine-mono-11.3.0/bin/libmono-2.0-x86.dll` exists.
+A `[MONO]` line in a program's log says whether Autorun sees it. .NET programs
+run slowly: their code is compiled as they run, and that code is x86.
+
 ## Playing
 
 Out of the box the controller works as a mouse and keyboard:

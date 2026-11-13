@@ -1310,6 +1310,33 @@ static void controls_panel( int show )
     log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
 }
 
+/* Wine Mono, which a .NET program (a game's configurator, often) needs, where
+ * mscoree looks for it: C:\windows\mono\mono-2.0, then the data directory's
+ * mono/wine-mono-<version> (WINE_MONO_VERSION, dlls/mscoree/mscoree_private.h).
+ * Only the 32-bit build is asked for: 32-bit programs are most of them. */
+#define RUNTIME_WINE_MONO_VERSION "11.3.0"
+
+static void log_wine_mono( void )
+{
+    static const char *const places[] =
+    {
+        RUNTIME_DIR "/drive_c/windows/mono/mono-2.0",
+        RUNTIME_DIR "/share/wine/mono/wine-mono-" RUNTIME_WINE_MONO_VERSION,
+    };
+    char path[256];
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(places); i++)
+    {
+        snprintf( path, sizeof(path), "%s/bin/libmono-2.0-x86.dll", places[i] );
+        if (access( path, F_OK )) continue;
+        log_line( "[MONO] Wine Mono found at %s: .NET programs can start", places[i] );
+        return;
+    }
+    log_line( "[MONO] no Wine Mono on the card (%s/bin or %s/bin): a .NET program will not start",
+              places[1], places[0] );
+}
+
 /* Frames shown, however the program draws: the framebuffer's, OpenGL's swaps,
  * the compositor's and Vulkan's presents. The Tasks panel's rate, and the one
  * FPSLocker is given (saltynx.c). */
@@ -5722,6 +5749,7 @@ int main( int argc, char **argv )
     if (wine_nx_fps_counter)
         log_line( "[INIT] frame rate counter on (DXVK HUD %s): drawn over a game's OpenGL frames, DXVK's "
                   "HUD over its Vulkan ones", launcher_hud_labels[runtime_dxvk_hud] );
+    log_wine_mono();
     log_line( "[INIT] FPSLocker %s (fpslocker)%s", wine_nx_fpslocker ? "on" : "off",
               wine_nx_fpslocker ? ": the frame rate goes to it, its target and display sync come back" : "" );
     log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
