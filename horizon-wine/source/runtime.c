@@ -153,6 +153,16 @@ extern const char wine_nx_graphics_runtime[];  /* source/nxvk_entry.c */
 static const int runtime_is_nxvk = 0;
 #endif
 
+/* The runtime's own log, which each start writes afresh. The nxvk runtime's is
+ * a file of its own: the card's runtime starts after it for the launcher, and
+ * would otherwise write over the run that went wrong on nxvk before anyone
+ * could read it off the card. */
+#ifdef WINE_NX_NXVK
+#define RUNTIME_LOG RUNTIME_LOGS "/autorun_runtime_nxvk.log"
+#else
+#define RUNTIME_LOG RUNTIME_LOGS "/autorun_runtime.log"
+#endif
+
 static FILE *log_file;
 /* A second copy, kept from the moment a program starts. The next run of the
  * launcher opens autorun_runtime.log afresh and what the program did is gone
@@ -484,7 +494,7 @@ static void open_game_log( const char *target )
     if ((game_log_file = fopen( path, "w" )))
     {
         /* What was said before this point, so the file stands on its own. */
-        if ((sofar = fopen( RUNTIME_LOGS "/autorun_runtime.log", "r" )))
+        if ((sofar = fopen( RUNTIME_LOG, "r" )))
         {
             char chunk[4096];
             size_t got;
@@ -566,7 +576,7 @@ void wine_nx_runtime_open_error_log( void )
         mkdir( "sdmc:/switch", 0777 );
         mkdir( RUNTIME_DIR, 0777 );
         mkdir( RUNTIME_LOGS, 0777 );
-        if ((log_file = fopen( RUNTIME_LOGS "/autorun_runtime.log", "a" )))
+        if ((log_file = fopen( RUNTIME_LOG, "a" )))
             setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
     }
     pthread_mutex_unlock( &log_mutex );
@@ -3749,6 +3759,50 @@ static void note_loader_lent_memory( void )
     }
 }
 
+/* Of what the loader had lent out, what is inside this program's heap: not the
+ * loader's own NRO, which lies below the heap, but pages a program before this
+ * one left lent, the stack of a thread it left running (the nxvk runtime's USB
+ * drives' watcher, 144 KB). They are taken out of the heap before anything is
+ * given out (native_heap.c), and named once the log is open. */
+#define LEFT_LENT_MAX 8
+static struct { u64 addr, size; int kept; } left_lent[LEFT_LENT_MAX];
+static int left_lent_count;
+
+static void keep_out_left_lent_memory( void )
+{
+    extern char *fake_heap_start, *fake_heap_end;
+    extern int wine_nx_native_heap_keep_out( uintptr_t address, size_t size );  /* native_heap.c */
+    int i;
+
+    for (i = 0; i < loader_lent_count && left_lent_count < LEFT_LENT_MAX; i++)
+    {
+        u64 addr = loader_lent[i].addr, size = loader_lent[i].size;
+
+        if (addr + size <= (uintptr_t)fake_heap_start || addr >= (uintptr_t)fake_heap_end) continue;
+        left_lent[left_lent_count].addr = addr;
+        left_lent[left_lent_count].size = size;
+        left_lent[left_lent_count].kept = wine_nx_native_heap_keep_out( addr, size );
+        left_lent_count++;
+    }
+}
+
+static void log_left_lent_memory( void )
+{
+    int i;
+
+    for (i = 0; i < left_lent_count; i++)
+        log_line( "[MAP] start-up: %010llx-%010llx, %llu KB of this heap, left lent by the program before "
+                  "(a thread it left running?): %s", (unsigned long long)left_lent[i].addr,
+                  (unsigned long long)(left_lent[i].addr + left_lent[i].size),
+                  (unsigned long long)(left_lent[i].size / 1024),
+                  left_lent[i].kept > 0 ? "kept out of the heap" :
+                  left_lent[i].kept < 0 ? "the heap had already given it out, and may fault there" :
+                  "not where the heap gives out blocks" );
+    if (left_lent_count)
+        log_line( "[MAP] start-up: what the program before left may still be running; if anything fails, "
+                  "close Autorun from the HOME menu and start it again" );
+}
+
 /* The whole address space, to compare what this program leaves behind with what
  * it was given: the loader undoes its own mappings when the program returns,
  * and refuses when a region is not in the state it expects. */
@@ -4027,6 +4081,23 @@ static int leave_cleanly( void )
     int left = memory_left_behind( 0 ), after;
 
     wine_nx_runtime_log_flush();
+#ifdef WINE_NX_USB_STORAGE
+    /* The USB drives' watcher is a thread, and a thread outlives the program
+     * that leaves it running (usb_storage.c). The nxvk runtime handed over to
+     * the card's own this way with it still running: the card's runtime found
+     * USB taken, and its first large block, laid over the thread's stack,
+     * faulted as the launcher came up. */
+    {
+        extern int wine_nx_usb_stop(void);
+
+        if (wine_nx_usb_stop())
+        {
+            after = memory_left_behind( 0 );
+            log_line( "[EXIT] USB drives' watcher ended: %d regions lent, was %d", after, left );
+            left = after;
+        }
+    }
+#endif
     /* Services opened for the whole run hold heap pages of their own: the
      * sockets take a transfer memory at start-up and nothing ever gave it back.
      * Close them and say what each one returns, so the one that matters shows. */
@@ -4377,7 +4448,7 @@ static int return_to_launcher( void )
     wine_nx_profile_stop();
 #ifdef WINE_NX_USB_STORAGE
     {
-        extern void wine_nx_usb_stop(void);
+        extern int wine_nx_usb_stop(void);
         wine_nx_usb_stop();
     }
 #endif
@@ -4575,12 +4646,22 @@ static int return_to_launcher( void )
         carafeErrorRelaunch( own_nro, wine_nx_program_exit_code ))
         return 0;
     /* A program waiting in run-next.txt (after the components setup) is started
-     * by the runtime started again, whether or not the launcher would be. */
-    if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
-        envHasNextLoad() && own_nro[0] && R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+     * by the runtime started again, whether or not the launcher would be. The
+     * nxvk runtime has no launcher, so it starts the card's runtime, which has
+     * one and starts what is queued on whichever runtime it is set to. Starting
+     * itself instead only to hand over ran the graphics test and opened USB for
+     * nothing, and the hand-over left the USB thread running. */
     {
-        log_step( "starting this program again for the launcher" );
-        return 0;
+        const char *next = own_nro;
+
+        if (runtime_is_nxvk && !access( RUNTIME_NRO_MESA_SWITCH, F_OK )) next = RUNTIME_NRO_MESA_SWITCH;
+        if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
+            envHasNextLoad() && next[0] && R_SUCCEEDED( envSetNextLoad( next, next ) ))
+        {
+            log_step( next == own_nro ? "starting this program again for the launcher"
+                                      : "starting the card's runtime for the launcher" );
+            return 0;
+        }
     }
     __nx_applet_exit_mode = 1;
     if (!runtime_components_run && carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
@@ -4740,6 +4821,9 @@ int main( int argc, char **argv )
     /* Before the console, whose framebuffer is lent to the graphics driver:
      * what is lent now is the loader's, and everything after it is ours. */
     note_loader_lent_memory();
+    /* And before the console's buffers come out of the heap's top, where a
+     * thread's stack left by the program before was. */
+    keep_out_left_lent_memory();
     consoleInit( NULL );
     /* One empty frame, so the screen is this program's and blank from the start
      * rather than whatever was on it before. */
@@ -4775,7 +4859,7 @@ int main( int argc, char **argv )
     mkdir( WINE_USER_DIR "/Saved Games", 0777 );
     mkdir( WINE_USER_DIR "/Videos", 0777 );
     mkdir( RUNTIME_LOGS, 0777 );
-    log_file = fopen( RUNTIME_LOGS "/autorun_runtime.log", "w" );
+    log_file = fopen( RUNTIME_LOG, "w" );
     if (log_file)
     {
         setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
@@ -4855,6 +4939,7 @@ int main( int argc, char **argv )
     /* The launcher can access SteamGridDB before a game is selected. */
     log_memory_map( "start-up" );
     log_line( "[MAP] start-up: %d regions the loader already had lent", loader_lent_count );
+    log_left_lent_memory();
     wine_nx_runtime_network_init();
     log_lent_memory( "the network" );
 
@@ -5071,14 +5156,35 @@ int main( int argc, char **argv )
         /* The nxvk runtime runs the programs set to it and nothing else: the
          * launcher is the card's own runtime's, which a program chosen there
          * comes back here from (runtime_switch_graphics_runtime). Started on
-         * its own, from the album or a shortcut to this NRO, it hands over. */
-        if (envHasNextLoad() && !access( RUNTIME_NRO_MESA_SWITCH, F_OK ) &&
-            R_SUCCEEDED( envSetNextLoad( RUNTIME_NRO_MESA_SWITCH, RUNTIME_NRO_MESA_SWITCH ) ))
+         * its own, from the album, a shortcut to this NRO or the error screen,
+         * it hands over, with everything it opened closed first: what it leaves
+         * goes on in this process into the card's runtime, as the USB drives'
+         * watcher did, whose stack the card's runtime then faulted on. */
+        if (envHasNextLoad() && !access( RUNTIME_NRO_MESA_SWITCH, F_OK ))
         {
-            log_line( "[GRAPHICS] the nxvk runtime has no launcher of its own; starting %s",
+            int mine = 0;
+
+            log_line( "[GRAPHICS] the nxvk runtime has no launcher of its own; handing over to %s",
                       RUNTIME_NRO_MESA_SWITCH );
             consoleExit( NULL );
+            wine_nx_console_active = 0;
+            /* The graphics test and the Vulkan probe opened the driver. */
+            release_lent_memory();
+            clear_heap_attributes();
             leave_cleanly();
+            memory_left_behind_ex( 1, &mine );
+            /* Pages of this program still lent would be a hole in the card's
+             * runtime's heap: Autorun closes instead, and starts afresh. */
+            if (mine)
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "pages of this program are still lent out; closing Autorun instead of handing over" );
+            }
+            else if (R_FAILED( envSetNextLoad( RUNTIME_NRO_MESA_SWITCH, RUNTIME_NRO_MESA_SWITCH ) ))
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "the loader would not start the card's runtime; closing Autorun" );
+            }
             return 0;
         }
 #endif

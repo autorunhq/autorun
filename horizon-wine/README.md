@@ -47,7 +47,12 @@ A game's Graphics driver setting picks mesa-switch with OpenGL through nvc0 or
 Zink, or nxvk. Two Mesas cannot be linked into one program, so nxvk is a second
 runtime on the card: a game set to it is queued in `run-next.txt` and that NRO
 is started for it, and the other way round (`source/runtime.c`,
-`runtime_switch_graphics_runtime`).
+`runtime_switch_graphics_runtime`). When the game ends, the nxvk runtime starts
+the card's runtime for the launcher. Both run in the one process the loader
+keeps, so whatever one leaves running goes on into the next: each closes USB
+and its threads first, and a runtime that finds pages left lent inside its heap
+keeps them out of it. The nxvk runtime writes `logs/autorun_runtime_nxvk.log`,
+which the card's runtime does not write over.
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup

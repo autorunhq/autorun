@@ -162,6 +162,74 @@ retry:
     return result;
 }
 
+/* Pages that a program before this one left lent out where this heap is: the
+ * loader starts every program in the same process, and a thread one leaves
+ * running keeps the pages of its stack. Nothing here knows they are not free,
+ * and the aligned heap, which grows down from the top, would give them to the
+ * first large block that reaches them, which faults on its first write (the
+ * card's runtime after the nxvk runtime left the USB drives' watcher running).
+ * Taken out of the heap for good: 1 when they are, 0 when they are not where
+ * the aligned heap gives out blocks, -1 when newlib's heap or a block given out
+ * already covers them. Newlib's heap then stops below them, as it stops below
+ * every aligned block. */
+int wine_nx_native_heap_keep_out( uintptr_t address, size_t size )
+{
+    uintptr_t low, high, top;
+    uint32_t first, end, at, length;
+    int result = 0;
+
+    if (!size || address + size < address) return 0;
+    __malloc_lock( _REENT );
+    init_heap();
+    top = heap.base + (size_t)heap.count * BACKING_UNIT;
+    low = address & ~(uintptr_t)(BACKING_UNIT - 1);
+    high = address + size > top - (BACKING_UNIT - 1) ? top :
+           (address + size + BACKING_UNIT - 1) & ~(uintptr_t)(BACKING_UNIT - 1);
+    if (heap.blocks && low < top && high > heap.base)
+    {
+        if (low < heap.base) low = heap.base;
+        first = (low - heap.base) / BACKING_UNIT;
+        end = (high - heap.base) / BACKING_UNIT;
+        result = -1;
+        if (end <= heap.bottom)
+        {
+            /* Below every block so far: the aligned heap reaches down over them
+             * now, unless newlib's heap already has. */
+            if (low >= (uintptr_t)__real__sbrk_r( _REENT, 0 ))
+            {
+                if (end < heap.bottom) backing_insert( &heap, end, heap.bottom - end );
+                heap.bottom = first;
+                result = 1;
+            }
+        }
+        else if (first >= heap.bottom)
+        {
+            /* Among the blocks: only a free one can still give them up. */
+            for (at = heap.bottom; at < heap.count; at += length)
+            {
+                if (!(length = heap.blocks[at].length & ~BACKING_USED)) break;
+                if (first >= at + length) continue;
+                if (!(heap.blocks[at].length & BACKING_USED) && end <= at + length)
+                {
+                    backing_remove( &heap, at );
+                    if (first > at) backing_insert( &heap, at, first - at );
+                    if (end < at + length) backing_insert( &heap, end, at + length - end );
+                    result = 1;
+                }
+                break;
+            }
+        }
+        if (result > 0)
+        {
+            backing_tag( &heap, first, end - first, 1 );
+            heap.used += (size_t)(end - first) * BACKING_UNIT;
+            __atomic_store_n( &backing_start, heap.base + (size_t)heap.bottom * BACKING_UNIT, __ATOMIC_RELEASE );
+        }
+    }
+    __malloc_unlock( _REENT );
+    return result;
+}
+
 #ifdef WINE_NX_SHADER_ALLOC_CACHE
 void wine_nx_native_free_cached( void *const *pointers, unsigned int count, size_t bytes )
 {

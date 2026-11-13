@@ -208,7 +208,9 @@ config/keys.txt the keys the controller sends. Both are set from the launcher
 (Settings, Defaults, Controls, and a program's own Controls row), so neither
 has to be written by hand.
 
-Logs: switch/wine/logs/autorun_runtime.log holds the last run.
+Logs: switch/wine/logs/autorun_runtime.log holds the last run, and
+autorun_runtime_nxvk.log the last run of the nxvk runtime; a game's own run is
+kept beside them under its name (Game.log, or Game_nxvk.log on nxvk).
 ''')
 
 
