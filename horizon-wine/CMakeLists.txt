@@ -1055,6 +1055,8 @@ if(WINE_NX_MESA_SWITCH_DIR)
     # The log says which thread pools Mesa starts and how large (source/carafe_mesa.c).
     target_sources(wine-nx-runtime PRIVATE source/carafe_mesa.c)
     target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=util_queue_init)
+    # Mesa's debug messages go into the runtime's log as well (carafe_mesa.c).
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=os_log_message)
     set_source_files_properties(source/vulkan_probe.c PROPERTIES
         INCLUDE_DIRECTORIES "${WINE_NX_MESA_SWITCH_DIR}/../include")
 

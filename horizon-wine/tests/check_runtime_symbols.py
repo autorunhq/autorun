@@ -67,4 +67,15 @@ native = native[:native.index('\n}\n')]
 assert 'svcQueryMemory( &info, &page_info, ctx->far.x )' in native and 'horizon_trace_native_backtrace( ctx );' in native
 assert re.search(r'horizon_trace_program_fault\( ctx, &rec, data->teb \);\s+horizon_trace_native_program_fault\( ctx \);',
                  horizon)
+# What Mesa says reaches the log: its debug messages (os_log_message, where
+# mesa-switch's winsys says why a GPU submission failed) and native stderr
+# (nouveau's NOUVEAU_ERR), whose device every thread's stream writes through.
+cmake = (root / 'horizon-wine/CMakeLists.txt').read_text()
+assert '-Wl,--wrap=os_log_message' in cmake
+mesa = (root / 'horizon-wine/source/carafe_mesa.c').read_text()
+assert 'void __wrap_os_log_message(const char* message)' in mesa and '"[MESA] %.*s%s"' in mesa
+runtime = (root / 'horizon-wine/source/runtime.c').read_text()
+assert 'devoptab_list[STD_ERR] = &native_stderr_device;' in runtime
+main = runtime[runtime.index('\nint main( int argc, char **argv )'):]
+assert main.index('consoleInit( NULL );') < main.index('runtime_native_stderr_hook();')
 print(f'runtime symbols: {count} functions written; names, offsets, unknown and foreign addresses read back')

@@ -10,6 +10,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/iosupport.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -566,6 +567,59 @@ void wine_nx_runtime_log_flush( void )
     if (game_log_file) fflush( game_log_file );
     pthread_mutex_unlock( &log_mutex );
     wine_nx_sd_cache_flush();
+}
+
+/* The runtime's native stderr, which nothing reads on the Switch: Mesa's
+ * nouveau prints its errors there (NOUVEAU_ERR is an fprintf to stderr), and
+ * so do others. Every thread has a stream of its own, but they all write
+ * through the device stderr is, which this takes over once the console has
+ * set it (consoleExit leaves it): into the log as [NATIVE-STDERR] lines, the
+ * first 512 and from then on every time their number doubles. */
+static Mutex native_stderr_mutex;
+static char native_stderr_line[512];
+static size_t native_stderr_len;
+static unsigned int native_stderr_lines;
+
+static ssize_t native_stderr_write( struct _reent *r, void *fd, const char *ptr, size_t len )
+{
+    size_t done = 0;
+
+    (void)r;
+    (void)fd;
+    while (done < len)
+    {
+        char line[sizeof(native_stderr_line)];
+        unsigned int n = 0;
+
+        line[0] = 0;
+        mutexLock( &native_stderr_mutex );
+        for (; done < len; done++)
+        {
+            char c = ptr[done];
+
+            if (c == '\n' || native_stderr_len >= sizeof(native_stderr_line) - 1)
+            {
+                memcpy( line, native_stderr_line, native_stderr_len );
+                line[native_stderr_len] = 0;
+                native_stderr_len = 0;
+                n = ++native_stderr_lines;
+                if (c == '\n') done++;
+                break;
+            }
+            if (c != '\r') native_stderr_line[native_stderr_len++] = c;
+        }
+        mutexUnlock( &native_stderr_mutex );
+        /* Outside the lock: the log takes its own. */
+        if (line[0] && (n <= 512 || !(n & (n - 1)))) log_line( "[NATIVE-STDERR] %s", line );
+    }
+    return len;
+}
+
+static const devoptab_t native_stderr_device = { .name = "stderr", .write_r = native_stderr_write };
+
+static void runtime_native_stderr_hook( void )
+{
+    devoptab_list[STD_ERR] = &native_stderr_device;
 }
 
 void wine_nx_runtime_open_error_log( void )
@@ -4904,6 +4958,7 @@ int main( int argc, char **argv )
     mkdir( WINE_USER_DIR "/Videos", 0777 );
     mkdir( RUNTIME_LOGS, 0777 );
     log_file = fopen( RUNTIME_LOG, "w" );
+    runtime_native_stderr_hook();  /* after consoleInit, which sets stderr's device */
     if (log_file)
     {
         setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
