@@ -1153,6 +1153,18 @@ BOOL wine_nx_drv_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surfa
     int width  = surface_rect->right - surface_rect->left;
     int height = surface_rect->bottom - surface_rect->top;
 
+    /* win32u hands back the window's surface while it still fits the rect
+     * (create_window_surface, dce.c): keep it, as winex11 does. Made anew it
+     * starts black, and update_window_state (SWP_NOREDRAW) copies only the
+     * window's own pixels into it, never its children's: a .NET configurator,
+     * whose layered form has SetLayeredWindowAttributes call
+     * update_window_state, showed none of its controls until the cursor went
+     * over each. */
+    if (*surface && (*surface)->funcs == &wine_nx_surface_funcs && EqualRect( &(*surface)->rect, surface_rect ))
+    {
+        nxdrv_trace( "[NXDRV] CreateWindowSurface keeps the surface %dx%d", width, height, 0, 0 );
+        return TRUE;
+    }
     if (*surface) window_surface_release( *surface );
     *surface = NULL;
     if (width <= 0 || height <= 0) return TRUE;
