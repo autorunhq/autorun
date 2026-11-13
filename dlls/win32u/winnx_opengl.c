@@ -28,6 +28,7 @@
 #include "wine/opengl_driver.h"
 #include "wine/debug.h"
 #include "../../horizon-wine/source/osk.h"
+#include "winnx_fps.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 
@@ -41,6 +42,9 @@ extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int  wine_nx_osk_translucent( void ) __attribute__((weak));
 extern int  wine_nx_cursor_state( int *x, int *y, int *visible ) __attribute__((weak));
 extern void wine_nx_cursor_bitmap( uint32_t *rgba ) __attribute__((weak));
+/* The program's DXVK HUD setting is on: Autorun draws the frame rate over its
+ * OpenGL frames, which DXVK's HUD never sees (runtime.c, winnx_fps.h). */
+extern int wine_nx_fps_counter __attribute__((weak));
 
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
@@ -225,6 +229,8 @@ struct nx_osk_gl
     GLuint texture, framebuffer;
     GLuint menu_program, menu_array;
     GLuint cursor_texture;
+    GLuint fps_texture;
+    unsigned int fps_shown;  /* the rate the texture holds, plus one; 0 for none */
     BOOL menu_failed;
     int width, height;
     unsigned int generation;
@@ -484,6 +490,61 @@ static void nx_cursor_gl_draw( struct nx_osk_gl *osk, int cx, int cy, EGLint wid
     nx_quad_gl_draw( osk, osk->cursor_texture, draw_x, draw_y, draw_w, draw_h, height );
 }
 
+/* The frame rate over the last half second, from the screen's swaps; all of it
+ * under nx_osk_gl_lock. */
+static unsigned long long nx_fps_since;
+static unsigned int nx_fps_frames, nx_fps_value;
+static BOOL nx_fps_logged;
+
+static void nx_fps_count( void )
+{
+    unsigned long long now = horizon_interrupt_time();
+
+    if (!nx_fps_since) nx_fps_since = now;
+    nx_fps_frames++;
+    if (now - nx_fps_since < 5000000) return;
+    nx_fps_value = (unsigned int)((nx_fps_frames * 10000000ull + (now - nx_fps_since) / 2) / (now - nx_fps_since));
+    nx_fps_frames = 0;
+    nx_fps_since = now;
+}
+
+/* The label in the top-left corner, as tall on the screen whatever the
+ * surface's size (it is 720 lines tall at most); the window's framebuffer is
+ * bound, without scissor or sRGB. */
+static void nx_fps_gl_draw( struct nx_osk_gl *osk, EGLint height )
+{
+    static uint32_t pixels[WINE_NX_FPS_W * WINE_NX_FPS_H];
+    int h = WINE_NX_FPS_H * (int)height / 720, margin = 8 * (int)height / 720;
+
+    if (!osk->fps_texture || !funcs->p_glIsTexture( osk->fps_texture ))
+    {
+        funcs->p_glGenTextures( 1, &osk->fps_texture );
+        funcs->p_glBindTexture( GL_TEXTURE_2D, osk->fps_texture );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+        funcs->p_glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+        funcs->p_glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, WINE_NX_FPS_W, WINE_NX_FPS_H, 0, GL_RGBA,
+                               GL_UNSIGNED_BYTE, NULL );
+        osk->fps_shown = 0;
+    }
+    if (osk->fps_shown != nx_fps_value + 1)
+    {
+        wine_nx_fps_draw( nx_fps_value, pixels );
+        funcs->p_glBindTexture( GL_TEXTURE_2D, osk->fps_texture );
+        funcs->p_glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, WINE_NX_FPS_W, WINE_NX_FPS_H, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, pixels );
+        osk->fps_shown = nx_fps_value + 1;
+    }
+    if (h < 1) h = 1;
+    if (nx_quad_gl_draw( osk, osk->fps_texture, margin, margin, WINE_NX_FPS_W * h / WINE_NX_FPS_H, h, height ) &&
+        !nx_fps_logged)
+    {
+        nx_fps_logged = TRUE;
+        nx_log( "[NXGL] frame rate drawn over the game's OpenGL frames (its DXVK HUD setting)" );
+    }
+}
+
 static void nx_osk_draw( struct opengl_drawable *base )
 {
     struct wine_nx_osk_frame frame;
@@ -496,9 +557,10 @@ static void nx_osk_draw( struct opengl_drawable *base )
     int cursor_x = 0, cursor_y = 0, cursor_visible = 0;
     BOOL cursor_on = !overlay_visible && wine_nx_cursor_state && wine_nx_cursor_bitmap &&
                      wine_nx_cursor_state( &cursor_x, &cursor_y, &cursor_visible ) && cursor_visible;
+    BOOL fps_on = &wine_nx_fps_counter && wine_nx_fps_counter;
     unsigned int i;
 
-    if (!overlay_visible && !cursor_on) return;
+    if (!overlay_visible && !cursor_on && !fps_on) return;
     if (!funcs->p_eglQuerySurface( egl->display, base->surface, EGL_WIDTH, &width ) ||
         !funcs->p_eglQuerySurface( egl->display, base->surface, EGL_HEIGHT, &height ) ||
         !(context = funcs->p_eglGetCurrentContext()))
@@ -509,7 +571,7 @@ static void nx_osk_draw( struct opengl_drawable *base )
         cursor_on = wine_nx_cursor_state && wine_nx_cursor_bitmap &&
                     wine_nx_cursor_state( &cursor_x, &cursor_y, &cursor_visible ) && cursor_visible;
     }
-    if (!overlay_visible && !cursor_on) return;
+    if (!overlay_visible && !cursor_on && !fps_on) return;
 
     pthread_mutex_lock( &nx_osk_gl_lock );
     if (!__atomic_load_n( &p_glBlitFramebuffer, __ATOMIC_ACQUIRE ))
@@ -614,6 +676,21 @@ static void nx_osk_draw( struct opengl_drawable *base )
         nx_cursor_gl_draw( osk, cursor_x, cursor_y, width, height );
         if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
         if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+    }
+    /* Every swap counts; the label stays out of the way of a menu or the
+     * keyboard. */
+    if (fps_on)
+    {
+        nx_fps_count();
+        if (!overlay_visible)
+        {
+            p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+            if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+            if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
+            nx_fps_gl_draw( osk, height );
+            if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+            if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+        }
     }
 
     p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );

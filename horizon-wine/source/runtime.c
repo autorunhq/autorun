@@ -751,6 +751,12 @@ int wine_nx_emulate_modeset = 1;
  * yield-backoff=0 in a program's settings file, turns it off. */
 int wine_nx_yield_backoff = 1;
 
+/* Whether the frame rate is drawn over the program's OpenGL frames
+ * (dlls/win32u/winnx_opengl.c, winnx_fps.h): its DXVK HUD setting is on, and
+ * DXVK's own HUD never sees a game drawn through OpenGL, Wine's Direct3D
+ * among them. For the Wine renderer the launcher calls it FPS counter. */
+int wine_nx_fps_counter;
+
 /* The DXVK payload a program runs with has a ddraw.dll of its own (DXVK-Sarek's
  * D3D7 over D3D9): that one passes DirectDraw on to Wine's, whose wined3d then
  * makes an OpenGL surface for the window before DXVK asks for its Vulkan
@@ -5482,6 +5488,7 @@ int main( int argc, char **argv )
         runtime_d3d = LAUNCHER_D3D_DXVK;
         runtime_dxvk_source = DXVK_SOURCE_OFFICIAL;
         runtime_dxvk_hud = 0;
+        wine_nx_fps_counter = 0;
         runtime_fex_carafe = runtime_fex_carafe_active = 0;
         runtime_fex_version[0] = 0;
 #ifdef WINE_NX_FEX
@@ -5581,6 +5588,7 @@ int main( int argc, char **argv )
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;
             runtime_dxvk_hud = settings.dxvk_hud;
+            wine_nx_fps_counter = settings.dxvk_hud != 0;
             wine_nx_graphics_configure( launcher_frame_limits[settings.frame_limit], settings.vsync );
             wine_nx_upscaling_configure( settings.upscaling, launcher_sharpness_values[settings.upscaling_sharpness] );
 #ifdef WINE_NX_LSFG
@@ -5683,6 +5691,9 @@ int main( int argc, char **argv )
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
     log_line( "[INIT] display mode emulation %s (mode-emulation)%s", wine_nx_emulate_modeset ? "on" : "off",
               wine_nx_emulate_modeset ? "" : ": a program's OpenGL draws to the window's surface itself" );
+    if (wine_nx_fps_counter)
+        log_line( "[INIT] frame rate counter on (DXVK HUD %s): drawn over a game's OpenGL frames, DXVK's "
+                  "HUD over its Vulkan ones", launcher_hud_labels[runtime_dxvk_hud] );
     log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
               wine_nx_yield_backoff ? ": after 2 ms of quick Sleep(0) or SwitchToThread, each sleeps 100 us" : "" );
     log_line( "[TARGET] %s", target );

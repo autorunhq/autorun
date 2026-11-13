@@ -82,7 +82,11 @@ runtime; the full package now ships the Mesa 26 one.
   (800x600 or 640x480 in full screen) are placed and scaled according to
   `wine_nx_picture_mode` / **Picture of another mode** (`whole`, `edges`,
   `stretched`, `own-size`), with pointer coordinates, `GetCursorPos`, and
-  `NtUserClipCursor` mapped consistently between desktop and screen space. The earlier runtime on
+  `NtUserClipCursor` mapped consistently between desktop and screen space. A
+  game's **DXVK HUD** setting (**FPS counter** for the Wine renderer) also
+  shows the frame rate over a game drawn through OpenGL, which DXVK's HUD
+  never sees: `dlls/win32u/winnx_opengl.c` counts the screen's swaps and draws
+  the label of `winnx_fps.h` in the top-left corner. The earlier runtime on
   Mesa 20.1's nouveau driver, patched for pinned 32-bit buffers
   (`horizon-wine/mesa`), can still be built.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.

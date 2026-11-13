@@ -2712,7 +2712,8 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                 ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "DXVK HUD",
                          "FPS shows only the frame rate. Compact shows the DirectX version, FPS and frame times. "
                          "Full also shows the DXVK version, GPU, video memory and shader compiler activity. "
-                         "The DXVK HUD does not cover VKD3D's D3D12 rendering." );
+                         "The DXVK HUD does not cover VKD3D's D3D12 rendering. A game DXVK does not draw, "
+                         "one drawn through OpenGL, gets Autorun's frame rate counter instead." );
                 row->kind = UI_ROW_DROPDOWN;
                 snprintf( row->value, sizeof(row->value), "%s", launcher_hud_labels[p->settings.dxvk_hud] );
                 row->choices = LAUNCHER_HUD_COUNT;
@@ -2722,6 +2723,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                          "Default preserves DXVK's game profile. A local dxvk.conf takes priority." );
                 snprintf( row->value, sizeof(row->value), "Configure" );
                 row->disabled = !dxvk_ready;
+            }
+            else
+            {
+                /* Wine's own Direct3D draws through OpenGL, where DXVK's HUD
+                 * never is: the same setting turns on Autorun's counter. */
+                ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "FPS counter",
+                         "Shows the frame rate in the top-left corner, over the game's OpenGL frames." );
+                row->kind = UI_ROW_SWITCH;
+                row->on = p->settings.dxvk_hud != 0;
+                snprintf( row->value, sizeof(row->value), "%s", row->on ? "Enabled" : "Disabled" );
             }
 
             ADD_ROW( ROW_FRAME_LIMIT, SECTION_GRAPHICS, "Frame rate limit",
@@ -3168,6 +3179,8 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             struct ui_row items[LAUNCHER_FRAME_LIMIT_COUNT] = {0};
 
             if (action == UI_ACTION_RESET) *value = 0;
+            else if (id == ROW_DXVK_HUD && p->settings.d3d == LAUNCHER_D3D_WINE)
+                *value = !*value;  /* the FPS counter's switch */
             else if (action == UI_ACTION_CHOOSE)
             {
                 for (i = 0; i < choices; i++)
