@@ -62,13 +62,17 @@ with compression tags of the GPU's, Zink makes one for every texture, and in
 Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
 back on.
 
-nvc0 on mesa-switch rebuilds its buffer lists at each GPU submission
-(`NOUVEAU_SWITCH_INCREMENTAL_REFS=0`). All OpenGL contexts share the screen's
-pushbuffer. Kept from one submission to the next, a destroyed context's lists
-stayed linked to that pushbuffer after they were freed. The winsys then latched
-"corrupt or oversized bufctx list", no draw validated after it, and Vampire: The
-Masquerade froze. `gl-incremental-refs` in `settings.json` puts mesa-switch's
-default back.
+A known nvc0 problem in mesa-switch, not fixed here: one pushbuffer serves the
+whole GPU screen and every OpenGL context on it. nvc0's state setters
+(`nouveau_bufctx_reset` in `set_framebuffer_state`, `set_vertex_buffers`,
+`set_sampler_views` and others) change a context's buffer lists without the
+screen's state lock, while a submission from another thread rewrites them
+under it. Vampire: The Masquerade - Redemption draws through WineD3D and
+Mesa's glthread. In a few minutes its winsys latches "corrupt or oversized
+bufctx list", after which no draw validates and the game freezes. That happens
+with `NOUVEAU_SWITCH_INCREMENTAL_REFS` on (mesa-switch's default) and off, in
+39- and 32-bit address spaces alike. Such a game runs on nxvk, Zink on NVK,
+which has none of nvc0's winsys.
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup
