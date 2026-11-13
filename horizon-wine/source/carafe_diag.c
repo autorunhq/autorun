@@ -427,6 +427,8 @@ static void reportCoreIdle(void) {
     }
 }
 
+static void reportNativeThreads(void);
+
 void __wrap_wine_nx_thread_report(void) {
     static int ready;
     static Result failed;
@@ -441,8 +443,11 @@ void __wrap_wine_nx_thread_report(void) {
         return;
     }
     reportFrames();
+    /* Always: what each core did, the system's threads included, and the
+     * threads [THREADS] leaves out. Four hops between cores every report. */
+    reportCoreIdle();
+    reportNativeThreads();
     if (measuring()) {
-        reportCoreIdle();
         carafeWaitsEnable();
         carafeWaitsReport();
         carafeFexStatsReport();
@@ -541,7 +546,121 @@ static void noteNativeThread(uintptr_t start, uintptr_t caller) {
     wine_nx_runtime_trace(line);
 }
 
+/* The threads the runtime's own code starts (Mesa's among them: with glthread
+ * the whole OpenGL driver runs on one) are not in the [THREADS] line, which
+ * lists Wine's. Each is noted here as it starts, and [NATIVE-CPU] says what
+ * share of a core each took and where it ran. */
+#define NATIVE_THREADS 96
+
+typedef struct {
+    Handle handle;
+    char name[12];
+    u64 last_ticks;
+} NativeThread;
+
+typedef struct {
+    void* (*start)(void*);
+    void* arg;
+    char name[12];
+} NativeStart;
+
+__thread const char* carafe_native_thread_name;
+static NativeThread g_native_threads[NATIVE_THREADS];
+
+static bool nativeTicks(Handle handle, u64* ticks) {
+    return R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCount, handle, UINT64_MAX)) ||
+        R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCountDeprecated, handle, UINT64_MAX));
+}
+
+static void* nativeMain(void* arg) {
+    NativeStart begin = *(NativeStart*)arg;
+    free(arg);
+    Handle handle = threadGetCurHandle();
+    NativeThread* mine = NULL;
+    for (unsigned int i = 0; i < NATIVE_THREADS && mine == NULL; i++) {
+        Handle expected = 0;
+        if (__atomic_compare_exchange_n(&g_native_threads[i].handle, &expected, UINT32_MAX, false, __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE)) {
+            mine = &g_native_threads[i];
+            memcpy(mine->name, begin.name, sizeof(mine->name));
+            mine->last_ticks = 0;
+            __atomic_store_n(&mine->handle, handle, __ATOMIC_RELEASE);
+        }
+    }
+    void* result = begin.start(begin.arg);
+    if (mine != NULL) {
+        __atomic_store_n(&mine->handle, 0, __ATOMIC_RELEASE);
+    }
+    return result;
+}
+
+static void reportNativeThreads(void) {
+    static u64 last_tick;
+    u64 now = armGetSystemTick();
+    u64 interval = last_tick != 0 ? now - last_tick : 0;
+    char line[512];
+    unsigned int total = 0;
+    unsigned int listed = 0;
+    int used = 0;
+    line[0] = 0;
+    last_tick = now;
+    for (unsigned int i = 0; i < NATIVE_THREADS; i++) {
+        NativeThread* thread = &g_native_threads[i];
+        Handle handle = __atomic_load_n(&thread->handle, __ATOMIC_ACQUIRE);
+        u64 ticks;
+        if (handle == 0 || handle == UINT32_MAX) {
+            continue;
+        }
+        if (!nativeTicks(handle, &ticks)) {
+            /* It ended without returning from its start routine. */
+            __atomic_compare_exchange_n(&thread->handle, &handle, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+            continue;
+        }
+        u64 before = thread->last_ticks;
+        thread->last_ticks = ticks;
+        if (interval == 0 || ticks < before) {
+            continue;
+        }
+        unsigned int permille = (unsigned int)((ticks - before) * 1000 / interval);
+        total += permille;
+        if (permille < 5 || listed >= 12 || (size_t)used + 40 >= sizeof(line)) {
+            continue;
+        }
+        s32 core = -1;
+        u64 mask = 0;
+        if (R_FAILED(svcGetThreadCoreMask(&core, &mask, handle))) {
+            core = -1;
+            mask = 0;
+        }
+        used += snprintf(line + used, sizeof(line) - (size_t)used, " %s@%d/%#x %u.%u%%", thread->name, (int)core,
+            (unsigned int)mask, permille / 10, permille % 10);
+        listed++;
+    }
+    if (interval == 0 || wine_nx_runtime_trace == NULL) {
+        return;
+    }
+    char text[600];
+    snprintf(text, sizeof(text), "[NATIVE-CPU] the runtime's own threads use %u.%02u cores:%s", total / 1000,
+        total % 1000 / 10, line);
+    wine_nx_runtime_trace(text);
+}
+
 int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*start)(void*), void* arg) {
     noteNativeThread((uintptr_t)start, (uintptr_t)__builtin_return_address(0));
-    return __real_pthread_create(thread, attr, start, arg);
+    NativeStart* begin = malloc(sizeof(*begin));
+    if (begin == NULL) {
+        return __real_pthread_create(thread, attr, start, arg);
+    }
+    begin->start = start;
+    begin->arg = arg;
+    if (carafe_native_thread_name != NULL) {
+        snprintf(begin->name, sizeof(begin->name), "%s", carafe_native_thread_name);
+    } else {
+        snprintf(begin->name, sizeof(begin->name), "+%lx", (unsigned long)((uintptr_t)start - runtimeBase()));
+    }
+    int result = __real_pthread_create(thread, attr, nativeMain, begin);
+    if (result != 0) {
+        free(begin);
+    }
+    return result;
 }

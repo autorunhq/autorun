@@ -5,10 +5,15 @@
 bool __real_util_queue_init(void* queue, const char* name, unsigned max_jobs, unsigned num_threads, unsigned flags,
     void* context);
 void wine_nx_runtime_trace(const char* msg) __attribute__((weak));
+extern __thread const char* carafe_native_thread_name;
 
 bool __wrap_util_queue_init(void* queue, const char* name, unsigned max_jobs, unsigned num_threads, unsigned flags,
     void* context) {
+    /* Its threads are started inside: carafe_diag.c names them after the queue
+     * in the [NATIVE-CPU] line. */
+    carafe_native_thread_name = name;
     bool made = __real_util_queue_init(queue, name, max_jobs, num_threads, flags, context);
+    carafe_native_thread_name = NULL;
     if (wine_nx_runtime_trace != NULL) {
         char line[160];
         snprintf(line, sizeof(line), "[NATIVE] Mesa queue %s: %u threads, %u jobs, flags %#x%s",
