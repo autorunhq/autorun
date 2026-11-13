@@ -52,4 +52,19 @@ with tempfile.TemporaryDirectory(prefix='autorun-symbols-') as tmp:
                     '-I', str(root / 'horizon-wine/source'), str(tmp / 't.c'),
                     str(root / 'horizon-wine/source/runtime_symbols.c'), '-o', str(tmp / 't')], check=True)
     subprocess.run([str(tmp / 't'), str(tmp / 'p.sym'), alpha, beta], check=True)
+# The exception handler (dlls/ntdll/unix/horizon.c). A page-table refresh
+# takes the GPU's buffers out for a moment like any heap: a write fault on one
+# is waited out, not handed to the program, where Vampire's thread spun in the
+# dispatcher for good. And a fault in the runtime's own code that does reach
+# the program names the function, the fault and the page.
+horizon = (root / 'dlls/ntdll/unix/horizon.c').read_text()
+transient = horizon[horizon.index('static BOOL horizon_transient_page_fault('):]
+transient = transient[:transient.index('\n}\n')]
+assert '!(info.attr & MemAttr_IsIpcMapped)' in transient and 'MemAttr_IsDeviceMapped))' not in transient
+assert '(fault_status & ~3u) != 0x04' in transient  # translation faults only
+native = horizon[horizon.index('static void horizon_trace_native_program_fault('):]
+native = native[:native.index('\n}\n')]
+assert 'svcQueryMemory( &info, &page_info, ctx->far.x )' in native and 'horizon_trace_native_backtrace( ctx );' in native
+assert re.search(r'horizon_trace_program_fault\( ctx, &rec, data->teb \);\s+horizon_trace_native_program_fault\( ctx \);',
+                 horizon)
 print(f'runtime symbols: {count} functions written; names, offsets, unknown and foreign addresses read back')

@@ -19446,7 +19446,7 @@ static BOOL horizon_redirect_user_shared_data( ThreadExceptionDump *ctx )
  * Resume the instruction once the kernel agrees the page is back. An address
  * that keeps faulting is not a window closing, and still parks the thread.
  */
-static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
+static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx, BOOL *gpu )
 {
     static u64 last_address;
     static unsigned int repeats;
@@ -19455,6 +19455,7 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
     MemoryInfo info;
     u32 page_info;
 
+    *gpu = FALSE;
     if (exception_class != 0x24 && exception_class != 0x25) return FALSE;
     if ((fault_status & ~3u) != 0x04) return FALSE;  /* translation fault, any level */
     if (ctx->esr & (1u << 10)) return FALSE;         /* FnV: FAR means nothing */
@@ -19470,9 +19471,19 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
         if (R_FAILED( svcQueryMemory( &info, &page_info, ctx->far.x ) )) return FALSE;
         /* Only the heap: guest memory faults are Wine's to handle. */
         if (info.type != MemType_Heap) return FALSE;
-        if ((info.perm & needed) == needed &&
-            !(info.attr & (MemAttr_IsIpcMapped | MemAttr_IsDeviceMapped)))
+        /* The GPU's buffers are heap mapped for the device as well, and the
+         * CPU writes them all the time: Mesa's command buffers, its uploads.
+         * The refresh takes out a whole block of the page table, neighbours
+         * included, so a command buffer beside a buffer being marked uncached
+         * faults as plain heap does. Handed to the program, that fault stopped
+         * Vampire: the Masquerade - Redemption in nvc0_2d_texture_set, its
+         * thread spinning in the dispatcher at 100% for good. Only pages an
+         * IPC call has mapped are still left to fault. */
+        if ((info.perm & needed) == needed && !(info.attr & MemAttr_IsIpcMapped))
+        {
+            *gpu = (info.attr & MemAttr_IsDeviceMapped) != 0;
             return TRUE;
+        }
         svcSleepThread( 100000ULL );  /* 0.1 ms; the calls that do this are short */
     }
     return FALSE;
@@ -19585,6 +19596,33 @@ static void horizon_trace_native_backtrace( const ThreadExceptionDump *ctx )
     if (depth) wine_nx_runtime_trace( line );
 }
 
+/* A fault in the runtime's own code handed to the program, Mesa writing a GPU
+ * buffer say, says in the line before it only where in memory: not which
+ * function, what kind of fault, or what the page was then. The first few say
+ * all three, and the calls that led there. */
+static void horizon_trace_native_program_fault( const ThreadExceptionDump *ctx )
+{
+    static unsigned int traced;
+    char where[160], line[360];
+    MemoryInfo info;
+    u32 page_info;
+    int len;
+
+    if (!wine_nx_runtime_symbol) return;
+    wine_nx_runtime_symbol( ctx->pc.x, where, sizeof(where) );
+    if (!where[0]) return;  /* not the runtime's code: the program's, or translated */
+    if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 4) return;
+    len = snprintf( line, sizeof(line), "[EXC] the runtime's own code faulted: esr=%#x dfsc=%#x",
+                    (unsigned)ctx->esr, (unsigned)(ctx->esr & 0x3f) );
+    if (R_SUCCEEDED( svcQueryMemory( &info, &page_info, ctx->far.x ) ))
+        snprintf( line + len, sizeof(line) - len, " region=%#llx/%#llx type=%#x attr=%#x perm=%#x ipc=%u device=%u",
+                  (unsigned long long)info.addr, (unsigned long long)info.size, info.type, info.attr, info.perm,
+                  info.ipc_refcount, info.device_refcount );
+    wine_nx_runtime_trace( line );
+    horizon_trace_native_where( ctx );
+    horizon_trace_native_backtrace( ctx );
+}
+
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -19628,7 +19666,9 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         }
     }
     if (horizon_commit_lazy_fault( ctx->far.x, ctx->esr )) horizon_resume_exception( ctx );
-    if (horizon_transient_page_fault( ctx ))
+    BOOL transient_gpu;
+
+    if (horizon_transient_page_fault( ctx, &transient_gpu ))
     {
         static unsigned int resumed;
         unsigned int count = __atomic_add_fetch( &resumed, 1, __ATOMIC_RELAXED );
@@ -19637,9 +19677,9 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         if (count <= 8 || !(count & (count - 1)))
         {
             snprintf( buf, sizeof(buf),
-                      "[EXC] transient fault at 0x%llx pc=0x%llx kind=%s; the page is back, resumed (%u)",
+                      "[EXC] transient fault at 0x%llx pc=0x%llx kind=%s; the page is back, resumed (%u)%s",
                       (unsigned long long)ctx->far.x, (unsigned long long)ctx->pc.x,
-                      (ctx->esr & 0x40) ? "write" : "read", count );
+                      (ctx->esr & 0x40) ? "write" : "read", count, transient_gpu ? ", a GPU buffer" : "" );
             wine_nx_runtime_trace( buf );
         }
         horizon_resume_exception( ctx );
@@ -19699,6 +19739,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         }
         rec.ExceptionCode = status;
         horizon_trace_program_fault( ctx, &rec, data->teb );
+        horizon_trace_native_program_fault( ctx );
         horizon_exception_context( ctx, &context );
         status = call_user_exception_dispatcher( data, &rec, &context );
         snprintf( buf, sizeof(buf),
