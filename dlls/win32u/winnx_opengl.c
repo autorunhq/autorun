@@ -388,8 +388,9 @@ static GLint nx_quad_gl_clip_origin( void )
 
 static BOOL nx_quad_gl_draw( struct nx_osk_gl *osk, GLuint tex, int x, int y, int w, int h, EGLint height )
 {
-    GLint program, array, active, texture, sampler = 0, viewport[4], clip_origin, clip_depth = 0;
+    GLint program, array, active, texture, sampler = 0, viewport[4];
     GLint src_rgb, dst_rgb, src_alpha, dst_alpha, equation_rgb, equation_alpha;
+    GLint clip_origin, clip_depth = 0;
     GLboolean blend, depth, stencil, cull, discard, mask[4];
 
     if (!nx_menu_gl_prepare( osk )) return FALSE;
