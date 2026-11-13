@@ -110,6 +110,7 @@ config.mkdir()
   "core-balancing": true,
   "display-devices": true,
   "windows-through-opengl": true,
+  "mode-emulation": true,
   "vulkan-probe": false,
   "reopen-the-launcher-on-exit": true,
   "dxvk-for-new-games": true,

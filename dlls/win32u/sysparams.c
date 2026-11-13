@@ -178,6 +178,8 @@ UINT64 thunk_lock_callback = 0;
 extern int wine_nx_display_devices __attribute__((weak));
 /* horizon-wine/source/runtime.c: 0=whole, 1=edges, 2=stretched, 3=own-size */
 extern int wine_nx_picture_mode __attribute__((weak));
+/* horizon-wine/source/runtime.c: 0 when mode-emulation is off for the program */
+extern int wine_nx_emulate_modeset __attribute__((weak));
 #endif
 
 #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
@@ -6265,6 +6267,9 @@ void sysparams_init(void)
         grab_fullscreen = IS_OPTION_TRUE( buffer[0] );
     if (!get_config_key( hkey, appkey, "Decorated", buffer, sizeof(buffer) ))
         decorated_mode = IS_OPTION_TRUE( buffer[0] );
+#ifdef __SWITCH__
+    if (&wine_nx_emulate_modeset) emulate_modeset = !!wine_nx_emulate_modeset;
+#endif
     if (!get_config_key( hkey, appkey, "EmulateModeset", buffer, sizeof(buffer) ))
         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
 

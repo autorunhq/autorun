@@ -160,6 +160,7 @@ the first time a newer build starts.
 | `verbose-log` | false | Wine's traces in the log (`verbose.txt`) |
 | `profiler` | false | Thread, server and sampling reports (`profile.txt`) |
 | `windows-through-opengl` | true | Windows drawn by the compositor, not the framebuffer (`framebuffer.txt`, inverted) |
+| `mode-emulation` | true | win32u emulates a display mode a program asks for: its OpenGL draws into a framebuffer object that an internal context blits to the window. `false` is upstream Autorun's way, the program's OpenGL drawing to the window's surface itself; `mode-emulation=0` in a program's settings file does it for one program |
 | `picture-mode` | `"whole"` | Display scaling for non-native resolutions (`"whole"`, `"edges"`, `"stretched"`, `"own-size"`) |
 | `reopen-the-launcher-on-exit` | false | Start the launcher again when a program ends (`reload-launcher.txt`) |
 | `core-balancing` | true | Move busy threads between cores (`no-balance.txt`, inverted) |

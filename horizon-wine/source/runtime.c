@@ -731,6 +731,19 @@ int wine_nx_display_devices = 1;
  * config/settings.json says the same. */
 int wine_nx_picture_mode = 0;
 
+/* Whether a display mode a program asks for is emulated by win32u: its OpenGL
+ * then draws into a framebuffer object of the mode's size, which an internal
+ * context of win32u's, sharing the program's objects, blits to the window at
+ * every swap (dlls/win32u/opengl.c, framebuffer_surface). Upstream Autorun has
+ * this off on the Switch; this fork has it on, for the picture modes. On
+ * mesa-switch's nvc0 the two contexts share textures and one pushbuffer, and
+ * Vampire: The Masquerade - Redemption, which asks for 640x480, latches
+ * "corrupt or oversized bufctx list" here and not upstream. mode-emulation in
+ * config/settings.json, or mode-emulation=0 in a program's settings file,
+ * turns it off: the program's OpenGL then draws to the window's surface itself,
+ * as upstream's does. Read by sysparams_init. */
+int wine_nx_emulate_modeset = 1;
+
 static const char *picture_mode_text( int mode )
 {
     switch (mode)
@@ -5129,6 +5142,7 @@ int main( int argc, char **argv )
         }
         log_line( "[INIT] a picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
     }
+    wine_nx_emulate_modeset = config_bool( "mode-emulation", 1, "mode-emulation.txt", 0 );
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -5461,6 +5475,11 @@ int main( int argc, char **argv )
             horizon_fast_sync_enabled = settings.fast_sync;
             horizon_server_pool_wanted = settings.server_pool;
             wine_nx_lazy_file_views = settings.lazy_file_views;
+            {
+                int emulation = launcher_setting_state( &kv, "mode-emulation" );
+
+                if (emulation >= 0) wine_nx_emulate_modeset = emulation;
+            }
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
             runtime_fex_carafe = settings.fex_carafe;
@@ -5624,6 +5643,8 @@ int main( int argc, char **argv )
               &carafe_lock_boost_enabled && carafe_lock_boost_enabled ? "on" : "off" );
     __atomic_store_n( &runtime_program_settings_read, 1, __ATOMIC_RELEASE );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
+    log_line( "[INIT] display mode emulation %s (mode-emulation)%s", wine_nx_emulate_modeset ? "on" : "off",
+              wine_nx_emulate_modeset ? "" : ": a program's OpenGL draws to the window's surface itself" );
     log_line( "[TARGET] %s", target );
 
     status = runtime_target_machine( target, &target_machine );
