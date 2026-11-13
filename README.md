@@ -238,6 +238,22 @@ drawing a frame between each two the game draws. It needs Lossless Scaling's
 installation to `switch/wine/lsfg/Lossless.dll`, then turn on **LSFG-VK (2x)** in
 the game's **Frame Generation** options.
 
+### FPSLocker
+
+With SaltyNX and FPSLocker's overlay installed, a game Autorun runs as an
+application (from its forwarder, or from the homebrew menu opened over a game)
+shows its frame rate in FPSLocker, and the limit set there holds the game to
+it, from the next start too once FPSLocker saved it. With FPSLocker's display
+sync on, the screen's refresh rate follows the limit (40 Hz for 40 FPS, for
+example; 30 FPS stays at 60 Hz and shows every frame twice) from the game's
+start, and Autorun puts the screen back to 60 Hz when the game ends. These are
+the builds of
+[SaltyNX](https://github.com/berlint-hub/SaltyNX/tree/arena%2Fe0ad6872-saltynx)
+and [FPSLocker](https://github.com/berlint-hub/FPSLocker/tree/arena%2F369175f0-fpslocker)
+that NetherSX2_nx uses. Started from the album, Autorun is not an application
+and FPSLocker does not follow it. `[FPSLOCKER]` lines in the game's log show
+what Autorun found; `"fpslocker": false` in `config/settings.json` turns it off.
+
 ## Playing
 
 Out of the box the controller works as a mouse and keyboard:

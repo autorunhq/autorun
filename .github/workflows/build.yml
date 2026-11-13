@@ -129,7 +129,8 @@ jobs:
           # runtime's thread placement, which stages 2, 4 and 6 changed.
           for check in check_thread_creation_wait check_horizon_thread_tls check_horizon_fd_owner \
                        check_shader_affinity check_futex_exit check_orchestrator_setting check_server_pool \
-                       check_horizon_suspend check_core_affinity check_yield_backoff check_fps_counter; do
+                       check_horizon_suspend check_core_affinity check_yield_backoff check_fps_counter \
+                       check_fpslocker; do
             python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
               echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error|never true|data race|failed' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
               exit 1

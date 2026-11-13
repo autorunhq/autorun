@@ -56,6 +56,7 @@ static pthread_mutex_t present_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 #ifdef __SWITCH__
 #include "../../horizon-wine/source/osk.h"
+#include "../../horizon-wine/source/fpslocker.h"
 #endif
 
 /* The Upscaling setting a scaled swapchain is made with: 0 bilinear, 1 FSR 1.0
@@ -91,16 +92,29 @@ void wine_nx_upscaling_configure( int mode, float sharpness )
     nx_upscaling_sharpness = sharpness;
 }
 
-static void nx_pace_present( uint64_t *previous )
+/* FPSLocker's target and the panel's rate (saltynx.c). */
+extern int wine_nx_fps_lock_target __attribute__((weak));
+extern int wine_nx_fps_lock_panel __attribute__((weak));
+
+static void nx_pace_present( uint64_t *previous, VkPresentModeKHR mode )
 {
     struct timespec now, delay;
-    uint64_t time, remaining;
+    uint64_t time, remaining, interval = nx_frame_interval;
+    int target = &wine_nx_fps_lock_target ? __atomic_load_n( &wine_nx_fps_lock_target, __ATOMIC_ACQUIRE ) : 0;
+    int panel = &wine_nx_fps_lock_panel ? __atomic_load_n( &wine_nx_fps_lock_panel, __ATOMIC_RELAXED ) : 0;
 
-    if (!nx_frame_interval || clock_gettime( CLOCK_MONOTONIC, &now )) return;
+    /* FPSLocker's target (fpslocker.h): a FIFO swapchain on a panel running
+     * at the target, as display sync puts it, needs nothing more. On a panel at
+     * a multiple of it or at another rate, frames wait for their time here,
+     * unless the frame limit of the game's settings is the lower. */
+    if (target > 0 && 1000000000ull / target > interval &&
+        !(mode == VK_PRESENT_MODE_FIFO_KHR && fpslocker_swap_interval( target, panel ) == 1))
+        interval = 1000000000ull / target;
+    if (!interval || clock_gettime( CLOCK_MONOTONIC, &now )) return;
     time = (uint64_t)now.tv_sec * 1000000000ull + now.tv_nsec;
-    if (*previous && time < *previous + nx_frame_interval)
+    if (*previous && time < *previous + interval)
     {
-        remaining = *previous + nx_frame_interval - time;
+        remaining = *previous + interval - time;
         delay.tv_sec = remaining / 1000000000ull;
         delay.tv_nsec = remaining % 1000000000ull;
         while (nanosleep( &delay, &delay ) && errno == EINTR) {}
@@ -4829,7 +4843,8 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
         VkSwapchainPresentModeInfoKHR *modes;
         VkPresentModeKHR *values;
 
-        nx_pace_present( &swapchain_from_handle( client_swapchains[0] )->nx_last_present );
+        nx_pace_present( &swapchain_from_handle( client_swapchains[0] )->nx_last_present,
+                         swapchain_from_handle( client_swapchains[0] )->nx_present_mode );
         modes = (void *)find_next_struct( (const void *)present_info, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR );
         if (modes)
         {

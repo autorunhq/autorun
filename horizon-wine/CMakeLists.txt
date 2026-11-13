@@ -660,6 +660,7 @@ add_executable(wine-nx-runtime
     source/carafe_fex_stats.c
     source/orchestrator.c
     source/orchestrator_policy.c
+    source/saltynx.c
     ../dlls/winebus.sys/hid.c
     ../dlls/hidparse.sys/main.c
     $<TARGET_OBJECTS:wine-horizon-real>
@@ -808,6 +809,7 @@ set_source_files_properties(source/forwarder.c source/carafe_hid.c
     source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c
     source/carafe_diag.c source/carafe_bench.c source/carafe_waits.c source/carafe_fex_stats.c
     source/carafe_lock_boost.c source/carafe_mesa.c source/orchestrator.c source/orchestrator_policy.c
+    source/saltynx.c
     PROPERTIES COMPILE_OPTIONS "-std=gnu11")
 set_property(SOURCE source/carafe_hid.c ../dlls/winebus.sys/hid.c APPEND PROPERTY
     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/winebus.sys")

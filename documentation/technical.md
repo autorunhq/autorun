@@ -89,6 +89,34 @@ runtime; the full package now ships the Mesa 26 one.
   the label of `winnx_fps.h` in the top-left corner. The earlier runtime on
   Mesa 20.1's nouveau driver, patched for pinned 32-bit buffers
   (`horizon-wine/mesa`), can still be built.
+- **FPSLocker and SaltyNX.** SaltyNX injects no homebrew title, so neither its
+  NX-FPS plugin nor its own per-game code ever sees an Autorun game. The
+  runtime does their part, as NetherSX2_nx does the plugin's
+  (`horizon-wine/source/saltynx.c`, `fpslocker.h`). A thread asks SaltySD's
+  port for its shared memory (command 7) and makes FPSLocker's block in it
+  anew, with the settings FPSLocker saved in
+  `SaltySD/plugins/FPSLocker/<title>.dat`, after clearing what an earlier
+  program left: SaltyNX clears its memory for each game it starts but not for
+  a homebrew title, so one forwarder's target would otherwise be the next
+  one's. Then, ten times a second, it writes the frame rate of the last
+  second, the API (EGL or Vulkan) and the frame count, and reads FPSLocker's
+  target for the console's mode (asked of am each time: libnx's copy is only
+  updated by `appletMainLoop`) and the panel's rate. It never writes
+  FPSLocker's target or display sync bits. With FPSLocker's display sync on
+  for the mode (SaltyNX's `SaltySD/flags/displaysync.flag` and
+  `displaysyncdocked.flag`, read once a second), it asks SaltyNX for the
+  target's refresh rate (command 11) from the game's start and whenever that
+  changes, as SaltyNX does for a game it injected; FPSLocker itself asks only
+  when its target is changed. The present paths keep the target: with the
+  panel at the target or a multiple of it (up to 4x, as 30 on 60 Hz), OpenGL
+  sets that swap interval and a FIFO Vulkan swapchain at 1x waits for nothing
+  more; otherwise each frame waits for its time (`winnx_opengl.c`
+  `nx_fps_lock_frame`, `vulkan.c` `nx_pace_present`). When the program ends,
+  a panel display sync moved off 60 Hz is set back to 60. SaltyNX's 60 Hz
+  while the game is out of focus is not done: the HOME menu suspends the
+  game. It needs Autorun started as an application (a forwarder), since
+  FPSLocker follows only those; `[FPSLOCKER]` lines in the log say what it
+  found. `fpslocker` (below) turns it off.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
 - **Input.** Single-finger and two-finger 40px scroll touchscreen input, docked
   USB mouse (`hidGetMouseStates` with left/right/middle buttons and wheel delta
@@ -178,6 +206,7 @@ the first time a newer build starts.
 | `windows-through-opengl` | true | Windows drawn by the compositor, not the framebuffer (`framebuffer.txt`, inverted) |
 | `mode-emulation` | true | win32u emulates a display mode a program asks for: its OpenGL draws into a framebuffer object that an internal context blits to the window. `false` is upstream Autorun's way, the program's OpenGL drawing to the window's surface itself; `mode-emulation=0` in a program's settings file does it for one program |
 | `yield-backoff` | true | Once a thread has been yielding (`Sleep(0)`, `SwitchToThread`) for 2 ms without a break, each further yield sleeps 100 µs instead of keeping its core busy; shorter waits are never slowed. `false` makes every one a plain yield; `yield-backoff=0` in a program's settings file does it for one program |
+| `fpslocker` | true | A game's frame rate goes to FPSLocker's overlay through SaltyNX's shared memory, FPSLocker's target limits the game's frames, and with its display sync on the panel's refresh rate follows the target. `false` leaves SaltyNX alone; `fpslocker=0` in a program's settings file does it for one program |
 | `picture-mode` | `"whole"` | Display scaling for non-native resolutions (`"whole"`, `"edges"`, `"stretched"`, `"own-size"`) |
 | `reopen-the-launcher-on-exit` | false | Start the launcher again when a program ends (`reload-launcher.txt`) |
 | `core-balancing` | true | Move busy threads between cores (`no-balance.txt`, inverted) |

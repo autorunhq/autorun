@@ -49,6 +49,7 @@
 #include "osk.h"
 #include "std_stream_lines.h"
 #include "thread_profile.h"
+#include "saltynx.h"
 #include "dxvk_releases.h"
 #include "horizon_dlls.h"
 #include "horizon_dll_features.h"
@@ -757,6 +758,12 @@ int wine_nx_yield_backoff = 1;
  * among them. For the Wine renderer the launcher calls it FPS counter. */
 int wine_nx_fps_counter;
 
+/* Whether a program's frame rate goes to FPSLocker and FPSLocker's target and
+ * display sync come back (saltynx.c, fpslocker.h). fpslocker in
+ * config/settings.json, or fpslocker=0 in a program's settings file, turns it
+ * off. */
+int wine_nx_fpslocker = 1;
+
 /* The DXVK payload a program runs with has a ddraw.dll of its own (DXVK-Sarek's
  * D3D7 over D3D9): that one passes DirectDraw on to Wine's, whose wined3d then
  * makes an OpenGL surface for the window before DXVK asks for its Vulkan
@@ -1302,13 +1309,25 @@ static void controls_panel( int show )
     log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
 }
 
+/* Frames shown, however the program draws: the framebuffer's, OpenGL's swaps,
+ * the compositor's and Vulkan's presents. The Tasks panel's rate, and the one
+ * FPSLocker is given (saltynx.c). */
+unsigned int wine_nx_frames_shown( void )
+{
+    extern unsigned int wine_nx_gl_swaps __attribute__((weak));
+    extern unsigned int wine_nx_vk_presents __attribute__((weak));
+
+    return __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
+           (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
+           wine_nx_compositor_frames_fast() +
+           (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
+}
+
 static void tasks_panel_build( const char **title, int *count )
 {
     static struct wine_nx_task tasks[TASKS_ROWS];
     static u64 last_build;
     static unsigned int last_frames, last_mb;
-    extern unsigned int wine_nx_gl_swaps __attribute__((weak));
-    extern unsigned int wine_nx_vk_presents __attribute__((weak));
     extern unsigned long long wine_nx_sd_bytes __attribute__((weak));
     extern unsigned int wine_nx_sd_cache_mb( void );
     extern char *fake_heap_start, *fake_heap_end;
@@ -1316,10 +1335,7 @@ static void tasks_panel_build( const char **title, int *count )
     struct mallinfo heap = mallinfo();
     unsigned long long heap_size = (unsigned long long)(fake_heap_end - fake_heap_start);
     unsigned long long heap_free = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
-    unsigned int frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
-                          (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
-                          wine_nx_compositor_frames_fast() +
-                          (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
+    unsigned int frames = wine_nx_frames_shown();
     unsigned int card = &wine_nx_sd_bytes ? (unsigned int)( __atomic_load_n( &wine_nx_sd_bytes, __ATOMIC_RELAXED ) >> 20 ) : 0;
     unsigned int fps = 0, read = 0, total = 0, n, i;
 
@@ -4230,6 +4246,7 @@ static int leave_cleanly( void )
 {
     int left = memory_left_behind( 0 ), after;
 
+    wine_nx_saltynx_stop();
     wine_nx_runtime_log_flush();
 #ifdef WINE_NX_USB_STORAGE
     /* The USB drives' watcher is a thread, and a thread outlives the program
@@ -5183,6 +5200,7 @@ int main( int argc, char **argv )
     }
     wine_nx_emulate_modeset = config_bool( "mode-emulation", 1, "mode-emulation.txt", 0 );
     wine_nx_yield_backoff = config_bool( "yield-backoff", 1, "yield-backoff.txt", 0 );
+    wine_nx_fpslocker = config_bool( "fpslocker", 1, "fpslocker.txt", 0 );
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -5521,9 +5539,11 @@ int main( int argc, char **argv )
             wine_nx_lazy_file_views = settings.lazy_file_views;
             if (settings.mode_emulation) wine_nx_emulate_modeset = settings.mode_emulation > 0;
             {
+                int fpslocker = launcher_setting_state( &kv, "fpslocker" );
                 int backoff = launcher_setting_state( &kv, "yield-backoff" );
 
                 if (backoff >= 0) wine_nx_yield_backoff = backoff;
+                if (fpslocker >= 0) wine_nx_fpslocker = fpslocker;
             }
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
@@ -5694,9 +5714,12 @@ int main( int argc, char **argv )
     if (wine_nx_fps_counter)
         log_line( "[INIT] frame rate counter on (DXVK HUD %s): drawn over a game's OpenGL frames, DXVK's "
                   "HUD over its Vulkan ones", launcher_hud_labels[runtime_dxvk_hud] );
+    log_line( "[INIT] FPSLocker %s (fpslocker)%s", wine_nx_fpslocker ? "on" : "off",
+              wine_nx_fpslocker ? ": the frame rate goes to it, its target and display sync come back" : "" );
     log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
               wine_nx_yield_backoff ? ": after 2 ms of quick Sleep(0) or SwitchToThread, each sleeps 100 us" : "" );
     log_line( "[TARGET] %s", target );
+    if (wine_nx_fpslocker && !runtime_components_run) wine_nx_saltynx_start();
 
     status = runtime_target_machine( target, &target_machine );
     if (status || (status = horizon_set_process_machine( target_machine )))

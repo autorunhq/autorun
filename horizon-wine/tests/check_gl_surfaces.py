@@ -182,6 +182,9 @@ static void mock_interval(void *display, int value) { intervals++; }
 static int mock_error(void) { return 0; }
 static const char *mock_string(void *display, int name) { return "mock"; }
 static void nx_osk_draw(struct opengl_drawable *base) { overlays++; }
+/* FPSLocker's target (tests/check_fpslocker.py runs the real one). */
+static EGLint nx_swap_interval_set = -1;
+static void nx_fps_lock_frame(struct opengl_drawable *base) { (void)base; }
 #define NX_SCREEN_CLEARS 8
 static BOOL nx_osk_shown;
 static unsigned int nx_screen_clears;

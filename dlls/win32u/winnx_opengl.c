@@ -17,9 +17,11 @@
 
 #ifdef __SWITCH__
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <pthread.h>
 
 #include "ntstatus.h"
@@ -29,6 +31,7 @@
 #include "wine/debug.h"
 #include "../../horizon-wine/source/osk.h"
 #include "winnx_fps.h"
+#include "../../horizon-wine/source/fpslocker.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 
@@ -45,6 +48,9 @@ extern void wine_nx_cursor_bitmap( uint32_t *rgba ) __attribute__((weak));
 /* The program's DXVK HUD setting is on: Autorun draws the frame rate over its
  * OpenGL frames, which DXVK's HUD never sees (runtime.c, winnx_fps.h). */
 extern int wine_nx_fps_counter __attribute__((weak));
+/* FPSLocker's target and the panel's rate (saltynx.c). */
+extern int wine_nx_fps_lock_target __attribute__((weak));
+extern int wine_nx_fps_lock_panel __attribute__((weak));
 
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
@@ -190,12 +196,19 @@ static void nx_drawable_destroy( struct opengl_drawable *base )
     wine_nx_gl_release_window();
 }
 
+/* The swap interval of the screen's surface as last set: the program's, or
+ * the one FPSLocker's target asks for (nx_fps_lock_frame); -1 for a new surface. */
+static EGLint nx_swap_interval_set = -1;
+
 static void nx_drawable_flush( struct opengl_drawable *base, UINT flags )
 {
     TRACE( "drawable %s, flags %#x\n", debugstr_opengl_drawable( base ), flags );
 
     if (impl_from_opengl_drawable( base )->screen && (flags & GL_FLUSH_INTERVAL))
+    {
         funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
+        nx_swap_interval_set = abs( base->interval );
+    }
     if (flags & GL_FLUSH_UPDATED)
     {
         static int told_cx, told_cy, told_mx, told_my;
@@ -728,6 +741,39 @@ static void nx_screen_clear( void )
     p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, draw_fb );
 }
 
+/* FPSLocker's target, before a frame of the screen goes (fpslocker.h): with
+ * the panel at the target or a multiple of it (display sync puts it there),
+ * the swap interval that many refreshes; otherwise the frame waits for its
+ * time. With no target the program's own interval is back (INT_MIN until Wine
+ * first set one: the surface's is left as it is). */
+static uint64_t nx_fps_lock_due;  /* 100 ns */
+
+static void nx_fps_lock_frame( struct opengl_drawable *base )
+{
+    int target = &wine_nx_fps_lock_target ? __atomic_load_n( &wine_nx_fps_lock_target, __ATOMIC_ACQUIRE ) : 0;
+    int panel = &wine_nx_fps_lock_panel ? __atomic_load_n( &wine_nx_fps_lock_panel, __ATOMIC_RELAXED ) : 0;
+    int multiple = fpslocker_swap_interval( target, panel );
+    EGLint interval = multiple ? multiple : base->interval != INT_MIN ? abs( base->interval ) : nx_swap_interval_set;
+    unsigned long long wait;
+
+    if (interval >= 0 && interval != nx_swap_interval_set)
+    {
+        funcs->p_eglSwapInterval( egl->display, interval );
+        nx_swap_interval_set = interval;
+    }
+    if (target <= 0 || multiple)
+    {
+        nx_fps_lock_due = 0;
+        return;
+    }
+    if ((wait = fpslocker_pace( &nx_fps_lock_due, horizon_interrupt_time(), 10000000ull / target )))
+    {
+        struct timespec delay = { wait / 10000000ull, (wait % 10000000ull) * 100 };
+
+        nanosleep( &delay, NULL );
+    }
+}
+
 static BOOL nx_drawable_swap( struct opengl_drawable *base )
 {
     unsigned long long start;
@@ -737,6 +783,7 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
         return funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_store_n( &nx_osk_shown, FALSE, __ATOMIC_RELAXED );
     nx_osk_draw( base );
+    nx_fps_lock_frame( base );
     start = horizon_interrupt_time();
     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
@@ -897,6 +944,7 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
     nx_screen_format = format;
     nx_screen_refs = 1;
     pthread_mutex_unlock( &nx_screen_mutex );
+    nx_swap_interval_set = -1;  /* a new surface: its interval is set again before its first frame */
     if (!previous) nx_screen_first_frame( gl, format );
 
     TRACE( "created drawable %s with EGL surface %p\n", debugstr_opengl_drawable( &gl->base ), gl->base.surface );

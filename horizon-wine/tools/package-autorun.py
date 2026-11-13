@@ -112,6 +112,7 @@ config.mkdir()
   "windows-through-opengl": true,
   "mode-emulation": true,
   "yield-backoff": true,
+  "fpslocker": true,
   "vulkan-probe": false,
   "reopen-the-launcher-on-exit": true,
   "dxvk-for-new-games": true,
