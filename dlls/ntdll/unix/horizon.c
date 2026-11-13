@@ -19609,8 +19609,11 @@ static void horizon_trace_native_program_fault( const ThreadExceptionDump *ctx )
     int len;
 
     if (!wine_nx_runtime_symbol) return;
-    wine_nx_runtime_symbol( ctx->pc.x, where, sizeof(where) );
-    if (!where[0]) return;  /* not the runtime's code: the program's, or translated */
+    /* Only a function of the runtime's: anything else above its base is the
+     * program's, translated code or, in a 32-bit address space, a PE module
+     * the loader put above the runtime (libwow64fex.dll's probes there were
+     * reported as the runtime's own code). */
+    if (!wine_nx_runtime_symbol( ctx->pc.x, where, sizeof(where) )) return;
     if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 4) return;
     len = snprintf( line, sizeof(line), "[EXC] the runtime's own code faulted: esr=%#x dfsc=%#x",
                     (unsigned)ctx->esr, (unsigned)(ctx->esr & 0x3f) );
