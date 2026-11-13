@@ -455,6 +455,17 @@ assert 'if (panel_moved && base[FPSLOCKER_PANEL_RATE] != 60)' in stop
 assert 'saltysd_call( SALTYSD_SET_REFRESH_RATE, 60,' in stop and 'shmemClose( &shared );' in stop
 call = body(bridge, 'static uint64_t saltysd_call(')
 assert call.index('svcSendSyncRequest( session )') < call.index('svcCloseHandle( session );')
+# Vampire's log said "SaltyNX does not answer (0x10801)": the kernel's
+# LimitReached, the process out of sessions. The limit is raised above what is
+# in use, only where the loader hints SetResourceLimitLimitValue, and set back
+# when the program ends.
+assert '#define KERNEL_LIMIT_REACHED 0x10801' in bridge
+assert re.search(r'if \(\*connect == KERNEL_LIMIT_REACHED && more_sessions\(\)\)\s*'
+                 r'\*connect = svcConnectToNamedPort\( &session, SALTYSD_PORT \);', call)
+more = body(bridge, 'static int more_sessions( void )')
+assert more.index('if (!envIsSyscallHinted( 0x7e ))') < more.index('svcSetResourceLimitLimitValue(')
+assert 'used + 8 > limit ? svcSetResourceLimitLimitValue( (Handle)limits, LimitableResource_Sessions, used + 8 ) : 0' in more
+assert stop.count('sessions_back();') == 2
 
 # The runtime: on unless fpslocker says otherwise, for the whole card or one
 # program; started once the program is known, for a game and not for the

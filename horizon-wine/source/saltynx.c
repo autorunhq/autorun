@@ -43,12 +43,14 @@ int wine_nx_fps_lock_panel;
 #define BRIDGE_WINDOW    10           /* periods the frame rate is counted over */
 #define SYNC_FLAG        "sdmc:/SaltySD/flags/displaysync.flag"
 #define SYNC_FLAG_DOCKED "sdmc:/SaltySD/flags/displaysyncdocked.flag"
+#define KERNEL_LIMIT_REACHED 0x10801  /* the kernel's LimitReached (132) */
 
 static pthread_t bridge_thread;
 static int bridge_running, bridge_stop;
 static SharedMemory shared;
 static int shared_mapped;
 static int panel_moved;  /* display sync was on with the panel off 60 Hz */
+static s64 sessions_limit_before;  /* the session limit before more_sessions raised it; 0 when it did not */
 
 static void bridge_trace( const char *format, ... )
 {
@@ -59,6 +61,58 @@ static void bridge_trace( const char *format, ... )
     vsnprintf( line, sizeof(line), format, args );
     va_end( args );
     wine_nx_runtime_trace( line );
+}
+
+/* Room for SaltySD's session. Wine's runtime holds most of the sessions the
+ * application's resource limit allows, and connecting to SaltySD then fails
+ * with LimitReached (0x10801), as NetherSX2_nx's core did. The limit is raised
+ * a little above what is in use, never lowered, and set back when the program
+ * ends. Returns whether it was raised. */
+static int more_sessions( void )
+{
+    static int told;
+    u64 limits = 0;
+    s64 used = 0, limit = 0;
+    Result result;
+
+    /* SetResourceLimitLimitValue (0x7e) only where the loader says the
+     * process may call it: one it may not ends the process. */
+    if (!envIsSyscallHinted( 0x7e ))
+    {
+        if (!told++) bridge_trace( "[FPSLOCKER] sessions: this process may not raise its limit" );
+        return 0;
+    }
+    if (R_FAILED( svcGetInfo( &limits, InfoType_ResourceLimit, INVALID_HANDLE, 0 ) ) || !limits) return 0;
+    if (R_FAILED( svcGetResourceLimitCurrentValue( &used, (Handle)limits, LimitableResource_Sessions ) ) ||
+        R_FAILED( svcGetResourceLimitLimitValue( &limit, (Handle)limits, LimitableResource_Sessions ) ))
+    {
+        svcCloseHandle( (Handle)limits );
+        return 0;
+    }
+    result = used + 8 > limit ? svcSetResourceLimitLimitValue( (Handle)limits, LimitableResource_Sessions, used + 8 ) : 0;
+    svcCloseHandle( (Handle)limits );
+    if (!told++ || R_SUCCEEDED( result ))
+        bridge_trace( "[FPSLOCKER] sessions: %lld of %lld in use; the limit raised to %lld: %s", (long long)used,
+                      (long long)limit, (long long)(used + 8), R_FAILED( result ) ? "refused" : "done" );
+    if (R_FAILED( result ) || used + 8 <= limit) return 0;
+    if (!sessions_limit_before) sessions_limit_before = limit;
+    return 1;
+}
+
+static void sessions_back( void )
+{
+    u64 limits = 0;
+    s64 used = 0;
+
+    if (!sessions_limit_before) return;
+    if (R_SUCCEEDED( svcGetInfo( &limits, InfoType_ResourceLimit, INVALID_HANDLE, 0 ) ) && limits)
+    {
+        if (R_SUCCEEDED( svcGetResourceLimitCurrentValue( &used, (Handle)limits, LimitableResource_Sessions ) ) &&
+            used <= sessions_limit_before)
+            svcSetResourceLimitLimitValue( (Handle)limits, LimitableResource_Sessions, sessions_limit_before );
+        svcCloseHandle( (Handle)limits );
+    }
+    sessions_limit_before = 0;
 }
 
 /* One request to SaltySD on a session of its own, closed at once: its port
@@ -72,6 +126,8 @@ static uint64_t saltysd_call( uint64_t command, uint64_t argument, uint32_t *han
     Handle session;
 
     *connect = svcConnectToNamedPort( &session, SALTYSD_PORT );
+    if (*connect == KERNEL_LIMIT_REACHED && more_sessions())
+        *connect = svcConnectToNamedPort( &session, SALTYSD_PORT );
     if (R_FAILED( *connect )) return ~0ull;
     saltysd_request( buffer, command, argument, 0 );
     if (R_SUCCEEDED( svcSendSyncRequest( session ) )) result = saltysd_reply( buffer, handle, extra, extra_count );
@@ -275,7 +331,11 @@ void wine_nx_saltynx_stop( void )
     pthread_join( bridge_thread, NULL );
     bridge_running = 0;
     __atomic_store_n( &wine_nx_fps_lock_target, 0, __ATOMIC_RELEASE );
-    if (!shared_mapped) return;
+    if (!shared_mapped)
+    {
+        sessions_back();
+        return;
+    }
     if ((base = shmemGetAddr( &shared )))
     {
         if ((block = fpslocker_find_block( base ))) fpslocker_publish( block, 0, 0.0f, 0, wine_nx_frames_shown() );
@@ -291,4 +351,5 @@ void wine_nx_saltynx_stop( void )
     shmemClose( &shared );
     shared_mapped = 0;
     panel_moved = 0;
+    sessions_back();
 }
