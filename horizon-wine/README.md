@@ -62,21 +62,18 @@ with compression tags of the GPU's, Zink makes one for every texture, and in
 Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
 back on.
 
-On mesa-switch no OpenGL context that drew is destroyed while a program runs.
-nvc0 there gives every context of the screen the screen's one pushbuffer. It
-keeps a context's buffer lists linked to that pushbuffer from one submission to
-the next (`NOUVEAU_SWITCH_INCREMENTAL_REFS`, its default). `nvc0_destroy`
-frees them while they are still linked (`nouveau_bufctx_del`), and later
-submissions write through them into whatever the heap gave that memory to.
-The loading screen's first frame on a new OpenGL surface used to be drawn with a
-context of its own, made and destroyed for it. Vampire: The Masquerade -
-Redemption then froze about a minute later on "corrupt or oversized bufctx
-list". That frame is now drawn with the program's own context
-(`dlls/win32u/winnx_opengl.c`, `nx_screen_first_frame`); upstream Autorun has
-no such frame. Turning incremental refs off is no cure. Then every submission
-rewrites every context's lists, which nvc0's state setters change without the
-screen's lock (`nouveau_bufctx_reset` in `set_framebuffer_state`,
-`set_vertex_buffers`, `set_sampler_views`), and the freeze stayed.
+Vampire: The Masquerade - Redemption froze on mesa-switch about a minute in,
+on "corrupt or oversized bufctx list", with display mode emulation on, this
+fork's default. Its 640x480 is then drawn into a framebuffer object, which an
+internal context of win32u's, sharing the game's objects, blits to the window at
+every swap, and nvc0 gives every context of the screen the screen's one
+pushbuffer. With **Display mode emulation** off for the game (`mode-emulation`),
+as upstream Autorun has it, the game draws to the window itself and plays. Two
+earlier guesses did not hold: turning `NOUVEAU_SWITCH_INCREMENTAL_REFS` off,
+and drawing the loading screen's first frame on a new OpenGL surface with the
+program's own context instead of one made and destroyed for it
+(`dlls/win32u/winnx_opengl.c`, `nx_screen_first_frame`). The frame is still
+drawn that way, so no context that drew is destroyed while a program runs.
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup

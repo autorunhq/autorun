@@ -102,10 +102,10 @@ wgl = (root / 'dlls/opengl32/unix_wgl.c').read_text()
 vk = wgl[wgl.index('static BOOL initialize_vk_device( TEB *teb, const struct opengl_context *ctx )'):]
 vk = vk[:vk.index('if (!ctx->extensions[GL_EXT_memory_object_fd] )')]
 assert re.search(r'#ifdef __SWITCH__\n(    /\*.*\n|     \*.*\n)*    return FALSE;\n#endif', vk)
-# mesa-switch frees a destroyed context's buffer lists while the screen's one
-# pushbuffer still has them linked: the loading screen's first frame is drawn
-# with the program's context, and none is made or destroyed for it (Vampire
-# froze on "corrupt or oversized bufctx list" when one was).
+# The loading screen's first frame is drawn with the program's context, and
+# none is made or destroyed for it: every context of the screen shares the
+# screen's one nvc0 pushbuffer on mesa-switch. (Vampire's freeze on "corrupt or
+# oversized bufctx list" was display mode emulation's, not this frame's.)
 winnx = (root / 'dlls/win32u/winnx_opengl.c').read_text()
 first = winnx[winnx.index('static void nx_screen_first_frame('):]
 first = first[:first.index('\n}\n')]

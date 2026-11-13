@@ -757,18 +757,13 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
 
 /* The first frame of a surface that takes the screen while the loading screen
  * or the floating keyboard is up: drawn with the context this thread has
- * current, the program's, and skipped when it has none. It used to be drawn
- * with a context of its own, made, drawn with and destroyed, and on mesa-switch
- * a context that drew must not be destroyed while a program runs. nvc0 gives
- * every context of the screen the screen's one pushbuffer, and keeps a
- * context's buffer lists linked to it from one submission to the next
- * (NOUVEAU_SWITCH_INCREMENTAL_REFS, its default). nvc0_destroy frees them while
- * they are still linked (nouveau_bufctx_del), and the submissions after it
- * write through them into whatever the heap gives that memory to next. Vampire:
- * The Masquerade - Redemption takes the screen with the loading screen up, and
- * froze about a minute later on "corrupt or oversized bufctx list" in every
- * build with this frame. Upstream Autorun has no first frame, so no context
- * that drew is destroyed there while a game runs. This fork's loading screen
+ * current, the program's, and skipped when it has none, so that no context
+ * that drew is made and destroyed for it while a program runs: on mesa-switch
+ * every context of the screen shares the screen's one nvc0 pushbuffer. It used
+ * to be drawn with a context of its own, which was suspected of Vampire: The
+ * Masquerade - Redemption's freeze on "corrupt or oversized bufctx list"; the
+ * freeze stayed without it, and went with display mode emulation off
+ * (runtime.c, wine_nx_emulate_modeset). This fork's loading screen
  * (carafe_loading.c) shows through the floating keyboard, so every program
  * that takes the screen while it is up gets this frame. The program's context
  * is left as it was found: nx_screen_clear and nx_osk_draw put back what they
