@@ -153,6 +153,9 @@ static const struct vulkan_driver_funcs nx_vulkan_driver_funcs =
     .p_map_device_extensions = nx_map_device_extensions,
 };
 
+/* The program has started Vulkan; read by winnx_opengl.c. */
+int wine_nx_vk_served;
+
 UINT wine_nx_drv_VulkanInit( UINT version, void *vulkan_handle, const struct vulkan_driver_funcs **driver_funcs )
 {
     TRACE( "version %u, vulkan_handle %p\n", version, vulkan_handle );
@@ -163,6 +166,7 @@ UINT wine_nx_drv_VulkanInit( UINT version, void *vulkan_handle, const struct vul
         return STATUS_INVALID_PARAMETER;
     }
     *driver_funcs = &nx_vulkan_driver_funcs;
+    __atomic_store_n( &wine_nx_vk_served, 1, __ATOMIC_RELEASE );
     nx_log( "[NXVK] the Switch display driver serves Vulkan (handle %p)", vulkan_handle );
     return STATUS_SUCCESS;
 }

@@ -744,6 +744,15 @@ int wine_nx_picture_mode = 0;
  * as upstream's does. Read by sysparams_init. */
 int wine_nx_emulate_modeset = 1;
 
+/* The DXVK payload a program runs with has a ddraw.dll of its own (DXVK-Sarek's
+ * D3D7 over D3D9): that one passes DirectDraw on to Wine's, whose wined3d then
+ * makes an OpenGL surface for the window before DXVK asks for its Vulkan
+ * surface. The screen has one NWindow, the OpenGL surface took it and
+ * "[NXVK] screen busy; Vulkan surface refused" ended Vampire: The Masquerade -
+ * Redemption at CreateDevice. With this set, and once the program has started
+ * Vulkan, OpenGL surfaces are made offscreen (winnx_opengl.c). */
+int wine_nx_dxvk_wraps_ddraw;
+
 static const char *picture_mode_text( int mode )
 {
     switch (mode)
@@ -2837,6 +2846,17 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
                                          dxvk_dir, sizeof(dxvk_dir) ))
     {
         snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
+        {
+            char wrapper[256];
+            size_t at;
+
+            snprintf( wrapper, sizeof(wrapper), RUNTIME_DIR "/drive_c/%s/ddraw.dll", dxvk_dir );
+            for (at = 0; wrapper[at]; at++) if (wrapper[at] == '\\') wrapper[at] = '/';
+            wine_nx_dxvk_wraps_ddraw = !access( wrapper, F_OK );
+            if (wine_nx_dxvk_wraps_ddraw)
+                log_line( "[DXVK] the payload has its own ddraw.dll: Wine's DirectDraw draws offscreen and leaves "
+                          "the screen to Vulkan" );
+        }
         if (dxvk.version[0])
             log_line( "[DXVK] %s payload C:\\%s (version %s); application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir, dxvk.version );

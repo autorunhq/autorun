@@ -34,6 +34,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 /* The runtime hands the screen's NWindow to one OpenGL surface at a time
  * (horizon-wine/source/runtime.c). */
 extern void *wine_nx_gl_acquire_window( void );
+extern int wine_nx_dxvk_wraps_ddraw __attribute__((weak));  /* runtime.c */
+extern int wine_nx_vk_served __attribute__((weak));         /* winnx_vulkan.c */
 extern void wine_nx_gl_release_window( void );
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int  wine_nx_osk_translucent( void ) __attribute__((weak));
@@ -73,6 +75,16 @@ static void nx_client_surface_update( struct client_surface *client )
     size = (SIZE){ max( 1, rect->right - rect->left ), max( 1, rect->bottom - rect->top ) };
     offscreen = !(get_window_long( client->hwnd, GWL_STYLE ) & WS_VISIBLE);
     if (!offscreen && client->hwnd != client->toplevel) offscreen = !is_window_visible( client->hwnd );
+    /* DXVK's own ddraw.dll over Wine's: the screen is for its Vulkan surface. */
+    if (!offscreen && &wine_nx_dxvk_wraps_ddraw && wine_nx_dxvk_wraps_ddraw &&
+        &wine_nx_vk_served && __atomic_load_n( &wine_nx_vk_served, __ATOMIC_ACQUIRE ))
+    {
+        static LONG logged;
+
+        offscreen = TRUE;
+        if (!InterlockedExchange( &logged, 1 ) && &wine_nx_runtime_trace)
+            wine_nx_runtime_trace( "[NXGL] an OpenGL surface stays offscreen: the screen is left to DXVK's Vulkan surface" );
+    }
     changed = InterlockedExchange( &client->offscreen, offscreen ) != offscreen;
 
     if (changed || (offscreen && (size.cx != surface->size.cx || size.cy != surface->size.cy)))
