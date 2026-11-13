@@ -2660,6 +2660,9 @@ static const char runtime_environment[] =
     "USERPROFILE=C:\\users\\steamuser\0"
     "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
     "windir=C:\\windows\0"
+    /* Wine's data directory, the card's share/wine (WINE_NX_RUNTIME_DOS_ROOT):
+     * mscoree looks for Wine Mono in its mono/wine-mono-<version>. */
+    "WINEDATADIR=\\??\\Z:\\switch\\wine\\share\\wine\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0"
     "WINE_NX_GRAPHICS_PATH=\0"
     "WINE_NX_WINDOW_PICTURE_EVENT=\0";

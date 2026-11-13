@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Wine Mono on the card (dlls/ntdll/unix/env.c, horizon-wine/source/runtime.c):
-the card has no dosdevices links, so the data directory had no DOS name and
-WINEDATADIR was never set; mscoree then looked for Wine Mono only in
-C:\\windows\\mono\\mono-2.0. The runtime now gives WINEDATADIR its name on the
-card, and logs where it finds Wine Mono, by the version mscoree asks for."""
+"""Wine Mono on the card (horizon-wine/source/runtime.c): a program's
+environment, which the runtime builds itself, had no WINEDATADIR, so mscoree
+looked for Wine Mono only in C:\\windows\\mono\\mono-2.0. It now has the card's
+share/wine there, and the runtime logs where it finds Wine Mono, by the
+version mscoree asks for."""
 from pathlib import Path
 import re
 
@@ -17,22 +17,22 @@ assert 'static const WCHAR basedir[] = L"\\\\wine-mono-" WINE_MONO_VERSION;' in 
 assert 'static const WCHAR libmono2_arch_dll[] = L"\\\\bin\\\\libmono-2.0-x86.dll";' in metahost
 version = re.search(r'#define WINE_MONO_VERSION "([^"]+)"', (root / 'dlls/mscoree/mscoree_private.h').read_text()).group(1)
 
-# WINEDATADIR on the card: Z:, as nt_to_unix_file_name maps it, when the unix
-# name found no drive.
-env = (root / 'dlls/ntdll/unix/env.c').read_text()
-dynamic = env[env.index('static void add_dynamic_environment('):]
-dynamic = dynamic[:dynamic.index('\n}\n')]
-assert dynamic.index('if (data_dir) unix_to_nt_file_name( data_dir, &nt_data_dir, FILE_OPEN );') < \
-    dynamic.index('if (data_dir && !nt_data_dir)') < dynamic.index('append_envW( env, pos, size, "WINEDATADIR", nt_data_dir );')
-assert 'static const char dos_data_dir[] = WINE_NX_RUNTIME_DOS_ROOT "\\\\share\\\\wine";' in dynamic
+# WINEDATADIR on the card: the runtime builds a program's environment itself
+# (runtime_environment), not through ntdll's add_dynamic_environment, so it is
+# there, the card's share/wine as Z: names it, where ntdll's data_dir is.
+runtime = (root / 'horizon-wine/source/runtime.c').read_text()
+block = runtime[runtime.index('static const char runtime_environment[] ='):]
+block = block[:block.index(';\n')]
+assert '"WINEDATADIR=\\\\??\\\\Z:\\\\switch\\\\wine\\\\share\\\\wine\\0"' in block, block
+assert block.index('"windir=') < block.index('"WINEDATADIR=') < block.index('"WINE_D3D_CONFIG=')
 paths = (root / 'dlls/ntdll/unix/horizon_runtime_paths.h').read_text()
 assert '#define WINE_NX_RUNTIME_DOS_ROOT "\\\\??\\\\Z:\\\\switch\\\\wine"' in paths
 assert '#define WINE_NX_SHARED_ROOT "sdmc:/switch/wine"' in paths
 loader = (root / 'dlls/ntdll/unix/loader.c').read_text()
 assert 'data_dir = WINE_NX_RUNTIME_ROOT "/share/wine";' in loader
+assert 'chars += sizeof(runtime_environment)' in runtime
 
 # The runtime's log: the version mscoree asks for, both places, in its order.
-runtime = (root / 'horizon-wine/source/runtime.c').read_text()
 assert f'#define RUNTIME_WINE_MONO_VERSION "{version}"' in runtime, version
 mono = runtime[runtime.index('static void log_wine_mono( void )'):]
 mono = mono[:mono.index('\n}\n')]
