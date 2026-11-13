@@ -35,9 +35,49 @@ heap = hbl[hbl.index('static u64 calculateMaxHeapSize(void)'):]
 heap = heap[:heap.index('\n}\n')]
 assert 'InfoType_HeapRegionSize' in heap and 'size = region & ~0x1FFFFFull;' in heap
 assert heap.index('size -= 0x6000000;') < heap.index('InfoType_HeapRegionSize')
+# In a 32-bit address space the loader keeps the NRO as high as it finds room,
+# out of the way of images linked at low fixed bases.
+place = hbl[hbl.index('void* map_addr = virtmemFindCodeMemory(total_size, 0);'):]
+place = place[:place.index('rc = svcMapProcessCodeMemory(')]
+assert 'aslr_base + aslr_size <= 0x100000000ull' in place
+assert 'if ((uintptr_t)other > (uintptr_t)map_addr)' in place
+# Wine there: the kernel's heap (or alias) region always covers 0x7ffe0000, so
+# the shared user data goes where Wine can map a page, below 2 GB if it can;
+# ntdll exports it to the PE side, and the program's own reads of 0x7ffe0000
+# fault into the redirect once the heap page there is out of the runtime's heap
+# and inaccessible, until the program ends. Thread data, which goes above 4 GB,
+# takes the top of what there is, as native stacks already did. An update of
+# Wine had lost all this, and a 32-bit forwarder's game stopped at "failed to
+# map the shared user data: c0000018".
+wine = (root.parent / 'dlls/ntdll/unix/virtual.c').read_text()
+first = wine[wine.index('struct thread_data *virtual_alloc_first_thread_data(void)'):]
+first = first[:first.index('\n}\n')]
+assert 'if (status == (unsigned int)STATUS_CONFLICTING_ADDRESSES) status = relocate_user_shared_data( &view );' in first
+assert 'thread_data_limit_low( &alloc_type )' in first
+relocate = wine[wine.index('static NTSTATUS relocate_user_shared_data('):]
+relocate = relocate[:relocate.index('\n}\n')]
+assert 'limit_2g - 1' in relocate and 'limit_4g - 1' in relocate
+assert relocate.index('user_shared_data = (*view)->base;') < relocate.index('horizon_hide_user_shared_data_address(')
+limit = wine[wine.index('static ULONG_PTR thread_data_limit_low('):]
+limit = limit[:limit.index('\n}\n')]
+assert 'if ((void *)limit_4g < host_addr_space_limit) return limit_4g;' in limit and 'MEM_TOP_DOWN' in limit
+data = wine[wine.index('struct thread_data *virtual_alloc_thread_data(void)'):]
+data = data[:data.index('\n}\n')]
+assert 'thread_data_limit_low( &alloc_type )' in data
+horizon = (root.parent / 'dlls/ntdll/unix/horizon.c').read_text()
+hide = horizon[horizon.index('const char *horizon_hide_user_shared_data_address( ULONG_PTR address )'):]
+hide = hide[:hide.index('\n}\n')]
+assert hide.index('wine_nx_native_heap_keep_out_leaving( address, granule, small_room )') < \
+    hide.index('svcSetMemoryPermission( (void *)address, granule, Perm_None )')
+assert 'if (horizon_redirect_user_shared_data( ctx )) horizon_resume_exception( ctx );' in horizon
+for name in ('wine_nx_user_shared_data',):
+    assert name in (root.parent / 'dlls/ntdll/ntdll.spec').read_text()
 # And the runtime takes the game it names, --library-game=ID, as a forwarded one.
 runtime = (root / 'source/runtime.c').read_text()
 assert 'if (!forwarded_game) forwarded_game = runtime_command_line_game( argc, argv, target, sizeof(target) );' in runtime
+back = runtime[runtime.index('static int return_to_launcher( void )'):]
+back = back[:back.index('\n}\n')]
+assert back.index('horizon_restore_user_shared_data_address();') < back.index('release_lent_memory();')
 command_line = runtime[runtime.index('static int runtime_command_line_game('):]
 command_line = command_line[:command_line.index('\n}\n')]
 assert 'WINE_NX_FORWARDER_GAME_ARG' in command_line and 'return runtime_library_game( id, target, size );' in command_line

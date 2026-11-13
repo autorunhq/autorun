@@ -713,7 +713,7 @@ fork has it in its own form, which the last column names.
 | 0002 | horizon fd owner | 37 | 97 % | owner matching was in the fork; the two report lines taken (stage 2) |
 | 0003 | horizon alias region | 31 | 90 % | in the fork; upstream renamed the log tag to [HMAP] and guards the overflow |
 | 0004 | sync alert diagnostics | 54 | 100 % | taken (stage 2) |
-| 0006 | virtual 32bit address space | 23 | 13 % | deferred: the fork's launcher and its own forwarders are 39-bit with the low window; only a third-party 32-bit forwarder would need it, and its PE half needs rebuilt DLLs (stage 5) |
+| 0006 | virtual 32bit address space | 23 | 43 % | in the fork's own form, for a game's 32-bit forwarder (`forwarder.c`): `relocate_user_shared_data` tries below 2 GB first, and the heap page at 0x7ffe0000 is taken out of the runtime's heap and made inaccessible (`horizon_hide_user_shared_data_address`), so the PE side's direct reads of it fault into horizon.c's redirect whether or not its DLLs read `wine_nx_user_shared_data`; `thread_data_limit_low` as the patch's |
 | 0007 | low window 32bit guest range | 10 | 100 % | in the fork |
 | 0008 | runtime screen until first frame | 29 | 96 % | in the fork; the notice before the program starts has one more condition (`wine_nx_watch_window_pictures`) |
 | 0009 | winnx vulkan reserve screen | 2 | 100 % | in the fork |

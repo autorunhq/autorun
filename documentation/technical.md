@@ -107,7 +107,14 @@ runtime; the full package now ships the Mesa 26 one.
   `--library-game=ID` (`source/forwarder.c`, `runtime_command_line_game`). Its
   title id hashes the address space in, so it sits beside the game's 39-bit
   forwarder, and the low-window patch never applies to it. The launcher started
-  there runs 32-bit games only. AMD64 programs use the main 39-bit application
+  there runs 32-bit games only. In that address space the kernel's heap region
+  always covers 0x7ffe0000, and nothing lies above 4 GiB. KUSER_SHARED_DATA
+  moves to a free page below 2 GiB, which ntdll exports to the PE side
+  (`wine_nx_user_shared_data`). The heap page at 0x7ffe0000 is taken out of the
+  runtime's heap and made inaccessible, so a program's own reads of it fault and
+  are served from the real page. Thread data takes the top of the space
+  (`dlls/ntdll/unix/virtual.c`), and the loader puts the NRO as high as it
+  fits. AMD64 programs use the main 39-bit application
   forwarder. The same NRO selects the execution path from the program's PE
   header.
   Wine reserves the program's low address space early, keeps its allocations

@@ -19962,6 +19962,62 @@ static BOOL horizon_overlaps_kernel_region( void *addr, size_t size )
     return FALSE;
 }
 
+/* The heap page at the shared user data's Windows address, when the page itself
+ * had to go elsewhere (virtual.c, relocate_user_shared_data): in a 32-bit
+ * address space the kernel's heap region covers 0x7ffe0000, and what is there
+ * is plain heap, read-write. A program reading 0x7ffe0000 would read whatever
+ * the runtime keeps there. Taken out of the runtime's heap first, so nothing
+ * of the runtime's is or will be there, then made inaccessible: the program's
+ * reads fault and are served from the real page, and its writes are access
+ * violations, as on Windows. The 64 KB granule goes whole, as the heap hands
+ * out no less and Windows maps nothing else in it. Newlib's heap, which serves
+ * the runtime's small allocations, cannot grow past it, so it is taken only
+ * where that leaves newlib's heap 256 MB: the heap region is placed at random,
+ * and some layouts put 0x7ffe0000 just above the runtime's code. There the
+ * program's own reads of it, which are rare (ntdll, kernel32, kernelbase and
+ * win32u go through the pointer), read the heap. */
+extern int wine_nx_native_heap_keep_out_leaving( uintptr_t address, size_t size, size_t small_room )
+    __attribute__((weak));
+static ULONG_PTR horizon_hidden_user_shared_data;
+
+const char *horizon_hide_user_shared_data_address( ULONG_PTR address )
+{
+    const size_t granule = 0x10000, small_room = (size_t)256 * 1024 * 1024;
+    MemoryInfo info;
+    u32 page_info;
+    int kept;
+
+    if (address & (granule - 1)) return "are not handled: the address is not a granule's";
+    if (R_FAILED( svcQueryMemory( &info, &page_info, address ) ))
+        return "are not handled: the kernel would not say what is there";
+    if ((info.type & 0xff) == MemType_Unmapped || !(info.perm & Perm_R))
+        return "fault and are served from there, as nothing there can be read";
+    if ((info.type & 0xff) != MemType_Heap || info.perm != Perm_Rw || info.attr ||
+        info.addr + info.size < address + granule)
+        return "read what is there: it is not plain heap";
+    if (!&wine_nx_native_heap_keep_out_leaving) return "read the heap there: no runtime heap to take it out of";
+    if ((kept = wine_nx_native_heap_keep_out_leaving( address, granule, small_room )) <= 0)
+        return kept == -2 ? "read the heap there: taking it would leave the runtime's small allocations too little"
+             : kept < 0 ? "read the heap there: the runtime's heap already uses it"
+                        : "read the heap there: it is outside the runtime's heap";
+    if (R_FAILED( svcSetMemoryPermission( (void *)address, granule, Perm_None ) ))
+        return "read nothing of the runtime's there, but do not fault: the kernel would not protect it";
+    horizon_hidden_user_shared_data = address;
+    return NULL;
+}
+
+/* At the program's end: the loader starts the next program in this process,
+ * with the heap whole again, and a page left inaccessible in it would fault
+ * in whatever that program put there. */
+void horizon_restore_user_shared_data_address( void )
+{
+    ULONG_PTR address = horizon_hidden_user_shared_data;
+
+    if (!address) return;
+    if (R_SUCCEEDED( svcSetMemoryPermission( (void *)address, 0x10000, Perm_Rw ) ))
+        horizon_hidden_user_shared_data = 0;
+}
+
 void horizon_log_low_address_space( void )
 {
     unsigned long long type_mb[32] = {0}, gaps[6] = {0}, gap_addr[6] = {0}, addr = 0;

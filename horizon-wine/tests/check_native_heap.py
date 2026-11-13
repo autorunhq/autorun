@@ -207,7 +207,15 @@ static void keep_out_tests(void)
     assert(heap.blocks && !heap.used && heap.bottom == heap.count);
     assert(wine_nx_native_heap_keep_out(0, 4096) == 0);
     assert(wine_nx_native_heap_keep_out(hole, 0) == 0);
-    assert(wine_nx_native_heap_keep_out(hole, 0x24000) == 1);
+    /* A page wanted where it is (the shared user data's Windows address) is
+     * taken only where newlib's heap, which then stops below it, keeps room:
+     * not with a byte too little, and then nothing is taken. */
+    {
+        size_t room = low - heap_break;
+        assert(wine_nx_native_heap_keep_out_leaving(hole, 0x24000, room + 1) == -2);
+        assert(!heap.used && heap.bottom == heap.count && !heap.holes);
+        assert(wine_nx_native_heap_keep_out_leaving(hole, 0x24000, room) == 1);
+    }
     assert(heap.used == 3 * unit && heap.base + (size_t)heap.bottom * unit == low && heap.holes == 1);
     assert(!owns_pointer((void *)(low - 1)) && owns_pointer((void *)low));
     /* What is above it is still given out, and nothing lands on it. */
@@ -280,7 +288,7 @@ int main(void)
 #endif
     keep_out_tests();
     pthread_mutex_destroy(&mutex);
-    puts("native heap: concurrent allocation, resize, free, break, scan-free budget and kept-out page tests passed");
+    puts("native heap: concurrent allocation, resize, free, break, scan-free budget, kept-out page and room-keeping tests passed");
 }
 '''
 cache_flags = []

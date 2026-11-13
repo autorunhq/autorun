@@ -172,9 +172,26 @@ retry:
  * the aligned heap gives out blocks, -1 when newlib's heap or a block given out
  * already covers them. Newlib's heap then stops below them, as it stops below
  * every aligned block. */
+static int keep_out( uintptr_t address, size_t size, size_t small_room );
+
 int wine_nx_native_heap_keep_out( uintptr_t address, size_t size )
 {
-    uintptr_t low, high, top;
+    return keep_out( address, size, 0 );
+}
+
+/* The same, for a page wanted where it is (the shared user data's Windows
+ * address in a 32-bit address space), only when newlib's heap, which then stops
+ * below it, keeps small_room bytes to grow in: -2 when it would not, and
+ * nothing is taken. Newlib's heap has no way round a page in its way, and the
+ * runtime's small allocations would run out instead. */
+int wine_nx_native_heap_keep_out_leaving( uintptr_t address, size_t size, size_t small_room )
+{
+    return keep_out( address, size, small_room );
+}
+
+static int keep_out( uintptr_t address, size_t size, size_t small_room )
+{
+    uintptr_t low, high, top, floor;
     uint32_t first, end, at, length;
     int result = 0;
 
@@ -195,7 +212,9 @@ int wine_nx_native_heap_keep_out( uintptr_t address, size_t size )
         {
             /* Below every block so far: the aligned heap reaches down over them
              * now, unless newlib's heap already has. */
-            if (low >= (uintptr_t)__real__sbrk_r( _REENT, 0 ))
+            floor = (uintptr_t)__real__sbrk_r( _REENT, 0 );
+            if (low >= floor && low - floor < small_room) result = -2;
+            else if (low >= floor)
             {
                 if (end < heap.bottom) backing_insert( &heap, end, heap.bottom - end );
                 heap.bottom = first;

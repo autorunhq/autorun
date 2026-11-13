@@ -45,6 +45,12 @@ extern unsigned long long horizon_next_thread_local_page( unsigned long long add
 extern unsigned int horizon_drop_thread_local_pages( unsigned int *found );
 extern void *wine_nx_arm64ec_dispatch_ret;
 extern int horizon_get_kernel_regions( void **starts, size_t *sizes, int max );
+/* When the shared user data cannot be at its Windows address: the heap page
+ * there is taken out of the runtime's heap and made inaccessible, so reads of
+ * it fault into horizon_redirect_user_shared_data. NULL when it was, or why
+ * not; given back by horizon_restore_user_shared_data_address. */
+extern const char *horizon_hide_user_shared_data_address( ULONG_PTR address );
+extern void horizon_restore_user_shared_data_address( void );
 /* Logs the kernel's view of the low 4 GB once: megabytes per memory type and the largest free ranges. */
 extern void horizon_log_low_address_space( void );
 extern BOOL horizon_get_stack_region( void **start, void **limit );

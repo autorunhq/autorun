@@ -4678,6 +4678,15 @@ static int return_to_launcher( void )
             log_line( "[QUIT] %u code mappings given back, %u refused", released, failed );
         }
     }
+    {
+        /* dlls/ntdll/unix/horizon.c: in a 32-bit address space the heap page
+         * at 0x7ffe0000 was made inaccessible for the program, which read its
+         * shared user data there. The next program the loader starts in this
+         * process gets the heap whole again. */
+        extern void horizon_restore_user_shared_data_address( void ) __attribute__((weak));
+
+        if (&horizon_restore_user_shared_data_address) horizon_restore_user_shared_data_address();
+    }
     /* Name whatever is left: at this point there should be nothing but the
      * pages the loader itself lent out before this program started. */
     release_lent_memory();

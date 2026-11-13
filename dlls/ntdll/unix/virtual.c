@@ -5035,6 +5035,48 @@ static void set_large_address_space(void)
 }
 
 
+#ifdef __SWITCH__
+/* In a 32-bit address space (a game's 32-bit forwarder) the kernel puts its
+ * heap region, or its alias region, over 0x7ffe0000 in every layout it picks,
+ * and nothing can be mapped there: Wine stopped with "failed to map the shared
+ * user data: c0000018". The page goes where Wine can map one, below 2 GB if it
+ * can, and user_shared_data says where: ntdll exports it to the PE ntdlls and
+ * kernelbase (wine_nx_user_shared_data), win32u reads it, and a program's own
+ * reads of 0x7ffe0000 fault and are served from it (horizon.c,
+ * horizon_redirect_user_shared_data) once the heap page at 0x7ffe0000 is taken
+ * out of the runtime's heap and made inaccessible. */
+static NTSTATUS relocate_user_shared_data( struct file_view **view )
+{
+    const unsigned int vprot = VPROT_WRITE | VPROT_READ | VPROT_COMMITTED;
+    void *windows = user_shared_data;
+    const char *hidden;
+    NTSTATUS status;
+    char msg[256];
+
+    if ((status = map_view( view, NULL, page_size, MEM_TOP_DOWN, vprot, 0, limit_2g - 1, 0 )) &&
+        (status = map_view( view, NULL, page_size, MEM_TOP_DOWN, vprot, 0, limit_4g - 1, 0 )))
+        return status;
+    user_shared_data = (*view)->base;
+    hidden = horizon_hide_user_shared_data_address( (ULONG_PTR)windows );
+    snprintf( msg, sizeof(msg), "[USD] %p cannot be mapped in this address space: the shared user data is at %p; "
+              "a program's own reads of %p %s", windows, user_shared_data, windows,
+              hidden ? hidden : "fault and are served from there" );
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( msg );
+    return STATUS_SUCCESS;
+}
+
+/* Thread data goes above 4 GB, out of a WoW64 guest's way, as native stacks do
+ * (virtual_alloc_thread_stack). A 32-bit address space has nothing there, and
+ * asking for it failed the first thread: the top of what there is instead, as
+ * far from the guest as it goes. */
+static ULONG_PTR thread_data_limit_low( unsigned int *alloc_type )
+{
+    if ((void *)limit_4g < host_addr_space_limit) return limit_4g;
+    *alloc_type |= MEM_TOP_DOWN;
+    return 0;
+}
+#endif
+
 /***********************************************************************
  *           virtual_alloc_first_thread_data
  */
@@ -5054,14 +5096,27 @@ struct thread_data *virtual_alloc_first_thread_data(void)
                        VPROT_WRITE |
 #endif
                        VPROT_READ | VPROT_COMMITTED, 0, 0, 0 );
+#ifdef __SWITCH__
+    if (status == (unsigned int)STATUS_CONFLICTING_ADDRESSES) status = relocate_user_shared_data( &view );
+#endif
     if (status)
     {
         ERR( "wine: failed to map the shared user data: %08x\n", status );
         exit(1);
     }
 
+#ifdef __SWITCH__
+    {
+        unsigned int alloc_type = MEM_TOP_DOWN;
+        ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+
+        status = map_view( &view, NULL, size, alloc_type,
+                           VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_low, 0, 0 );
+    }
+#else
     status = map_view( &view, NULL, size, MEM_TOP_DOWN,
                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+#endif
     if (status)
     {
         ERR( "wine: failed to allocate initial thread data: %08x\n", status );
@@ -5211,7 +5266,17 @@ struct thread_data *virtual_alloc_thread_data(void)
 #endif
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+#ifdef __SWITCH__
+    {
+        unsigned int alloc_type = 0;
+        ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+
+        status = map_view( &view, NULL, size, alloc_type, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED,
+                           limit_low, 0, 0 );
+    }
+#else
     status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+#endif
     if (!status)
     {
 #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)

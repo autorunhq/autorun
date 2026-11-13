@@ -26,5 +26,8 @@ void wine_nx_native_heap_stats( struct wine_nx_native_heap_stats *stats );
  * 1 when it did, 0 when they are not where it gives out large blocks, -1 when
  * part of them is given out already. */
 int wine_nx_native_heap_keep_out( uintptr_t address, size_t size );
+/* The same, only when newlib's heap, which stops below what is taken out, still
+ * has small_room bytes to grow in below it; -2, taking nothing, when not. */
+int wine_nx_native_heap_keep_out_leaving( uintptr_t address, size_t size, size_t small_room );
 
 #endif
