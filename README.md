@@ -159,11 +159,35 @@ The touchscreen works everywhere too.
 - pick how its graphics are drawn (Wine's Direct3D or DXVK), how a picture
   smaller than the screen is enlarged (FSR 1.0, or whole-pixel steps for pixel
   art), and **Frame Generation**;
-- pick the CPU translator (FEX or Box64), and give it its own controls.
+- pick the CPU translator (FEX or Box64), and give it its own controls;
+- **Run another program** from the game's folder, such as its configuration
+  tool or its setup (see below);
+- **Edit a text file** of the game's, such as an `.ini` or a `.cfg` (see below).
 
 **Settings (−)**: show hidden games, the controls every game uses by default,
 a [SteamGridDB](https://www.steamgriddb.com) API key for artwork, returning to
 Autorun when a game ends, updates, the Windows DLLs, and the credits.
+
+### A game's other programs and its text files
+
+Many games keep a configuration tool beside their `.exe`, where the resolution
+and other settings their own menu lacks are, and keep those settings in text
+files. Two rows under **General** in a game's options open the game's folder:
+
+- **Run another program** lists its programs (and folders, and **Up one
+  folder** for one beside it). The one you choose starts at once with its own
+  settings and stays out of the library, as **+ -> Run a program once** does;
+  the game's own entry is unchanged. A .NET configurator needs Wine Mono (see
+  below).
+- **Edit a text file** lists its `.ini`, `.cfg`, `.txt`, `.xml`, `.json` and
+  other text files. A file opens one line to a row, and a setting of an `.ini`
+  shows its name and its value. **A** changes the value, or the whole of any
+  other line, with the keyboard; **Y** changes the whole line, adds a line
+  above or below, or removes it. **B** leaves, and asks whether to save what
+  changed. The file is written back as it was, in its encoding (UTF-8,
+  UTF-16, or the Windows code page) and with its line ends, but for the lines
+  you changed, and only once it has been written whole beside the old one.
+  A line longer than the keyboard's 500 characters cannot be changed here.
 
 ### Carafe's builds of DXVK and FEX
 

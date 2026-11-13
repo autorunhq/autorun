@@ -14,6 +14,7 @@
  * Icons are read and decoded on a worker thread and shown as they arrive.
  * When SDL cannot start, the text menu of launcher_console.c is shown instead.
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <math.h>
@@ -52,6 +53,7 @@
 #include "launcher_graphics.h"
 #include "launcher_dxvk.h"
 #include "launcher_game_settings.h"
+#include "launcher_text_edit.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
@@ -1810,10 +1812,15 @@ enum program_row
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LARGE_ADDRESS, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
-    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, ROW_RESET_SETTINGS, PROGRAM_ROWS
+    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, ROW_RESET_SETTINGS, ROW_OTHER_PROGRAM, ROW_EDIT_FILE, PROGRAM_ROWS
 };
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
+/* What a file browser lists besides folders. */
+enum browse_kind { BROWSE_PROGRAMS, BROWSE_IMAGES, BROWSE_TEXT };
+static int file_browser_from( struct launcher *l, const char *folder, enum browse_kind kind, const char *title,
+                              char *target, size_t size );
+static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size );
 static int pick_forwarder_icon( void *opaque, char *target, size_t size );
 static void save_look( struct launcher *l );
 
@@ -2520,6 +2527,13 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                 row->value_tone = tone;
             else count--;
         }
+        ADD_ROW( ROW_OTHER_PROGRAM, SECTION_GENERAL, "Run another program",
+                 "Starts another program from the game's folder, such as its configuration tool, where its "
+                 "resolution and the settings its own menu lacks are, or its setup. It runs with its own "
+                 "settings and stays out of the library." );
+        ADD_ROW( ROW_EDIT_FILE, SECTION_GENERAL, "Edit a text file",
+                 "Opens one of the game's .ini, .cfg or other text files from its folder. A changes a line, or "
+                 "the value of a setting; Y adds and removes lines. Leaving asks whether to save." );
         ADD_ROW( ROW_FAVORITE, SECTION_GENERAL, "Favorite", "Keeps the game in the Favorites filter of the library." );
         row->kind = UI_ROW_SWITCH;
         row->on = p->favorite;
@@ -2907,6 +2921,27 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                 break;
             }
             return start_program( l, p, target, size );
+
+        case ROW_OTHER_PROGRAM:
+        {
+            char picked[512];
+
+            if (action != UI_ACTION_CHOOSE) break;
+            if (!file_browser_from( l, dir, BROWSE_PROGRAMS, "Run another program", picked, sizeof(picked) )) break;
+            launcher_log( "[LAUNCHER] Another program of %s: %s", p->path, picked );
+            if (start_path( l, picked, "Run another program", target, size )) return 1;
+            break;
+        }
+
+        case ROW_EDIT_FILE:
+        {
+            char picked[512];
+
+            if (action != UI_ACTION_CHOOSE) break;
+            if (!file_browser_from( l, dir, BROWSE_TEXT, "Edit a text file", picked, sizeof(picked) )) break;
+            launcher_text_edit( ui, picked, file_name( picked ) );
+            break;
+        }
 
         case ROW_GAME_FIX:
             if (action != UI_ACTION_CHOOSE) break;
@@ -3871,7 +3906,7 @@ static int compare_files( const void *a, const void *b )
     return strcasecmp( x->name, y->name );
 }
 
-static int read_dir( struct launcher *l, const char *dir, int *count, int images )
+static int read_dir( struct launcher *l, const char *dir, int *count, enum browse_kind kind )
 {
     struct dirent *entry;
     DIR *handle;
@@ -3894,16 +3929,18 @@ static int read_dir( struct launcher *l, const char *dir, int *count, int images
         if (!file->is_dir)
         {
             const char *extension = strrchr( entry->d_name, '.' );
-            if (images ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
-                                        strcasecmp( extension, ".jpeg" )))
-                       : (!launcher_is_exe( entry->d_name ) && !launcher_is_shortcut( entry->d_name ) &&
-                          !launcher_is_batch( entry->d_name ))) continue;
+            if (kind == BROWSE_IMAGES ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
+                                                       strcasecmp( extension, ".jpeg" ))) :
+                kind == BROWSE_TEXT ? !launcher_text_edit_offers( entry->d_name )
+                                    : (!launcher_is_exe( entry->d_name ) && !launcher_is_shortcut( entry->d_name ) &&
+                                       !launcher_is_batch( entry->d_name ))) continue;
         }
         snprintf( file->name, sizeof(file->name), "%s", entry->d_name );
-        file->shortcut = images || file->is_dir ? 0 : launcher_is_shortcut( entry->d_name ) ? 1 :
+        file->shortcut = kind != BROWSE_PROGRAMS || file->is_dir ? 0 : launcher_is_shortcut( entry->d_name ) ? 1 :
                          launcher_is_batch( entry->d_name ) ? 2 : 0;
         file->machine = 0;
-        file->supported = images || file->is_dir || file->shortcut || !l->options->machine_of( path, &file->machine );
+        file->supported = kind != BROWSE_PROGRAMS || file->is_dir || file->shortcut ||
+                          !l->options->machine_of( path, &file->machine );
         (*count)++;
     }
     closedir( handle );
@@ -4063,10 +4100,14 @@ static int follow_shortcut( struct launcher *l, const char *dir, const char *pat
     return 1;
 }
 
-static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, int images )
+/* The file browser. With start it opens in that folder rather than asking for
+ * the storage first, and B there, or at the top of the storage, closes it. */
+static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, enum browse_kind kind,
+                                   const char *start, const char *title )
 {
     struct ui *ui = &l->ui;
     char dir[512], came_from[256] = "", dos[512], path[512];
+    const int images = kind == BROWSE_IMAGES;
 
     picked_args[0] = 0;
 
@@ -4074,7 +4115,8 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
     {
         int choose_storage = 0;
 
-        if (!file_browser_storage( l, dir, sizeof(dir), images ? "Choose icon" : "Add Game" ))
+        if (start) snprintf( dir, sizeof(dir), "%s", start );
+        else if (!file_browser_storage( l, dir, sizeof(dir), title ))
         {
             save_look( l );
             return 0;
@@ -4085,9 +4127,10 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
             struct ui_list list = {0};
             int count, has_up, readable, rows, i, reload = 0;
 
-            while (!(readable = read_dir( l, dir, &count, images )) && !is_root( dir )) parent_dir( dir );
+            while (!(readable = read_dir( l, dir, &count, kind )) && !is_root( dir )) parent_dir( dir );
             if (!readable)
             {
+                if (start) return 0;
                 choose_storage = 1;
                 continue;
             }
@@ -4122,13 +4165,23 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                 }
                 else if (files[i].shortcut)
                     snprintf( row->value, sizeof(row->value), "%s", files[i].shortcut == 1 ? "Shortcut" : "Batch file" );
+                else if (kind == BROWSE_TEXT)
+                {
+                    const char *extension = strrchr( files[i].name, '.' ) + 1;
+                    size_t k;
+
+                    for (k = 0; extension[k] && k < 12; k++) row->value[k] = toupper( (unsigned char)extension[k] );
+                    snprintf( row->value + k, sizeof(row->value) - k, " file" );
+                }
                 else snprintf( row->value, sizeof(row->value), "%s", images ? "Image" : launcher_machine_name( files[i].machine ) );
                 if (came_from[0] && !strcasecmp( files[i].name, came_from )) list.selection = rows;
             }
             if (!rows)
             {
                 memset( file_rows, 0, sizeof(file_rows[0]) );
-                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s", images ? "No folders or images here" : "No folders, programs or shortcuts here" );
+                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s",
+                          images ? "No folders or images here" : kind == BROWSE_TEXT ? "No folders or text files here"
+                                                                                     : "No folders, programs or shortcuts here" );
                 file_rows[0].disabled = 1;
                 rows = 1;
             }
@@ -4138,14 +4191,17 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
 
             while (!reload)
             {
-                enum ui_action action = ui_list_run( ui, &list, images ? "Choose icon" : "Files", dos, file_rows, rows, 0 );
+                enum ui_action action = ui_list_run( ui, &list, start ? title : images ? "Choose icon" : "Files", dos,
+                                                     file_rows, rows, 0 );
                 int index = list.selection - has_up;
 
                 if (action == UI_ACTION_QUIT) return 0;
+                if (action == UI_ACTION_BACK && start && !strcmp( dir, start )) return 0;
                 if (action == UI_ACTION_BACK || (action == UI_ACTION_CHOOSE && index < 0))
                 {
                     if (!has_up)
                     {
+                        if (start) return 0;
                         choose_storage = 1;
                         break;
                     }
@@ -4158,7 +4214,7 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                 if (index < 0 || index >= count) continue;
                 join_path( path, sizeof(path), dir, files[index].name );
                 launcher_log( "[LAUNCHER] Browser chose %s (%s)", path,
-                              files[index].is_dir ? "folder" : images ? "image" :
+                              files[index].is_dir ? "folder" : images ? "image" : kind == BROWSE_TEXT ? "text file" :
                               files[index].shortcut == 1 ? "shortcut" : files[index].shortcut ? "batch file" : "program" );
                 if (files[index].is_dir)
                 {
@@ -4184,7 +4240,21 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size )
 {
-    return file_browser_pick_kind( l, target, size, 0 );
+    return file_browser_pick_kind( l, target, size, BROWSE_PROGRAMS, NULL, "Add Game" );
+}
+
+/* A browser that opens in a game's folder, for what goes with the game, and
+ * leaves the folder the library's browser opens in as it was. */
+static int file_browser_from( struct launcher *l, const char *folder, enum browse_kind kind, const char *title,
+                              char *target, size_t size )
+{
+    char previous[sizeof(l->browse_dir)];
+    int result;
+
+    strcpy( previous, l->browse_dir );
+    result = file_browser_pick_kind( l, target, size, kind, folder, title );
+    strcpy( l->browse_dir, previous );
+    return result;
 }
 
 static int pick_forwarder_icon( void *opaque, char *target, size_t size )
@@ -4193,7 +4263,7 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
     char previous[sizeof(l->browse_dir)];
     int result;
     strcpy( previous, l->browse_dir );
-    result = file_browser_pick_kind( l, target, size, 1 );
+    result = file_browser_pick_kind( l, target, size, BROWSE_IMAGES, NULL, "Choose icon" );
     strcpy( l->browse_dir, previous );
     save_look( l );
     return result;
@@ -4202,21 +4272,27 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
 /* A program started from the file browser and left out of the library: a
  * setup, a patch, a tool. It runs with the settings a new game would have,
  * or its own if it already has a file of them. */
-static int run_once( struct launcher *l, char *target, size_t size )
+static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size )
 {
     struct program program;
-    char path[512];
     int index;
 
-    if (!file_browser_pick( l, path, sizeof(path) )) return 0;
-    launcher_log( "[LAUNCHER] Run once: %s", path );
     if ((index = find_program( l, path )) >= 0) return start_program( l, &l->programs[index], target, size );
     if (!describe_program( l, &program, path ))
     {
-        ui_message( &l->ui, "Run a program once", "Autorun cannot run this executable." );
+        ui_message( &l->ui, title, "Autorun cannot run this executable." );
         return 0;
     }
     return start_program( l, &program, target, size );
+}
+
+static int run_once( struct launcher *l, char *target, size_t size )
+{
+    char path[512];
+
+    if (!file_browser_pick( l, path, sizeof(path) )) return 0;
+    launcher_log( "[LAUNCHER] Run once: %s", path );
+    return start_path( l, path, "Run a program once", target, size );
 }
 
 static int add_game( struct launcher *l )

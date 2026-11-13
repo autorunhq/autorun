@@ -692,7 +692,7 @@ target_sources(wine-nx-runtime PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
     source/launcher.c source/launcher_graphics.c source/launcher_dxvk.c source/dxvk_options.c source/launcher_catalog.c source/launcher_console.c
     source/input_profile.c source/launcher_input.c
-    source/game_settings.c source/launcher_game_settings.c
+    source/game_settings.c source/launcher_game_settings.c source/launcher_text_edit.c
     source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
     source/launcher_image.c source/launcher_artwork.c source/steamgriddb.c source/autorun_update.c source/autorun_install.c
     source/launcher_update.c source/launcher_setup.c source/setup_boot.c source/forwarder.c
@@ -1108,7 +1108,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c
+set_source_files_properties(source/launcher_game_settings.c source/launcher_text_edit.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c
     source/carafe_loading.c source/carafe_error.c
     source/carafe_draw.c source/carafe_text.c source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"

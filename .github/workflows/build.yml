@@ -140,7 +140,7 @@ jobs:
                        check_shader_affinity check_futex_exit check_orchestrator_setting check_server_pool \
                        check_horizon_suspend check_core_affinity check_yield_backoff check_fps_counter \
                        check_fpslocker check_wine_mono \
-                       check_own_size_windows; do
+                       check_own_size_windows check_text_edit; do
             python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
               echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error|never true|data race|failed' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
               exit 1
