@@ -97,11 +97,19 @@ runtime; the full package now ships the Mesa 26 one.
   present (`dlls/win32u/vulkan.c`), blitted into the back buffer before
   `eglSwapBuffers` (`winnx_opengl.c`), or drawn as the compositor's top layer;
   the controller is its while it is up.
-- **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
-  launch the NRO through a forwarder made with "32-bit, no alias", which the
-  launcher can install itself and which also raises the memory limit to 2 GiB.
-  AMD64 programs use the main 39-bit application forwarder. The same NRO
-  selects the execution path from the program's PE header.
+- **Memory.** Fixed-base 32-bit games such as NFSU2 need their image's address
+  below 4 GiB. In Autorun's 39-bit application that takes the Atmosphere
+  low-address patch. Without it, use the game's 32-bit forwarder: in the
+  library, the game's Create game forwarder, Address space "32-bit, no alias".
+  That forwarder carries its own loader (`hbl/`), which Horizon starts in a
+  32-bit address space without the alias region. The heap there is 2 GiB rather
+  than 1, and the loader keeps its heap to that region. It starts the NRO with
+  `--library-game=ID` (`source/forwarder.c`, `runtime_command_line_game`). Its
+  title id hashes the address space in, so it sits beside the game's 39-bit
+  forwarder, and the low-window patch never applies to it. The launcher started
+  there runs 32-bit games only. AMD64 programs use the main 39-bit application
+  forwarder. The same NRO selects the execution path from the program's PE
+  header.
   Wine reserves the program's low address space early, keeps its allocations
   clear of the memory Horizon hands to libnx, and leaves 32-bit programs'
   Vulkan memory in the driver's own mappings.

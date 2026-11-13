@@ -4854,37 +4854,40 @@ static unsigned int launcher_install_forwarder( const char **step )
 static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
 {
     bool installed = false;
-    Result rc;
+    unsigned int rc;
     *step = "reading " AUTORUN_NRO;
     if (access( AUTORUN_NRO, R_OK )) return MAKERESULT( Module_Libnx, LibnxError_NotFound );
-    *step = "checking the Autorun forwarder";
-    if (R_FAILED( rc = nsInitialize() )) return rc;
-    rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
-    nsExit();
-    if (R_FAILED( rc )) return rc;
-    if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    /* A game's 39-bit forwarder starts Autorun's application, which has to be
+     * there; a 32-bit one carries a loader of its own and starts the NRO. */
+    if (request->address_space == WINE_NX_FORWARDER_39_BIT)
+    {
+        *step = "checking the Autorun forwarder";
+        if (R_FAILED( rc = nsInitialize() )) return rc;
+        rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
+        nsExit();
+        if (R_FAILED( rc )) return rc;
+        if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    }
     wine_nx_forwarder_report = log_line_plain;
-    return wine_nx_forwarder_install( request, step );
+    rc = wine_nx_forwarder_install( request, step );
+    log_line( "[LAUNCHER] game %u's %s forwarder %016llx: rc=0x%x%s%s", request->game_id,
+              request->address_space == WINE_NX_FORWARDER_39_BIT ? "39-bit" : "32-bit (no alias)",
+              wine_nx_forwarder_game_title_id( request->game_id, request->address_space ), rc,
+              rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
+    return rc;
 }
 
-static int runtime_forwarded_game( char *target, size_t size )
+/* The library's game with this id: its path in target and 1, or -1 when the
+ * library has none (or its path does not fit). */
+static int runtime_library_game( unsigned int id, char *target, size_t size )
 {
-    struct autorun_game_launch launch = {0};
     struct launcher_catalog *catalog;
-    AppletStorage storage;
-    s64 bytes = 0;
-    Result rc;
     int found = 0, i;
 
-    if (R_FAILED( appletPopLaunchParameter( &storage, AppletLaunchParameterKind_UserChannel ) )) return 0;
-    rc = appletStorageGetSize( &storage, &bytes );
-    if (R_SUCCEEDED( rc ) && bytes == sizeof(launch)) rc = appletStorageRead( &storage, 0, &launch, sizeof(launch) );
-    appletStorageClose( &storage );
-    if (R_FAILED( rc ) || !autorun_game_launch_valid( &launch, bytes )) return -1;
-    if (!(catalog = malloc( sizeof(*catalog) ))) return -1;
+    if (!id || !(catalog = malloc( sizeof(*catalog) ))) return -1;
     if (launcher_catalog_load( catalog, RUNTIME_DIR "/" LAUNCHER_CATALOG_FILE ) == LAUNCHER_CATALOG_OK)
         for (i = 0; i < catalog->count; i++)
-            if (catalog->entries[i].id == launch.game_id)
+            if (catalog->entries[i].id == id)
             {
                 if (strlen( catalog->entries[i].path ) < size)
                 {
@@ -4895,6 +4898,42 @@ static int runtime_forwarded_game( char *target, size_t size )
             }
     free( catalog );
     return found ? 1 : -1;
+}
+
+/* A game handed over by its 39-bit forwarder, which starts Autorun's
+ * application with the game's id as its launch parameter: 0 when there is
+ * none, otherwise as runtime_library_game. */
+static int runtime_forwarded_game( char *target, size_t size )
+{
+    struct autorun_game_launch launch = {0};
+    AppletStorage storage;
+    s64 bytes = 0;
+    Result rc;
+
+    if (R_FAILED( appletPopLaunchParameter( &storage, AppletLaunchParameterKind_UserChannel ) )) return 0;
+    rc = appletStorageGetSize( &storage, &bytes );
+    if (R_SUCCEEDED( rc ) && bytes == sizeof(launch)) rc = appletStorageRead( &storage, 0, &launch, sizeof(launch) );
+    appletStorageClose( &storage );
+    if (R_FAILED( rc ) || !autorun_game_launch_valid( &launch, bytes )) return -1;
+    return runtime_library_game( launch.game_id, target, size );
+}
+
+/* A game named on the command line by its 32-bit forwarder, whose loader
+ * starts this NRO with --library-game=ID (forwarder.c): 0 when the command
+ * line names none, otherwise as runtime_library_game. */
+static int runtime_command_line_game( int argc, char **argv, char *target, size_t size )
+{
+    const size_t prefix = sizeof(WINE_NX_FORWARDER_GAME_ARG) - 1;
+    unsigned long id;
+    char *end;
+
+    if (argc < 2 || !argv[1] || strncmp( argv[1], WINE_NX_FORWARDER_GAME_ARG, prefix )) return 0;
+    errno = 0;
+    id = strtoul( argv[1] + prefix, &end, 10 );
+    if (errno || end == argv[1] + prefix || *end || !id || id > 0xffffffffUL) return -1;
+    log_line( "[FORWARDER] library game %lu from the command line, in a %d-bit address space",
+              id, runtime_address_space_bits() );
+    return runtime_library_game( id, target, size );
 }
 
 static unsigned long long runtime_title_id( void )
@@ -5165,6 +5204,7 @@ int main( int argc, char **argv )
      * find them through game_settings_find. */
     game_fixes_install_profiles( RUNTIME_DIR );
     forwarded_game = runtime_forwarded_game( target, sizeof(target) );
+    if (!forwarded_game) forwarded_game = runtime_command_line_game( argc, argv, target, sizeof(target) );
     if (forwarded_game < 0) launch_error = "This shortcut no longer matches a game in the library. Create it again from the game's Library settings.";
     else if (forwarded_game > 0 && access( target, R_OK ))
     {

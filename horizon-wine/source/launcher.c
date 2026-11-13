@@ -2015,6 +2015,10 @@ static int next_picture_state( int state, int direction )
 
 static int address_space_fits( struct launcher *l, struct program *p )
 {
+    /* Started from a game's 32-bit forwarder, the launcher runs in a 32-bit
+     * address space: a 32-bit game's image is at home there wherever it was
+     * linked, and a 64-bit one has no room. */
+    if (l->options->address_space_bits == 32) return p->machine == 0x014c;
     return l->options->address_space_bits == 39 &&
            (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
 }
@@ -2852,7 +2856,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             if (action == UI_ACTION_CHOOSE && p->added && save_library( l ))
             {
                 char key[256] = "", previous[256];
-                struct launcher_forwarder_game game = { p->catalog_id, p->title, p->path, p->square_art };
+                struct launcher_forwarder_game game = { p->catalog_id, p->title, p->path, p->square_art, p->machine };
                 launcher_kv_get( &l->look, "steamgriddb-key", key, sizeof(key) );
                 strcpy( previous, key );
                 launcher_forwarder_run( ui, l->options, &game, key, sizeof(key), pick_forwarder_icon, l );

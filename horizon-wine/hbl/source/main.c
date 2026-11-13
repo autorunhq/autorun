@@ -127,6 +127,15 @@ static u64 calculateMaxHeapSize(void) {
     if (size > 0x6000000)
         size -= 0x6000000;
 
+    // The heap has to fit its region, which in a 32-bit address space is
+    // 1 GiB, or 2 GiB without the alias region (a game's 32-bit forwarder):
+    // less than the memory an application has, and svcSetHeapSize refuses a
+    // heap larger than its region. 36 and 39 bits leave 6 and 8 GiB for it.
+    u64 region = 0;
+    if (R_SUCCEEDED(svcGetInfo(&region, InfoType_HeapRegionSize, CUR_PROCESS_HANDLE, 0)) &&
+        region && size > region)
+        size = region & ~0x1FFFFFull;
+
     return size;
 }
 
