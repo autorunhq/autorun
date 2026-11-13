@@ -23,11 +23,15 @@
  * late. A wait shorter than 2 ms is now never slowed, and a longer one by at
  * most 100 us, while a frame limiter or an idle loop that waits longer leaves
  * its core idle.
+ *
+ * A turn of such a loop takes 1-3 us here, a yield and a check, or a yield and
+ * timeGetTime; the gap is 10 us so that a thread doing real work between its
+ * yields, in pieces of 10 us or more, is never taken for one waiting.
  */
 #ifndef HORIZON_YIELD_BACKOFF_H
 #define HORIZON_YIELD_BACKOFF_H
 
-#define HORIZON_YIELD_BACKOFF_GAP     200ull     /* 100 ns units: 20 us */
+#define HORIZON_YIELD_BACKOFF_GAP     100ull     /* 100 ns units: 10 us */
 #define HORIZON_YIELD_BACKOFF_AFTER   20000ull   /* 100 ns units: 2 ms */
 #define HORIZON_YIELD_BACKOFF_SLEEP   100000ll   /* ns: 100 us */
 

@@ -58,7 +58,7 @@ runtime; the full package now ships the Mesa 26 one.
   including sections with no file whose views share their pages. `Sleep(0)`,
   `SwitchToThread` and Wine's own yields (after a wait that timed out, or a
   message poll that found nothing) yield as on Windows, but once a thread has
-  been yielding for 2 ms with under 20 µs between yields, each further one in
+  been yielding for 2 ms with under 10 µs between yields, each further one in
   that run sleeps 100 µs (`dlls/ntdll/unix/horizon_yield_backoff.h`). A game's
   long wait loop then leaves its core idle instead of busy; Vampire: The
   Masquerade - Redemption called `Sleep(0)` up to a million times a second and
