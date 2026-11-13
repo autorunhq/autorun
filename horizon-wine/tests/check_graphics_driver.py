@@ -66,6 +66,27 @@ platform = (source / 'runtime_platform.c').read_text()
 sysconf = platform[platform.index('long sysconf( int name )\n{'):]
 sysconf = sysconf[:sysconf.index('\n}\n')]
 assert '_SC_PHYS_PAGES' in sysconf and 'InfoType_TotalMemorySize' in sysconf
+# Both runtimes run in the loader's one process: whatever one leaves running
+# goes on into the next. USB's watcher thread is ended on every way out, and
+# the nxvk runtime starts the card's runtime for the launcher itself.
+leave = runtime[runtime.index('static int leave_cleanly( void )'):]
+leave = leave[:leave.index('\n}\n')]
+assert 'wine_nx_usb_stop()' in leave and leave.index('wine_nx_usb_stop()') < leave.index('socketExit();')
+back = runtime[runtime.index('static int return_to_launcher( void )'):]
+back = back[:back.index('\n}\n')]
+assert 'if (runtime_is_nxvk && !access( RUNTIME_NRO_MESA_SWITCH, F_OK )) next = RUNTIME_NRO_MESA_SWITCH;' in back
+assert 'memory_left_behind_ex( 1, &mine );' in handover and handover.index('leave_cleanly();') < handover.index('memory_left_behind_ex')
+# NVK's compressed images each take an allocation and compression tags of
+# their own, and Zink ran out of them: off for nxvk and for Zink on
+# mesa-switch, before a Vulkan instance reads NVK_DEBUG, unless asked for.
+compression = runtime[runtime.index('static void runtime_nvk_compression( const char *what )'):]
+compression = compression[:compression.index('\n}\n')]
+assert 'config_bool( "nvk-compression", 0,' in compression and 'no_compression' in compression
+init = runtime[runtime.index('log_line( "[INIT] Mesa from nxvk:'):]
+assert init.index('runtime_nvk_compression(') < init.index('wine_nx_vulkan_probe();') < init.index('wine_nx_graphics_selftest();')
+zink = runtime[runtime.index('if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)'):]
+zink = zink[:zink.index('else unsetenv( "MESA_SWITCH_GL_DRIVER" );')]
+assert 'runtime_nvk_compression(' in zink
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')

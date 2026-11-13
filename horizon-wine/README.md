@@ -54,6 +54,12 @@ and its threads first, and a runtime that finds pages left lent inside its heap
 keeps them out of it. The nxvk runtime writes `logs/autorun_runtime_nxvk.log`,
 which the card's runtime does not write over.
 
+NVK's image compression is off in the nxvk runtime and for Zink on mesa-switch
+(`NVK_DEBUG=no_compression`): each compressed image is an allocation of its own
+with compression tags of the GPU's, Zink makes one for every texture, and in
+Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
+back on.
+
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup
 programs and default settings into the release zip,

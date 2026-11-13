@@ -2311,6 +2311,34 @@ static int config_bool( const char *key, int fallback, const char *was, int flip
     return fallback;
 }
 
+#ifdef WINE_NX_MESA_SWITCH
+/* NVK compresses the images a program draws into, each in an allocation of its
+ * own, padded to the GPU's big page and holding compression tags, of which the
+ * GPU has only so many. Zink makes an image of that kind for every texture: in
+ * Doom 3 on nxvk about 2000 were held when allocations began to fail, 35,000
+ * "zink: couldn't allocate memory" in mesa-nxvk.log and textures drawn from
+ * garbage. Without compression NVK no longer asks for an allocation of their
+ * own, and Zink puts small textures together as it does its buffers. For what
+ * the nxvk runtime draws, and for Zink on mesa-switch's NVK; nvk-compression in
+ * settings.json turns it back on. */
+static void runtime_nvk_compression( const char *what )
+{
+    const char *debug = getenv( "NVK_DEBUG" );
+    char value[256];
+
+    if (config_bool( "nvk-compression", 0, "nvk-compression.txt", 0 ))
+    {
+        log_line( "[INIT] NVK image compression on for %s (nvk-compression in settings.json)", what );
+        return;
+    }
+    if (debug && strstr( debug, "no_compression" )) return;
+    snprintf( value, sizeof(value), "%s%sno_compression", debug && debug[0] ? debug : "",
+              debug && debug[0] ? "," : "" );
+    setenv( "NVK_DEBUG", value, 1 );
+    log_line( "[INIT] NVK image compression off for %s: NVK_DEBUG=%s", what, value );
+}
+#endif
+
 
 static unsigned int close_handle_object( HANDLE handle )
 {
@@ -5006,6 +5034,8 @@ int main( int argc, char **argv )
         log_line( "[INIT] Mesa from nxvk: OpenGL through Zink, Vulkan through NVK; Mesa's own log in %s; "
                   "Vulkan probe %s", getenv( "MESA_LOG_FILE" ) ? getenv( "MESA_LOG_FILE" ) : "none",
                   vulkan_probe ? "on" : "off" );
+        /* Before anything here makes a Vulkan instance, which reads it. */
+        runtime_nvk_compression( "OpenGL through Zink and Vulkan" );
 #else
         log_line( "[INIT] Mesa from mesa-switch: OpenGL through nvc0, Vulkan through NVK; Vulkan probe %s",
                   vulkan_probe ? "on" : "off" );
@@ -5348,6 +5378,7 @@ int main( int argc, char **argv )
             {
                 setenv( "MESA_SWITCH_GL_DRIVER", "zink", 1 );
                 log_line( "[NXGL] OpenGL through Zink on NVK, from the program's settings" );
+                runtime_nvk_compression( "OpenGL through Zink" );
             }
             else unsetenv( "MESA_SWITCH_GL_DRIVER" );
 #endif
