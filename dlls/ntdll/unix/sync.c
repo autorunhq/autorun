@@ -222,7 +222,7 @@ static inline int futex_wake_one( const LONG *addr )
 
 #include "horizon_private.h"
 #include "horizon_threads.h"
-#include "horizon_zero_sleep.h"
+#include "horizon_yield_backoff.h"
 
 C_ASSERT( sizeof(LONG) == sizeof(int) );
 
@@ -2455,6 +2455,26 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
  */
 #ifdef __SWITCH__
 extern void svcSleepThread( int64_t nano );
+
+/* config/settings.json's yield-backoff, or a program's (runtime.c). */
+extern int wine_nx_yield_backoff __attribute__((weak));
+/* Yields that slept, for the [PROGRESS] line. */
+unsigned int wine_nx_yield_sleeps;
+static __thread struct horizon_yield_backoff yield_backoff;
+
+/* Says once, in the log, that a thread's loop of yields began to sleep. */
+static void yield_backoff_noticed(void)
+{
+    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
+    static int noticed;
+    char line[200];
+
+    if (!&wine_nx_runtime_trace || __atomic_exchange_n( &noticed, 1, __ATOMIC_RELAXED )) return;
+    snprintf( line, sizeof(line), "[CORES] thread %04x yields in a loop (Sleep(0), SwitchToThread or a poll): "
+              "from now on a long quick run of yields sleeps 50-250 us each instead of keeping its core busy",
+              (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+    wine_nx_runtime_trace( line );
+}
 #endif
 
 NTSTATUS WINAPI NtYieldExecution(void)
@@ -2463,8 +2483,20 @@ NTSTATUS WINAPI NtYieldExecution(void)
     /* Sleep(0) and SwitchToThread must give up the core: wined3d waits for its
      * command-stream thread by pausing and sleeping 0, and without a yield that
      * wait spun a whole core while the thread it waited for got less of one.
-     * The Switch build has no HAVE_SCHED_YIELD; libnx's sched_yield is this call. */
-    svcSleepThread( -1 );  /* YieldType_WithCoreMigration */
+     * The Switch build has no HAVE_SCHED_YIELD; libnx's sched_yield is this call.
+     * A yield returns at once when nothing else waits for the core, though, so
+     * a long quick run of them sleeps a little each (horizon_yield_backoff.h). */
+    long long ns = (!&wine_nx_yield_backoff || wine_nx_yield_backoff)
+                   ? horizon_yield_backoff_ns( &yield_backoff, horizon_interrupt_time() ) : 0;
+
+    if (!ns) svcSleepThread( -1 );  /* YieldType_WithCoreMigration */
+    else
+    {
+        yield_backoff_noticed();
+        __atomic_add_fetch( &wine_nx_yield_sleeps, 1, __ATOMIC_RELAXED );
+        svcSleepThread( ns );
+    }
+    yield_backoff.last = horizon_interrupt_time();
     return STATUS_SUCCESS;
 #elif defined(HAVE_SCHED_YIELD)
 #ifdef RUSAGE_THREAD
@@ -2492,20 +2524,6 @@ NTSTATUS WINAPI NtYieldExecution(void)
 extern void svcSleepThread( int64_t nano );
 extern void wine_nx_stop_point( void ) __attribute__((weak));
 extern void wine_nx_stop_sleep( int64_t nano ) __attribute__((weak));
-
-/* Says once, in the log, that a thread's loop of Sleep(0) began to sleep. */
-static void zero_sleep_noticed(void)
-{
-    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
-    static int noticed;
-    char line[160];
-
-    if (!&wine_nx_runtime_trace || __atomic_exchange_n( &noticed, 1, __ATOMIC_RELAXED )) return;
-    snprintf( line, sizeof(line), "[CORES] thread %04x waits in a loop of Sleep(0): from now on a long run of "
-              "them sleeps 50-250 us a call instead of keeping its core busy",
-              (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
-    wine_nx_runtime_trace( line );
-}
 #endif
 
 /******************************************************************
@@ -2567,26 +2585,6 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
             when = now.QuadPart - when;
         }
 
-#ifdef __SWITCH__
-        /* Sleep(0): a long run of them in a row sleeps a little each
-         * (horizon_zero_sleep.h). */
-        if (!when)
-        {
-            static __thread struct horizon_zero_sleep zero_sleep;
-            long long ns = horizon_zero_sleep_ns( &zero_sleep, horizon_interrupt_time() );
-
-            if (!ns) status = NtYieldExecution();
-            else
-            {
-                zero_sleep_noticed();
-                if (&wine_nx_stop_sleep) wine_nx_stop_sleep( ns );
-                else svcSleepThread( ns );
-                if (&wine_nx_stop_point) wine_nx_stop_point();
-            }
-            zero_sleep.last = horizon_interrupt_time();
-            return status;
-        }
-#endif
         /* Note that we yield after establishing the desired timeout, but
            we only care about the result of the yield for zero timeouts */
         status = NtYieldExecution();

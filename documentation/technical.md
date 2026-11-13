@@ -55,12 +55,16 @@ runtime; the full package now ships the Mesa 26 one.
   the DLL repository ships in `horizon-dlls/classes.reg`; hives an earlier build left in
   `switch/wine` itself are moved there on the first start), message
   queues, timers, the clipboard, raw input, object directories and sections,
-  including sections with no file whose views share their pages. `Sleep(0)`
-  yields as on Windows, but once a thread has called it 64 times in a row with
-  under 20 µs between calls, each further call in that run sleeps 50 µs,
-  doubling up to 250 µs (`dlls/ntdll/unix/horizon_zero_sleep.h`). A game's
-  wait loop then leaves its core idle instead of busy; Vampire: The Masquerade -
-  Redemption called it up to a million times a second and kept core 0 at 100%.
+  including sections with no file whose views share their pages. `Sleep(0)`,
+  `SwitchToThread` and Wine's own yields (after a wait that timed out, or a
+  message poll that found nothing) yield as on Windows, but once a thread has
+  yielded 64 times in a row with under 20 µs between yields, each further one
+  in that run sleeps 50 µs, doubling up to 250 µs
+  (`dlls/ntdll/unix/horizon_yield_backoff.h`). A game's wait loop then leaves
+  its core idle instead of busy; Vampire: The Masquerade - Redemption called
+  `Sleep(0)` up to a million times a second and kept core 0 at 100%.
+  `yield_sleeps` on the `[PROGRESS]` line counts the yields that slept, and
+  `yield-backoff` (below) turns it off.
 - **Sockets.** Overlapped Winsock on I/O completion ports: pending
   `WSARecv`/`WSASend`, `AcceptEx`, `ConnectEx`, cancellation, and the
   completion rules of wineserver's `async_set_result`. Horizon has only IPv4:
@@ -166,6 +170,7 @@ the first time a newer build starts.
 | `profiler` | false | Thread, server and sampling reports (`profile.txt`) |
 | `windows-through-opengl` | true | Windows drawn by the compositor, not the framebuffer (`framebuffer.txt`, inverted) |
 | `mode-emulation` | true | win32u emulates a display mode a program asks for: its OpenGL draws into a framebuffer object that an internal context blits to the window. `false` is upstream Autorun's way, the program's OpenGL drawing to the window's surface itself; `mode-emulation=0` in a program's settings file does it for one program |
+| `yield-backoff` | true | A thread's long quick run of `Sleep(0)` or `SwitchToThread` sleeps 50-250 µs a call instead of keeping its core busy. `false` makes every one a plain yield; `yield-backoff=0` in a program's settings file does it for one program |
 | `picture-mode` | `"whole"` | Display scaling for non-native resolutions (`"whole"`, `"edges"`, `"stretched"`, `"own-size"`) |
 | `reopen-the-launcher-on-exit` | false | Start the launcher again when a program ends (`reload-launcher.txt`) |
 | `core-balancing` | true | Move busy threads between cores (`no-balance.txt`, inverted) |

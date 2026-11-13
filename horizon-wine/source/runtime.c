@@ -744,6 +744,13 @@ int wine_nx_picture_mode = 0;
  * as upstream's does. Read by sysparams_init. */
 int wine_nx_emulate_modeset = 1;
 
+/* Whether a thread's long quick run of yields (Sleep(0), SwitchToThread, a
+ * wait that timed out, a message poll that found nothing) sleeps a little each
+ * instead of keeping its core busy (dlls/ntdll/unix/horizon_yield_backoff.h,
+ * read by NtYieldExecution). yield-backoff in config/settings.json, or
+ * yield-backoff=0 in a program's settings file, turns it off. */
+int wine_nx_yield_backoff = 1;
+
 /* The DXVK payload a program runs with has a ddraw.dll of its own (DXVK-Sarek's
  * D3D7 over D3D9): that one passes DirectDraw on to Wine's, whose wined3d then
  * makes an OpenGL surface for the window before DXVK asks for its Vulkan
@@ -2010,6 +2017,7 @@ static void runtime_report_interpreter(void)
         extern unsigned int wine_nx_gl_explicit_flushes __attribute__((weak));
         extern int wine_nx_gl_pinned_memory __attribute__((weak));
         extern unsigned int wine_nx_syscall_counts[] __attribute__((weak));
+        extern unsigned int wine_nx_yield_sleeps __attribute__((weak));  /* NtYieldExecution */
         static unsigned int calls, last_reads = ~0u, last_frames = ~0u;
         static unsigned int last_usb_reads = ~0u, last_usb_hits = ~0u;
         static u64 start;
@@ -2025,7 +2033,7 @@ static void runtime_report_interpreter(void)
         unsigned long long read_ms = &wine_nx_file_read_100ns
                                      ? __atomic_load_n( &wine_nx_file_read_100ns, __ATOMIC_RELAXED ) / 10000 : 0;
         unsigned int syscalls = &wine_nx_syscalls ? __atomic_load_n( &wine_nx_syscalls, __ATOMIC_RELAXED ) : 0;
-        char native[384] = "", gl[512] = "", audio[32] = "", systop[64] = "", usb[128] = "";
+        char native[384] = "", gl[512] = "", audio[32] = "", systop[64] = "", usb[128] = "", yields[32] = "";
 
         if (!start) start = now;
         if (++calls % 2) return;
@@ -2067,6 +2075,11 @@ static void runtime_report_interpreter(void)
                 len += snprintf( systop + len, sizeof(systop) - len, "%s%x:%u", k ? "," : "", best_id[k], best_n[k] );
             if (!best_n[0]) systop[0] = 0;
         }
+        /* Yields that slept instead (horizon_yield_backoff.h): a program waiting in
+         * a loop of Sleep(0) or SwitchToThread, since the start. */
+        if (&wine_nx_yield_sleeps && wine_nx_yield_sleeps)
+            snprintf( yields, sizeof(yields), " yield_sleeps=%u",
+                      __atomic_load_n( &wine_nx_yield_sleeps, __ATOMIC_RELAXED ) );
 #ifdef WINE_NX_BOX64_DYNAREC
         {
             extern unsigned long long wine_nx_box64_native_entries;
@@ -2173,7 +2186,7 @@ static void runtime_report_interpreter(void)
         log_line( "[PROGRESS] %llus reads=%u read_ms=%llu read_mb=%llu sd_reads=%u sd_ms=%llu sd_mb=%llu "
                   "sd_writes=%u sd_write_ms=%llu writes_held=%u sd_stats=%u stat_hits=%u flushes=%u/%u/%u/%u/%u "
                   "cache_hits=%u cache_mb=%u syscalls=%u "
-                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s%s",
+                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s%s%s",
                   (unsigned long long)(armTicksToNs( now - start ) / 1000000000ull), reads, read_ms,
                   &wine_nx_file_read_bytes
                       ? __atomic_load_n( &wine_nx_file_read_bytes, __ATOMIC_RELAXED ) >> 20 : 0,
@@ -2188,7 +2201,7 @@ static void runtime_report_interpreter(void)
                   wine_nx_sd_flush_jump, wine_nx_sd_flush_path, wine_nx_sd_flush_end,
                   wine_nx_sd_flush_close, wine_nx_sd_flush_timer,
                   __atomic_load_n( &wine_nx_sd_hits, __ATOMIC_RELAXED ), wine_nx_sd_cache_mb(), syscalls, frames,
-                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, native, gl, audio, usb );
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, yields, native, gl, audio, usb );
         {
             extern void wine_nx_thread_report( void );
             extern void horizon_memory_pool_stats( char *buffer, size_t size );
@@ -5163,6 +5176,7 @@ int main( int argc, char **argv )
         log_line( "[INIT] a picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
     }
     wine_nx_emulate_modeset = config_bool( "mode-emulation", 1, "mode-emulation.txt", 0 );
+    wine_nx_yield_backoff = config_bool( "yield-backoff", 1, "yield-backoff.txt", 0 );
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -5499,6 +5513,11 @@ int main( int argc, char **argv )
             horizon_server_pool_wanted = settings.server_pool;
             wine_nx_lazy_file_views = settings.lazy_file_views;
             if (settings.mode_emulation) wine_nx_emulate_modeset = settings.mode_emulation > 0;
+            {
+                int backoff = launcher_setting_state( &kv, "yield-backoff" );
+
+                if (backoff >= 0) wine_nx_yield_backoff = backoff;
+            }
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
             runtime_fex_carafe = settings.fex_carafe;
@@ -5664,6 +5683,8 @@ int main( int argc, char **argv )
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
     log_line( "[INIT] display mode emulation %s (mode-emulation)%s", wine_nx_emulate_modeset ? "on" : "off",
               wine_nx_emulate_modeset ? "" : ": a program's OpenGL draws to the window's surface itself" );
+    log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
+              wine_nx_yield_backoff ? ": a long quick run of Sleep(0) or SwitchToThread sleeps 50-250 us each" : "" );
     log_line( "[TARGET] %s", target );
 
     status = runtime_target_machine( target, &target_machine );

@@ -111,6 +111,7 @@ config.mkdir()
   "display-devices": true,
   "windows-through-opengl": true,
   "mode-emulation": true,
+  "yield-backoff": true,
   "vulkan-probe": false,
   "reopen-the-launcher-on-exit": true,
   "dxvk-for-new-games": true,
