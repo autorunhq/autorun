@@ -127,6 +127,9 @@ copies.
 1. Copy the game's folder into `switch/wine/drive_c` on the SD card (that
    folder is the game's `C:` drive), or onto a USB drive.
 2. In Autorun, press **+** -> **Add game** and choose the game's `.exe`.
+   A shortcut (`.lnk`) or a batch file (`.bat`, `.cmd`) kept with the game's
+   files can be chosen instead: the program it starts is added, with the
+   arguments it gives it.
 3. Press **A** to play.
 
 Adding a game gives it DXVK, which draws Direct3D through the Switch's Vulkan

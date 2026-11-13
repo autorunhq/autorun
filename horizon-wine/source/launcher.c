@@ -39,6 +39,7 @@
 #include "launcher_pe.h"
 #include "launcher_input.h"
 #include "launcher_settings.h"
+#include "launcher_shortcut.h"
 #include "launcher_ui.h"
 #include "launcher_forwarder.h"
 #include "launcher_image.h"
@@ -165,6 +166,7 @@ struct file_entry
 {
     char name[256];
     int is_dir;
+    int shortcut;            /* 1 a .lnk, 2 a .bat or .cmd: chosen for the program it starts */
     int supported;
     unsigned short machine;
 };
@@ -3877,10 +3879,15 @@ static int read_dir( struct launcher *l, const char *dir, int *count, int images
         {
             const char *extension = strrchr( entry->d_name, '.' );
             if (images ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
-                                        strcasecmp( extension, ".jpeg" ))) : !launcher_is_exe( entry->d_name )) continue;
+                                        strcasecmp( extension, ".jpeg" )))
+                       : (!launcher_is_exe( entry->d_name ) && !launcher_is_shortcut( entry->d_name ) &&
+                          !launcher_is_batch( entry->d_name ))) continue;
         }
         snprintf( file->name, sizeof(file->name), "%s", entry->d_name );
-        file->supported = images || file->is_dir || !l->options->machine_of( path, &file->machine );
+        file->shortcut = images || file->is_dir ? 0 : launcher_is_shortcut( entry->d_name ) ? 1 :
+                         launcher_is_batch( entry->d_name ) ? 2 : 0;
+        file->machine = 0;
+        file->supported = images || file->is_dir || file->shortcut || !l->options->machine_of( path, &file->machine );
         (*count)++;
     }
     closedir( handle );
@@ -3995,10 +4002,57 @@ static int file_browser_storage( struct launcher *l, char *dir, size_t size, con
     }
 }
 
+/* A shortcut or a batch file chosen in the browser stands for the program it
+ * starts (launcher_shortcut.h): target gets that program's path, and
+ * picked_args the arguments the file gives it. */
+static char picked_args[LAUNCHER_SHORTCUT_TEXT];
+
+static int follow_shortcut( struct launcher *l, const char *dir, const char *path, int kind, char *target, size_t size )
+{
+    static char data[65536];
+    struct launcher_shortcut shortcut;
+    char message[900];
+    size_t len = 0;
+    FILE *file;
+    int parsed;
+
+    if ((file = fopen( path, "rb" )))
+    {
+        len = fread( data, 1, sizeof(data) - 1, file );
+        fclose( file );
+    }
+    data[len] = 0;
+    parsed = kind == 1 ? launcher_lnk_parse( data, len, &shortcut ) : launcher_bat_parse( data, &shortcut );
+    if (!parsed)
+    {
+        launcher_log( "[LAUNCHER] %s: no program read from it (%u bytes)", path, (unsigned int)len );
+        ui_message( &l->ui, kind == 1 ? "Shortcut" : "Batch file",
+                    kind == 1 ? "This shortcut does not name a program."
+                              : "No line of this batch file starts a program that Autorun can find by name." );
+        return 0;
+    }
+    if (!launcher_shortcut_resolve( dir, &shortcut, file_exists, target, size ))
+    {
+        launcher_log( "[LAUNCHER] %s: target %s (relative %s, folder %s) is not on the card", path,
+                      shortcut.target, shortcut.relative, shortcut.workdir );
+        snprintf( message, sizeof(message), "The program it starts was not found:\n\n%.300s\n\n"
+                  "It is looked for in this folder and the three above it. Keep the %s with the game's files.",
+                  shortcut.target[0] ? shortcut.target : shortcut.relative,
+                  kind == 1 ? "shortcut" : "batch file" );
+        ui_message( &l->ui, kind == 1 ? "Shortcut" : "Batch file", message );
+        return 0;
+    }
+    snprintf( picked_args, sizeof(picked_args), "%s", shortcut.args );
+    launcher_log( "[LAUNCHER] %s starts %s, arguments: %s", path, target, picked_args[0] ? picked_args : "none" );
+    return 1;
+}
+
 static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, int images )
 {
     struct ui *ui = &l->ui;
     char dir[512], came_from[256] = "", dos[512], path[512];
+
+    picked_args[0] = 0;
 
     for (;;)
     {
@@ -4050,13 +4104,15 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                     snprintf( row->value, sizeof(row->value), "Cannot run here" );
                     row->disabled = 1;
                 }
+                else if (files[i].shortcut)
+                    snprintf( row->value, sizeof(row->value), "%s", files[i].shortcut == 1 ? "Shortcut" : "Batch file" );
                 else snprintf( row->value, sizeof(row->value), "%s", images ? "Image" : launcher_machine_name( files[i].machine ) );
                 if (came_from[0] && !strcasecmp( files[i].name, came_from )) list.selection = rows;
             }
             if (!rows)
             {
                 memset( file_rows, 0, sizeof(file_rows[0]) );
-                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s", images ? "No folders or images here" : "No folders or programs here" );
+                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s", images ? "No folders or images here" : "No folders, programs or shortcuts here" );
                 file_rows[0].disabled = 1;
                 rows = 1;
             }
@@ -4086,11 +4142,18 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                 if (index < 0 || index >= count) continue;
                 join_path( path, sizeof(path), dir, files[index].name );
                 launcher_log( "[LAUNCHER] Browser chose %s (%s)", path,
-                              files[index].is_dir ? "folder" : images ? "image" : "program" );
+                              files[index].is_dir ? "folder" : images ? "image" :
+                              files[index].shortcut == 1 ? "shortcut" : files[index].shortcut ? "batch file" : "program" );
                 if (files[index].is_dir)
                 {
                     snprintf( dir, sizeof(dir), "%s", path );
                     reload = 1;
+                }
+                else if (files[index].shortcut)
+                {
+                    if (!follow_shortcut( l, dir, path, files[index].shortcut, target, size )) continue;
+                    save_look( l );
+                    return 1;
                 }
                 else
                 {
@@ -4143,10 +4206,12 @@ static int run_once( struct launcher *l, char *target, size_t size )
 static int add_game( struct launcher *l )
 {
     struct program program;
-    char path[512], message[800];
+    char path[512], message[1400], args[LAUNCHER_SHORTCUT_TEXT], args_path[512];
     int index;
 
     if (!file_browser_pick( l, path, sizeof(path) )) return -1;
+    /* A shortcut's or a batch file's arguments, kept before another menu picks a file. */
+    snprintf( args, sizeof(args), "%s", picked_args );
     launcher_log( "[LAUNCHER] Add Game selected %s", path );
     if ((index = find_program( l, path )) >= 0)
     {
@@ -4164,8 +4229,12 @@ static int add_game( struct launcher *l )
         char name[128];
         int answer;
 
-        snprintf( message, sizeof(message), "%s\n\n%s\n\nAdd this game to your library?",
-                  program.title, program.dos );
+        if (args[0])
+            snprintf( message, sizeof(message), "%s\n\n%s\n\nArguments: %.300s\n\nAdd this game to your library?",
+                      program.title, program.dos, args );
+        else
+            snprintf( message, sizeof(message), "%s\n\n%s\n\nAdd this game to your library?",
+                      program.title, program.dos );
         answer = ui_ask( &l->ui, "Review Game", message, hints, 3 );
         if (answer == UI_A) break;
         if (answer != UI_X)
@@ -4201,6 +4270,13 @@ static int add_game( struct launcher *l )
         return -1;
     }
     apply_new_game_renderer( l, &l->programs[index] );
+    /* Its arguments go where the Arguments row keeps them, unless it has some already. */
+    if (args[0] && launcher_args_path( path, args_path, sizeof(args_path) ) && !file_exists( args_path ) &&
+        write_line( args_path, args ))
+    {
+        load_program_settings( l, &l->programs[index] );
+        launcher_log( "[LAUNCHER] Arguments of %s: %s", path, args );
+    }
     launcher_log( "[LAUNCHER] Added %s to the library", path );
     ui_toast( &l->ui, launcher_fixes_pending( l->fixes, path ) ?
               "Game added. It has a fix, offered when it starts" : "Game added to the library", 2500 );
