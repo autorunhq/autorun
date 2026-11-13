@@ -258,6 +258,7 @@ static PFN_glGenVertexArrays p_glGenVertexArrays;
 static PFN_glBindVertexArray p_glBindVertexArray;
 static PFN_glIsVertexArray p_glIsVertexArray;
 static PFN_glBindSampler p_glBindSampler;
+static PFN_glClipControl p_glClipControl;
 static BOOL nx_menu_gl_loaded, nx_menu_gl_usable, nx_menu_gl_logged;
 #define NX_SCREEN_CLEARS 8
 static BOOL nx_osk_shown;
@@ -306,6 +307,7 @@ static BOOL nx_menu_gl_load( void )
     p_glBindVertexArray = (void *)funcs->p_eglGetProcAddress( "glBindVertexArray" );
     p_glIsVertexArray = (void *)funcs->p_eglGetProcAddress( "glIsVertexArray" );
     p_glBindSampler = (void *)funcs->p_eglGetProcAddress( "glBindSampler" );
+    p_glClipControl = (void *)funcs->p_eglGetProcAddress( "glClipControl" );
     nx_menu_gl_usable = p_glCreateShader && p_glShaderSource && p_glCompileShader && p_glGetShaderiv &&
                         p_glDeleteShader && p_glCreateProgram && p_glAttachShader && p_glLinkProgram &&
                         p_glGetProgramiv && p_glDeleteProgram && p_glUseProgram && p_glIsProgram &&
@@ -367,13 +369,36 @@ static BOOL nx_menu_gl_prepare( struct nx_osk_gl *osk )
     return TRUE;
 }
 
+/* The menu and the cursor are drawn in the program's own context, at its swap:
+ * as GL has it, from the bottom of the window up. wined3d draws to its
+ * render targets the other way up (glClipControl(GL_UPPER_LEFT), with
+ * ARB_clip_control) and leaves it so when it presents with a blit, so with
+ * display mode emulation off, where the program's context draws the window
+ * itself, the menu came out upside down. With emulation on it was drawn in
+ * win32u's own context, which never turns it. The origin is put back after. */
+static GLint nx_quad_gl_clip_origin( void )
+{
+    GLint origin = 0;
+
+    if (!p_glClipControl) return 0;
+    funcs->p_glGetIntegerv( GL_CLIP_ORIGIN, &origin );
+    if (!origin) funcs->p_glGetError();  /* a context without clip control: the query's error is ours */
+    return origin;
+}
+
 static BOOL nx_quad_gl_draw( struct nx_osk_gl *osk, GLuint tex, int x, int y, int w, int h, EGLint height )
 {
-    GLint program, array, active, texture, sampler = 0, viewport[4];
+    GLint program, array, active, texture, sampler = 0, viewport[4], clip_origin, clip_depth = 0;
     GLint src_rgb, dst_rgb, src_alpha, dst_alpha, equation_rgb, equation_alpha;
     GLboolean blend, depth, stencil, cull, discard, mask[4];
 
     if (!nx_menu_gl_prepare( osk )) return FALSE;
+
+    if ((clip_origin = nx_quad_gl_clip_origin()) == GL_UPPER_LEFT)
+    {
+        funcs->p_glGetIntegerv( GL_CLIP_DEPTH_MODE, &clip_depth );
+        p_glClipControl( GL_LOWER_LEFT, clip_depth );
+    }
 
     funcs->p_glGetIntegerv( GL_CURRENT_PROGRAM, &program );
     funcs->p_glGetIntegerv( GL_VERTEX_ARRAY_BINDING, &array );
@@ -424,6 +449,7 @@ static BOOL nx_quad_gl_draw( struct nx_osk_gl *osk, GLuint tex, int x, int y, in
     p_glActiveTexture( active );
     p_glBindVertexArray( array );
     p_glUseProgram( program );
+    if (clip_origin == GL_UPPER_LEFT) p_glClipControl( GL_UPPER_LEFT, clip_depth );
     return TRUE;
 }
 

@@ -112,6 +112,20 @@ first = first[:first.index('\n}\n')]
 assert 'eglCreateContext' not in first and 'eglDestroyContext' not in first
 assert 'EGLContext context = funcs->p_eglGetCurrentContext();' in first
 assert 'eglDestroyContext' not in winnx
+# The settings menu and the cursor are drawn in the program's context at its
+# swap; wined3d leaves glClipControl(GL_UPPER_LEFT) there, and with display
+# mode emulation off the menu came out upside down. The quad is drawn from the
+# bottom up and the program's origin put back.
+quad = winnx[winnx.index('static BOOL nx_quad_gl_draw('):]
+quad = quad[:quad.index('\n}\n')]
+assert re.search(r'if \(\(clip_origin = nx_quad_gl_clip_origin\(\)\) == GL_UPPER_LEFT\)\s*\{\s*'
+                 r'funcs->p_glGetIntegerv\( GL_CLIP_DEPTH_MODE, &clip_depth \);\s*'
+                 r'p_glClipControl\( GL_LOWER_LEFT, clip_depth \);', quad)
+assert quad.index('p_glClipControl( GL_LOWER_LEFT') < quad.index('p_glDrawArrays( GL_TRIANGLES, 0, 3 );') < \
+    quad.index('if (clip_origin == GL_UPPER_LEFT) p_glClipControl( GL_UPPER_LEFT, clip_depth );')
+origin = winnx[winnx.index('static GLint nx_quad_gl_clip_origin( void )'):]
+origin = origin[:origin.index('\n}\n')]
+assert 'if (!p_glClipControl) return 0;' in origin and 'if (!origin) funcs->p_glGetError();' in origin
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')
