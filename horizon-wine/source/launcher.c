@@ -1809,7 +1809,7 @@ enum program_row
     ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LARGE_ADDRESS, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
     ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, ROW_RESET_SETTINGS, PROGRAM_ROWS
 };
 
@@ -2601,6 +2601,17 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.lazy_file_views;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.lazy_file_views ? "Enabled" : "Disabled" );
 
+        if (p->machine == 0x014c)
+        {
+            ADD_ROW( ROW_LARGE_ADDRESS, SECTION_EMULATION, "Large address aware",
+                     "Lets a 32-bit game use addresses up to 4 GB instead of 2, as the 4 GB patch does, without "
+                     "changing its file. For a game that runs out of memory while the console still has some. "
+                     "It adds addresses, not memory, and some old games misbehave with it." );
+            row->kind = UI_ROW_SWITCH;
+            row->on = p->settings.large_address_aware;
+            snprintf( row->value, sizeof(row->value), "%s", p->settings.large_address_aware ? "Enabled" : "Disabled" );
+        }
+
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
                  "Horizon uses direct synchronization and targeted wakeups. Standard uses server requests." );
         row->kind = UI_ROW_DROPDOWN;
@@ -3122,6 +3133,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 
         case ROW_LOCK_BOOST:
             p->settings.lock_boost = action == UI_ACTION_RESET ? 0 : !p->settings.lock_boost;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_LARGE_ADDRESS:
+            p->settings.large_address_aware = action == UI_ACTION_RESET ? 0 : !p->settings.large_address_aware;
             save_program_settings( l, p );
             break;
 

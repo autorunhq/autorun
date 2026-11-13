@@ -4996,9 +4996,30 @@ static struct thread_data *init_thread_data( void *ptr )
     return data;
 }
 
+#ifdef __SWITCH__
+/* horizon-wine/source/runtime.c: large-address-aware=1 in a program's
+ * settings. A 32-bit program is then given addresses up to 4 GB as if its
+ * image carried IMAGE_FILE_LARGE_ADDRESS_AWARE, with no need to patch the
+ * file. It adds addresses, not memory. */
+int wine_nx_large_address_aware;
+#endif
+
 /* enable use of a large address space when allowed by the application */
 static void set_large_address_space(void)
 {
+#ifdef __SWITCH__
+    if (main_image_info.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        int own = !!(main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
+
+        if (wine_nx_large_address_aware) main_image_info.ImageCharacteristics |= IMAGE_FILE_LARGE_ADDRESS_AWARE;
+        if (&wine_nx_runtime_trace)
+            wine_nx_runtime_trace( own ? "[VA] 32-bit program: addresses up to 4 GB, its image is large address aware"
+                                   : wine_nx_large_address_aware
+                                   ? "[VA] 32-bit program: addresses up to 4 GB (large-address-aware); its image does not ask for them"
+                                   : "[VA] 32-bit program: addresses up to 2 GB; its image is not large address aware" );
+    }
+#endif
     if (main_image_info.Machine == IMAGE_FILE_MACHINE_I386)
     {
         /* reserve the DOS area, and make it accessible (except the low 64K)

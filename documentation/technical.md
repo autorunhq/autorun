@@ -393,6 +393,11 @@ changes, and fails if the pinned text moves.
   mark is `registry/components-1.done`, so a reset registry runs it again.
 - A 32-bit address space leaves a program about 2 GiB of addresses and caps the
   whole process at 2 GiB of memory.
+- A 32-bit program whose image is not large address aware is given addresses
+  below 2 GiB only. **Large address aware** in the game's settings
+  (`large-address-aware=1`) gives it those up to 4 GiB without patching the
+  file; `[VA] 32-bit program: addresses up to ...` in the log says which it
+  got. It adds addresses, not memory.
 - AMD64 programs require the 39-bit application forwarder and remain
   experimental.
 - One program at a time; one controller.
