@@ -102,6 +102,18 @@ wgl = (root / 'dlls/opengl32/unix_wgl.c').read_text()
 vk = wgl[wgl.index('static BOOL initialize_vk_device( TEB *teb, const struct opengl_context *ctx )'):]
 vk = vk[:vk.index('if (!ctx->extensions[GL_EXT_memory_object_fd] )')]
 assert re.search(r'#ifdef __SWITCH__\n(    /\*.*\n|     \*.*\n)*    return FALSE;\n#endif', vk)
+# nvc0 on mesa-switch: a destroyed context's buffer lists, kept linked to the
+# screen's shared pushbuffer between submissions, were freed while still on it
+# (Vampire's "corrupt or oversized bufctx list"). Rebuilt at each submission,
+# set before the Vulkan probe, the graphics test or the launcher makes a screen.
+lists = runtime[runtime.index('static void runtime_nvc0_buffer_lists( void )'):]
+lists = lists[:lists.index('\n}\n')]
+assert 'config_bool( "gl-incremental-refs", 0,' in lists
+assert 'setenv( "NOUVEAU_SWITCH_INCREMENTAL_REFS", "0", 1 );' in lists
+mesa_switch = runtime[runtime.index('log_line( "[INIT] Mesa from mesa-switch:'):]
+assert mesa_switch.index('runtime_nvc0_buffer_lists();') < mesa_switch.index('#endif') \
+    < mesa_switch.index('wine_nx_vulkan_probe();') < mesa_switch.index('wine_nx_graphics_selftest();') \
+    < mesa_switch.index('chosen = wine_nx_launcher_run(')
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')

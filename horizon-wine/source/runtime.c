@@ -2407,6 +2407,30 @@ static void runtime_nvk_compression( const char *what )
     setenv( "NVK_DEBUG", value, 1 );
     log_line( "[INIT] NVK image compression off for %s: NVK_DEBUG=%s", what, value );
 }
+
+#ifndef WINE_NX_NXVK
+/* mesa-switch gives the GPU screen one pushbuffer, shared by every OpenGL
+ * context on it (Wine's and the compositor's), and by default keeps each
+ * context's buffer lists linked to it from one submission to the next
+ * (NOUVEAU_SWITCH_INCREMENTAL_REFS). A destroyed context's lists stay linked:
+ * nouveau_bufctx_del frees them without taking them off. The next submission
+ * walked freed memory, the winsys latched "corrupt or oversized bufctx list",
+ * every draw after it failed to validate and wrote past the pushbuffer, and
+ * Vampire: The Masquerade froze some 50 s in, on every build. Lists rebuilt at
+ * each submission, as libdrm's are, are taken off by every submission, and
+ * nvc0_destroy submits before it frees its own. gl-incremental-refs in
+ * settings.json puts mesa-switch's default back. */
+static void runtime_nvc0_buffer_lists( void )
+{
+    if (config_bool( "gl-incremental-refs", 0, "gl-incremental-refs.txt", 0 ))
+    {
+        log_line( "[INIT] nvc0 keeps its buffer lists between GPU submissions (gl-incremental-refs in settings.json)" );
+        return;
+    }
+    setenv( "NOUVEAU_SWITCH_INCREMENTAL_REFS", "0", 1 );
+    log_line( "[INIT] nvc0 rebuilds its buffer lists at each GPU submission: NOUVEAU_SWITCH_INCREMENTAL_REFS=0" );
+}
+#endif
 #endif
 
 
@@ -5110,6 +5134,8 @@ int main( int argc, char **argv )
 #else
         log_line( "[INIT] Mesa from mesa-switch: OpenGL through nvc0, Vulkan through NVK; Vulkan probe %s",
                   vulkan_probe ? "on" : "off" );
+        /* Before anything here makes the GPU screen, whose pushbuffer reads it. */
+        runtime_nvc0_buffer_lists();
 #endif
         if (vulkan_probe)
         {

@@ -62,6 +62,14 @@ with compression tags of the GPU's, Zink makes one for every texture, and in
 Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
 back on.
 
+nvc0 on mesa-switch rebuilds its buffer lists at each GPU submission
+(`NOUVEAU_SWITCH_INCREMENTAL_REFS=0`). All OpenGL contexts share the screen's
+pushbuffer. Kept from one submission to the next, a destroyed context's lists
+stayed linked to that pushbuffer after they were freed. The winsys then latched
+"corrupt or oversized bufctx list", no draw validated after it, and Vampire: The
+Masquerade froze. `gl-incremental-refs` in `settings.json` puts mesa-switch's
+default back.
+
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup
 programs and default settings into the release zip,
