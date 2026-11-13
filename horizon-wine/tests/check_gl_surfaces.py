@@ -122,6 +122,10 @@ static const struct opengl_drawable_funcs nx_drawable_funcs;
 static struct client_surface *clients[64];
 static unsigned int live_drawables, live_surfaces, acquires, releases, swaps, overlays, intervals, style_reads;
 static BOOL screen_busy, fail_pbuffer, fail_window, fail_drawable, fail_client;
+/* A DXVK payload with its own ddraw.dll, once Vulkan is started (off here). */
+extern int wine_nx_dxvk_wraps_ddraw __attribute__((weak));
+extern int wine_nx_vk_served __attribute__((weak));
+extern void wine_nx_runtime_trace(const char *msg) __attribute__((weak));
 static int get_window_long(HWND hwnd, int offset) { style_reads++; return ((WND *)hwnd)->visible ? WS_VISIBLE : 0; }
 static BOOL is_window_visible(HWND hwnd) {
     for (WND *win = hwnd; win; win = win->parent) if (!win->visible) return FALSE;
