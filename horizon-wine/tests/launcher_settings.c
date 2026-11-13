@@ -145,6 +145,24 @@ static void test_settings( const char *dir )
     load_text( &kv, "server-pool=0\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.server_pool );
+    /* Display mode emulation: no key is the shared setting, and settings
+     * nobody filled in write none. */
+    load_text( &kv, "" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.mode_emulation == 0 && launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "mode-emulation" ) );
+    load_text( &kv, "mode-emulation=0\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.mode_emulation == -1 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "mode-emulation=0\n" ) );
+    settings.mode_emulation = 1;
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "mode-emulation=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.mode_emulation == 1 );
+    settings.mode_emulation = 2;
+    assert( !launcher_settings_write( &kv, &settings ) );
+    settings.mode_emulation = 0;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "mode-emulation" ) );
     load_text( &kv, "server-pool=yes\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.server_pool );

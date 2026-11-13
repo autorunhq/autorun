@@ -5314,6 +5314,7 @@ int main( int argc, char **argv )
             .framebuffer = !wine_nx_compositor_mode,
             .swkbd_auto = wine_nx_swkbd_auto_enabled,
             .picture_mode = wine_nx_picture_mode,
+            .mode_emulation = wine_nx_emulate_modeset,
         };
         int chosen;
 
@@ -5386,6 +5387,8 @@ int main( int argc, char **argv )
         wine_nx_config_set_bool( &runtime_config, "verbose-log", options.verbose );
         wine_nx_config_set_bool( &runtime_config, "profiler", options.profile );
         wine_nx_config_set_bool( &runtime_config, "windows-through-opengl", !options.framebuffer );
+        wine_nx_emulate_modeset = !!options.mode_emulation;
+        wine_nx_config_set_bool( &runtime_config, "mode-emulation", wine_nx_emulate_modeset );
         wine_nx_config_set_bool( &runtime_config, "reopen-the-launcher-on-exit", options.reopen_launcher );
         runtime_reopen_launcher = options.reopen_launcher;
         wine_nx_config_set_bool( &runtime_config, "dxvk-for-new-games", options.dxvk_on_add );
@@ -5475,11 +5478,7 @@ int main( int argc, char **argv )
             horizon_fast_sync_enabled = settings.fast_sync;
             horizon_server_pool_wanted = settings.server_pool;
             wine_nx_lazy_file_views = settings.lazy_file_views;
-            {
-                int emulation = launcher_setting_state( &kv, "mode-emulation" );
-
-                if (emulation >= 0) wine_nx_emulate_modeset = emulation;
-            }
+            if (settings.mode_emulation) wine_nx_emulate_modeset = settings.mode_emulation > 0;
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
             runtime_fex_carafe = settings.fex_carafe;

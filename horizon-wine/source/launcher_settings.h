@@ -218,6 +218,11 @@ struct launcher_settings
      * picture with black bars, 1 filling the screen with its edges cropped,
      * 2 stretched to it, 3 at its own size in the middle. */
     int picture_mode;
+    /* win32u's emulation of a display mode the program asks for (its OpenGL
+     * drawn into a framebuffer object that an internal context blits to the
+     * window): 0 the shared setting, 1 on, -1 off. Zero is the shared setting
+     * so that settings nobody filled in leave it alone. */
+    int mode_emulation;
     /* Which Mesa draws: mesa-switch with OpenGL through nvc0 (the default) or
      * through Zink, or nxvk, Vulkan and OpenGL (through Zink) from another
      * runtime on the card, wine-nx-runtime-nxvk.nro (source/runtime.c). */
@@ -461,6 +466,11 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         else if (!strcasecmp( value, "stretched" )) settings->picture_mode = 2;
         else if (!strcasecmp( value, "own-size" )) settings->picture_mode = 3;
     }
+    {
+        int emulation = launcher_setting_state( kv, "mode-emulation" );
+
+        settings->mode_emulation = emulation < 0 ? 0 : emulation ? 1 : -1;
+    }
     settings->graphics_driver = LAUNCHER_GRAPHICS_NVC0;
     if (launcher_kv_get( kv, "graphics-driver", value, sizeof(value) ) ||
         launcher_kv_get( kv, "gl-driver", value, sizeof(value) ))  /* the key it had first */
@@ -540,7 +550,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
         settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
         settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
         settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT ||
-        settings->picture_mode < -1 || settings->picture_mode > 3) return 0;
+        settings->picture_mode < -1 || settings->picture_mode > 3 ||
+        settings->mode_emulation < -1 || settings->mode_emulation > 1) return 0;
     return launcher_kv_set( kv, "title", settings->title[0] ? settings->title : NULL ) &&
            launcher_kv_set( kv, "hidden", settings->hidden ? "1" : NULL ) &&
            launcher_kv_set( kv, "verbose", states[settings->verbose + 1] ) &&
@@ -561,6 +572,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                                       settings->picture_mode == 1 ? "edges" :
                                       settings->picture_mode == 2 ? "stretched" :
                                       settings->picture_mode == 3 ? "own-size" : "whole" ) &&
+           launcher_kv_set( kv, "mode-emulation", !settings->mode_emulation ? NULL :
+                                                  settings->mode_emulation > 0 ? "1" : "0" ) &&
            launcher_kv_set( kv, "gl-driver", NULL ) &&
            launcher_kv_set( kv, "graphics-driver", launcher_graphics_values[settings->graphics_driver] ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&

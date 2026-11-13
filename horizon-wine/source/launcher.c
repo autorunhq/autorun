@@ -1769,7 +1769,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_PICTURE, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
@@ -2611,6 +2611,17 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         snprintf( row->value, sizeof(row->value), "%s",
                   picture_text( p->settings.picture_mode, l->options->picture_mode, buffer, sizeof(buffer) ) );
 
+        ADD_ROW( ROW_MODE_EMULATION, SECTION_GRAPHICS, "Display mode emulation",
+                 "A game that asks for a resolution of its own draws into a hidden picture of that size, which "
+                 "is then copied to the screen. Off lets the game draw to the screen's surface directly, as "
+                 "upstream Autorun does: turn it off for an OpenGL or old Direct3D game that freezes soon "
+                 "after it starts (Vampire: The Masquerade - Redemption)."
+                 " Global follows the setting in Settings (X on the library)." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  state_text( p->settings.mode_emulation > 0 ? 1 : p->settings.mode_emulation < 0 ? 0 : -1,
+                              l->options->mode_emulation, "On", "Off", buffer, sizeof(buffer) ) );
+
         if (l->options->vulkan)
         {
             char nxvk[512];
@@ -2932,6 +2943,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                                        next_picture_state( p->settings.picture_mode, action == UI_ACTION_LEFT ? -1 : 1 );
             save_program_settings( l, p );
             break;
+
+        case ROW_MODE_EMULATION:
+        {
+            int state = p->settings.mode_emulation > 0 ? 1 : p->settings.mode_emulation < 0 ? 0 : -1;
+
+            state = action == UI_ACTION_RESET ? -1 : next_state( state, action == UI_ACTION_LEFT ? -1 : 1 );
+            p->settings.mode_emulation = state < 0 ? 0 : state ? 1 : -1;
+            save_program_settings( l, p );
+            break;
+        }
 
         case ROW_GRAPHICS_DRIVER:
         {
@@ -3262,7 +3283,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_PICTURE,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_PICTURE, SET_MODE_EMULATION,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
     SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
@@ -3466,6 +3487,7 @@ static void settings_menu( struct launcher *l )
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
             [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_PICTURE] = SET_SECTION_DEFAULTS,
+            [SET_MODE_EMULATION] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
@@ -3525,6 +3547,15 @@ static void settings_menu( struct launcher *l )
                                  "cropped fills the screen and loses the borders; stretched fills it and "
                                  "distorts; own size draws it in the middle, one pixel to one pixel, as a "
                                  "window stands on a desk. A finger lands on what it sees in every one.";
+        snprintf( rows[SET_MODE_EMULATION].label, sizeof(rows[0].label), "Display mode emulation" );
+        snprintf( rows[SET_MODE_EMULATION].value, sizeof(rows[0].value), "%s", on_off[!!l->options->mode_emulation] );
+        rows[SET_MODE_EMULATION].kind = UI_ROW_SWITCH;
+        rows[SET_MODE_EMULATION].on = !!l->options->mode_emulation;
+        rows[SET_MODE_EMULATION].help = "A game that asks for a resolution of its own draws into a hidden picture of that size, which "
+                 "is then copied to the screen. Off lets the game draw to the screen's surface directly, as "
+                 "upstream Autorun does: turn it off for an OpenGL or old Direct3D game that freezes soon "
+                 "after it starts (Vampire: The Masquerade - Redemption)."
+                 " For every program without its own setting.";
         launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
         for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
 
@@ -3617,6 +3648,7 @@ static void settings_menu( struct launcher *l )
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
         case SET_PROFILE: l->options->profile = !l->options->profile; break;
         case SET_WINDOWS: l->options->framebuffer = !l->options->framebuffer; break;
+        case SET_MODE_EMULATION: l->options->mode_emulation = !l->options->mode_emulation; break;
         case SET_PICTURE:
             l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 3 : 1)) % 4;
             break;

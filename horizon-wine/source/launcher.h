@@ -47,6 +47,7 @@ struct wine_nx_launcher_options
     int reopen_launcher;  /* come back here when a program ends, rather than to the menu */
     int dxvk_on_add;      /* a game added to the library starts with DXVK enabled */
     int swkbd_auto;       /* the on-screen keyboard opens when a text field takes focus */
+    int mode_emulation;   /* win32u emulates a display mode a program asks for */
     int picture_mode;     /* a mode of the program's own: 0 whole with bars, 1 filling
                            * the screen with its edges cropped, 2 stretched to it, 3 at
                            * its own size in the middle */
