@@ -639,35 +639,54 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
     return ret;
 }
 
+/* The first frame of a surface that takes the screen while the loading screen
+ * or the floating keyboard is up: drawn with the context this thread has
+ * current, the program's, and skipped when it has none. It used to be drawn
+ * with a context of its own, made, drawn with and destroyed, and on mesa-switch
+ * a context that drew must not be destroyed while a program runs. nvc0 gives
+ * every context of the screen the screen's one pushbuffer, and keeps a
+ * context's buffer lists linked to it from one submission to the next
+ * (NOUVEAU_SWITCH_INCREMENTAL_REFS, its default). nvc0_destroy frees them while
+ * they are still linked (nouveau_bufctx_del), and the submissions after it
+ * write through them into whatever the heap gives that memory to next. Vampire:
+ * The Masquerade - Redemption takes the screen with the loading screen up, and
+ * froze about a minute later on "corrupt or oversized bufctx list" in every
+ * build with this frame. Upstream Autorun has no first frame, so no context
+ * that drew is destroyed there while a game runs. This fork's loading screen
+ * (carafe_loading.c) shows through the floating keyboard, so every program
+ * that takes the screen while it is up gets this frame. The program's context
+ * is left as it was found: nx_screen_clear and nx_osk_draw put back what they
+ * change. */
 static void nx_screen_first_frame( struct nx_gl_drawable *gl, int format )
 {
-    EGLContext previous = funcs->p_eglGetCurrentContext(), context;
+    EGLContext context = funcs->p_eglGetCurrentContext();
     EGLSurface draw = funcs->p_eglGetCurrentSurface( EGL_DRAW ), read = funcs->p_eglGetCurrentSurface( EGL_READ );
-    unsigned int i;
+    PFN_glBindFramebuffer bind_fb;
 
+    (void)format;
     if (!wine_nx_osk_visible()) return;
-    funcs->p_eglBindAPI( EGL_OPENGL_API );
-    if (!(context = funcs->p_eglCreateContext( egl->display, nx_config_for_format( format ), NULL, NULL ))) return;
-    if (funcs->p_eglMakeCurrent( egl->display, gl->base.surface, gl->base.surface, context ))
+    if (!context)
     {
-        funcs->p_glClearColor( 0, 0, 0, 1 );
-        funcs->p_glClear( GL_COLOR_BUFFER_BIT );
-        nx_osk_draw( &gl->base );
-        nx_log( "[NXGL] first frame: the floating keyboard's picture, swap %s",
-                funcs->p_eglSwapBuffers( egl->display, gl->base.surface ) ? "done" : "failed" );
+        nx_log( "[NXGL] first frame: no context current on this thread; the screen keeps its last picture" );
+        return;
     }
-    if (!funcs->p_eglMakeCurrent( egl->display, draw, read, previous ))
+    if (!__atomic_load_n( &p_glBindFramebuffer, __ATOMIC_ACQUIRE ) &&
+        (bind_fb = (void *)funcs->p_eglGetProcAddress( "glBindFramebuffer" )))
+        __atomic_store_n( &p_glBindFramebuffer, bind_fb, __ATOMIC_RELEASE );
+    if (!__atomic_load_n( &p_glBindFramebuffer, __ATOMIC_ACQUIRE ) ||
+        !funcs->p_eglMakeCurrent( egl->display, gl->base.surface, gl->base.surface, context ))
+    {
+        nx_log( "[NXGL] first frame: the thread's context cannot draw to the new surface, error %#x",
+                funcs->p_eglGetError() );
+        return;
+    }
+    nx_screen_clear();
+    nx_osk_draw( &gl->base );
+    nx_log( "[NXGL] first frame: the floating keyboard's picture, drawn with the thread's context, swap %s",
+            funcs->p_eglSwapBuffers( egl->display, gl->base.surface ) ? "done" : "failed" );
+    if (!funcs->p_eglMakeCurrent( egl->display, draw, read, context ))
         nx_log( "[NXGL] first frame: the thread's context could not be made current again, error %#x",
                 funcs->p_eglGetError() );
-    funcs->p_eglDestroyContext( egl->display, context );
-    pthread_mutex_lock( &nx_osk_gl_lock );
-    for (i = 0; i < ARRAY_SIZE(nx_osk_gl); i++)
-    {
-        if (nx_osk_gl[i].context != context) continue;
-        free( nx_osk_gl[i].pixels );
-        memset( &nx_osk_gl[i], 0, sizeof(nx_osk_gl[i]) );
-    }
-    pthread_mutex_unlock( &nx_osk_gl_lock );
 }
 
 static const struct opengl_drawable_funcs nx_drawable_funcs =

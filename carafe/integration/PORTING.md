@@ -718,10 +718,10 @@ fork has it in its own form, which the last column names.
 | 0008 | runtime screen until first frame | 29 | 96 % | in the fork; the notice before the program starts has one more condition (`wine_nx_watch_window_pictures`) |
 | 0009 | winnx vulkan reserve screen | 2 | 100 % | in the fork |
 | 0010 | vulkan take screen at swapchain | 3 | 33 % | in the fork, with the call made weak |
-| 0011 | winnx opengl first frame | 22 | 100 % | in the fork |
+| 0011 | winnx opengl first frame | 22 | 50 % | in the fork's own form: the frame is drawn with the program's current context instead of one made and destroyed for it, as mesa-switch's nvc0 frees a destroyed context's buffer lists while the screen's shared pushbuffer still has them linked (Vampire froze on "corrupt or oversized bufctx list"); skipped when the thread has no context |
 | 0012 | winnx flush mouse motion | 4 | 75 % | in the fork; the flush is made only after a move or a button was sent, and an empty flush sends nothing, so the server sees the same |
 | 0013 | audio source rate frames | 30 | 100 % | in the fork |
-| 0014 | winnx opengl clear after loading screen | 29 | 79 % | in the fork, with atomic loads and stores |
+| 0014 | winnx opengl clear after loading screen | 29 | 82 % | in the fork, with atomic loads and stores |
 | 0015 | win32u screen size of a window | 15 | 100 % | in the fork |
 | 0016 | opengl present at window position | 31 | 100 % | in the fork |
 | 0017 | winnx screen follows game window | 72 | 100 % | in the fork |

@@ -62,17 +62,21 @@ with compression tags of the GPU's, Zink makes one for every texture, and in
 Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
 back on.
 
-A known nvc0 problem in mesa-switch, not fixed here: one pushbuffer serves the
-whole GPU screen and every OpenGL context on it. nvc0's state setters
-(`nouveau_bufctx_reset` in `set_framebuffer_state`, `set_vertex_buffers`,
-`set_sampler_views` and others) change a context's buffer lists without the
-screen's state lock, while a submission from another thread rewrites them
-under it. Vampire: The Masquerade - Redemption draws through WineD3D and
-Mesa's glthread. In a few minutes its winsys latches "corrupt or oversized
-bufctx list", after which no draw validates and the game freezes. That happens
-with `NOUVEAU_SWITCH_INCREMENTAL_REFS` on (mesa-switch's default) and off, in
-39- and 32-bit address spaces alike. Such a game runs on nxvk, Zink on NVK,
-which has none of nvc0's winsys.
+On mesa-switch no OpenGL context that drew is destroyed while a program runs.
+nvc0 there gives every context of the screen the screen's one pushbuffer. It
+keeps a context's buffer lists linked to that pushbuffer from one submission to
+the next (`NOUVEAU_SWITCH_INCREMENTAL_REFS`, its default). `nvc0_destroy`
+frees them while they are still linked (`nouveau_bufctx_del`), and later
+submissions write through them into whatever the heap gave that memory to.
+The loading screen's first frame on a new OpenGL surface used to be drawn with a
+context of its own, made and destroyed for it. Vampire: The Masquerade -
+Redemption then froze about a minute later on "corrupt or oversized bufctx
+list". That frame is now drawn with the program's own context
+(`dlls/win32u/winnx_opengl.c`, `nx_screen_first_frame`); upstream Autorun has
+no such frame. Turning incremental refs off is no cure. Then every submission
+rewrites every context's lists, which nvc0's state setters change without the
+screen's lock (`nouveau_bufctx_reset` in `set_framebuffer_state`,
+`set_vertex_buffers`, `set_sampler_views`), and the freeze stayed.
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup
