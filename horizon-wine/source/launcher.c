@@ -715,10 +715,14 @@ static void save_program_settings( struct launcher *l, struct program *p )
     load_program_settings( l, p );
 }
 
+static void apply_new_game_renderer( struct launcher *l, struct program *p );
+
 /* A game's Reset to defaults: every setting its menus set, the launcher's and
  * the in-game menu's, back to its default (launcher_settings_reset), with its
- * FEX and DXVK options and its Box64 options. Its title, whether it is hidden,
- * the game fix it was asked about, its controls and its launch arguments stay. */
+ * FEX and DXVK options and its Box64 options; its Direct3D renderer is then the
+ * one a game just added gets (DXVK for new games). Its title, whether it is
+ * hidden, the game fix it was asked about, its controls and its launch
+ * arguments stay. */
 static int reset_program_settings( struct launcher *l, struct program *p )
 {
     struct launcher_kv kv;
@@ -741,6 +745,7 @@ static int reset_program_settings( struct launcher *l, struct program *p )
     if (!launcher_kv_save( &kv, path )) return 0;
     if (launcher_sibling_path( p->path, ".box64.txt", path, sizeof(path) )) remove( path );
     load_program_settings( l, p );
+    apply_new_game_renderer( l, p );
     return 1;
 }
 
