@@ -222,6 +222,7 @@ static inline int futex_wake_one( const LONG *addr )
 
 #include "horizon_private.h"
 #include "horizon_threads.h"
+#include "horizon_zero_sleep.h"
 
 C_ASSERT( sizeof(LONG) == sizeof(int) );
 
@@ -2491,6 +2492,20 @@ NTSTATUS WINAPI NtYieldExecution(void)
 extern void svcSleepThread( int64_t nano );
 extern void wine_nx_stop_point( void ) __attribute__((weak));
 extern void wine_nx_stop_sleep( int64_t nano ) __attribute__((weak));
+
+/* Says once, in the log, that a thread's loop of Sleep(0) began to sleep. */
+static void zero_sleep_noticed(void)
+{
+    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
+    static int noticed;
+    char line[160];
+
+    if (!&wine_nx_runtime_trace || __atomic_exchange_n( &noticed, 1, __ATOMIC_RELAXED )) return;
+    snprintf( line, sizeof(line), "[CORES] thread %04x waits in a loop of Sleep(0): from now on a long run of "
+              "them sleeps 50-250 us a call instead of keeping its core busy",
+              (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+    wine_nx_runtime_trace( line );
+}
 #endif
 
 /******************************************************************
@@ -2552,6 +2567,26 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
             when = now.QuadPart - when;
         }
 
+#ifdef __SWITCH__
+        /* Sleep(0): a long run of them in a row sleeps a little each
+         * (horizon_zero_sleep.h). */
+        if (!when)
+        {
+            static __thread struct horizon_zero_sleep zero_sleep;
+            long long ns = horizon_zero_sleep_ns( &zero_sleep, horizon_interrupt_time() );
+
+            if (!ns) status = NtYieldExecution();
+            else
+            {
+                zero_sleep_noticed();
+                if (&wine_nx_stop_sleep) wine_nx_stop_sleep( ns );
+                else svcSleepThread( ns );
+                if (&wine_nx_stop_point) wine_nx_stop_point();
+            }
+            zero_sleep.last = horizon_interrupt_time();
+            return status;
+        }
+#endif
         /* Note that we yield after establishing the desired timeout, but
            we only care about the result of the yield for zero timeouts */
         status = NtYieldExecution();

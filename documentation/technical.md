@@ -55,7 +55,12 @@ runtime; the full package now ships the Mesa 26 one.
   the DLL repository ships in `horizon-dlls/classes.reg`; hives an earlier build left in
   `switch/wine` itself are moved there on the first start), message
   queues, timers, the clipboard, raw input, object directories and sections,
-  including sections with no file whose views share their pages.
+  including sections with no file whose views share their pages. `Sleep(0)`
+  yields as on Windows, but once a thread has called it 64 times in a row with
+  under 20 µs between calls, each further call in that run sleeps 50 µs,
+  doubling up to 250 µs (`dlls/ntdll/unix/horizon_zero_sleep.h`). A game's
+  wait loop then leaves its core idle instead of busy; Vampire: The Masquerade -
+  Redemption called it up to a million times a second and kept core 0 at 100%.
 - **Sockets.** Overlapped Winsock on I/O completion ports: pending
   `WSARecv`/`WSASend`, `AcceptEx`, `ConnectEx`, cancellation, and the
   completion rules of wineserver's `async_set_result`. Horizon has only IPv4:
