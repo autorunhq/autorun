@@ -479,6 +479,10 @@ started = runtime.index('if (wine_nx_fpslocker && !runtime_components_run) wine_
 assert runtime.index('log_line( "[TARGET] %s", target );') < started
 leave = body(runtime, 'static int leave_cleanly( void )')
 assert leave.index('wine_nx_saltynx_stop();') < leave.index('wine_nx_runtime_log_flush();')
+# A program that ends goes back through return_to_launcher, not leave_cleanly:
+# the bridge stops there too, before the screen's presenter.
+back = body(runtime, 'static int return_to_launcher( void )')
+assert back.index('wine_nx_saltynx_stop();') < back.index('wine_nx_compositor_stop();')
 assert 'unsigned int frames = wine_nx_frames_shown();' in runtime
 cmake = (root / 'horizon-wine/CMakeLists.txt').read_text()
 assert cmake.count('source/saltynx.c') == 2

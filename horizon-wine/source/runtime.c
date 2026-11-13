@@ -4612,6 +4612,9 @@ static int return_to_launcher( void )
 
         if (&wine_nx_input_thread_stop) wine_nx_input_thread_stop();
     }
+    /* FPSLocker's bridge, a thread of the runtime's too; it puts the panel
+     * back to 60 Hz if display sync moved it (saltynx.c). */
+    wine_nx_saltynx_stop();
     wine_nx_compositor_stop();
     wine_nx_profile_stop();
 #ifdef WINE_NX_USB_STORAGE
