@@ -598,4 +598,24 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                             launcher_sharpness_labels[settings->upscaling_sharpness] : NULL );
 }
 
+/* A game's Reset to defaults: every value its menus set goes back to its
+ * default, with the in-game menu's large-pages and the runtime's
+ * yield-backoff; its title, whether it is hidden and whatever else the file
+ * holds (the game fix it was asked about, its controls) stay. The FEX and
+ * DXVK options, which have tables of their own, are the caller's to clear.
+ * Returns 0 when the result would not fit. */
+static inline int launcher_settings_reset( struct launcher_kv *kv )
+{
+    struct launcher_kv empty = {{0}, 0};
+    struct launcher_settings settings, defaults;
+
+    launcher_settings_read( kv, &settings );
+    launcher_settings_read( &empty, &defaults );
+    memcpy( defaults.title, settings.title, sizeof(defaults.title) );
+    defaults.hidden = settings.hidden;
+    return launcher_settings_write( kv, &defaults ) &&
+           launcher_kv_set( kv, "large-pages", NULL ) &&
+           launcher_kv_set( kv, "yield-backoff", NULL );
+}
+
 #endif

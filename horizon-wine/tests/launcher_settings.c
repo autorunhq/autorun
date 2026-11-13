@@ -374,6 +374,41 @@ static void test_settings( const char *dir )
     assert( !strcmp( path, "sdmc:/Games/Test/Game.wine-nx.txt" ) );
 }
 
+/* Reset to defaults: what the menus set goes, the title, hidden, the game fix
+ * the player was asked about and the controls stay, and the FEX and DXVK
+ * options are left for the launcher to clear. */
+static void test_reset(void)
+{
+    struct launcher_kv kv, empty = {{0}, 0};
+    struct launcher_settings settings, defaults;
+    char value[64];
+
+    load_text( &kv, "title=My Game\nhidden=1\ngame-fix-skip=vampire 3\nbutton-layout=xbox\n"
+                    "sync=horizon\ncpu=box64\nfex-build=carafe\nfour-cores=0\nlazy-file-views=1\n"
+                    "orchestrator=1\nlock-boost=1\nserver-pool=1\nwindows=framebuffer\npicture=edges\n"
+                    "mode-emulation=0\ngraphics-driver=zink\nd3d=wine\ndxvk-hud=fps\nvsync=0\nlsfg=1\n"
+                    "large-pages=1\nyield-backoff=0\nverbose=1\nprofile=0\nFEX_TSOENABLED=1\n" );
+    assert( launcher_settings_reset( &kv ) );
+    memset( &settings, 0, sizeof(settings) );  /* padding and unused bytes alike, for memcmp */
+    memset( &defaults, 0, sizeof(defaults) );
+    launcher_settings_read( &kv, &settings );
+    launcher_settings_read( &empty, &defaults );
+    assert( !strcmp( settings.title, "My Game" ) && settings.hidden == 1 );
+    memcpy( defaults.title, settings.title, sizeof(defaults.title) );
+    defaults.hidden = 1;
+    assert( !memcmp( &settings, &defaults, sizeof(settings) ) );
+    assert( launcher_kv_get( &kv, "game-fix-skip", value, sizeof(value) ) && !strcmp( value, "vampire 3" ) );
+    assert( launcher_kv_get( &kv, "button-layout", value, sizeof(value) ) && !strcmp( value, "xbox" ) );
+    assert( launcher_kv_get( &kv, "FEX_TSOENABLED", value, sizeof(value) ) );  /* the launcher's to clear */
+    assert( !strstr( kv.text, "sync=" ) && !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "mode-emulation" ) &&
+            !strstr( kv.text, "large-pages" ) && !strstr( kv.text, "yield-backoff" ) && !strstr( kv.text, "verbose" ) &&
+            !strstr( kv.text, "d3d=" ) && !strstr( kv.text, "cpu=" ) && !strstr( kv.text, "lsfg" ) );
+
+    /* An empty file stays empty but for what the defaults always write. */
+    kv = empty;
+    assert( launcher_settings_reset( &kv ) && !strstr( kv.text, "title" ) && !strstr( kv.text, "hidden" ) );
+}
+
 int main(void)
 {
     char dir[] = "/tmp/launcher-settings.XXXXXX", command[64];
@@ -382,6 +417,7 @@ int main(void)
     test_get();
     test_set();
     test_settings( dir );
+    test_reset();
     snprintf( command, sizeof(command), "rm -rf '%s'", dir );
     system( command );
     printf( "launcher_settings: all tests passed\n" );

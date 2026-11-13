@@ -56,6 +56,7 @@
 #include "dxvk_releases.h"
 #include "box64_options.h"
 #include "fex_options.h"
+#include "dxvk_options.h"
 #include "fex_build.h"
 #ifdef WINE_NX_SWAP_POC
 #include "launcher_swap.h"
@@ -712,6 +713,35 @@ static void save_program_settings( struct launcher *l, struct program *p )
         !launcher_kv_save( &kv, path ))
         ui_toast( &l->ui, "Could not save the program's settings", 2500 );
     load_program_settings( l, p );
+}
+
+/* A game's Reset to defaults: every setting its menus set, the launcher's and
+ * the in-game menu's, back to its default (launcher_settings_reset), with its
+ * FEX and DXVK options and its Box64 options. Its title, whether it is hidden,
+ * the game fix it was asked about, its controls and its launch arguments stay. */
+static int reset_program_settings( struct launcher *l, struct program *p )
+{
+    struct launcher_kv kv;
+    char path[768], folder[768];
+    unsigned int i;
+    int ready = 1;
+
+    if (launcher_settings_on_usb( p->path ))
+    {
+        runtime_file( l, "program-settings", folder, sizeof(folder) );
+        ready = !mkdir( folder, 0777 ) || errno == EEXIST;
+    }
+    if (!ready || !launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) ||
+        !launcher_kv_load( &kv, path ) || !launcher_settings_reset( &kv ))
+        return 0;
+    for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
+        if (!launcher_kv_set( &kv, nx_fex_options[i].name, NULL )) return 0;
+    for (i = 0; i < dxvk_option_count; i++)
+        if (!launcher_kv_set( &kv, dxvk_options[i].name, NULL )) return 0;
+    if (!launcher_kv_save( &kv, path )) return 0;
+    if (launcher_sibling_path( p->path, ".box64.txt", path, sizeof(path) )) remove( path );
+    load_program_settings( l, p );
+    return 1;
 }
 
 static void apply_new_game_renderer( struct launcher *l, struct program *p )
@@ -1773,7 +1803,7 @@ enum program_row
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
-    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
+    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, ROW_RESET_SETTINGS, PROGRAM_ROWS
 };
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
@@ -2810,6 +2840,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                      "others found with the file browser can be added." );
             row->destructive = in_library;
         }
+        ADD_ROW( ROW_RESET_SETTINGS, SECTION_GENERAL, "Reset to defaults",
+                 "Puts every setting of this game back to its default: graphics, emulation and logs, and its "
+                 "FEX, DXVK and Box64 options, here and in the in-game menu. Its title, arguments, controls "
+                 "and place in the library stay." );
+        row->destructive = 1;
 #undef ADD_ROW
 
         launcher_game_settings_load( game, l->options->runtime_dir, p->path, p->machine );
@@ -3224,6 +3259,20 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         case ROW_FEX:
             if (action != UI_ACTION_CHOOSE) break;
             fex_options_menu( l, p );
+            break;
+
+        case ROW_RESET_SETTINGS:
+            if (action != UI_ACTION_CHOOSE ||
+                !ui_confirm( ui, "Reset to defaults",
+                             "Put every setting of this game back to its default? Its title, arguments, "
+                             "controls and place in the library stay.", "Reset" ))
+                break;
+            if (reset_program_settings( l, p )) ui_toast( ui, "The game's settings are back to their defaults", 2500 );
+            else
+            {
+                ui_toast( ui, "Could not save the program's settings", 2500 );
+                load_program_settings( l, p );
+            }
             break;
 
         case ROW_HIDE:
