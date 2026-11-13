@@ -319,6 +319,17 @@ static BOOL initialize_vk_device( TEB *teb, const struct opengl_context *ctx )
     static PFN_vkGetPhysicalDeviceProperties2KHR p_vkGetPhysicalDeviceProperties2KHR;
 
     if (buffers.vk_device) return TRUE; /* already initialized */
+#ifdef __SWITCH__
+    /* Horizon has no file descriptors for GPU memory. NVK advertises
+     * VK_KHR_external_memory_fd and placed maps, from its shared code, but on
+     * the Switch it exports no memory and places no mapping (nxvk's
+     * nvkmd_nvgpu_mem_export_dma_buf and nvkmd_nvgpu_mem_map). Taken at its
+     * word through Zink, it kept buffer storage for 32-bit programs whose
+     * persistent maps then all failed: Vampire: The Masquerade - Redemption on
+     * nxvk, WineD3D writing through NULL after "Failed to map chunk memory".
+     * Without it, buffer storage is pinned memory's or hidden. */
+    return FALSE;
+#endif
     if (!ctx->extensions[GL_EXT_memory_object_fd] )
     {
         TRACE( "GL_EXT_memory_object_fd is not supported\n" );

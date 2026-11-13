@@ -94,6 +94,14 @@ has = has[:has.index('\n}\n')]
 assert "extern void zink_create_screen( void ) __attribute__((weak));" in has
 assert '(zink && (runtime_is_nxvk || !runtime_mesa_has_zink()))' in runtime
 assert '.mesa_zink = runtime_mesa_has_zink(),' in runtime
+# 32-bit programs' persistent buffer maps: NVK claims placed maps and fd export
+# that it cannot do on Horizon, so Wine's Vulkan path is off on the Switch and
+# buffer storage is pinned memory's (mesa-switch) or hidden (Zink), not left to
+# fail (Vampire on nxvk, WineD3D's "Failed to map chunk memory").
+wgl = (root / 'dlls/opengl32/unix_wgl.c').read_text()
+vk = wgl[wgl.index('static BOOL initialize_vk_device( TEB *teb, const struct opengl_context *ctx )'):]
+vk = vk[:vk.index('if (!ctx->extensions[GL_EXT_memory_object_fd] )')]
+assert re.search(r'#ifdef __SWITCH__\n(    /\*.*\n|     \*.*\n)*    return FALSE;\n#endif', vk)
 launcher = (source / 'launcher.c').read_text()
 assert '"wine-nx-runtime-nxvk.nro"' in launcher
 print('graphics driver: setting read and written, old key moved over, the runtime started for nxvk only when on the card')
