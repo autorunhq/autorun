@@ -31,6 +31,14 @@ on:
         type: boolean
         default: false
 
+# One build per commit: the same commit pushed to several branches at once (an
+# arena branch and main kept in step) starts a run for each push, and the
+# later run cancels the earlier, so it is built once, by the last push. A
+# commit pushed to one branch builds as before.
+concurrency:
+  group: build-${{ github.sha }}-${{ github.event.inputs.x86 || 'amd64' }}
+  cancel-in-progress: true
+
 jobs:
   keyboard:
     name: floating keyboard (host test)
