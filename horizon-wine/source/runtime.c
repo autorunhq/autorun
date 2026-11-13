@@ -5684,7 +5684,7 @@ int main( int argc, char **argv )
     log_line( "[INIT] display mode emulation %s (mode-emulation)%s", wine_nx_emulate_modeset ? "on" : "off",
               wine_nx_emulate_modeset ? "" : ": a program's OpenGL draws to the window's surface itself" );
     log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
-              wine_nx_yield_backoff ? ": a long quick run of Sleep(0) or SwitchToThread sleeps 50-250 us each" : "" );
+              wine_nx_yield_backoff ? ": after 2 ms of quick Sleep(0) or SwitchToThread, each sleeps 100 us" : "" );
     log_line( "[TARGET] %s", target );
 
     status = runtime_target_machine( target, &target_machine );

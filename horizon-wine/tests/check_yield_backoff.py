@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Yields on Horizon (dlls/ntdll/unix/horizon_yield_backoff.h): a long quick
-run of them (Sleep(0), SwitchToThread, Wine's own yields after a wait that timed
-out or an empty message poll) sleeps a little each, so a thread waiting in such
-a loop leaves its core idle; a yield after other work, and the first yields of a
-run, stay yields. yield-backoff turns it off."""
+"""Yields on Horizon (dlls/ntdll/unix/horizon_yield_backoff.h): once a thread
+has been yielding (Sleep(0), SwitchToThread, Wine's own yields after a wait that
+timed out or an empty message poll) for 2 ms without a break, each further yield
+sleeps 100 us, so a thread waiting in such a loop leaves its core idle; shorter
+waits and a yield after other work stay plain yields. yield-backoff turns it
+off."""
 from pathlib import Path
 import re
 import subprocess
@@ -32,39 +33,44 @@ static long long call( struct horizon_yield_backoff *s, unsigned long long *now,
 int main(void)
 {
     struct horizon_yield_backoff s = {0};
-    unsigned long long now = 123456789;
+    unsigned long long now = 123456789, first;
     unsigned int i;
 
-    /* A loop with next to nothing between its yields: yields first, ... */
-    for (i = 0; i < HORIZON_YIELD_BACKOFF_YIELDS; i++) assert( call( &s, &now, 20 ) == 0 );
-    /* ... then sleeps, doubling every 16 calls, never past the cap. */
-    for (i = 0; i < 16; i++) assert( call( &s, &now, 20 ) == 50000 );
-    for (i = 0; i < 16; i++) assert( call( &s, &now, 20 ) == 100000 );
-    for (i = 0; i < 16; i++) assert( call( &s, &now, 20 ) == 200000 );
-    for (i = 0; i < 100000; i++) assert( call( &s, &now, 20 ) == HORIZON_YIELD_BACKOFF_MAX );
+    /* A loop with next to nothing between its yields: plain yields for 2 ms, ... */
+    assert( call( &s, &now, 20 ) == 0 );
+    first = now - 10;
+    while (now + 20 - first < HORIZON_YIELD_BACKOFF_AFTER) assert( call( &s, &now, 20 ) == 0 );
+    /* ... then 100 us a yield for as long as it lasts. */
+    for (i = 0; i < 100000; i++) assert( call( &s, &now, 20 ) == HORIZON_YIELD_BACKOFF_SLEEP );
 
-    /* Other work between two yields starts the count again. */
+    /* Other work between two yields starts the run again. */
     assert( call( &s, &now, HORIZON_YIELD_BACKOFF_GAP ) == 0 );
-    for (i = 1; i < HORIZON_YIELD_BACKOFF_YIELDS; i++) assert( call( &s, &now, 20 ) == 0 );
-    assert( call( &s, &now, 20 ) == 50000 );
+    assert( call( &s, &now, 20 ) == 0 );
+
+    /* A wait shorter than 2 ms, as wined3d's for its command stream, is never
+     * slowed, however many yields it takes. */
+    for (i = 0; i < 1000; i++)
+    {
+        unsigned long long begin;
+
+        assert( call( &s, &now, 5000 ) == 0 );
+        begin = now;
+        while (now - begin < HORIZON_YIELD_BACKOFF_AFTER - 1000) assert( call( &s, &now, 5 ) == 0 );
+    }
 
     /* A thread that yields between pieces of work longer than the gap is
      * never slowed. */
-    for (i = 0; i < 10000; i++) assert( call( &s, &now, HORIZON_YIELD_BACKOFF_GAP + 50 ) == 0 );
-
-    /* A wait that ends within the first yields of its run is not slowed. */
-    for (i = 0; i < 50; i++) assert( call( &s, &now, 15 ) == 0 );
-    assert( call( &s, &now, 5000 ) == 0 );
+    for (i = 0; i < 100000; i++) assert( call( &s, &now, HORIZON_YIELD_BACKOFF_GAP + 50 ) == 0 );
 
     /* The first yield, and a clock that went back, stay yields. */
     {
         struct horizon_yield_backoff fresh = {0};
-        assert( horizon_yield_backoff_ns( &fresh, 5 ) == 0 && fresh.run == 0 );
-        fresh.last = 1000; fresh.run = 500;
-        assert( horizon_yield_backoff_ns( &fresh, 900 ) == 0 && fresh.run == 0 );
+        assert( horizon_yield_backoff_ns( &fresh, 5 ) == 0 && fresh.start == 5 );
+        fresh.last = 100000; fresh.start = 1;
+        assert( horizon_yield_backoff_ns( &fresh, 90000 ) == 0 && fresh.start == 90000 );
     }
-    printf( "yield backoff: %u yields in a row stay yields, then 50-%lld us\n", HORIZON_YIELD_BACKOFF_YIELDS,
-            HORIZON_YIELD_BACKOFF_MAX / 1000 );
+    printf( "yield backoff: plain yields for %llu ms, then %lld us each\n", HORIZON_YIELD_BACKOFF_AFTER / 10000,
+            HORIZON_YIELD_BACKOFF_SLEEP / 1000 );
     return 0;
 }
 '''
@@ -110,5 +116,5 @@ assert re.search(r'int backoff = launcher_setting_state\( &kv, "yield-backoff" \
 assert runtime.index('config_bool( "yield-backoff"') < runtime.index('launcher_setting_state( &kv, "yield-backoff" )') \
     < runtime.index('log_line( "[INIT] yield backoff %s (yield-backoff)%s"')
 assert '" yield_sleeps=%u"' in runtime and 'systop, yields, native, gl, audio, usb );' in runtime
-print('yield backoff: Sleep(0), SwitchToThread and Wine\'s own yields sleep after a run of quick yields; '
+print('yield backoff: Sleep(0), SwitchToThread and Wine\'s own yields sleep after 2 ms of quick yields; '
       'yield-backoff turns it off')

@@ -2471,7 +2471,7 @@ static void yield_backoff_noticed(void)
 
     if (!&wine_nx_runtime_trace || __atomic_exchange_n( &noticed, 1, __ATOMIC_RELAXED )) return;
     snprintf( line, sizeof(line), "[CORES] thread %04x yields in a loop (Sleep(0), SwitchToThread or a poll): "
-              "from now on a long quick run of yields sleeps 50-250 us each instead of keeping its core busy",
+              "from now on, after 2 ms of quick yields, each sleeps 100 us instead of keeping its core busy",
               (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
     wine_nx_runtime_trace( line );
 }
