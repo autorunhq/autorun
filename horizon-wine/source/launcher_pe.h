@@ -258,6 +258,9 @@ static inline int launcher_icon_decode_dib( const unsigned char *data, size_t si
     bits = launcher_u16( data + 14 );
     compression = launcher_u32( data + 16 );
     if (header_size < 40 || header_size > size) return 0;
+    /* A top-down DIB has a negative height; the most negative has no positive
+     * and is no icon. */
+    if (height == INT32_MIN) return 0;
     if (height < 0) height = -height;
     height /= 2;
     if (width <= 0 || height <= 0 || width > LAUNCHER_ICON_MAX_SIDE || height > LAUNCHER_ICON_MAX_SIDE) return 0;
