@@ -4289,19 +4289,26 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
  * a batch file, it gets the arguments that gives it, kept beside it as Add
  * Game keeps them (NAME.args.txt, which is where the runtime reads a
  * program's arguments), unless it has its own already. */
+static int keep_picked_args( const char *path, const char *args )
+{
+    char args_path[512];
+
+    if (!args[0] || !launcher_args_path( path, args_path, sizeof(args_path) ) || file_exists( args_path ) ||
+        !write_line( args_path, args )) return 0;
+    launcher_log( "[LAUNCHER] Arguments of %s: %s", path, args );
+    return 1;
+}
+
 static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size )
 {
     struct program program;
-    char args[LAUNCHER_SHORTCUT_TEXT], args_path[512];
+    char args[LAUNCHER_SHORTCUT_TEXT];
     int index;
 
     snprintf( args, sizeof(args), "%s", picked_args );
-    if (args[0] && launcher_args_path( path, args_path, sizeof(args_path) ) && !file_exists( args_path ) &&
-        write_line( args_path, args ))
-        launcher_log( "[LAUNCHER] Arguments of %s: %s", path, args );
     if ((index = find_program( l, path )) >= 0)
     {
-        if (args[0]) load_program_settings( l, &l->programs[index] );
+        if (keep_picked_args( path, args )) load_program_settings( l, &l->programs[index] );
         return start_program( l, &l->programs[index], target, size );
     }
     if (!describe_program( l, &program, path ))
@@ -4309,6 +4316,7 @@ static int start_path( struct launcher *l, const char *path, const char *title, 
         ui_message( &l->ui, title, "Autorun cannot run this executable." );
         return 0;
     }
+    if (keep_picked_args( path, args )) load_program_settings( l, &program );
     /* The renderer a game just added gets: Wine's Direct3D when Give a new
      * game DXVK is off, unless the program's own settings name one. */
     apply_new_game_renderer( l, &program );
