@@ -4297,6 +4297,9 @@ static int start_path( struct launcher *l, const char *path, const char *title, 
         ui_message( &l->ui, title, "Autorun cannot run this executable." );
         return 0;
     }
+    /* The renderer a game just added gets: Wine's Direct3D when Give a new
+     * game DXVK is off, unless the program's own settings name one. */
+    apply_new_game_renderer( l, &program );
     return start_program( l, &program, target, size );
 }
 

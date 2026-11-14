@@ -477,7 +477,8 @@ static void carousel_fixture(void)
          * so the row reads in the same order as the library's. */
         catalog->entries[index].launched_order = 8 - i;
         snprintf( path, sizeof(path), "%s/Game.wine-nx.txt", folder );
-        file = fopen( path, "w" ); assert( file ); fprintf( file, "title=%s\n", titles[i] ); fclose( file );
+        /* Wine's Direct3D: a game's default is DXVK, which this test has none of to install. */
+        file = fopen( path, "w" ); assert( file ); fprintf( file, "title=%s\nd3d=wine\n", titles[i] ); fclose( file );
         for (y = 0; y < 480; y++) for (x = 0; x < 320; x++)
         {
             int channel, offset = (y * 320 + x) * 4;
