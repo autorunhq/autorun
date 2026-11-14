@@ -117,6 +117,7 @@ static void reset(void)
 
     while (sd_cache_files) sd_cache_close( &test_reent, sd_cache_files->key );
     sd_stat_forget_all( &sd_stat_cache );
+    memset( sd_cache_closed_tally, 0, sizeof(sd_cache_closed_tally) );
     assert( !sd_cache_pool.used && !sd_cache_pool.held && !sd_write_buffers );
     sd_cache_pool.max = SD_CACHE_POOL_MIN;
     sd_cache_off = fail_open = 0;
@@ -291,11 +292,34 @@ static void test_report_files(void)
 
     last_trace[0] = 0;
     wine_nx_sd_cache_report_files();
-    assert( !strcmp( last_trace, "[SDFILES] the card gave open files 16 MB: pak002.pk4 16 MB for 4 MB asked" ) );
+    assert( !strcmp( last_trace, "[SDFILES] the card gave files 16 MB: pak002.pk4 16 MB for 4 MB asked" ) );
     /* Told once: nothing new, nothing said. */
     last_trace[0] = 0;
     wine_nx_sd_cache_report_files();
     assert( !last_trace[0] );
+
+    /* Doom 3 opens its archive for each read: closed files count too, the
+     * opens of one name together, beside one still open. */
+    for (i = 0; i < 3; i++)
+    {
+        unsigned int k;
+
+        if (i) assert( !sd_cache_open( &test_reent, &reader, "sdmc:/Roms/Doom 3/base/pak002.pk4", O_RDONLY, 0 ) );
+        assert( !sd_cache_seek( &test_reent, &reader, 0, SEEK_SET ) );
+        for (k = 0; k < 96; k++) assert( sd_cache_read_file( &test_reent, &reader, big, SD_CACHE_DIRECT ) == SD_CACHE_DIRECT );
+        assert( !sd_cache_close( &test_reent, &reader ) );
+    }
+    assert( !sd_cache_open( &test_reent, &writer, "sdmc:/Roms/Doom 3/base/pak000.pk4", O_RDONLY, 0 ) );
+    assert( !sd_cache_seek( &test_reent, &writer, 0, SEEK_SET ) );
+    for (i = 0; i < 16; i++) assert( sd_cache_read_file( &test_reent, &writer, big, SD_CACHE_DIRECT ) == SD_CACHE_DIRECT );
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !strcmp( last_trace, "[SDFILES] the card gave files 19 MB: pak002.pk4 18 MB for 18 MB asked; "
+                                 "pak000.pk4 1 MB for 1 MB asked" ) );
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !last_trace[0] );
+    assert( !sd_cache_close( &test_reent, &writer ) );
     free( big );
 }
 

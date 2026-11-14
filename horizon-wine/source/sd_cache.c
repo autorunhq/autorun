@@ -123,42 +123,101 @@ static void sd_cache_account_locked( void *fd, size_t len, unsigned long long ca
  * what a game asks for (whole chunks for scattered small reads, chunks read
  * again after the file's few lines moved on): Doom 3 took 1.75 GB from it
  * while its level loaded for 305 MB asked. Called by the [PROGRESS] report. */
+/* What files closed since the last report asked and were given, by name: a
+ * game that opens an archive for each read (Doom 3 and its .pk4 files) would
+ * otherwise never be in the report. The smallest gives way when it is full. */
+#define SD_CACHE_CLOSED 32
+static struct sd_cache_tally { char name[48]; unsigned long long asked, card; } sd_cache_closed_tally[SD_CACHE_CLOSED];
+
+static const char *sd_cache_file_name( const struct sd_cache_file *file )
+{
+    const char *name = file->path ? strrchr( file->path, '/' ) : NULL;
+
+    return name ? name + 1 : file->path ? file->path : "?";
+}
+
+/* Adds to name's entry in tally, of count entries. */
+static void sd_cache_tally_add( struct sd_cache_tally *tally, unsigned int count, const char *name,
+                                unsigned long long asked, unsigned long long card )
+{
+    struct sd_cache_tally *slot = NULL;
+    unsigned int i;
+
+    if (!card && !asked) return;
+    for (i = 0; i < count; i++)
+    {
+        if (tally[i].name[0] && !strncmp( tally[i].name, name, sizeof(tally[i].name) - 1 )) { slot = &tally[i]; break; }
+        if (!slot || (slot->name[0] && (!tally[i].name[0] || tally[i].card < slot->card))) slot = &tally[i];
+    }
+    if (i == count)
+    {
+        if (slot->name[0] && slot->card >= card) return;
+        memset( slot, 0, sizeof(*slot) );
+        snprintf( slot->name, sizeof(slot->name), "%s", name );
+    }
+    slot->asked += asked;
+    slot->card += card;
+}
+
+/* A file is closing: what it was not yet reported for is kept. Lock held. */
+static void sd_cache_tally_closing( void *fd )
+{
+    struct sd_cache_file *file = sd_cache_find( sd_cache_files, fd );
+
+    if (file) sd_cache_tally_add( sd_cache_closed_tally, SD_CACHE_CLOSED, sd_cache_file_name( file ),
+                                  file->asked - file->asked_told, file->card - file->card_told );
+}
+
 void wine_nx_sd_cache_report_files( void )
 {
-    struct { char name[48]; unsigned long long asked, card; } top[3];
+    static struct sd_cache_tally all[SD_CACHE_CLOSED + 32];
+    struct sd_cache_tally *top[3] = {0};
     unsigned long long total = 0;
     struct sd_cache_file *file;
-    unsigned int count = 0, i, j;
+    unsigned int i, j;
     char line[320];
     int len;
 
     if (!sd_cache_base) return;
-    memset( top, 0, sizeof(top) );
     pthread_mutex_lock( &sd_cache_mutex );
+    memset( all, 0, sizeof(all) );
+    memcpy( all, sd_cache_closed_tally, sizeof(sd_cache_closed_tally) );
+    memset( sd_cache_closed_tally, 0, sizeof(sd_cache_closed_tally) );
+    for (i = 0; i < SD_CACHE_CLOSED; i++) total += all[i].card;
     for (file = sd_cache_files; file; file = file->next)
     {
         unsigned long long card = file->card - file->card_told, asked = file->asked - file->asked_told;
-        const char *name = file->path ? strrchr( file->path, '/' ) : NULL;
 
         file->card_told = file->card;
         file->asked_told = file->asked;
         total += card;
-        if (!card) continue;
-        for (i = 0; i < count && top[i].card >= card; i++) ;
-        if (i >= 3) continue;
-        for (j = count < 3 ? count : 2; j > i; j--) top[j] = top[j - 1];
-        snprintf( top[i].name, sizeof(top[i].name), "%s", name ? name + 1 : file->path ? file->path : "?" );
-        top[i].asked = asked;
-        top[i].card = card;
-        if (count < 3) count++;
+        sd_cache_tally_add( all, sizeof(all) / sizeof(all[0]), sd_cache_file_name( file ), asked, card );
     }
-    pthread_mutex_unlock( &sd_cache_mutex );
+    for (i = 0; i < sizeof(all) / sizeof(all[0]); i++)
+    {
+        struct sd_cache_tally *entry = &all[i];
+
+        if (!entry->name[0] || !entry->card) continue;
+        for (j = 0; j < 3; j++)
+        {
+            struct sd_cache_tally *held = top[j];
+
+            if (held && held->card >= entry->card) continue;
+            top[j] = entry;
+            if (!(entry = held)) break;
+        }
+    }
     /* Only when the card was busy: 16 MB or more since the last report. */
-    if (!count || total < (16ull << 20)) return;
-    len = snprintf( line, sizeof(line), "[SDFILES] the card gave open files %llu MB:", total >> 20 );
-    for (i = 0; i < count && len > 0 && (size_t)len < sizeof(line); i++)
+    if (!top[0] || total < (16ull << 20))
+    {
+        pthread_mutex_unlock( &sd_cache_mutex );
+        return;
+    }
+    len = snprintf( line, sizeof(line), "[SDFILES] the card gave files %llu MB:", total >> 20 );
+    for (i = 0; i < 3 && top[i] && len > 0 && (size_t)len < sizeof(line); i++)
         len += snprintf( line + len, sizeof(line) - len, "%s %s %llu MB for %llu MB asked", i ? ";" : "",
-                         top[i].name, top[i].card >> 20, top[i].asked >> 20 );
+                         top[i]->name, top[i]->card >> 20, top[i]->asked >> 20 );
+    pthread_mutex_unlock( &sd_cache_mutex );
     wine_nx_runtime_trace( line );
 }
 
@@ -418,6 +477,7 @@ static int sd_cache_close( struct _reent *r, void *fd )
     if ((wb = sd_write_find( sd_write_buffers, fd )) && wb->len) wine_nx_sd_flush_close++;
     flushed = sd_cache_flush_locked( r, wb );
     sd_write_forget( &sd_write_buffers, fd );
+    sd_cache_tally_closing( fd );
     sd_cache_closed( &sd_cache_files, &sd_cache_pool, fd );
     pthread_mutex_unlock( &sd_cache_mutex );
     ret = sd_cache_base->close_r( r, fd );
