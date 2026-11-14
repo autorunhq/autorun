@@ -84,8 +84,13 @@ static const struct release_backend fex_carafe_backend = {
     "fex-carafe", WINE_NX_CARAFE_DLLS_REPO, CARAFE_RELEASES, "fex-carafe", "gz",
     "fex-carafe", NULL, fex_dlls, 1, 0, "fex-carafe-", 1, 0xaa64
 };
+static const struct release_backend fex_experimental_backend = {
+    "fex-experimental", WINE_NX_CARAFE_DLLS_REPO, CARAFE_RELEASES, "fex-experimental", "gz",
+    "fex-experimental", NULL, fex_dlls, 1, 0, "fex-experimental-", 1, 0xaa64
+};
 static const struct release_backend *const dxvk_backends[DXVK_BACKEND_COUNT] = {
-    &dxvk_backend, &sarek_backend, &gplasync_backend, &carafe_backend, &fex_carafe_backend
+    &dxvk_backend, &sarek_backend, &gplasync_backend, &carafe_backend, &fex_carafe_backend,
+    &fex_experimental_backend
 };
 static const struct release_backend vkd3d_backend = {
     "vkd3d", "HansKristian-Work/vkd3d-proton", "https://github.com/HansKristian-Work/vkd3d-proton/",

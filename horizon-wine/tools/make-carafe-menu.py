@@ -547,8 +547,9 @@ def build_menu(horizon_wine: Path) -> str:
         "FEX build",
         "Autorun is the FEX that comes with the Windows DLLs. Carafe is the same FEX with Carafe's patches, "
         "for 32-bit programs. If it is not on the card, the launcher downloads it the next time it starts the "
-        "program, and the program runs on Autorun's until then. FEX options then lists what only it reads.",
-        [("-", "Autorun"), ("carafe", "Carafe")],
+        "program, and the program runs on Autorun's until then. FEX options then lists what only it reads. "
+        "Experimental is Carafe's with changes still being tried: it may be faster, or not work.",
+        [("-", "Autorun"), ("carafe", "Carafe"), ("experimental", "Experimental")],
     )
     emit_setting(
         lines, "four-cores", "program", "four-cores", "restart", 0, "-", "-",
@@ -632,7 +633,7 @@ def build_menu(horizon_wine: Path) -> str:
                 opt["key"],
                 "restart",
                 def_idx,
-                "show:fex-build=1" if opt["carafe"] else "-",
+                "show:fex-build=1,2" if opt["carafe"] else "-",
                 "-",
                 fex_nice_name(opt["key"]),
                 opt["help"],

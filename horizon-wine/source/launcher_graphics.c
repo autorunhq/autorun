@@ -26,7 +26,7 @@ struct launcher_graphics
 };
 
 static const char *const source_names[DXVK_BACKEND_COUNT] =
-    { "Official DXVK", "DXVK Sarek", "DXVK Async", "DXVK Carafe", "FEX Carafe" };
+    { "Official DXVK", "DXVK Sarek", "DXVK Async", "DXVK Carafe", "FEX Carafe", "FEX Experimental" };
 
 static const char *backend_name( int vkd3d, enum dxvk_source source )
 {
@@ -177,7 +177,7 @@ static int install_release( struct launcher_graphics *g, int vkd3d, enum dxvk_so
 {
     struct install_progress progress = { .ui = g->ui, .release = release,
         .name = backend_name( vkd3d, source ),
-        .installing = !vkd3d && source == DXVK_BACKEND_FEX_CARAFE ? "Installing the file..." :
+        .installing = !vkd3d && (source == DXVK_BACKEND_FEX_CARAFE || source == DXVK_BACKEND_FEX_EXPERIMENTAL) ? "Installing the file..." :
                       "Installing x86 and x64 files...",
         .host = source == DXVK_SOURCE_GPLASYNC && !vkd3d ? "Downloading from GitLab..." : "Downloading from GitHub..." };
     enum dxvk_result result;
@@ -330,13 +330,14 @@ int launcher_graphics_select( struct launcher_graphics *g, const struct ui_list 
 int launcher_graphics_select_fex( struct launcher_graphics *g, const struct ui_list *anchor,
                                   int *carafe, char version[32] )
 {
-    struct ui_row builds[2] = {0};
-    int chosen;
+    struct ui_row builds[3] = {0};
+    int chosen, current = *carafe == 2 ? 2 : *carafe != 0;
 
     if (!g) return 0;
     snprintf( builds[0].label, sizeof(builds[0].label), "Autorun" );
     snprintf( builds[1].label, sizeof(builds[1].label), "Carafe" );
-    chosen = ui_settings_dropdown( g->ui, anchor, builds, 2, *carafe != 0 );
+    snprintf( builds[2].label, sizeof(builds[2].label), "Experimental" );
+    chosen = ui_settings_dropdown( g->ui, anchor, builds, 3, current );
     if (chosen < 0) return 0;
     if (!chosen)
     {
@@ -344,9 +345,10 @@ int launcher_graphics_select_fex( struct launcher_graphics *g, const struct ui_l
         version[0] = 0;
         return 1;
     }
-    if (!select_release( g, anchor, 0x014c, 0, 0, DXVK_BACKEND_FEX_CARAFE, *carafe ? version : "", version ))
+    /* A version belongs to the build it was chosen for. */
+    if (!select_release( g, anchor, 0x014c, 0, 0, DXVK_FEX_BACKEND( chosen ), chosen == current ? version : "", version ))
         return 0;
-    *carafe = 1;
+    *carafe = chosen;
     return 1;
 }
 
@@ -431,13 +433,13 @@ int launcher_graphics_ensure( struct launcher_graphics *g, unsigned short machin
     return 1;
 }
 
-int launcher_graphics_ensure_fex( struct launcher_graphics *g, char version[32] )
+int launcher_graphics_ensure_fex( struct launcher_graphics *g, int build, char version[32] )
 {
     char fex[32];
 
     if (!g) return 0;
     strcpy( fex, version );
-    if (!ensure_backend( g, 0x014c, 0, 0, DXVK_BACKEND_FEX_CARAFE, fex )) return 0;
+    if (!ensure_backend( g, 0x014c, 0, 0, DXVK_FEX_BACKEND( build ), fex )) return 0;
     strcpy( version, fex );
     return 1;
 }

@@ -367,6 +367,15 @@ so that check never finds a file it would want to replace. If a DLL update
 replaces the file anyway, what is in system32 no longer matches the record and
 is taken for the stock DLL, which it is.
 
+**The experimental FEX.** A third choice of **FEX build**, Experimental
+(`fex-build=experimental`), is Carafe's build with the patches of
+`carafe/dlls/fex-experimental` on top (`build-fex.sh ... experimental`). It has
+a version of its own in `versions.txt` (`fex-experimental=`), releases of its
+own (`fex-experimental-<version>`) and a folder of its own on the card
+(`drive_c/fex-experimental/versions`), and goes into system32 the same way.
+Nothing about it changes Carafe's build, its releases or the games set to it;
+it reads the same FEX options. See `carafe/dlls/fex-experimental/README.md`.
+
 The default renderer was not touched: a program with no `d3d` line runs on
 DXVK (`runtime.c`), and the settings menu's row that writes nothing reads
 "DXVK". A game added while the launcher's "Give a new game DXVK" is off gets

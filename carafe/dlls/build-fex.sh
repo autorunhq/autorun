@@ -5,7 +5,11 @@
 # series from carafe/dlls/fex. A patch of the series that horizon.patch already
 # holds is passed over; any other that does not apply stops the build.
 #
-#   build-fex.sh <FEX checkout to make> <build directory>
+#   build-fex.sh <FEX checkout to make> <build directory> [experimental]
+#
+# With "experimental", the patches of carafe/dlls/fex-experimental go on top,
+# in order; every one of them has to apply. That is the build experiments are
+# made in, released apart from Carafe's (fex-experimental-<version>).
 #
 # Needs git, cmake, ninja, python3 and llvm-mingw (WINE_NX_LLVM_MINGW, or on PATH).
 set -eu
@@ -13,6 +17,11 @@ here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 autorun="$(CDPATH= cd -- "$here/../.." && pwd)"
 src="$1"
 build="$2"
+flavour="${3:-carafe}"
+case "$flavour" in
+    carafe|experimental) ;;
+    *) echo "build-fex.sh: the third argument is \"experimental\" or nothing." >&2; exit 1;;
+esac
 horizon_wine="$autorun/horizon-wine"
 revision=395b132f346b1a45def246d10c52245edba1ef02
 
@@ -56,6 +65,19 @@ for patch in "$here"/fex/*.patch; do
     fi
 done
 echo "FEX: $applied patches of Carafe's applied"
+if [ "$flavour" = experimental ]; then
+    tried=0
+    for patch in "$here"/fex-experimental/*.patch; do
+        [ -f "$patch" ] || continue
+        if ! git -C "$src" apply "$patch"; then
+            echo "FEX: experimental $(basename "$patch") does not apply" >&2
+            exit 1
+        fi
+        tried=$((tried + 1))
+        echo "FEX: applied experimental $(basename "$patch")"
+    done
+    echo "FEX: $tried experimental patches applied"
+fi
 
 # Newer CMake refuses the old minimum versions some of FEX's externals name.
 export CMAKE_POLICY_VERSION_MINIMUM=3.5

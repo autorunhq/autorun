@@ -218,6 +218,29 @@ static void test_catalog(void)
     seen = 0;
     assert( parse_release_page( &fex_carafe_backend, (const unsigned char *)page, strlen( page ), found, 8, &seen ) == 1 );
     assert( !strcmp( found[0].version, "2609-1" ) && found[0].size == 1041730 );
+    /* The experimental FEX has releases of its own: neither build lists the other's. */
+    {
+        static const char both[] = "["
+            "{\"tag_name\":\"fex-experimental-2609-4\",\"draft\":false,\"prerelease\":false,\"assets\":[{"
+            "\"name\":\"fex-experimental-2609-4.tar.gz\",\"size\":1041999,"
+            "\"browser_download_url\":\"https://github.com/" WINE_NX_CARAFE_DLLS_REPO
+            "/releases/download/fex-experimental-2609-4/fex-experimental-2609-4.tar.gz\"}]},"
+            "{\"tag_name\":\"fex-carafe-2609-1\",\"draft\":false,\"prerelease\":false,\"assets\":[{"
+            "\"name\":\"fex-carafe-2609-1.tar.gz\",\"size\":1041730,"
+            "\"browser_download_url\":\"https://github.com/" WINE_NX_CARAFE_DLLS_REPO
+            "/releases/download/fex-carafe-2609-1/fex-carafe-2609-1.tar.gz\"}]}"
+            "]";
+
+        seen = 0;
+        assert( parse_release_page( &fex_experimental_backend, (const unsigned char *)both, strlen( both ), found, 8, &seen ) == 1 );
+        assert( !strcmp( found[0].version, "2609-4" ) && found[0].size == 1041999 );
+        seen = 0;
+        assert( parse_release_page( &fex_carafe_backend, (const unsigned char *)both, strlen( both ), found, 8, &seen ) == 1 );
+        assert( !strcmp( found[0].version, "2609-1" ) );
+        seen = 0;
+        assert( parse_release_page( &fex_experimental_backend, (const unsigned char *)page, strlen( page ), found, 8, &seen ) == 0 );
+        assert( backend_stable_version( &fex_experimental_backend, "2609-4" ) );
+    }
     /* The other sources do not take them for theirs. */
     seen = 0;
     assert( parse_release_page( &dxvk_backend, (const unsigned char *)page, strlen( page ), found, 8, &seen ) == 0 );
@@ -262,6 +285,17 @@ static void test_installed( const char *root )
             !strcmp( path + strlen( root ), "/drive_c/fex-carafe/versions/2609-1" ) );
     assert( !dxvk_release_path( DXVK_BACKEND_FEX_CARAFE, root, 0x8664, "2609-1", path, sizeof(path) ) );
     assert( !dxvk_release_path( DXVK_BACKEND_COUNT, root, 0x014c, "2609-1", path, sizeof(path) ) );
+    /* The experimental FEX is kept apart: Carafe's versions are not its own. */
+    dxvk_resolve_version( DXVK_BACKEND_FEX_EXPERIMENTAL, root, 0x014c, "", &v );
+    assert( !v.installed );
+    dll( root, "drive_c/fex-experimental/versions/2609-5/libwow64fex.dll", 0xaa64, 900, 'e' );
+    dxvk_resolve_version( DXVK_BACKEND_FEX_EXPERIMENTAL, root, 0x014c, "", &v );
+    assert( v.installed && !strcmp( v.version, "2609-5" ) );
+    assert( dxvk_release_path( DXVK_BACKEND_FEX_EXPERIMENTAL, root, 0x014c, "2609-5", path, sizeof(path) ) );
+    assert( !strcmp( path + strlen( root ), "/drive_c/fex-experimental/versions/2609-5" ) );
+    dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, root, 0x014c, "", &v );
+    assert( v.installed && !strcmp( v.version, "2609-2" ) );
+    assert( !launcher_dxvk_directory( 0x014c, DXVK_BACKEND_FEX_EXPERIMENTAL ) );
 
     /* Carafe's DXVK is a DXVK for both machines, in folders of its own. */
     dll( root, "drive_c/dxvk-carafe/versions/3.1.1-1/d3d9.dll", 0x014c, 300, 'd' );
@@ -431,6 +465,12 @@ static int live( const char *root, enum dxvk_source source, const char *name, un
         printf( "%s: the release list could not be fetched\n", name );
         return 77;
     }
+    if (source == DXVK_BACKEND_FEX_EXPERIMENTAL && (result == DXVK_OK || result == DXVK_NOT_FOUND) && count < 1)
+    {
+        /* Its first release is made by the run that first builds it. */
+        printf( "%s: none released yet\n", name );
+        return 78;
+    }
     if (result != DXVK_OK || count < 1)
     {
         printf( "%s: no release the launcher accepts (%s)\n", name, dxvk_result_message( result ) );
@@ -467,7 +507,7 @@ int main( int argc, char **argv )
     assert( mkdtemp( root ) );
     if (argc > 1 && !strcmp( argv[1], "live" ))
     {
-        int fex, dxvk32, dxvk64 = 0;
+        int fex, dxvk32, dxvk64 = 0, experimental;
 
         fex = live( root, DXVK_BACKEND_FEX_CARAFE, "FEX Carafe", 0x014c, "libwow64fex.dll", 0xaa64 );
         dxvk32 = live( root, DXVK_SOURCE_CARAFE, "DXVK Carafe", 0x014c, "d3d9.dll", 0x014c );
@@ -496,6 +536,20 @@ int main( int argc, char **argv )
             assert( wine_nx_fex_build_select( root, NULL, &changed ) == FEX_BUILD_STOCK && changed );
             assert( is_dll( root, SYSTEM, 600, 's' ) );
         }
+        /* The experimental FEX, in a folder of its own beside Carafe's. */
+        experimental = live( root, DXVK_BACKEND_FEX_EXPERIMENTAL, "FEX Experimental", 0x014c, "libwow64fex.dll", 0xaa64 );
+        if (!experimental && !fex)
+        {
+            struct dxvk_version v;
+            char one[1024], other[1024];
+
+            dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, root, 0x014c, "", &v );
+            assert( v.installed && dxvk_release_path( DXVK_BACKEND_FEX_CARAFE, root, 0x014c, v.version, one, sizeof(one) ) );
+            dxvk_resolve_version( DXVK_BACKEND_FEX_EXPERIMENTAL, root, 0x014c, "", &v );
+            assert( v.installed && dxvk_release_path( DXVK_BACKEND_FEX_EXPERIMENTAL, root, 0x014c, v.version, other, sizeof(other) ) );
+            assert( strcmp( one, other ) );
+        }
+        if (experimental == 1) fex = 1;
         status = fex == 1 || dxvk32 == 1 || dxvk64 ? 1 : fex == 77 || dxvk32 == 77 ? 77 : 0;
         assert( remove_tree( root ) );
         puts( status == 77 ? "Carafe DLL releases: not reachable from here" :

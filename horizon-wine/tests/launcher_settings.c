@@ -103,6 +103,18 @@ static void test_settings( const char *dir )
     load_text( &kv, "fex-build=carafe\nfex-version=../../x\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.fex_carafe && !settings.fex_version[0] );
+    /* The experimental build is a build of its own, with versions of its own. */
+    load_text( &kv, "fex-build=experimental\nfex-version=2609-3\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe == 2 && !strcmp( settings.fex_version, "2609-3" ) );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=experimental\n" ) && strstr( kv.text, "fex-version=2609-3\n" ) );
+    load_text( &kv, "fex-build=carafe\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe == 1 );
+    load_text( &kv, "fex-build=something\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fex_carafe );
     /* Carafe's thread orchestrator and its lock wait boost: off unless a
      * program's settings say 1, each on its own, and no line when off. */
     load_text( &kv, "" );

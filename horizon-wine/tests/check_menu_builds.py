@@ -83,11 +83,13 @@ with tempfile.TemporaryDirectory() as temp:
     only_carafe = {name for name, carafe in plain['fexcarafe'] if carafe == '1'}
     every_fex = {name for name, _ in plain['fexcarafe']}
     assert len(only_carafe) == 12 and len(every_fex) == 31 and every_fex <= set(rows)
-    assert [text for key, text, _ in plain['value'] if key == 'fex-build'] == ['-', 'carafe']
+    assert [text for key, text, _ in plain['value'] if key == 'fex-build'] == ['-', 'carafe', 'experimental']
     assert shown(plain) & every_fex == every_fex - only_carafe
     with_carafe = ask('set:fex-build=carafe')
     assert shown(with_carafe) & every_fex == every_fex
     assert shown(with_carafe) - every_fex == shown(plain) - every_fex
+    # The experimental build is Carafe's with more: it reads the same options.
+    assert shown(ask('set:fex-build=experimental')) == shown(with_carafe)
     assert 'fex-build' in shown(plain) and ['fex', '1'] in plain['grouprow']
     box64 = ask('set:cpu=box64')
     assert 'fex-build' not in shown(box64) and ['fex', '0'] in box64['grouprow']
@@ -104,6 +106,7 @@ with tempfile.TemporaryDirectory() as temp:
                               ('lock-boost', '1', ['0', '1', '0', '0', '0']),
                               ('server-pool', '1', ['0', '0', '1', '0', '0']),
                               ('fex-build', 'carafe', ['0', '0', '0', '1', '0']),
+                              ('fex-build', 'experimental', ['0', '0', '0', '2', '0']),
                               ('dxvk-source', 'carafe', ['0', '0', '0', '0', '3']),
                               ('dxvk-source', 'gplasync', ['0', '0', '0', '0', '2']),
                               ('dxvk-source', 'sarek', ['0', '0', '0', '0', '1'])):

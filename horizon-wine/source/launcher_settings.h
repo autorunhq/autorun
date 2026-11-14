@@ -198,7 +198,8 @@ struct launcher_settings
     int fast_sync;
     int fex;
     /* Which FEX a 32-bit program runs on: 0 the DLL repository's, 1 the one
-     * with Carafe's patches, of fex_version or the newest installed. */
+     * with Carafe's patches, 2 the experimental one on top of those
+     * (carafe/dlls/fex-experimental), of fex_version or the newest installed. */
     int fex_carafe;
     char fex_version[32];
     int four_cores;
@@ -451,7 +452,8 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->profile = launcher_setting_state( kv, "profile" );
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = !launcher_kv_get( kv, "cpu", value, sizeof(value) ) || strcasecmp( value, "box64" );
-    settings->fex_carafe = launcher_kv_get( kv, "fex-build", value, sizeof(value) ) && !strcasecmp( value, "carafe" );
+    settings->fex_carafe = !launcher_kv_get( kv, "fex-build", value, sizeof(value) ) ? 0 :
+                           !strcasecmp( value, "carafe" ) ? 1 : !strcasecmp( value, "experimental" ) ? 2 : 0;
     settings->fex_version[0] = 0;
     if (settings->fex_carafe && launcher_kv_get( kv, "fex-version", value, sizeof(value) ) &&
         launcher_dxvk_version_valid( value ))
@@ -570,7 +572,8 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "profile", states[settings->profile + 1] ) &&
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
-           launcher_kv_set( kv, "fex-build", settings->fex_carafe ? "carafe" : NULL ) &&
+           launcher_kv_set( kv, "fex-build", settings->fex_carafe == 2 ? "experimental" :
+                                             settings->fex_carafe ? "carafe" : NULL ) &&
            launcher_kv_set( kv, "fex-version", settings->fex_carafe && settings->fex_version[0] ?
                             settings->fex_version : NULL ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&

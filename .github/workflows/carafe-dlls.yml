@@ -39,9 +39,23 @@ env:
 
 jobs:
   fex:
-    name: FEX (libwow64fex.dll)
+    # Twice: Carafe's build, and the experimental one, which is Carafe's with
+    # the patches of carafe/dlls/fex-experimental on top and is released apart
+    # from it (fex-experimental-<version>), so an experiment never replaces
+    # the build games already run on.
+    name: FEX ${{ matrix.build }} (libwow64fex.dll)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build: carafe
+            package: fex
+            title: Carafe build
+          - build: experimental
+            package: fex-experimental
+            title: experimental build
     steps:
       - uses: actions/checkout@v4
 
@@ -68,13 +82,13 @@ jobs:
       - name: Build
         run: |
           export WINE_NX_LLVM_MINGW="$RUNNER_TEMP/llvm-mingw" WINE_NX_JOBS="$(nproc)"
-          sh carafe/dlls/build-fex.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-build" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          sh carafe/dlls/build-fex.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-build" ${{ matrix.build }} 2>&1 | tee "$RUNNER_TEMP/build.log"
           test "${PIPESTATUS[0]}" = 0
 
       - name: Pack
         run: |
           export PATH="$RUNNER_TEMP/llvm-mingw/bin:$PATH"
-          python3 carafe/dlls/package.py fex "$RUNNER_TEMP/fex-build/Bin/libwow64fex.dll" \
+          python3 carafe/dlls/package.py ${{ matrix.package }} "$RUNNER_TEMP/fex-build/Bin/libwow64fex.dll" \
             "$RUNNER_TEMP/fex" "$RUNNER_TEMP/out" 2>&1 | tee -a "$RUNNER_TEMP/build.log"
           test "${PIPESTATUS[0]}" = 0
 
@@ -90,7 +104,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fex-carafe-${{ github.sha }}
+          name: fex-${{ matrix.build }}-${{ github.sha }}
           path: ${{ runner.temp }}/out/*.tar.gz
           if-no-files-found: error
           retention-days: 30
@@ -100,10 +114,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPLACE: ${{ inputs.replace }}
         run: |
-          version="$(python3 carafe/dlls/package.py fex-version)"
-          tag="fex-carafe-$version"
+          version="$(python3 carafe/dlls/package.py ${{ matrix.package }}-version)"
+          tag="fex-${{ matrix.build }}-$version"
           asset="$RUNNER_TEMP/out/$tag.tar.gz"
           notes="FEX-2609 for 32-bit programs with Carafe's patches (carafe/dlls/fex), built from $GITHUB_SHA. Autorun's launcher downloads it: Game Settings, Emulation, FEX build, Carafe (32-bit programs on FEX)."
+          if [ "${{ matrix.build }}" = experimental ]; then
+            notes="FEX-2609 for 32-bit programs with Carafe's patches and the experimental ones on top (carafe/dlls/fex-experimental), built from $GITHUB_SHA. For trying changes out: it may be faster, or not work. Autorun's launcher downloads it: Game Settings, Emulation, FEX build, Experimental."
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             if [ "$REPLACE" != true ]; then
               echo "::notice::$tag is already released and keeps its archive; raise the version in carafe/dlls/versions.txt to publish this build"
@@ -113,7 +130,7 @@ jobs:
             gh release edit "$tag" --notes "$notes"
           else
             gh release create "$tag" "$asset" --target "$GITHUB_SHA" --latest=false \
-              --title "FEX, Carafe build $version" --notes "$notes"
+              --title "FEX, ${{ matrix.title }} $version" --notes "$notes"
           fi
           echo "::notice::released $tag"
 

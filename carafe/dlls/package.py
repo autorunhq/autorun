@@ -2,13 +2,15 @@
 """Pack the Carafe builds of FEX and DXVK the way a card downloads them.
 
     package.py fex  <libwow64fex.dll> <FEX checkout> <output folder>
+    package.py fex-experimental <libwow64fex.dll> <FEX checkout> <output folder>
     package.py dxvk <DXVK build folder> <DXVK checkout> <output folder>
 
 Each makes <name>-carafe-<version>.tar.gz, laid out like a DXVK release:
 <name>-carafe-<version>/x32/*.dll for 32-bit programs and, for DXVK, x64/*.dll
 for 64-bit ones. The version is the one in versions.txt, and the launcher
 (horizon-wine/source/dxvk_releases.c) looks for a release tagged
-<name>-carafe-<version> that holds an asset of that name.
+<name>-carafe-<version> that holds an asset of that name. The experimental FEX
+(build-fex.sh ... experimental) is fex-experimental-<version> throughout.
 """
 import gzip
 import hashlib
@@ -37,7 +39,7 @@ def versions():
         if line:
             key, value = line.split('=', 1)
             found[key.strip()] = value.strip()
-    for key in ('fex', 'dxvk'):
+    for key in ('fex', 'fex-experimental', 'dxvk'):
         if not re.fullmatch(r'\d+(\.\d+)*-\d+', found.get(key, '')):
             sys.exit(f'versions.txt: {key} must look like 1.2.3-4')
     return found
@@ -93,8 +95,9 @@ def write_archive(output, top, files):
     return path
 
 
-def pack_fex(dll, source, output):
-    version = versions()['fex']
+def pack_fex(dll, source, output, experimental=False):
+    version = versions()['fex-experimental' if experimental else 'fex']
+    name = 'fex-experimental' if experimental else 'fex-carafe'
     stripped = output / 'libwow64fex.dll'
     output.mkdir(parents=True, exist_ok=True)
     subprocess.run([tool('llvm-strip'), '--strip-debug', '-o', str(stripped), str(dll)], check=True)
@@ -111,7 +114,7 @@ def pack_fex(dll, source, output):
         sys.exit(f'libwow64fex.dll lacks what wow64.dll asks of it: {sorted(required - exports)}')
     fex = ROOT / 'horizon-wine/fex'
     manifest = {
-        'name': 'fex-carafe', 'version': version, 'fex': 'FEX-2609', 'revision': FEX_REVISION,
+        'name': name, 'version': version, 'fex': 'FEX-2609', 'revision': FEX_REVISION,
         'built_from': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
         'horizon_patch_sha256': digest((fex / 'horizon.patch').read_bytes()),
         'abi_sha256': {name: digest((fex / name).read_bytes())
@@ -119,11 +122,13 @@ def pack_fex(dll, source, output):
         'carafe_patches': patches('fex'),
         'files': {'x32/libwow64fex.dll': digest(data)},
     }
+    if experimental:
+        manifest['experimental_patches'] = patches('fex-experimental')
     files = {'x32/libwow64fex.dll': data,
-             'fex-carafe-manifest.json': (json.dumps(manifest, indent=2) + '\n').encode(),
+             f'{name}-manifest.json': (json.dumps(manifest, indent=2) + '\n').encode(),
              'licenses/FEX-MIT.txt': (Path(source) / 'LICENSE').read_bytes()}
     stripped.unlink()
-    return write_archive(output, f'fex-carafe-{version}', files)
+    return write_archive(output, f'{name}-{version}', files)
 
 
 def pack_dxvk(build, source, output):
@@ -148,13 +153,16 @@ def pack_dxvk(build, source, output):
 
 
 def main():
-    if len(sys.argv) == 2 and sys.argv[1] in ('fex-version', 'dxvk-version'):
-        print(versions()[sys.argv[1].split('-')[0]])
+    if len(sys.argv) == 2 and sys.argv[1] in ('fex-version', 'fex-experimental-version', 'dxvk-version'):
+        print(versions()[sys.argv[1][:-len('-version')]])
         return
-    if len(sys.argv) != 5 or sys.argv[1] not in ('fex', 'dxvk'):
+    if len(sys.argv) != 5 or sys.argv[1] not in ('fex', 'fex-experimental', 'dxvk'):
         sys.exit(__doc__)
     what, built, source, output = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
-    (pack_fex if what == 'fex' else pack_dxvk)(built, source, output)
+    if what == 'dxvk':
+        pack_dxvk(built, source, output)
+    else:
+        pack_fex(built, source, output, experimental=what == 'fex-experimental')
 
 
 if __name__ == '__main__':

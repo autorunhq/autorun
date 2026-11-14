@@ -24,8 +24,17 @@ enum dxvk_source
      * their DXVK source; the catalog and install calls below take it, with
      * the 32-bit machine. */
     DXVK_BACKEND_FEX_CARAFE = DXVK_SOURCE_COUNT,
+    /* The same again with what is being tried on top of Carafe's patches
+     * (carafe/dlls/fex-experimental), released and kept apart from it, so that
+     * an experiment never replaces the build games already run well on. */
+    DXVK_BACKEND_FEX_EXPERIMENTAL,
     DXVK_BACKEND_COUNT
 };
+
+/* A program's FEX build as its settings hold it (launcher_settings.h,
+ * fex_carafe): 1 Carafe's, 2 the experimental one. */
+#define DXVK_FEX_BACKEND( build ) ((build) == 2 ? DXVK_BACKEND_FEX_EXPERIMENTAL : DXVK_BACKEND_FEX_CARAFE)
+#define DXVK_FEX_BUILD_NAME( build ) ((build) == 2 ? "Experimental" : "Carafe")
 
 struct dxvk_release
 {

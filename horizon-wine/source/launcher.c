@@ -2138,7 +2138,7 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
         char fex[32];
 
         strcpy( fex, p->settings.fex_version );
-        if (!launcher_graphics_ensure_fex( l->graphics, fex )) return 0;
+        if (!launcher_graphics_ensure_fex( l->graphics, p->settings.fex_carafe, fex )) return 0;
     }
 #endif
     p->missing = 0;
@@ -2571,15 +2571,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             struct dxvk_version fex = {0};
 
             if (p->settings.fex_carafe)
-                dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, l->options->runtime_dir, p->machine,
-                                      p->settings.fex_version, &fex );
+                dxvk_resolve_version( DXVK_FEX_BACKEND( p->settings.fex_carafe ), l->options->runtime_dir,
+                                      p->machine, p->settings.fex_version, &fex );
             ADD_ROW( ROW_FEX_BUILD, SECTION_EMULATION, "FEX build",
                      "Autorun is the FEX that comes with the Windows DLLs. Carafe is the same FEX with Carafe's "
-                     "patches, downloaded from this Autorun's releases; FEX options then lists what only it reads." );
+                     "patches, downloaded from this Autorun's releases; FEX options then lists what only it reads. "
+                     "Experimental is Carafe's with changes still being tried: it may be faster, or not work." );
             row->kind = UI_ROW_DROPDOWN;
             row->download = p->settings.fex_carafe && !fex.installed;
             if (!p->settings.fex_carafe) snprintf( row->value, sizeof(row->value), "Autorun" );
-            else snprintf( row->value, sizeof(row->value), "Carafe %s",
+            else snprintf( row->value, sizeof(row->value), "%s %s", DXVK_FEX_BUILD_NAME( p->settings.fex_carafe ),
                            fex.installed ? fex.version : "Not installed" );
         }
 #endif
