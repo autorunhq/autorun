@@ -79,17 +79,20 @@ if [ "$flavour" = experimental ]; then
     echo "FEX: $tried experimental patches applied"
 fi
 
-# Carafe's build is compiled for any ARM64 CPU and without link-time
-# optimization, and stays so. The experimental one is compiled for the
-# console's CPU, a Cortex-A57 (as the Proton builds for the Switch do,
-# github.com/Azkali/proton-arm64-a57), and with FEX's own default of link-time
-# optimization: both make FEX's own code faster, the translator and the
-# helpers translated code calls, not the code it emits.
+# Carafe's build is compiled for any ARM64 CPU, and stays so. The experimental
+# one is compiled for the console's CPU, a Cortex-A57 (as the Proton builds for
+# the Switch are, github.com/Azkali/proton-arm64-a57): that makes FEX's own
+# code faster, the translator and the helpers translated code calls, not the
+# code it emits.
+#
+# Link-time optimization, FEX's default elsewhere, stays off for both: with it
+# the link loses BTCpuSimulateImpl, which only assembly refers to, and
+# FlushInstructionCache, which compiler-rt's __clear_cache needs after the
+# import libraries were already read.
 tune=none
 lto=OFF
 if [ "$flavour" = experimental ]; then
     tune=cortex-a57
-    lto=ON
 fi
 
 # Newer CMake refuses the old minimum versions some of FEX's externals name.

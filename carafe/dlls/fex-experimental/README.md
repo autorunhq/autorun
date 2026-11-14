@@ -15,7 +15,7 @@ set to it are not touched by anything here.
 | Version | On top of Carafe's `fex=2609-1` |
 | --- | --- |
 | `2609-1` | Nothing: Carafe's build under another name. |
-| `2609-2` | FEX's own code compiled for the console's CPU (`-mcpu=cortex-a57`) and with link-time optimization, FEX's default. No patch: the translated code is the same, the translator and its helpers are faster. |
+| `2609-2` | FEX's own code compiled for the console's CPU (`-mcpu=cortex-a57`). No patch: the translated code is the same, the translator and its helpers are tuned for the A57. (Link-time optimization was tried with it and does not link, see `../build-fex.sh`.) |
 
 To try something:
 
