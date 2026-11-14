@@ -16,6 +16,7 @@ set to it are not touched by anything here.
 | --- | --- |
 | `2609-1` | Nothing: Carafe's build under another name. |
 | `2609-2` | FEX's own code compiled for the console's CPU (`-mcpu=cortex-a57`). No patch: the translated code is the same, the translator and its helpers are tuned for the A57. (Link-time optimization was tried with it and does not link, see `../build-fex.sh`.) |
+| `2609-3` | `2609-2` and `0001`: FEX-2611's `preserve_all` for the helpers translated code calls (upstream `c76fccf25`, `ef006bdb1`). x87 maths at full precision (FEX options, x87 reduced precision off) is called without saving every register around each call. Nothing changes for a game on reduced precision. |
 
 To try something:
 

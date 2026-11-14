@@ -1,0 +1,32 @@
+Experimental: preserve_all for the helpers translated code calls, on llvm-mingw too.
+MIT, as the file it changes.
+
+FEX upstream c76fccf25 and ef006bdb1 (in FEX-2611): clang 22.1 and newer
+support the preserve_all calling convention on Windows targets, so the x87
+helpers at full precision are called without saving and restoring every
+register around the call. Asynchronous unwind tables are off with it, as
+upstream has it, for a conflict between the two under mingw.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3a4f11ba7..61e8f695f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -233,11 +233,17 @@ check_cxx_source_compiles(
+   HAS_CLANG_PRESERVE_ALL)
+ unset(CMAKE_REQUIRED_FLAGS)
+ if (HAS_CLANG_PRESERVE_ALL)
+-  if (MINGW)
++  message(STATUS "Clang version ${CMAKE_CXX_COMPILER_VERSION}")
++  set(CLANG_MINIMUM_VERSION 22.1)
++  if (MINGW AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS ${CLANG_MINIMUM_VERSION})
+     message(STATUS "Ignoring broken clang::preserve_all support")
+     set(HAS_CLANG_PRESERVE_ALL FALSE)
+   else()
+     message(STATUS "Has clang::preserve_all")
++    if (MINGW)
++      message(STATUS "Disabling asynchronous-unwind-tables due to bug with preserve_all and mingw")
++      add_compile_options(-fno-asynchronous-unwind-tables)
++    endif()
+   endif()
+ endif()
+ 
