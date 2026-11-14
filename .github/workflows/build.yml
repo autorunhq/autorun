@@ -134,6 +134,22 @@ jobs:
         # over: this checkout has neither.
         run: sh horizon-wine/check-runtime-console.sh
 
+      - name: Swap, threads, the low window and the WoW64 CPU
+        # The runtime's other host scripts that need no ARM64 host, no
+        # submodule and nothing vendored: the swap file and its threads,
+        # FEX's continuation and the stall report's locks, Horizon's native
+        # views, and the x86 system-call gate and the CPU DLL's native side.
+        run: |
+          for script in check-swap check-horizon-threads check-low-window check-wow64-box64-bridge \
+                        check-wow64-box64-unix; do
+            sh "horizon-wine/$script.sh" > "$RUNNER_TEMP/$script.log" 2>&1 || {
+              echo "::error::horizon-wine/$script.sh failed: $(grep -m 4 -E 'error|Assert|Error|failed' "$RUNNER_TEMP/$script.log" | tr '\n' ' ' | cut -c1-900)"
+              cat "$RUNNER_TEMP/$script.log"
+              exit 1
+            }
+            tail -n 1 "$RUNNER_TEMP/$script.log"
+          done
+
       - name: Every other check that runs on a computer
         # The checks of horizon-wine/tests that run on an x86-64 Linux host
         # without the submodules or vendor/, beside those the console checks
