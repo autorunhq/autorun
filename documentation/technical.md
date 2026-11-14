@@ -344,7 +344,7 @@ sh horizon-wine/check-wow64-box64-bridge.sh   # the x86 system-call gate
 sh horizon-wine/check-wow64-box64-unix.sh     # the native side of the CPU DLL
 sh horizon-wine/check-amd64.sh                # AMD64, ARM64EC and both Box64 CPU modes
 sh horizon-wine/check-audio.sh                # the audio driver
-sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scripted input (Homebrew's sdl2, sdl3, sdl2_ttf, libpng)
+sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scripted input (Homebrew's sdl2, sdl3, sdl2_ttf, libpng; or Linux's SDL2, SDL2_ttf, libpng, turbojpeg, curl and OpenSSL)
 sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the horizon-dlls checkout: install, resume, verify, update
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
@@ -360,6 +360,12 @@ python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu
 (cd horizon-wine && cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator && /tmp/orchestrator)   # Carafe's orchestrator: what it decides, on made-up loads
 (cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator_switch && /tmp/orchestrator_switch)   # the orchestrator behind its switch: off it leaves everything to the balancer
 ```
+
+CI (`.github/workflows/build.yml`, the job runtime (host checks)) runs
+`check-runtime-console.sh` and every `check_*.py` that needs neither an ARM64
+host, the submodules, `vendor/` nor FFmpeg; the media and Carafe jobs run
+theirs. The launcher, DLL and game fix scripts above need the submodules
+and are run by hand, on macOS or Linux.
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by
 `tools/bootstrap-box64-core.sh`) and never edited:
