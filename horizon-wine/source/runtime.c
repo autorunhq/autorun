@@ -786,6 +786,23 @@ void wine_nx_cursor_show( int visible )
     wine_nx_compositor_cursor( x, y, visible );
 }
 
+/* Where the arrow is on the screen, and whether to draw it, for a frame that
+ * reaches the screen through Vulkan rather than the framebuffer or the window
+ * compositor (dlls/win32u/vulkan.c). */
+int wine_nx_cursor_state( int *x, int *y, int *width, int *height )
+{
+    int visible;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    *x = (int)wine_nx_cursor.x;
+    *y = (int)wine_nx_cursor.y;
+    *width = wine_nx_cursor.width;
+    *height = wine_nx_cursor.height;
+    visible = wine_nx_cursor_visible;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    return visible;
+}
+
 /* The floating keyboard (osk.c) draws its labels with the console's own font,
  * which stays mapped for as long as the service is open. */
 int wine_nx_osk_font( const void **data, size_t *size )
