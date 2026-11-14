@@ -1,6 +1,6 @@
 Autorun low-window patch
 
-Base: Atmosphere 1.12.1, 6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8.
+Base: Atmosphere 1.12.2, 4e3f37038d9e82dde7054897213ab32b2ecf651f.
 Only 39-bit processes with program ID 0548EABB35576000 receive the new layout.
 That is Autorun's generation-2 main forwarder for
 sdmc:/switch/wine/wine-nx-runtime.nro, without additional arguments.
@@ -14,7 +14,7 @@ Build with devkitA64, libnx, Python 3 and Atmosphere's build dependencies:
   sh horizon-wine/build-low-window.sh /path/to/rebuilt/wine-nx-runtime.nro
 
 The archive uses Fusee's SD overrides; it does not replace package3.
-Use it only with the matching Atmosphere 1.12.1 package3 and fusee.bin.
+Use it only with the matching Atmosphere 1.12.2 package3 and fusee.bin.
 For Hekate fss0/pkg3 boots, duplicate the working entry and add these lines
 after its fss0/pkg3 line, preserving its other settings:
   kernel=atmosphere/mesosphere.bin

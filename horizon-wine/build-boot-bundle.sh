@@ -5,13 +5,13 @@ root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 horizon_wine="$root/horizon-wine"
 work="$horizon_wine/toolchains/boot-payloads"
 output="${1:-$work/bundle}"
-ams_rev=6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8
+ams_rev=4e3f37038d9e82dde7054897213ab32b2ecf651f
 libnx_rev=20cbcfd90567f7bf84df7725f27e345e2164fa6b
 hoc_rev=7960dd9be629c9ea8f99b26633cf3a3cfedbb34d
-ams="$work/atmosphere-1.12.1"
+ams="$work/atmosphere-1.12.2"
 hoc="$work/hoc-2.6.0"
-hoc_ams="$work/atmosphere-hoc-1.12.1-2.6.0"
-release="$work/atmosphere-1.12.1.zip"
+hoc_ams="$work/atmosphere-hoc-1.12.2-2.6.0"
+release="$work/atmosphere-1.12.2.zip"
 libnx="$work/libnx-20cbcfd"
 hoc_dist="$work/hoc-2.6.0.zip"
 build=out/nintendo_nx_arm64_armv8a/release
@@ -28,7 +28,7 @@ if [ ! -d "$libnx/.git" ]; then
 fi
 [ "$(git -C "$libnx" rev-parse HEAD)" = "$libnx_rev" ] || { echo 'libnx revision mismatch' >&2; exit 1; }
 if [ ! -d "$ams/.git" ]; then
-    git clone --depth 1 --branch 1.12.1 https://github.com/Atmosphere-NX/Atmosphere.git "$ams"
+    git clone --depth 1 --branch 1.12.2 https://github.com/Atmosphere-NX/Atmosphere.git "$ams"
 fi
 if [ ! -d "$hoc/.git" ]; then
     git clone --depth 1 --branch 2.6.0-rel https://github.com/Horizon-OC/Horizon-OC.git "$hoc"
@@ -73,7 +73,7 @@ hactool -t kip1 "--uncompressed=$work/loader-hoc.kip" \
     "$hoc_ams/stratosphere/loader/$build/loader.kip" >/dev/null
 if [ ! -f "$release" ]; then
     curl -fL --retry 3 -o "$release" \
-        'https://github.com/Atmosphere-NX/Atmosphere/releases/download/1.12.1/atmosphere-1.12.1-master-6b0c077b4%2Bhbl-2.4.5%2Bhbmenu-3.6.1.zip'
+        'https://github.com/Atmosphere-NX/Atmosphere/releases/download/1.12.2/atmosphere-1.12.2-master-4e3f37038%2Bhbl-2.4.5%2Bhbmenu-3.6.1.zip'
 fi
 if [ ! -f "$hoc_dist" ]; then
     curl -fL --retry 3 -o "$hoc_dist" \

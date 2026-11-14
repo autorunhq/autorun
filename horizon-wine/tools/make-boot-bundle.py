@@ -8,8 +8,8 @@ import subprocess
 import zipfile
 
 
-ATMOSPHERE_ZIP_SHA256 = "f42161b3bce11442ea487eb84811013cf0e5ba571a7964323e206990b341a297"
-PACKAGE3_SHA256 = "94c2e6f7e438571c51964b2d730c6cc7ab5557e19b2fd0315878c004dd8d56a6"
+ATMOSPHERE_ZIP_SHA256 = "57d0019ff430af4b712899ff58fd341da8d9ed38159c51ade8e29fd42ecb2dda"
+PACKAGE3_SHA256 = "946bb5a85c35b1204dfeae230ad3415803e0848745bb41f8e0ccee4ff27a96f9"
 HOC_ZIP_SHA256 = "aaeff73154ce94e44c3957b4a527027de3cfac971158448837561fa557c49c8e"
 
 
@@ -46,11 +46,11 @@ args = parser.parse_args()
 
 archive = args.atmosphere_zip.read_bytes()
 if digest(archive) != ATMOSPHERE_ZIP_SHA256:
-    raise SystemExit("Atmosphere 1.12.1 release archive hash mismatch")
+    raise SystemExit("Atmosphere 1.12.2 release archive hash mismatch")
 with zipfile.ZipFile(args.atmosphere_zip) as z:
     package3 = z.read("atmosphere/package3")
 if digest(package3) != PACKAGE3_SHA256:
-    raise SystemExit("Atmosphere 1.12.1 package3 hash mismatch")
+    raise SystemExit("Atmosphere 1.12.2 package3 hash mismatch")
 hoc_archive = args.hoc_zip.read_bytes()
 if digest(hoc_archive) != HOC_ZIP_SHA256:
     raise SystemExit("HOC 2.6.0 release archive hash mismatch")
@@ -100,8 +100,8 @@ header = """#ifndef WINE_NX_SETUP_BOOT_MANIFEST_H
 #define WINE_NX_SETUP_BOOT_MANIFEST_H
 static const struct setup_boot_manifest setup_boot_release_manifest = {
     .version = 2,
-    .release = "ams-1.12.1-hoc-2.6.0",
-    .atmosphere_version = UINT32_C(0x010c01),
+    .release = "ams-1.12.2-hoc-2.6.0",
+    .atmosphere_version = UINT32_C(0x010c02),
 """
 for field, name in (("stock", "loader-stock.kip"), ("hoc", "loader-hoc.kip"),
                     ("mesosphere", "mesosphere.bin")):
@@ -113,5 +113,5 @@ header += f"    .hoc_config_revision = {revision},\n"
 header += f"    .hoc_kip_version = {version},\n"
 header += "};\n#endif\n"
 (args.output / "setup_boot_manifest.h").write_text(header)
-print(f"Boot bundle: Atmosphere 1.12.1, HOC 2.6.0 KIP version {version}, CUST revision {revision}")
+print(f"Boot bundle: Atmosphere 1.12.2, HOC 2.6.0 KIP version {version}, CUST revision {revision}")
 print(args.output)
