@@ -11,12 +11,25 @@ export SDL_AUDIODRIVER=dummy
 [ -d /opt/homebrew/lib ] && export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 horizon_wine="$root/horizon-wine"
-# Wine's Notepad, the program that stands in for the games under several names,
-# is the DLL repository's.
-notepad="$root/horizon-dlls/switch/wine/drive_c/windows/syswow64/notepad.exe"
-[ -f "$notepad" ] || { echo "no $notepad: check out horizon-dlls" >&2; exit 1; }
 build="$(mktemp -d "${TMPDIR:-/tmp}/wine-nx-launcher.XXXXXX")"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
+# Wine's Notepad, the program that stands in for the games under several names,
+# is the DLL repository's. Without that checkout (CI's is without submodules) a
+# bare 32-bit image made here stands in for it: the same runs, without icons.
+notepad="$root/horizon-dlls/switch/wine/drive_c/windows/syswow64/notepad.exe"
+if [ ! -f "$notepad" ]; then
+    notepad="$build/program.exe"
+    python3 - "$notepad" <<'PY'
+import sys
+pe = bytearray(128)
+pe[0:2] = b'MZ'
+pe[0x3c] = 64
+pe[64:68] = b'PE\0\0'
+pe[68:70] = (0x14c).to_bytes(2, 'little')
+open(sys.argv[1], 'wb').write(pe)
+PY
+    echo "no horizon-dlls checkout: a bare 32-bit image stands in for Notepad"
+fi
 font="${LAUNCHER_FONT:-/System/Library/Fonts/Supplemental/Arial.ttf}"
 # Linux has no Arial where macOS keeps it: DejaVu Sans, as CI's keyboard test uses.
 [ -n "${LAUNCHER_FONT:-}" ] || [ -f "$font" ] || font=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf

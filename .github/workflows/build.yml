@@ -7,9 +7,10 @@ name: build
 # keyboard still does what it should, the one of the Carafe DLLs, which
 # downloads them from this repository's releases the way a card does, and the
 # one of the media parser, which plays files through the runtime's own code
-# and FFmpeg configured as the runtime's, and the runtime's own host checks
-# (check-runtime-console.sh and the checks of horizon-wine/tests that run on a
-# computer), so a check that stops building or passing is seen at the commit.
+# and FFmpeg configured as the runtime's, the launcher driven headless, and the
+# runtime's own host checks (check-runtime-console.sh and the checks of
+# horizon-wine/tests that run on a computer), so a check that stops building or
+# passing is seen at the commit.
 #
 # Run it from the Actions tab, or push to a branch. The build is Linux only:
 # build.sh has no toolchain download for other machines, and this is where the
@@ -84,6 +85,35 @@ jobs:
           path: ${{ runner.temp }}/shots
           if-no-files-found: error
           retention-days: 14
+
+  launcher:
+    name: launcher (host test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The game fixes repository
+        # Its profiles are what the launcher's game settings are checked
+        # against. The DLL repository is left out: a bare 32-bit image made
+        # by the test stands in for its Notepad.
+        run: git submodule update --init --depth 1 game-fixes
+
+      - name: SDL2, its fonts, the image libraries, curl and OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev libpng-dev libturbojpeg0-dev libcurl4-openssl-dev libssl-dev \
+            libzstd-dev zlib1g-dev fonts-dejavu-core
+
+      - name: The launcher, headless, with scripted input
+        # Its controls, settings and catalog, then the launcher itself under
+        # SDL's dummy driver: Run once (a program, and a batch file with its
+        # arguments), Add Game, Home, the library's pages and covers, with the
+        # address and undefined behaviour sanitizers (check-launcher-host.sh).
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: sh horizon-wine/tests/check-launcher-host.sh
 
   runtime-checks:
     name: runtime (host checks)
