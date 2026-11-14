@@ -109,6 +109,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: What was built
+        # In an annotation, for the same reason: the CPU it was compiled for,
+        # and what CMake said of the compiler, preserve_all among it.
+        run: |
+          { grep -m 1 '^FEX: built for' "$RUNNER_TEMP/build.log"
+            grep -m 4 'Clang version\|clang::preserve_all\|asynchronous-unwind-tables\|experimental patches applied' "$RUNNER_TEMP/build.log"; } |
+            cut -c1-300 | tr '\n' ';' | sed 's/^/::notice::/'
+          echo
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,7 +141,7 @@ jobs:
             gh release create "$tag" "$asset" --target "$GITHUB_SHA" --latest=false \
               --title "FEX, ${{ matrix.title }} $version" --notes "$notes"
           fi
-          echo "::notice::released $tag: $(grep -m 1 '^FEX: built for' "$RUNNER_TEMP/build.log" | cut -c6-)"
+          echo "::notice::released $tag"
 
   dxvk:
     name: DXVK

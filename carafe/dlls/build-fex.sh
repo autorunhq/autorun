@@ -106,4 +106,4 @@ cmake -S "$src" -B "$build" -G Ninja \
     -DFEX_HORIZON=ON -DFEX_HORIZON_ABI_DIR="$horizon_wine/fex"
 cmake --build "$build" --target wow64fex -j "${WINE_NX_JOBS:-4}"
 ls -l "$build/Bin/libwow64fex.dll"
-echo "FEX: built for CPU \"$tune\", link-time optimization $lto, preserve_all $(grep -q '^HAS_CLANG_PRESERVE_ALL:INTERNAL=1' "$build/CMakeCache.txt" 2>/dev/null && grep -q 'CLANG_MINIMUM_VERSION' "$src/CMakeLists.txt" && echo on || echo off)"
+echo "FEX: built for CPU \"$tune\", link-time optimization $lto"
