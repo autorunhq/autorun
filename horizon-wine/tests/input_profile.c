@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include "../source/input_profile.h"
+#include "../source/input_presets.h"
 
 static int held( const uint64_t *keys, unsigned int code )
 {
@@ -210,9 +211,54 @@ static void persistence( void )
     assert(!rmdir(root));
 }
 
+/* The controls menu's presets: every binding written, keyboard and mouse on,
+ * the mouse buttons on the triggers, and Autorun's own mapping back again. */
+static void presets(void)
+{
+    struct input_profile defaults, p;
+
+    input_profile_defaults(&defaults, 1);
+    for (int preset = 0; preset < INPUT_PRESET_COUNT; preset++)
+    {
+        struct launcher_kv kv = {{0}, 0};
+
+        /* Over a profile that had its own, in both spellings. */
+        assert(launcher_kv_set(&kv, "key.ZR", "0x26") && launcher_kv_set(&kv, "A", "0x20"));
+        assert(launcher_kv_set(&kv, "left-deadzone", "15"));
+        assert(input_preset_write(&kv, preset));
+        input_profile_defaults(&p, 1);
+        input_profile_apply(&p, &kv);
+        assert(p.deadzone[0] == 15);
+        if (!preset)
+        {
+            assert(p.mode == INPUT_CONTROLLER && !memcmp(p.keys, defaults.keys, sizeof(p.keys)));
+            continue;
+        }
+        assert(p.mode == INPUT_KEYBOARD_MOUSE && !p.left_inherit);
+        assert(input_presets[preset].name && input_presets[preset].help);
+        for (int i = 0; i < INPUT_SOURCE_COUNT; i++)
+        {
+            struct input_binding parsed;
+            char text[16];
+
+            assert(p.keys[i].count == 1 && p.keys[i].code[0] == input_presets[preset].keys[i]);
+            snprintf(text, sizeof(text), "0x%x", input_presets[preset].keys[i]);
+            assert(input_binding_parse(&parsed, text, 0) && parsed.code[0] == input_presets[preset].keys[i]);
+        }
+        assert(p.keys[7].code[0] == INPUT_MOUSE_LEFT && p.keys[6].code[0] == INPUT_MOUSE_RIGHT);  /* ZR, ZL */
+    }
+    /* Shooter and RPG: W A S D and mouse look. */
+    for (int preset = 1; preset <= 2; preset++)
+    {
+        assert(input_presets[preset].keys[16] == 'W' && input_presets[preset].keys[19] == 'D');
+        assert(input_presets[preset].keys[20] == INPUT_MOUSE_UP && input_presets[preset].keys[23] == INPUT_MOUSE_MOVE_RIGHT);
+    }
+    assert(!input_preset_write(&(struct launcher_kv){{0}, 0}, INPUT_PRESET_COUNT));
+}
+
 int main(void)
 {
-    mapping(); transitions(); persistence();
-    puts("Input profiles: mapping, deadzones, chords, transitions and inheritance passed");
+    mapping(); transitions(); persistence(); presets();
+    puts("Input profiles: mapping, deadzones, chords, transitions, inheritance and presets passed");
     return 0;
 }

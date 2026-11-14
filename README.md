@@ -312,6 +312,23 @@ Two fingers on the screen scroll the wheel vertically; a USB mouse connected
 to the dock moves the cursor and sends left, right, middle, and wheel events
 when no finger is on the screen.
 
+**Keyboard / mouse preset** in the same Controls menu sets every button at
+once for a kind of game, with the mouse buttons on the triggers:
+
+| Control | First-person shooter | Action RPG | Point-and-click / strategy |
+|---|---|---|---|
+| Left stick | W A S D | W A S D | Mouse pointer |
+| Right stick | Mouse | Mouse | Wheel, arrows left / right |
+| **ZR** / **ZL** | Left / right click | Left / right click | Left / right click |
+| **A** / **B** | Space / Ctrl | E / Space | Left / right click |
+| **X** / **Y** | R / E | R / Tab | Space / I |
+| **L** / **R** | Wheel up / down | Ctrl / Shift | Shift / Ctrl |
+| Stick clicks | Shift / F | Shift / Q | Middle click / Tab |
+| **+** / **-** | Esc / Tab | Esc / Tab | Esc / Tab |
+| D-pad | 1 2 3 4 | I, M, F9, F5 | Arrow keys |
+
+**Autorun default** there brings back the table above.
+
 Every button can be changed: **Settings -> Game defaults -> Controls** for all
 games, or a game's options (**Y**) -> **Controls** for that game alone. Each
 stick, the d-pad and the touchscreen can move the mouse or send the arrow keys
