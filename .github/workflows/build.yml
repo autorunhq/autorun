@@ -7,7 +7,9 @@ name: build
 # keyboard still does what it should, the one of the Carafe DLLs, which
 # downloads them from this repository's releases the way a card does, and the
 # one of the media parser, which plays files through the runtime's own code
-# and FFmpeg configured as the runtime's.
+# and FFmpeg configured as the runtime's, and the runtime's own host checks
+# (check-runtime-console.sh and the checks of horizon-wine/tests that run on a
+# computer), so a check that stops building or passing is seen at the commit.
 #
 # Run it from the Actions tab, or push to a branch. The build is Linux only:
 # build.sh has no toolchain download for other machines, and this is where the
@@ -82,6 +84,67 @@ jobs:
           path: ${{ runner.temp }}/shots
           if-no-files-found: error
           retention-days: 14
+
+  runtime-checks:
+    name: runtime (host checks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: minizip, zlib and OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libminizip-dev zlib1g-dev libssl-dev
+
+      - name: The runtime's console checks
+        # Horizon's file access, memory, registry, queues, pad and the
+        # launcher's readers, built with the address and undefined behaviour
+        # sanitizers. What needs the submodules or vendor/ says it is passed
+        # over: this checkout has neither.
+        run: sh horizon-wine/check-runtime-console.sh
+
+      - name: Every other check that runs on a computer
+        # The checks of horizon-wine/tests that run on an x86-64 Linux host
+        # without the submodules or vendor/, beside those the console checks
+        # and the other jobs run. Left out: those that need an ARM64 host (the
+        # ARM64EC and FEX contexts, the loader's unwinding), the submodules
+        # (classes, user profile, DXVK and FEX payloads), FFmpeg (the media
+        # job) or a Mesa, FEX or DXVK checkout. Each one that fails is named,
+        # and the rest still run.
+        run: |
+          failed=""
+          for check in check_arm64ec_box64_unix check_arm64ec_fpcsr check_autorun_runtime_update \
+                       check_callback_lifetime check_caret check_config_json check_delete_on_close \
+                       check_desktop_ancestry check_directshow_reg check_display_expose_cursor \
+                       check_dsound_resample check_exception_restore check_fex_jit_bridge check_fex_memory \
+                       check_fex_smc check_free_space check_gl_surfaces check_graphics_driver \
+                       check_horizon_address_space_limit check_horizon_async check_horizon_async_sockets \
+                       check_horizon_byte_pipes check_horizon_fast_sync check_horizon_fragmented_memory \
+                       check_horizon_mappings check_horizon_native_view check_horizon_pipe_descriptors \
+                       check_horizon_pipe_reads check_horizon_queue_wakes check_horizon_sockaddr \
+                       check_horizon_thread_fds check_horizon_thread_handles check_horizon_topology \
+                       check_kernel_context check_kernel_hold check_key_names check_mouse_filter \
+                       check_native_heap check_native_stack check_pe_release check_pointer_events \
+                       check_popup_restore check_positioned_io check_prince_resolution check_qpc_base \
+                       check_quartz_empty_categories check_raw_mouse check_render_overhead \
+                       check_resource_forks check_runtime_symbols check_select_wait check_setup_boot \
+                       check_static_unix_libs check_swap_game check_swap_native check_swap_threads \
+                       check_swap_ui check_thread_input check_user_apc check_window_destroy \
+                       check_window_hooks check_window_list check_window_parent check_window_zorder \
+                       check_wine_mono_payload check_wmvcore_backend check_wow64_thread_context \
+                       check_wow64_unix_tables check_write_virtual_memory check_xinput_keystrokes; do
+            if python3 "horizon-wine/tests/$check.py" > "$RUNNER_TEMP/$check.log" 2>&1; then
+              tail -n 1 "$RUNNER_TEMP/$check.log"
+            else
+              echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assert|Error|never true|data race|failed' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
+              failed="$failed $check"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "Failed:$failed"
+            exit 1
+          fi
 
   carafe:
     name: Carafe DLLs (host test)
