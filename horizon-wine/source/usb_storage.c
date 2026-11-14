@@ -52,13 +52,20 @@ void wine_nx_usb_start(void)
     wine_nx_runtime_trace( buf );
 }
 
-void wine_nx_usb_stop(void)
+/* libusbhsfs watches the ports from a thread of its own, on a 128 KB stack of
+ * heap, which only usbHsFsExit ends. A program that leaves without it leaves
+ * the thread behind: the loader starts the next program in this same process,
+ * where the thread still holds the USB session (the next one cannot open USB)
+ * and the pages of its stack are a hole in the next heap. Nonzero when it was
+ * running. */
+int wine_nx_usb_stop(void)
 {
-    if (!usb_started) return;
+    if (!usb_started) return 0;
     usbHsFsSetPopulateCallback( NULL, NULL );
     usbHsFsExit();
     usb_started = 0;
     usb_device_count = 0;
+    return 1;
 }
 
 /* Drives mount on libusbhsfs' own thread. Wait for the attached ones, up to

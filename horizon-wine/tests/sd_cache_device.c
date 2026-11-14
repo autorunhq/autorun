@@ -37,7 +37,8 @@ struct test_file { off_t pos; int flags; };
 static struct test_file reader, writer;
 
 int FindDevice( const char *name ) { return strcmp( name, "sdmc:" ) ? -1 : 0; }
-void wine_nx_runtime_trace( const char *msg ) { (void)msg; }
+static char last_trace[512];
+void wine_nx_runtime_trace( const char *msg ) { snprintf( last_trace, sizeof(last_trace), "%s", msg ); }
 
 static int card_open( struct _reent *r, void *fd, const char *path, int flags, int mode )
 {
@@ -116,6 +117,7 @@ static void reset(void)
 
     while (sd_cache_files) sd_cache_close( &test_reent, sd_cache_files->key );
     sd_stat_forget_all( &sd_stat_cache );
+    memset( sd_cache_closed_tally, 0, sizeof(sd_cache_closed_tally) );
     assert( !sd_cache_pool.used && !sd_cache_pool.held && !sd_write_buffers );
     sd_cache_pool.max = SD_CACHE_POOL_MIN;
     sd_cache_off = fail_open = 0;
@@ -261,6 +263,66 @@ static void test_tiny_reads(void)
     assert( sd_cache_pool.used <= SD_CACHE_LINES );
 }
 
+/* [SDFILES]: what the card gave each open file against what was asked of it,
+ * scattered small reads costing whole chunks, and big reads straight through. */
+static void test_report_files(void)
+{
+    struct sd_cache_file *file;
+    char byte, *big = malloc( SD_CACHE_DIRECT );
+    unsigned int i;
+
+    assert( big );
+    assert( !sd_cache_open( &test_reent, &reader, "sdmc:/Roms/Doom 3/base/pak002.pk4", O_RDONLY, 0 ) );
+    /* A byte in each of 100 chunks: 100 bytes asked, 100 chunks from the card. */
+    for (i = 0; i < 100; i++)
+    {
+        assert( sd_cache_seek( &test_reent, &reader, (off_t)i * SD_CACHE_CHUNK, SEEK_SET ) == (off_t)i * SD_CACHE_CHUNK );
+        assert( sd_cache_read_file( &test_reent, &reader, &byte, 1 ) == 1 );
+    }
+    assert( (file = sd_cache_find( sd_cache_files, &reader )) );
+    assert( file->asked == 100 && file->card == 100ull * SD_CACHE_CHUNK );
+    /* Read again: the last chunks are held, nothing more from the card. */
+    assert( sd_cache_seek( &test_reent, &reader, 99 * SD_CACHE_CHUNK, SEEK_SET ) == 99 * SD_CACHE_CHUNK );
+    assert( sd_cache_read_file( &test_reent, &reader, &byte, 1 ) == 1 );
+    assert( file->asked == 101 && file->card == 100ull * SD_CACHE_CHUNK );
+    /* Large reads go straight to the card and count as they are. */
+    assert( !sd_cache_seek( &test_reent, &reader, 0, SEEK_SET ) );
+    for (i = 0; i < 64; i++) assert( sd_cache_read_file( &test_reent, &reader, big, SD_CACHE_DIRECT ) == SD_CACHE_DIRECT );
+    assert( file->asked == 101 + 64ull * SD_CACHE_DIRECT && file->card == 100ull * SD_CACHE_CHUNK + 64ull * SD_CACHE_DIRECT );
+
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !strcmp( last_trace, "[SDFILES] the card gave files 16 MB: pak002.pk4 16 MB for 4 MB asked" ) );
+    /* Told once: nothing new, nothing said. */
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !last_trace[0] );
+
+    /* Doom 3 opens its archive for each read: closed files count too, the
+     * opens of one name together, beside one still open. */
+    for (i = 0; i < 3; i++)
+    {
+        unsigned int k;
+
+        if (i) assert( !sd_cache_open( &test_reent, &reader, "sdmc:/Roms/Doom 3/base/pak002.pk4", O_RDONLY, 0 ) );
+        assert( !sd_cache_seek( &test_reent, &reader, 0, SEEK_SET ) );
+        for (k = 0; k < 96; k++) assert( sd_cache_read_file( &test_reent, &reader, big, SD_CACHE_DIRECT ) == SD_CACHE_DIRECT );
+        assert( !sd_cache_close( &test_reent, &reader ) );
+    }
+    assert( !sd_cache_open( &test_reent, &writer, "sdmc:/Roms/Doom 3/base/pak000.pk4", O_RDONLY, 0 ) );
+    assert( !sd_cache_seek( &test_reent, &writer, 0, SEEK_SET ) );
+    for (i = 0; i < 16; i++) assert( sd_cache_read_file( &test_reent, &writer, big, SD_CACHE_DIRECT ) == SD_CACHE_DIRECT );
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !strcmp( last_trace, "[SDFILES] the card gave files 19 MB: pak002.pk4 18 MB for 18 MB asked; "
+                                 "pak000.pk4 1 MB for 1 MB asked" ) );
+    last_trace[0] = 0;
+    wine_nx_sd_cache_report_files();
+    assert( !last_trace[0] );
+    assert( !sd_cache_close( &test_reent, &writer ) );
+    free( big );
+}
+
 int main( int argc, char **argv )
 {
     static const struct { const char *name; void (*run)(void); } tests[] = {
@@ -268,6 +330,7 @@ int main( int argc, char **argv )
         { "tracking-failure", test_tracking_failure }, { "truncate", test_truncate },
         { "held-write", test_held_write }, { "shared-write", test_shared_write },
         { "append", test_append }, { "tiny-reads", test_tiny_reads },
+        { "report-files", test_report_files },
     };
     unsigned int i;
 

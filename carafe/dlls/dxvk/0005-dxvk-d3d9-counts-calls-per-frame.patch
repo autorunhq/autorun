@@ -1,0 +1,244 @@
+Carafe: with CARAFE_D3D9_STATS=1 in the environment, which the runtime sets when its profiler is on, the device
+counts draws, state, texture, stream, index, constant and transform calls, how many of the state and texture calls
+leave the value as it was, buffer locks and state block applies, and every 600 presents logs the average per frame
+as one [D3D9 calls] line. Off, it costs a flag test per call.
+Zlib, as the files it changes.
+
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -20,6 +20,7 @@
+ #include "../dxvk/dxvk_instance.h"
+ 
+ #include "../util/util_bit.h"
++#include "../util/util_env.h"
+ #include "../util/util_math.h"
+ 
+ #include "d3d9_initializer.h"
+@@ -64,6 +65,8 @@
+     , m_legacyD3DBridge    ( this )
+     , m_d3dCompatibility   ( pParent->GetD3DCompatibilityFlags() ) {
+ 
++    m_callStats = env::getEnvVar("CARAFE_D3D9_STATS") == "1";
++
+     InitShaderOptions();
+ 
+     // If we can SWVP, then we use an extended constant set
+@@ -2077,6 +2080,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetTransform(D3DTRANSFORMSTATETYPE State, const D3DMATRIX* pMatrix) {
++    CountCall(D3D9Call::Transform);
+     return SetStateTransform(GetTransformIndex(State), pMatrix);
+   }
+ 
+@@ -2312,6 +2316,9 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
++    if (unlikely(m_callStats))
++      CountState(D3D9Call::RenderState, uint32_t(State) < RenderStateCount && m_state.renderStates[State] == Value);
++
+     if (likely(uint32_t(State) < RenderStateCount && m_state.renderStates[State] == Value && IsUnchangedFastPath()))
+       return D3D_OK;
+ 
+@@ -2813,6 +2820,9 @@
+ 
+     DWORD stateSampler = RemapSamplerState(Stage);
+ 
++    if (unlikely(m_callStats))
++      CountState(D3D9Call::Texture, m_state.textures[stateSampler] == pTexture);
++
+     if (likely(m_state.textures[stateSampler] == pTexture && IsUnchangedFastPath()))
+       return D3D_OK;
+ 
+@@ -2844,6 +2854,10 @@
+           DWORD                    Value) {
+     D3D9TextureStageStateTypes dxvkType = RemapTextureStageStateType(Type);
+ 
++    if (unlikely(m_callStats))
++      CountState(D3D9Call::TextureStageState, Stage < caps::TextureStageCount
++        && uint32_t(dxvkType) < TextureStageStateCount && m_state.textureStages[Stage][dxvkType] == Value);
++
+     if (likely(Stage < caps::TextureStageCount && uint32_t(dxvkType) < TextureStageStateCount
+             && m_state.textureStages[Stage][dxvkType] == Value && IsUnchangedFastPath()))
+       return D3D_OK;
+@@ -2883,6 +2897,10 @@
+ 
+     uint32_t stateSampler = RemapSamplerState(Sampler);
+ 
++    if (unlikely(m_callStats))
++      CountState(D3D9Call::SamplerState, uint32_t(Type) < SamplerStateCount
++        && m_state.samplerStates[stateSampler][Type] == Value);
++
+     if (likely(uint32_t(Type) < SamplerStateCount
+             && m_state.samplerStates[stateSampler][Type] == Value && IsUnchangedFastPath()))
+       return D3D_OK;
+@@ -3045,6 +3063,7 @@
+           D3DPRIMITIVETYPE PrimitiveType,
+           UINT             StartVertex,
+           UINT             PrimitiveCount) {
++    CountCall(D3D9Call::Draw);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -3097,6 +3116,7 @@
+           UINT             NumVertices,
+           UINT             StartIndex,
+           UINT             PrimitiveCount) {
++    CountCall(D3D9Call::Draw);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -3158,6 +3178,7 @@
+           UINT             PrimitiveCount,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
++    CountCall(D3D9Call::DrawFromMemory);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(!VertexStreamZeroStride))
+@@ -3212,6 +3233,7 @@
+           D3DFORMAT        IndexDataFormat,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
++    CountCall(D3D9Call::DrawFromMemory);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(!VertexStreamZeroStride))
+@@ -3627,6 +3649,7 @@
+           UINT   StartRegister,
+     const float* pConstantData,
+           UINT   Vector4fCount) {
++    CountCall(D3D9Call::VertexShaderConstants);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     return SetShaderConstants<
+@@ -3718,6 +3741,7 @@
+           IDirect3DVertexBuffer9* pStreamData,
+           UINT                    OffsetInBytes,
+           UINT                    Stride) {
++    CountCall(D3D9Call::StreamSource);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(StreamNumber >= caps::MaxStreams))
+@@ -3865,6 +3889,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetIndices(IDirect3DIndexBuffer9* pIndexData) {
++    CountCall(D3D9Call::Indices);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     D3D9IndexBuffer* buffer = static_cast<D3D9IndexBuffer*>(pIndexData);
+@@ -4000,6 +4025,7 @@
+     UINT   StartRegister,
+     const float* pConstantData,
+     UINT   Vector4fCount) {
++    CountCall(D3D9Call::PixelShaderConstants);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     return SetShaderConstants <
+@@ -4255,12 +4281,32 @@
+   }
+ 
+ 
++  void D3D9DeviceEx::CountFrame() {
++    static const char* const names[] = {
++      "draws", "draws from memory", "render states", "unchanged", "sampler states", "unchanged",
++      "texture stage states", "unchanged", "textures", "unchanged", "stream sources", "index buffers",
++      "vertex shader constant sets", "pixel shader constant sets", "transforms", "buffer locks", "state block applies",
++    };
++
++    if (likely(!m_callStats) || ++m_callFrames < 600)
++      return;
++
++    std::string text = str::format("[D3D9 calls] per frame over ", m_callFrames, " frames:");
++    for (uint32_t i = 0; i < uint32_t(D3D9Call::Count); i++)
++      text += str::format(i ? ", " : " ", names[i], " ", m_callCounts[i] / m_callFrames);
++    Logger::info(text);
++    m_callCounts = { };
++    m_callFrames = 0;
++  }
++
++
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::PresentEx(
+     const RECT* pSourceRect,
+     const RECT* pDestRect,
+           HWND hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD dwFlags) {
++    CountFrame();
+ 
+     if (m_cursor.IsSoftwareCursor()) {
+       D3D9_SOFTWARE_CURSOR* pSoftwareCursor = m_cursor.GetSoftwareCursor();
+@@ -5475,6 +5521,7 @@
+           UINT                    SizeToLock,
+           void**                  ppbData,
+           DWORD                   Flags) {
++    CountCall(D3D9Call::Lock);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(ppbData == nullptr))
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1137,6 +1137,40 @@
+       return m_d3d9Options.unchangedStateFastPath && !m_multithread.enabled() && !ShouldRecord();
+     }
+ 
++    enum class D3D9Call : uint32_t {
++      Draw,
++      DrawFromMemory,
++      RenderState,
++      RenderStateSame,
++      SamplerState,
++      SamplerStateSame,
++      TextureStageState,
++      TextureStageStateSame,
++      Texture,
++      TextureSame,
++      StreamSource,
++      Indices,
++      VertexShaderConstants,
++      PixelShaderConstants,
++      Transform,
++      Lock,
++      StateBlockApply,
++      Count
++    };
++
++    void CountCall(D3D9Call call) {
++      if (unlikely(m_callStats))
++        m_callCounts[uint32_t(call)]++;
++    }
++
++    void CountState(D3D9Call call, bool same) {
++      m_callCounts[uint32_t(call)]++;
++      if (same)
++        m_callCounts[uint32_t(call) + 1]++;
++    }
++
++    void CountFrame();
++
+     bool IsD3DCompatibile(D3DCompatibility d3dCompatibility) const {
+       return m_d3dCompatibility.test(d3dCompatibility);
+     }
+@@ -1621,6 +1655,10 @@
+     D3D9Multithread                 m_multithread;
+     D3D9InputAssemblyState          m_iaState;
+ 
++    bool                            m_callStats = false;
++    std::array<uint64_t, uint32_t(D3D9Call::Count)> m_callCounts = { };
++    uint64_t                        m_callFrames = 0;
++
+     D3D9DeviceDirtyFlags            m_dirty;
+ 
+     D3D9TextureSlotTracking         m_textureSlotTracking;
+--- a/src/d3d9/d3d9_stateblock.cpp
++++ b/src/d3d9/d3d9_stateblock.cpp
+@@ -62,6 +62,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
++    m_parent->CountCall(D3D9DeviceEx::D3D9Call::StateBlockApply);
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+     // A state block can't be applied while another is being recorded.

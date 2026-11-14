@@ -55,7 +55,19 @@ runtime; the full package now ships the Mesa 26 one.
   the DLL repository ships in `horizon-dlls/classes.reg`; hives an earlier build left in
   `switch/wine` itself are moved there on the first start), message
   queues, timers, the clipboard, raw input, object directories and sections,
-  including sections with no file whose views share their pages.
+  including sections with no file whose views share their pages. `Sleep(0)`,
+  `SwitchToThread` and Wine's own yields (after a wait that timed out, or a
+  message poll that found nothing) yield as on Windows, but once a thread has
+  been yielding for 2 ms with under 10 µs between yields, each further one in
+  that run sleeps 100 µs (`dlls/ntdll/unix/horizon_yield_backoff.h`). A game's
+  long wait loop then leaves its core idle instead of busy; Vampire: The
+  Masquerade - Redemption called `Sleep(0)` up to a million times a second and
+  kept core 0 at 100%. Waits shorter than 2 ms are never slowed: a first
+  version slept after 64 quick yields, and Vampire's 3D scenes, which wait for
+  wined3d's command stream about 120 times a frame, fell to 11-23 frames a
+  second.
+  `yield_sleeps` on the `[PROGRESS]` line counts the yields that slept, and
+  `yield-backoff` (below) turns it off.
 - **Sockets.** Overlapped Winsock on I/O completion ports: pending
   `WSARecv`/`WSASend`, `AcceptEx`, `ConnectEx`, cancellation, and the
   completion rules of wineserver's `async_set_result`. Horizon has only IPv4:
@@ -67,26 +79,88 @@ runtime; the full package now ships the Mesa 26 one.
   nvc0 and Vulkan through NVK, with Wine's winevulkan on top. Direct3D runs
   through wined3d on OpenGL, or through architecture-specific DXVK payloads on
   Vulkan for programs set to use it; frames of another size than the screen's
-  (800x600 or 640x480 in full
-  screen) are scaled to it, keeping the aspect ratio. The earlier runtime on
+  (800x600 or 640x480 in full screen) are placed and scaled according to
+  `wine_nx_picture_mode` / **Picture of another mode** (`whole`, `edges`,
+  `stretched`, `own-size`), with pointer coordinates, `GetCursorPos`, and
+  `NtUserClipCursor` mapped consistently between desktop and screen space. A
+  game's **DXVK HUD** setting (**FPS counter** for the Wine renderer) also
+  shows the frame rate over a game drawn through OpenGL, which DXVK's HUD
+  never sees: `dlls/win32u/winnx_opengl.c` counts the screen's swaps and draws
+  the label of `winnx_fps.h` in the top-left corner. The earlier runtime on
   Mesa 20.1's nouveau driver, patched for pinned 32-bit buffers
   (`horizon-wine/mesa`), can still be built.
+- **FPSLocker and SaltyNX.** SaltyNX injects no homebrew title, so neither its
+  NX-FPS plugin nor its own per-game code ever sees an Autorun game. The
+  runtime does their part, as NetherSX2_nx does the plugin's
+  (`horizon-wine/source/saltynx.c`, `fpslocker.h`). A thread asks SaltySD's
+  port for its shared memory (command 7) and makes FPSLocker's block in it
+  anew, with the settings FPSLocker saved in
+  `SaltySD/plugins/FPSLocker/<title>.dat`, after clearing what an earlier
+  program left: SaltyNX clears its memory for each game it starts but not for
+  a homebrew title, so one forwarder's target would otherwise be the next
+  one's. Then, ten times a second, it writes the frame rate of the last
+  second, the API (EGL or Vulkan) and the frame count, and reads FPSLocker's
+  target for the console's mode (asked of am each time: libnx's copy is only
+  updated by `appletMainLoop`) and the panel's rate. It never writes
+  FPSLocker's target or display sync bits. With FPSLocker's display sync on
+  for the mode (SaltyNX's `SaltySD/flags/displaysync.flag` and
+  `displaysyncdocked.flag`, read once a second), it asks SaltyNX for the
+  target's refresh rate (command 11) from the game's start and whenever that
+  changes, as SaltyNX does for a game it injected; FPSLocker itself asks only
+  when its target is changed. The present paths keep the target: with the
+  panel at the target or a multiple of it (up to 4x, as 30 on 60 Hz), OpenGL
+  sets that swap interval and a FIFO Vulkan swapchain at 1x waits for nothing
+  more; otherwise each frame waits for its time (`winnx_opengl.c`
+  `nx_fps_lock_frame`, `vulkan.c` `nx_pace_present`). When the program ends,
+  a panel display sync moved off 60 Hz is set back to 60. SaltyNX's 60 Hz
+  while the game is out of focus is not done: the HOME menu suspends the
+  game. It needs Autorun started as an application (a forwarder), since
+  FPSLocker follows only those; `[FPSLOCKER]` lines in the log say what it
+  found. `fpslocker` (below) turns it off.
 - **Audio.** `winenxaudio.drv` plays through audout, for mmdevapi and DirectSound.
-- **Input.** The touchscreen, the controller as a mouse or as a keyboard with
-  per-game mappings, and XInput, which sees player 1 as an Xbox 360 controller.
-- **On-screen keyboard.** `source/osk.c` is a keyboard drawn over the program
-  that sends virtual keys one at a time, with scan codes, through the display
-  driver (Minus + right stick, or `NtUserShowSoftwareKeyboard` / a text field
-  taking focus). Horizon's keyboard applet only returns a finished string, so
-  fields a game draws itself could not be edited. Its picture is copied into
-  the Vulkan swapchain image before present (`dlls/win32u/vulkan.c`), blitted
-  into the back buffer before `eglSwapBuffers` (`winnx_opengl.c`), or drawn as
-  the compositor's top layer; the controller is its while it is up.
-- **Memory.** Fixed-base games such as NFSU2 need a 32-bit address space:
-  launch the NRO through a forwarder made with "32-bit, no alias", which the
-  launcher can install itself and which also raises the memory limit to 2 GiB.
-  AMD64 programs use the main 39-bit application forwarder. The same NRO
-  selects the execution path from the program's PE header.
+- **Input.** Single-finger and two-finger 40px scroll touchscreen input, docked
+  USB mouse (`hidGetMouseStates` with left/right/middle buttons and wheel delta
+  deduplication), raw mouse/wheel LL hooks in `horizon.c`/`server/queue.c`,
+  DirectInput keyboard hardware-state sync (`dinput/keyboard.c`), the
+  controller as a mouse or as a keyboard with per-game mappings, and XInput,
+  which sees player 1 as an Xbox 360 controller (with **Controller face
+  buttons** / `button-layout` switching positional Xbox and label-matched
+  Nintendo face layouts).
+- **Controls and Tasks panels.** `- + A` (`controls_panel`) and `- + Y`
+  (`tasks_panel`, backed by `wine_nx_tasks_snapshot` in
+  `source/thread_profile.c` and refreshed every second) share `source/osk.c`'s
+  overlay surface to display active bindings or live thread/core/memory/SD/FPS
+  telemetry while suppressing controller input to the game.
+- **On-screen keyboard.** `source/osk.c` is a 6-row (including F1–F12) keyboard
+  drawn over the program that sends virtual keys as held/released physical
+  keyboard events with scan codes through the display driver (Minus + B, or
+  `NtUserShowSoftwareKeyboard` / a text field taking focus), with multi-touch
+  finger tracking, key repeat, Caps lock, and sticky Shift. Horizon's keyboard
+  applet only returns a finished string, so fields a game draws itself could not
+  be edited. Its picture is copied into the Vulkan swapchain image before
+  present (`dlls/win32u/vulkan.c`), blitted into the back buffer before
+  `eglSwapBuffers` (`winnx_opengl.c`), or drawn as the compositor's top layer;
+  the controller is its while it is up.
+- **Memory.** Fixed-base 32-bit games such as NFSU2 need their image's address
+  below 4 GiB. In Autorun's 39-bit application that takes the Atmosphere
+  low-address patch. Without it, use the game's 32-bit forwarder: in the
+  library, the game's Create game forwarder, Address space "32-bit, no alias".
+  That forwarder carries its own loader (`hbl/`), which Horizon starts in a
+  32-bit address space without the alias region. The heap there is 2 GiB rather
+  than 1, and the loader keeps its heap to that region. It starts the NRO with
+  `--library-game=ID` (`source/forwarder.c`, `runtime_command_line_game`). Its
+  title id hashes the address space in, so it sits beside the game's 39-bit
+  forwarder, and the low-window patch never applies to it. The launcher started
+  there runs 32-bit games only. In that address space the kernel's heap region
+  always covers 0x7ffe0000, and nothing lies above 4 GiB. KUSER_SHARED_DATA
+  moves to a free page below 2 GiB, which ntdll exports to the PE side
+  (`wine_nx_user_shared_data`). The heap page at 0x7ffe0000 is taken out of the
+  runtime's heap and made inaccessible, so a program's own reads of it fault and
+  are served from the real page. Thread data takes the top of the space
+  (`dlls/ntdll/unix/virtual.c`), and the loader puts the NRO as high as it
+  fits. AMD64 programs use the main 39-bit application
+  forwarder. The same NRO selects the execution path from the program's PE
+  header.
   Wine reserves the program's low address space early, keeps its allocations
   clear of the memory Horizon hands to libnx, and leaves 32-bit programs'
   Vulkan memory in the driver's own mappings.
@@ -130,6 +204,10 @@ the first time a newer build starts.
 | `verbose-log` | false | Wine's traces in the log (`verbose.txt`) |
 | `profiler` | false | Thread, server and sampling reports (`profile.txt`) |
 | `windows-through-opengl` | true | Windows drawn by the compositor, not the framebuffer (`framebuffer.txt`, inverted) |
+| `mode-emulation` | true | win32u emulates a display mode a program asks for: its OpenGL draws into a framebuffer object that an internal context blits to the window. `false` is upstream Autorun's way, the program's OpenGL drawing to the window's surface itself; `mode-emulation=0` in a program's settings file does it for one program |
+| `yield-backoff` | true | Once a thread has been yielding (`Sleep(0)`, `SwitchToThread`) for 2 ms without a break, each further yield sleeps 100 µs instead of keeping its core busy; shorter waits are never slowed. `false` makes every one a plain yield; `yield-backoff=0` in a program's settings file does it for one program |
+| `fpslocker` | true | A game's frame rate goes to FPSLocker's overlay through SaltyNX's shared memory, FPSLocker's target limits the game's frames, and with its display sync on the panel's refresh rate follows the target. `false` leaves SaltyNX alone; `fpslocker=0` in a program's settings file does it for one program |
+| `picture-mode` | `"whole"` | Display scaling for non-native resolutions (`"whole"`, `"edges"`, `"stretched"`, `"own-size"`) |
 | `reopen-the-launcher-on-exit` | false | Start the launcher again when a program ends (`reload-launcher.txt`) |
 | `core-balancing` | true | Move busy threads between cores (`no-balance.txt`, inverted) |
 | `display-devices` | true | Report display devices (`no-display-devices.txt`, inverted) |
@@ -188,6 +266,12 @@ thread spends its time. DLLs that fail to load are logged (`[NXLDR]`, and
 Wine's `err:` lines) even without verbose traces, and so are files a program
 could not open (`[FS]`, with how it asked), the first overlapped socket
 operations (`[ASYNC]`), user APCs (`[APC]`) and x86 faults (`[BOX64]`).
+`[SYNC] server threads:` says whether each of the program's threads has a
+server thread of its own or they share a few (the program's `server-pool=1`
+setting, Carafe's server thread pool, which needs `sync=horizon`), and
+`[BUDGET]`, at the first server request after each 30 s, counts the threads
+in use against the limit, with the pool as `pool=threads/idle/waiting`; it
+does not need the profiler.
 
 ## Building
 
@@ -260,11 +344,32 @@ sh horizon-wine/check-wow64-box64-bridge.sh   # the x86 system-call gate
 sh horizon-wine/check-wow64-box64-unix.sh     # the native side of the CPU DLL
 sh horizon-wine/check-amd64.sh                # AMD64, ARM64EC and both Box64 CPU modes
 sh horizon-wine/check-audio.sh                # the audio driver
-sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scripted input (Homebrew's sdl2, sdl3, sdl2_ttf, libpng)
+sh horizon-wine/tests/check-launcher-host.sh  # the launcher, headless, with scripted input (Homebrew's sdl2, sdl3, sdl2_ttf, libpng; or Linux's SDL2, SDL2_ttf, libpng, turbojpeg, curl and OpenSSL)
 sh horizon-wine/tests/check-horizon-dlls.sh   # the DLL manager against the horizon-dlls checkout: install, resume, verify, update
 sh horizon-wine/tests/check-game-fixes.sh     # game fixes against the game-fixes checkout: match, download, apply, record, update
 for t in horizon-wine/tests/check_*.py; do python3 "$t"; done  # server pieces run against real host sockets and files
+python3 horizon-wine/tests/check_server_pool.py   # Carafe's server thread pool with real threads, under the address and thread sanitizers
+python3 horizon-wine/tests/check_horizon_suspend.py  # the server's suspend, resume, thread context and terminate handlers, and where the stall report may take locks
+python3 horizon-wine/tests/check_core_affinity.py    # which cores the runtime gives graphics and shader threads, and the core the orchestrator keeps
+sh horizon-wine/tools/bootstrap-wma.sh && python3 horizon-wine/tests/media_host.py --widl && python3 horizon-wine/tests/check_media_parser.py   # the media parser plays files FFmpeg wrote, against FFmpeg built with the runtime's configure lines (builds FFmpeg twice on its first run)
+python3 horizon-wine/tests/check_media_decoder.py   # the AAC and H.264 decoder of Media Foundation: AAC that FFmpeg wrote, sample for sample and at its times; damaged packets; a stream that changes (uses the builds of the line above)
+python3 horizon-wine/tests/check_carafe_dlls.py --live   # the Carafe DXVK and FEX releases, downloaded and installed as a card does (curl, zstd, zlib)
+python3 horizon-wine/tests/check_menu_languages.py   # the settings menu's catalog, shown by the menu's own reader under each of the fifteen console languages and held against Carafe's texts
+python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu shows for each DXVK and FEX build, against the launcher's own rules
+(cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/carafe-shims -I source tests/carafe_reports.c -o /tmp/carafe_reports && /tmp/carafe_reports)   # Carafe's reports: waits by kind, the lock wait's priority, FEX's counters
+(cd horizon-wine && cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator && /tmp/orchestrator)   # Carafe's orchestrator: what it decides, on made-up loads
+(cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator_switch && /tmp/orchestrator_switch)   # the orchestrator behind its switch: off it leaves everything to the balancer
 ```
+
+CI (`.github/workflows/build.yml`) runs `check-runtime-console.sh`,
+`check-swap.sh`, `check-horizon-threads.sh`, `check-low-window.sh`, both
+`check-wow64-box64-*.sh` and every `check_*.py` that needs neither an ARM64
+host, the submodules, `vendor/` nor FFmpeg (the job runtime (host checks)), and
+`check-launcher-host.sh` with only the game fixes submodule, where a bare
+32-bit image made by the script stands in for the DLL repository's Notepad
+(launcher (host test)); the media job runs its own and `check-audio.sh`, with
+COM headers its widl makes, and the Carafe job its own. The DLL and game fix
+scripts need both submodules and are run by hand, on macOS or Linux.
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by
 `tools/bootstrap-box64-core.sh`) and never edited:
@@ -291,10 +396,40 @@ changes, and fails if the pinned text moves.
   `C:\windows\autorun-setup.exe` (`tools/autorun_setup.c`) before the first
   program on a card: the MP3 decoder under Drivers32 and DllRegisterServer for
   the DirectShow and DMO DLLs, which lay out their own filter data. The
+  splitter that plays a file through the runtime's FFmpeg parser is
+  winegstreamer's, which that setup does not register; the runtime loads its
+  entry itself at every start (`dlls/ntdll/unix/horizon_directshow_reg.h`). The
   program waits in `run-next.txt` and starts when the runtime starts again; the
   mark is `registry/components-1.done`, so a reset registry runs it again.
 - A 32-bit address space leaves a program about 2 GiB of addresses and caps the
   whole process at 2 GiB of memory.
+- With display mode emulation off, the screen's OpenGL surface takes the size
+  of the program's display mode and the console's scaler stretches it over
+  the screen (`nx_screen_fit`, through mesa-switch's
+  `EGL_MESA_horizon_surface_resize`); pointer coordinates are mapped as
+  `stretched` whatever **Picture of another mode** says, except `own-size`,
+  which leaves the picture at its own size. The log says
+  `[NXGL] the screen's surface is WxH`.
+- A game of the Quake 2 years can crash as it starts drawing: it copies the
+  OpenGL extension list into a buffer sized for the drivers of its day, and
+  Mesa's list overruns it (Kingpin: a write past the top of its stack, then
+  jumps to 0x745f6c69, the letters "il_t"). **Old OpenGL extension list** in
+  the game's settings (`gl-old-extensions=1`) shows the program the short list
+  such a driver had; `[NXGL] old extension list` in the log says how many.
+- An OpenGL game held back by its one busy thread (Doom 3 on nxvk: 98% of a
+  core at 30 FPS, two cores idle) can hand its OpenGL calls to Mesa's
+  glthread: **OpenGL thread** in the game's settings (`gl-thread=1`), nxvk's
+  runtime only. nxvk's Switch EGL did not start glthread at all, and Mesa's
+  own default leaves it off below four CPUs: `nxvk-patches/0001` starts it
+  when the runtime sets `mesa_glthread=true` and has it finish before a
+  swap, a make-current and a context's or surface's end, as Mesa's DRI
+  frontend does. `[INIT] OpenGL thread on` and a `Mesa queue gl` line in the
+  log say it runs. A game that reads back from the GPU often can be slower.
+- A 32-bit program whose image is not large address aware is given addresses
+  below 2 GiB only. **Large address aware** in the game's settings
+  (`large-address-aware=1`) gives it those up to 4 GiB without patching the
+  file; `[VA] 32-bit program: addresses up to ...` in the log says which it
+  got. It adds addresses, not memory.
 - AMD64 programs require the 39-bit application forwarder and remain
   experimental.
 - One program at a time; one controller.
@@ -322,6 +457,7 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) | Martin Storsjö; LLVM and mingw-w64 authors | Apache-2.0 with LLVM exception, mingw-w64's licenses | Building Wine's and DXVK's Windows DLLs |
 | [FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) | Advanced Micro Devices | MIT | The Upscaling setting's FSR 1.0 (EASU and RCAS, `tools/fsr1`), which isrmicha brought to the launcher |
 | [dolphin-nx](https://github.com/NaGaa95/dolphin-nx) | NaGaa95 | GPL-2.0-or-later | The launcher's look (icon grid, program menu, settings and themes) follows its launcher; Autorun's launcher is its own code |
+| [Carafe](https://github.com/carafe-nx/carafe) | The Carafe authors | LGPL-2.1-or-later for its runtime overlay and Autorun patches; GPL-3.0-or-later for the thread orchestrator (`horizon-wine/source/orchestrator.c`, `orchestrator_policy.c`, `orchestrator_policy.h`, its tests `tests/orchestrator.c` and `tools/orchestrator_replay.c`) and for the settings menu's texts in fourteen languages (`horizon-wine/tools/carafe-menu-texts.json`, which the menu's catalog is built with) | The in-game settings menu, the loading and error screens and the registry overlay (`horizon-wine/source/carafe_*.c`), the thread orchestrator behind the **Thread orchestrator** setting, DirectShow and Windows Media playback through FFmpeg (`source/media_unix.c`) and runtime fixes; what was taken and what is still to come is in [carafe/integration/PORTING.md](../carafe/integration/PORTING.md) |
 
 References that shaped the port without being part of the build:
 

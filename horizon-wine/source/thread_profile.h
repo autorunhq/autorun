@@ -43,6 +43,20 @@ void wine_nx_profile_start( void );
 void wine_nx_profile_stop( void );
 /* With each [PROGRESS] report: the [THREADS] line, and [PROF] when sampling. */
 void wine_nx_thread_report( void );
+/* The rows the [THREADS] line is made of, for the tasks panel the runtime
+ * draws over the program (osk.c): every registered thread, busiest first, the
+ * share of a core it took over the interval since the last call -- of this or
+ * of wine_nx_thread_report -- and the core it is on. total is their sum in
+ * thousandths of a core. Returns how many rows were filled. */
+struct wine_nx_task
+{
+    unsigned int tid;
+    char kind;               /* 'w' a Wine thread, 's' a server connection */
+    int core;
+    unsigned int permille;
+    char name[24];
+};
+unsigned int wine_nx_tasks_snapshot( struct wine_nx_task *tasks, unsigned int max, unsigned int *total );
 /* Interrupts every registered thread's wait but this one's, so each reaches its
  * next check; returns how many it interrupted. */
 unsigned int wine_nx_threads_wake( void );
@@ -171,6 +185,18 @@ static inline unsigned int nx_prof_callers( uint64_t lr, uint64_t fp, uint64_t l
 #define NX_PROF_I386_EBP     0xb4
 #define NX_PROF_I386_ESP     0xc4
 
+#define NX_PROF_CPU_MACHINE     2
+#define NX_PROF_MACHINE_I386    0x14c
+#define NX_PROF_TEB_FEX_THREAD  0x1500
+#define NX_PROF_TEB_FEX_CONTROL 0x1508
+#define NX_PROF_FEX_IN_JIT      1
+#define NX_PROF_FEX_AREA_DIRTY  4
+#define NX_PROF_FEX_THREAD_SPAN 0x10000
+#define NX_PROF_FEX_RIP         24
+#define NX_PROF_FEX_GREGS       32
+#define NX_PROF_FEX_REG_ESP     4
+#define NX_PROF_FEX_REG_EBP     5
+
 /* Return addresses on that x86 stack, innermost first: the two words at esp
  * (at a gate, the returns into the stub and into its caller), then the frame
  * chain from ebp ([ebp] the saved ebp, [ebp + 4] the return address) while it
@@ -250,7 +276,8 @@ static inline uint64_t nx_prof_svc_key( int svc, uint64_t caller )
     return ((uint64_t)svc << 40) | (caller & 0xffffffffffull);
 }
 
-#define NX_PROF_BUCKETS 512  /* a power of two */
+#define NX_PROF_BUCKET_BITS 12
+#define NX_PROF_BUCKETS (1u << NX_PROF_BUCKET_BITS)  /* a power of two */
 #define NX_PROF_PROBES  64
 
 struct nx_prof_bucket
@@ -267,7 +294,7 @@ struct nx_prof_table
 
 static inline void nx_prof_add( struct nx_prof_table *table, uint64_t key )
 {
-    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> 55), i;
+    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> (64 - NX_PROF_BUCKET_BITS)), i;
 
     for (i = 0; i < NX_PROF_PROBES; i++)
     {

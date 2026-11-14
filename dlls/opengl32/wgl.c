@@ -306,7 +306,46 @@ struct object_table
     GLuint            **client_ids[L1_COUNT];   /* host -> client id mapping sparse array */
     GLuint              min_free;               /* id to start looking for a free slot */
     BOOL                implicit;               /* table allows implicit allocation */
+    LONG               *shared;                 /* the lists' shared flag */
+    LONG               *busy;                   /* the lists' busy flag */
 };
+
+/* A table belongs to a context's display lists, and until those are shared
+ * with another context only that context's thread uses it: then no lock is
+ * needed, and the lock is costly for a 32-bit program on the Switch, whose
+ * x86 ntdll runs translated. Doom 3 spent 8 to 10% of its main thread in
+ * RtlAcquireSRWLockShared, RtlReleaseSRWLockShared and the RtlWakeAddress the
+ * release always makes, to look up a texture or buffer name on each bind.
+ *
+ * The one thread marks the lists busy while it is in a table instead, and
+ * sharing them (display_lists_acquire) sets shared for good and waits for
+ * busy to clear, so that from there on everyone takes the lock. Both flags
+ * are written with interlocked exchanges: either the user sees shared and
+ * takes the lock, or the sharer sees busy and waits.
+ */
+static BOOL lock_object_table( struct object_table *table, BOOL exclusive )
+{
+    if (!ReadNoFence( table->shared ))
+    {
+        InterlockedExchange( table->busy, 1 );
+        if (!ReadNoFence( table->shared )) return FALSE;
+        InterlockedExchange( table->busy, 0 );
+    }
+    if (exclusive) AcquireSRWLockExclusive( &table->lock );
+    else AcquireSRWLockShared( &table->lock );
+    return TRUE;
+}
+
+static void unlock_object_table( struct object_table *table, BOOL exclusive, BOOL locked )
+{
+    if (!locked) InterlockedExchange( table->busy, 0 );
+    else if (exclusive) ReleaseSRWLockExclusive( &table->lock );
+    else ReleaseSRWLockShared( &table->lock );
+}
+
+/* The two go around a block: the first opens it, the second closes it. */
+#define LOCK_OBJECT_TABLE( table, exclusive ) { BOOL table_locked = lock_object_table( table, exclusive );
+#define UNLOCK_OBJECT_TABLE( table, exclusive ) unlock_object_table( table, exclusive, table_locked ); }
 
 static GLuint *find_object_id( GLuint **ids[L1_COUNT], GLuint client_id )
 {
@@ -492,6 +531,8 @@ struct display_lists
 {
     LONG                refcount;
     LONG                modified;
+    LONG                shared;                 /* more than one context has had these lists */
+    LONG                busy;                   /* their one context is in a table without its lock */
     struct object_table tables[OBJ_TYPE_COUNT];
     struct handle_table syncs;
 };
@@ -504,7 +545,11 @@ static struct display_lists *display_lists_create(void)
     lists->refcount = 1;
 
     for (UINT i = 0; i < OBJ_TYPE_COUNT; i++)
+    {
         init_object_table( lists->tables + i, i );
+        lists->tables[i].shared = &lists->shared;
+        lists->tables[i].busy = &lists->busy;
+    }
     InitializeSRWLock( &lists->syncs.lock );
 
     return lists;
@@ -513,6 +558,9 @@ static struct display_lists *display_lists_create(void)
 static struct display_lists *display_lists_acquire( struct display_lists *lists )
 {
     InterlockedIncrement( &lists->refcount );
+    /* From here on the tables are locked; their one user so far leaves first. */
+    InterlockedExchange( &lists->shared, 1 );
+    while (ReadAcquire( &lists->busy )) NtYieldExecution();
     return lists;
 }
 
@@ -766,9 +814,9 @@ void put_context_objects( enum object_type type, UINT n, GLuint *handles )
     if (!(ctx = get_current_context())) return;
     if (!(table = get_object_table( ctx, type, TRUE ))) return;
 
-    AcquireSRWLockExclusive( &table->lock );
+    LOCK_OBJECT_TABLE( table, TRUE )
     for (UINT i = 0; i < n; i++) handles[i] = handles[i] ? set_object( table, alloc_client_id( table, handles[i], 0 ), handles[i] ) : 0;
-    ReleaseSRWLockExclusive( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, TRUE )
 }
 
 GLuint put_context_object_range( enum object_type type, UINT range, GLuint base )
@@ -780,10 +828,10 @@ GLuint put_context_object_range( enum object_type type, UINT range, GLuint base 
     if (!(ctx = get_current_context())) return base;
     if (!(table = get_object_table( ctx, type, TRUE ))) return base;
 
-    AcquireSRWLockExclusive( &table->lock );
+    LOCK_OBJECT_TABLE( table, TRUE )
     first = alloc_client_id( table, base, range );
     for (UINT i = 0; i < range; i++) set_object( table, first + i, base + i );
-    ReleaseSRWLockExclusive( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, TRUE )
 
     return first;
 }
@@ -794,7 +842,7 @@ static void alloc_client_objects( struct context *ctx, enum object_type type, UI
 
     if (!(table = get_object_table( ctx, type, TRUE ))) return;
 
-    AcquireSRWLockExclusive( &table->lock );
+    LOCK_OBJECT_TABLE( table, TRUE )
     for (UINT i = 0; i < n; i++)
     {
         if (!handles[i] || get_object( table, handles[i], TRUE )) continue;
@@ -802,7 +850,7 @@ static void alloc_client_objects( struct context *ctx, enum object_type type, UI
         set_object( table, handles[i], create_object( table->type ) );
         table->implicit = TRUE; /* from now on we cannot rely on host-allocated ids */
     }
-    ReleaseSRWLockExclusive( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, TRUE )
 }
 
 static BOOL is_core_context( struct opengl_client_context *ctx )
@@ -849,10 +897,10 @@ BOOL alloc_context_objects( enum object_type type, UINT n, const GLuint *handles
         break;
     }
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     for (UINT i = 0; i < n && !needs_client; i++)
         needs_client = handles[i] && !get_object( table, handles[i], TRUE );
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
     if (!needs_client) return TRUE;
 
     if (alloc_client) alloc_client_objects( ctx, type, n, handles );
@@ -869,9 +917,9 @@ GLuint *del_context_objects( enum object_type type, UINT n, GLuint *handles )
     if (!handles || !(ctx = get_current_context())) return handles;
     if (!(table = get_object_table( ctx, type, FALSE ))) return handles;
 
-    AcquireSRWLockExclusive( &table->lock );
+    LOCK_OBJECT_TABLE( table, TRUE )
     for (UINT i = 0; i < n; i++) handles[i] = del_object( table, handles[i] );
-    ReleaseSRWLockExclusive( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, TRUE )
 
     return handles;
 }
@@ -884,9 +932,9 @@ GLuint *map_context_objects( enum object_type type, UINT n, GLuint *handles )
     if (!handles || !(ctx = get_current_context())) return handles;
     if (!(table = get_object_table( ctx, type, FALSE ))) return handles;
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     while (n--) handles[n] = handles[n] ? get_object( table, handles[n], FALSE ) : 0;
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
 
     return handles;
 }
@@ -988,9 +1036,9 @@ static BOOL map_client_objects( enum object_type type, GLuint host_id, GLuint *r
     if (!(ctx = get_current_context())) return FALSE;
     if (!(table = get_object_table( ctx, type, FALSE ))) return FALSE;
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     if ((object = find_object_id( table->client_ids, host_id ))) client_id = *object;
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
 
     *ret = client_id;
     return TRUE;
@@ -2826,9 +2874,9 @@ GLhandleARB WINAPI glGetHandleARB( GLenum pname )
     if (!(ctx = context_from_handle( args.teb->glCurrentRC ))) return 0;
     if (!(table = get_object_table( ctx, OBJ_TYPE_SHADER, FALSE ))) return 0;
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     if ((object = find_object_id( table->client_ids, args.ret ))) client_id = *object;
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
 
     return client_id;
 }
@@ -2849,13 +2897,13 @@ void WINAPI glGetAttachedObjectsARB( GLhandleARB container, GLsizei max_count, G
     if (!(ctx = context_from_handle( args.teb->glCurrentRC ))) return;
     if (!(table = get_object_table( ctx, OBJ_TYPE_SHADER, FALSE ))) return;
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     for (UINT i = 0; i < max_count; ++i)
     {
         if (!obj[i] || !(object = find_object_id( table->client_ids, obj[i] ))) continue;
         obj[i] = *object;
     }
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
 }
 
 void WINAPI glGetAttachedShaders( GLuint program, GLsizei max_count, GLsizei *count, GLuint *shaders )
@@ -2874,13 +2922,13 @@ void WINAPI glGetAttachedShaders( GLuint program, GLsizei max_count, GLsizei *co
     if (!(ctx = context_from_handle( args.teb->glCurrentRC ))) return;
     if (!(table = get_object_table( ctx, OBJ_TYPE_SHADER, FALSE ))) return;
 
-    AcquireSRWLockShared( &table->lock );
+    LOCK_OBJECT_TABLE( table, FALSE )
     for (UINT i = 0; i < max_count; ++i)
     {
         if (!shaders[i] || !(object = find_object_id( table->client_ids, shaders[i] ))) continue;
         shaders[i] = *object;
     }
-    ReleaseSRWLockShared( &table->lock );
+    UNLOCK_OBJECT_TABLE( table, FALSE )
 }
 
 /***********************************************************************

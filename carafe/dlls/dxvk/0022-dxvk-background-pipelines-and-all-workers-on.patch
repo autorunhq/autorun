@@ -1,0 +1,51 @@
+Carafe: pipelines are built in the background and every compiler worker takes every job unless a program's
+dxvk.conf says otherwise: dxvk.shaderCompilationMethod defaults to "async" and dxvk.allCompilerWorkers to True.
+On the console a Carbon race built no pipeline while drawing with them, and the compiler workers took under 1 %
+of a core each; "none" brings DXVK's own behaviour back for a game whose picture misses objects.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -29,7 +29,7 @@
+     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
+ 
+     skipRedundantPipelineBinds = config.getOption<bool>("dxvk.skipRedundantPipelineBinds", false);
+-    allCompilerWorkers = config.getOption<bool>("dxvk.allCompilerWorkers", false);
++    allCompilerWorkers = config.getOption<bool>("dxvk.allCompilerWorkers", true);
+ 
+     std::string rateMethod = env::getEnvVar("DXVK_FRAME_RATE_METHOD");
+ 
+@@ -56,12 +56,14 @@
+     std::string method = env::getEnvVar("DXVK_SHADER_COMPILATION_METHOD");
+ 
+     if (method.empty())
+-      method = config.getOption<std::string>("dxvk.shaderCompilationMethod", "none");
++      method = config.getOption<std::string>("dxvk.shaderCompilationMethod", "async");
+ 
+     if (method == "async")
+       shaderCompileMethod = DxvkShaderCompileMethod::Async;
+     else if (method == "dyasync")
+       shaderCompileMethod = DxvkShaderCompileMethod::Dyasync;
++    else if (method == "none")
++      shaderCompileMethod = DxvkShaderCompileMethod::None;
+ 
+     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
+     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;
+diff -ruN a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -98,11 +98,11 @@
+     /// Device name
+     std::string deviceFilter;
+ 
+-    DxvkShaderCompileMethod shaderCompileMethod = DxvkShaderCompileMethod::None;
++    DxvkShaderCompileMethod shaderCompileMethod = DxvkShaderCompileMethod::Async;
+ 
+     bool skipRedundantPipelineBinds = false;
+ 
+-    bool allCompilerWorkers = false;
++    bool allCompilerWorkers = true;
+ 
+     uint32_t frameRateMethod = 0;
+ 

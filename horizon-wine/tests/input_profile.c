@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include "../source/input_profile.h"
+#include "../source/input_presets.h"
 
 static int held( const uint64_t *keys, unsigned int code )
 {
@@ -26,13 +27,18 @@ static void mapping( void )
     }
     assert(p.keys[0].code[0] == INPUT_MOUSE_LEFT && p.keys[1].code[0] == INPUT_MOUSE_RIGHT);
     assert(p.keys[2].code[0] == 0x20 && p.keys[3].code[0] == 0x46);
-    assert(p.mode == INPUT_CONTROLLER && p.deadzone[0] == 5 && p.deadzone[1] == 5);
+    assert(p.mode == INPUT_CONTROLLER && !p.face_layout && p.deadzone[0] == 5 && p.deadzone[1] == 5);
     assert(p.mouse_speed == INPUT_MOUSE_SPEED_DEFAULT);
     assert(p.keys[16].code[0] == 'W' && p.keys[17].code[0] == 'S' && p.keys[18].code[0] == 'A' && p.keys[19].code[0] == 'D');
-    for (unsigned int i = 0; i < 4; i++)
+    /* The d-pad is the arrow keys, as the README promises; the left stick has
+     * W A S D and the right stick moves the pointer. */
     {
-        assert(p.keys[12 + i].code[0] == '1' + i);
-        assert(p.keys[20 + i].code[0] == INPUT_MOUSE_UP + i);
+        static const unsigned int arrows[4] = { 0x26 /* up */, 0x28 /* down */, 0x25 /* left */, 0x27 /* right */ };
+        for (unsigned int i = 0; i < 4; i++)
+        {
+            assert(p.keys[12 + i].code[0] == arrows[i]);
+            assert(p.keys[20 + i].code[0] == INPUT_MOUSE_UP + i);
+        }
     }
     p.deadzone[0] = p.deadzone[1] = 0;
     for (unsigned int i = 0; i < 16; i++)
@@ -96,15 +102,41 @@ static void mapping( void )
     input_map_keys(&p, &raw, &keys);
     assert(keys.mouse_x == 6000 && keys.mouse_y == -16000 && !keys.wheels);
     assert(!keys.keys[0] && !keys.keys[1] && !keys.keys[2] && !keys.keys[3]);
-    raw.buttons = input_sources[12].button;
+    /* A stick the program is told to ignore does not move the pointer either,
+     * and above the deadzone the pointer keeps its full travel. */
+    p.deadzone[1] = 25;
+    raw.axis[2] = 1500; raw.axis[3] = -3000;   /* 3354: inside 25%, outside 5% */
     input_map_keys(&p, &raw, &keys);
-    assert(held(keys.keys, '1'));
+    assert(!keys.mouse_x && !keys.mouse_y);
+    p.deadzone[1] = 5;
+    input_map_keys(&p, &raw, &keys);
+    assert(keys.mouse_x == 1500 && keys.mouse_y == -3000);
+    raw.buttons = input_sources[12].button;
+    raw.axis[2] = 6000; raw.axis[3] = -16000;
+    input_map_keys(&p, &raw, &keys);
+    assert(held(keys.keys, 0x26));   /* d-pad up is the up arrow */
     assert(input_binding_parse(&p.keys[12], "0x10b", 0));
     input_map_keys(&p, &raw, &keys);
-    assert(keys.mouse_x == 6000 - 32767 && !held(keys.keys, '1'));
+    assert(keys.mouse_x == 6000 - 32767 && !held(keys.keys, 0x26));
     raw.axis[1] = 32767;
     input_map_keys(&p, &raw, &keys);
     assert(held(keys.keys, 'W'));
+
+    /* Face-button layout (#50): 0 Xbox positional, 1 Nintendo label match,
+     * leaving any explicit pad.A..Y custom override untouched, and resetting
+     * non-custom buttons back if a program overrides button-layout. */
+    input_profile_defaults(&p, 1);
+    memset(&kv, 0, sizeof(kv));
+    launcher_kv_set(&kv, "button-layout", "1");
+    launcher_kv_set(&kv, "pad.X", "0x5");   /* LB override */
+    input_profile_apply(&p, &kv);
+    assert(p.face_layout == 1 && p.pad_custom == (1u << 2));
+    assert(p.pad[0].code[0] == 2 && p.pad[1].code[0] == 1 && p.pad[2].code[0] == 5 && p.pad[3].code[0] == 3);
+    memset(&kv, 0, sizeof(kv));
+    launcher_kv_set(&kv, "button-layout", "0");
+    input_profile_apply(&p, &kv);
+    assert(!p.face_layout && p.pad[0].code[0] == 1 && p.pad[1].code[0] == 2 &&
+           p.pad[2].code[0] == 5 && p.pad[3].code[0] == 4);
 }
 
 static void transitions( void )
@@ -179,9 +211,54 @@ static void persistence( void )
     assert(!rmdir(root));
 }
 
+/* The controls menu's presets: every binding written, keyboard and mouse on,
+ * the mouse buttons on the triggers, and Autorun's own mapping back again. */
+static void presets(void)
+{
+    struct input_profile defaults, p;
+
+    input_profile_defaults(&defaults, 1);
+    for (int preset = 0; preset < INPUT_PRESET_COUNT; preset++)
+    {
+        struct launcher_kv kv = {{0}, 0};
+
+        /* Over a profile that had its own, in both spellings. */
+        assert(launcher_kv_set(&kv, "key.ZR", "0x26") && launcher_kv_set(&kv, "A", "0x20"));
+        assert(launcher_kv_set(&kv, "left-deadzone", "15"));
+        assert(input_preset_write(&kv, preset));
+        input_profile_defaults(&p, 1);
+        input_profile_apply(&p, &kv);
+        assert(p.deadzone[0] == 15);
+        if (!preset)
+        {
+            assert(p.mode == INPUT_CONTROLLER && !memcmp(p.keys, defaults.keys, sizeof(p.keys)));
+            continue;
+        }
+        assert(p.mode == INPUT_KEYBOARD_MOUSE && !p.left_inherit);
+        assert(input_presets[preset].name && input_presets[preset].help);
+        for (int i = 0; i < INPUT_SOURCE_COUNT; i++)
+        {
+            struct input_binding parsed;
+            char text[16];
+
+            assert(p.keys[i].count == 1 && p.keys[i].code[0] == input_presets[preset].keys[i]);
+            snprintf(text, sizeof(text), "0x%x", input_presets[preset].keys[i]);
+            assert(input_binding_parse(&parsed, text, 0) && parsed.code[0] == input_presets[preset].keys[i]);
+        }
+        assert(p.keys[7].code[0] == INPUT_MOUSE_LEFT && p.keys[6].code[0] == INPUT_MOUSE_RIGHT);  /* ZR, ZL */
+    }
+    /* Shooter and RPG: W A S D and mouse look. */
+    for (int preset = 1; preset <= 2; preset++)
+    {
+        assert(input_presets[preset].keys[16] == 'W' && input_presets[preset].keys[19] == 'D');
+        assert(input_presets[preset].keys[20] == INPUT_MOUSE_UP && input_presets[preset].keys[23] == INPUT_MOUSE_MOVE_RIGHT);
+    }
+    assert(!input_preset_write(&(struct launcher_kv){{0}, 0}, INPUT_PRESET_COUNT));
+}
+
 int main(void)
 {
-    mapping(); transitions(); persistence();
-    puts("Input profiles: mapping, deadzones, chords, transitions and inheritance passed");
+    mapping(); transitions(); persistence(); presets();
+    puts("Input profiles: mapping, deadzones, chords, transitions, inheritance and presets passed");
     return 0;
 }

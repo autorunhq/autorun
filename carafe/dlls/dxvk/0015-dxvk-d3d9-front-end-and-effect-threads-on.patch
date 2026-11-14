@@ -1,0 +1,23 @@
+Carafe: the D3D9 front-end thread, the effect thread, the joining of repeated effect passes and the copies of managed
+buffer locks are on unless a program's dxvk.conf turns them off. They were Experimental rows, on in every run of the
+console's checks since stage 3 of the orchestrator research.
+Zlib, as the file it changes.
+
+diff -ruN a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -78,10 +78,10 @@
+     this->reproducibleCommandStream     = config.getOption<bool>        ("d3d9.reproducibleCommandStream",     false);
+     this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
+     this->unchangedStateFastPath        = config.getOption<bool>        ("d3d9.unchangedStateFastPath",        true);
+-    this->frontEndThread                = config.getOption<bool>        ("d3d9.frontEndThread",                false);
+-    this->effectThread                  = config.getOption<bool>        ("d3d9.effectThread",                  false);
+-    this->effectPassMerge               = config.getOption<bool>        ("d3d9.effectPassMerge",               false);
+-    this->managedBufferCopies           = config.getOption<bool>        ("d3d9.managedBufferCopies",           false);
++    this->frontEndThread                = config.getOption<bool>        ("d3d9.frontEndThread",                true);
++    this->effectThread                  = config.getOption<bool>        ("d3d9.effectThread",                  true);
++    this->effectPassMerge               = config.getOption<bool>        ("d3d9.effectPassMerge",               true);
++    this->managedBufferCopies           = config.getOption<bool>        ("d3d9.managedBufferCopies",           true);
+ 
+     // D3D8 options
+     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);

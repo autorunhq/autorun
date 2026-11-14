@@ -32,7 +32,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
 
 /* The runtime hands the screen's NWindow to one surface at a time
  * (horizon-wine/source/runtime.c); OpenGL and Vulkan take turns with it. */
-extern void *wine_nx_gl_acquire_window( void );
+extern void *wine_nx_vk_reserve_window( void );
 extern void wine_nx_gl_release_window( void );
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 
@@ -51,19 +51,23 @@ extern VkResult wine_nx_vkCreateViSurfaceNN( VkInstance instance, const struct n
                                              const VkAllocationCallbacks *allocator, VkSurfaceKHR *surface )
     __asm__("vkCreateViSurfaceNN");
 
+/* mesa-switch's NVK shares memory between devices through nvmap ids, which
+ * D3DKMT's shared resources use; nxvk's has no such calls, and there a shared
+ * resource cannot be made (CMakeLists.txt, WINE_NX_NXVK_DIR). */
 extern VkResult nvk_switch_allocate_shared_memory(
     VkDevice device, const VkMemoryAllocateInfo *allocate_info,
     const VkAllocationCallbacks *allocator, uint32_t nvmap_id,
-    VkDeviceMemory *memory_out );
+    VkDeviceMemory *memory_out ) __attribute__((weak));
 extern bool nvk_switch_export_memory( VkDeviceMemory memory,
                                       uint32_t *nvmap_id_out,
-                                      void **reference_out );
-extern void nvk_switch_release_memory_reference( void *reference );
+                                      void **reference_out ) __attribute__((weak));
+extern void nvk_switch_release_memory_reference( void *reference ) __attribute__((weak));
 
 VkResult wine_nx_vk_allocate_shared_memory(
     VkDevice device, const VkMemoryAllocateInfo *allocate_info,
     uint32_t nvmap_id, VkDeviceMemory *memory_out )
 {
+    if (!nvk_switch_allocate_shared_memory) return VK_ERROR_FEATURE_NOT_PRESENT;
     return nvk_switch_allocate_shared_memory( device, allocate_info, NULL,
                                                nvmap_id, memory_out );
 }
@@ -71,12 +75,13 @@ VkResult wine_nx_vk_allocate_shared_memory(
 BOOL wine_nx_vk_export_memory( VkDeviceMemory memory, uint32_t *nvmap_id,
                                void **reference )
 {
+    if (!nvk_switch_export_memory) return FALSE;
     return nvk_switch_export_memory( memory, nvmap_id, reference );
 }
 
 void wine_nx_vk_release_memory_reference( void *reference )
 {
-    nvk_switch_release_memory_reference( reference );
+    if (nvk_switch_release_memory_reference) nvk_switch_release_memory_reference( reference );
 }
 
 static void nx_log( const char *format, ... )
@@ -102,7 +107,7 @@ static VkResult nx_vulkan_surface_create( struct client_surface *client, const s
 
     TRACE( "hwnd %p, raw %u, instance %p\n", hwnd, client->raw, instance );
 
-    if (!(info.window = wine_nx_gl_acquire_window()))
+    if (!(info.window = wine_nx_vk_reserve_window()))
     {
         ERR( "hwnd %p: the screen already has an OpenGL or Vulkan surface\n", hwnd );
         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
@@ -148,6 +153,9 @@ static const struct vulkan_driver_funcs nx_vulkan_driver_funcs =
     .p_map_device_extensions = nx_map_device_extensions,
 };
 
+/* The program has started Vulkan; read by winnx_opengl.c. */
+int wine_nx_vk_served;
+
 UINT wine_nx_drv_VulkanInit( UINT version, void *vulkan_handle, const struct vulkan_driver_funcs **driver_funcs )
 {
     TRACE( "version %u, vulkan_handle %p\n", version, vulkan_handle );
@@ -158,6 +166,7 @@ UINT wine_nx_drv_VulkanInit( UINT version, void *vulkan_handle, const struct vul
         return STATUS_INVALID_PARAMETER;
     }
     *driver_funcs = &nx_vulkan_driver_funcs;
+    __atomic_store_n( &wine_nx_vk_served, 1, __ATOMIC_RELEASE );
     nx_log( "[NXVK] the Switch display driver serves Vulkan (handle %p)", vulkan_handle );
     return STATUS_SUCCESS;
 }

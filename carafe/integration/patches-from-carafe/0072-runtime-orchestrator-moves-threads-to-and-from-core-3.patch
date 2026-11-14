@@ -1,0 +1,49 @@
+Carafe: the orchestrator may move the graphics workers that run on core 3 at priority 63 onto the game's cores, with
+their own priority back, and may move a game thread onto core 3 at priority 63 and back. wine_nx_thread_views marks
+the threads on core 3 and no longer leaves them out of the movable ones; wine_nx_thread_side_cores tells whether
+core 3 is in use. A move to core 3 alone goes through the same offload as the graphics workers, a move of a thread
+on core 3 elsewhere through the same restore.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.c
++++ b/horizon-wine/source/thread_profile.c
+@@ -1616,8 +1616,14 @@
+     unsigned int permille;
+     u64 mask;
+     int movable;
++    int side;
+ };
+ 
++unsigned int wine_nx_thread_side_cores( void )
++{
++    return four_cores_enabled ? 8u : 0u;
++}
++
+ unsigned int wine_nx_thread_views( struct wine_nx_thread_view *views, unsigned int max )
+ {
+     static u64 last;
+@@ -1643,7 +1649,8 @@
+             memcpy( view->name, thread->name, sizeof(view->name) );
+             view->permille = nx_prof_permille( ticks, thread->orchestrator_ticks, interval );
+             if (R_FAILED( svcGetThreadCoreMask( &core, &view->mask, thread->handle ) )) view->mask = 0;
+-            view->movable = thread->kind == 'w' && !thread->fixed && !thread->helper && !thread->migratable;
++            view->movable = thread->kind == 'w' && !thread->fixed && !thread->migratable;
++            view->side = thread->helper;
+         }
+         thread->orchestrator_ticks = ticks;
+     }
+@@ -1662,8 +1669,12 @@
+         struct nx_prof_thread *thread = &registry[i];
+ 
+         if (!thread->handle || thread->kind != 'w' || thread->tid != tid) continue;
+-        if (thread->fixed || thread->helper || thread->migratable) break;
+-        if (R_SUCCEEDED( svcSetThreadCoreMask( thread->handle, core, mask ) ))
++        if (thread->fixed || thread->migratable) break;
++        if (mask == 8u)
++            placed = thread->helper || offload_thread_locked( thread ) > 0;
++        else if (thread->helper)
++            placed = restore_thread_locked( thread, core, mask );
++        else if (R_SUCCEEDED( svcSetThreadCoreMask( thread->handle, core, mask ) ))
+         {
+             if (thread->teb && &horizon_follow_thread_cores)
+                 horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );

@@ -41,6 +41,8 @@ typedef int BOOL;
 #define horizon_trace(...) ((void)0)
 #define HORIZON_POOL_PAGE 4096
 #define HORIZON_POOL_ARENA ((size_t)2 * 1048576)
+#define HORIZON_ANONYMOUS_BACKING_MIN ((size_t)HORIZON_POOL_PAGE)
+#define HORIZON_ANONYMOUS_BACKING_UNIT ((size_t)64 * 1024)
 
 enum horizon_section_state { SECTION_NONE, SECTION_ALIASED, SECTION_HOLE, SECTION_ANCHOR, SECTION_NATIVE };
 struct horizon_backing { struct { int detached; } swap; int swap_excluded; };

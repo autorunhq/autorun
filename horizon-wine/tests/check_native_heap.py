@@ -196,6 +196,64 @@ static void *allocation_worker(void *argument)
     }
     return 0;
 }
+/* Pages a program before this one left lent near the top of the heap (the
+ * stack of a thread it left running): kept out, never given to a block. */
+static void keep_out_tests(void)
+{
+    const uintptr_t unit = 65536, top = (uintptr_t)fake_heap_end, low = top - 4 * 1048576;
+    const uintptr_t hole = low + 4096;
+    void *above[3], *below, *again;
+
+    assert(heap.blocks && !heap.used && heap.bottom == heap.count);
+    assert(wine_nx_native_heap_keep_out(0, 4096) == 0);
+    assert(wine_nx_native_heap_keep_out(hole, 0) == 0);
+    /* A page wanted where it is (the shared user data's Windows address) is
+     * taken only where newlib's heap, which then stops below it, keeps room:
+     * not with a byte too little, and then nothing is taken. */
+    {
+        size_t room = low - heap_break;
+        assert(wine_nx_native_heap_keep_out_leaving(hole, 0x24000, room + 1) == -2);
+        assert(!heap.used && heap.bottom == heap.count && !heap.holes);
+        assert(wine_nx_native_heap_keep_out_leaving(hole, 0x24000, room) == 1);
+    }
+    assert(heap.used == 3 * unit && heap.base + (size_t)heap.bottom * unit == low && heap.holes == 1);
+    assert(!owns_pointer((void *)(low - 1)) && owns_pointer((void *)low));
+    /* What is above it is still given out, and nothing lands on it. */
+    for (unsigned int i = 0; i < 3; i++)
+    {
+        above[i] = __wrap__memalign_r(_REENT, 65536, 1048576);
+        assert(above[i] && (uintptr_t)above[i] >= low + 3 * unit);
+        memset(above[i], 0x5a, 1048576);
+    }
+    below = __wrap__memalign_r(_REENT, 65536, 8 * 1048576);
+    assert(below && (uintptr_t)below + 8 * 1048576 <= low);
+    memset(below, 0xa5, 8 * 1048576);
+    /* Newlib's heap stops below the blocks, and so below it. */
+    __malloc_lock(_REENT);
+    assert(__wrap__sbrk_r(_REENT, low - (uintptr_t)fake_heap_start) == (void *)-1);
+    assert(__wrap__sbrk_r(_REENT, 1048576) == fake_heap_start);
+    /* Where newlib's heap or a block already is, it is too late. */
+    assert(wine_nx_native_heap_keep_out((uintptr_t)fake_heap_start + 4096, 4096) == -1);
+    assert(__wrap__sbrk_r(_REENT, -1048576) == fake_heap_start + 1048576);
+    __malloc_unlock(_REENT);
+    assert(wine_nx_native_heap_keep_out((uintptr_t)above[0] + 4096, 4096) == -1);
+    assert(wine_nx_native_heap_keep_out(low - unit, 2 * unit) == -1);
+    /* Inside a free block among the blocks it is not: 16 units free become
+     * one free, one kept out and fourteen free, which a block fits exactly. */
+    __wrap__free_r(_REENT, above[1]);
+    assert(wine_nx_native_heap_keep_out((uintptr_t)above[1] + unit + 100, 100) == 1);
+    again = __wrap__memalign_r(_REENT, 65536, 14 * unit);
+    assert(again == (char *)above[1] + 2 * unit);
+    __wrap__free_r(_REENT, above[0]);
+    __wrap__free_r(_REENT, above[2]);
+    __wrap__free_r(_REENT, below);
+    __wrap__free_r(_REENT, again);
+    /* Only the kept-out pages are left, for good, and the heap's bottom stays
+     * at the lowest of them. */
+    assert(heap.used == 4 * unit && heap.base + (size_t)heap.bottom * unit == low && heap.holes == 2);
+    check_available();
+}
+
 int main(void)
 {
     pthread_t workers[9];
@@ -228,8 +286,9 @@ int main(void)
 #ifdef WINE_NX_SHADER_ALLOC_CACHE
     shader_alloc_cache_tests();
 #endif
+    keep_out_tests();
     pthread_mutex_destroy(&mutex);
-    puts("native heap: concurrent allocation, resize, free, break and scan-free budget tests passed");
+    puts("native heap: concurrent allocation, resize, free, break, scan-free budget, kept-out page and room-keeping tests passed");
 }
 '''
 cache_flags = []

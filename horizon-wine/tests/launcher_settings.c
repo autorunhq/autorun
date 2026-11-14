@@ -82,6 +82,102 @@ static void test_settings( const char *dir )
     load_text( &kv, "four-cores=unknown\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.four_cores );
+    /* The FEX build of 32-bit programs: Autorun's unless the file says Carafe's. */
+    assert( !settings.fex_carafe && !settings.fex_version[0] );
+    load_text( &kv, "fex-build=carafe\nfex-version=2609-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex && settings.fex_carafe && !strcmp( settings.fex_version, "2609-1" ) );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=carafe\n" ) && strstr( kv.text, "fex-version=2609-1\n" ) );
+    settings.fex_version[0] = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=carafe\n" ) && !strstr( kv.text, "fex-version" ) );
+    settings.fex_carafe = 0;
+    strcpy( settings.fex_version, "2609-1" );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "fex-build" ) && !strstr( kv.text, "fex-version" ) );
+    /* A version without the build, or one that is not a version, is not kept. */
+    load_text( &kv, "fex-version=2609-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fex_carafe && !settings.fex_version[0] );
+    load_text( &kv, "fex-build=carafe\nfex-version=../../x\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe && !settings.fex_version[0] );
+    /* The experimental build is a build of its own, with versions of its own. */
+    load_text( &kv, "fex-build=experimental\nfex-version=2609-3\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe == 2 && !strcmp( settings.fex_version, "2609-3" ) );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "fex-build=experimental\n" ) && strstr( kv.text, "fex-version=2609-3\n" ) );
+    load_text( &kv, "fex-build=carafe\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fex_carafe == 1 );
+    load_text( &kv, "fex-build=something\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.fex_carafe );
+    /* Carafe's thread orchestrator and its lock wait boost: off unless a
+     * program's settings say 1, each on its own, and no line when off. */
+    load_text( &kv, "" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.orchestrator && !settings.lock_boost );
+    load_text( &kv, "orchestrator=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.orchestrator && !settings.lock_boost );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "orchestrator=1\n" ) && !strstr( kv.text, "lock-boost" ) );
+    settings.orchestrator = 0;
+    settings.lock_boost = 1;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "orchestrator" ) && strstr( kv.text, "lock-boost=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( !back.orchestrator && back.lock_boost );
+    load_text( &kv, "orchestrator=0\nlock-boost=yes\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.orchestrator && !settings.lock_boost );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "lock-boost" ) );
+    /* The server's shared threads (Carafe's patch 0023): off unless a
+     * program's settings say 1, no line when off, and kept apart from the
+     * synchronization setting they depend on. */
+    load_text( &kv, "sync=horizon\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.fast_sync && !settings.server_pool );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "server-pool" ) );
+    load_text( &kv, "server-pool=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.server_pool && !settings.fast_sync );
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "server-pool=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.server_pool && !back.fast_sync );
+    settings.server_pool = 0;
+    assert( launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "server-pool" ) );
+    load_text( &kv, "server-pool=0\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.server_pool );
+    /* Display mode emulation: no key is the shared setting, and settings
+     * nobody filled in write none. */
+    load_text( &kv, "" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.mode_emulation == 0 && launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "mode-emulation" ) );
+    load_text( &kv, "mode-emulation=0\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.mode_emulation == -1 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "mode-emulation=0\n" ) );
+    settings.mode_emulation = 1;
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "mode-emulation=1\n" ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.mode_emulation == 1 );
+    settings.mode_emulation = 2;
+    assert( !launcher_settings_write( &kv, &settings ) );
+    settings.mode_emulation = 0;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "mode-emulation" ) );
+    load_text( &kv, "server-pool=yes\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( !settings.server_pool );
     load_text( &kv, "cpu=box64\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.fex );
@@ -115,6 +211,28 @@ static void test_settings( const char *dir )
     assert( settings.verbose == 1 && settings.profile == 0 && settings.framebuffer == 1 &&
             settings.d3d == LAUNCHER_D3D_DXVK_VKD3D );
     assert( settings.hidden == 0 && !settings.title[0] );  /* only 1 or on hides */
+    assert( settings.picture_mode == -1 );
+
+    load_text( &kv, "picture=edges\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 1 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=edges" ) );
+    load_text( &kv, "picture=stretched\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 2 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=stretched" ) );
+    load_text( &kv, "picture=own-size\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 3 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=own-size" ) );
+    load_text( &kv, "picture=whole\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == 0 && launcher_settings_write( &kv, &settings ) );
+    assert( strstr( kv.text, "picture=whole" ) );
+    load_text( &kv, "picture=unknown\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.picture_mode == -1 && launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "picture=" ) );
 
     load_text( &kv, "d3d=wine\nd3d9=dxvk\n" );
     launcher_settings_read( &kv, &settings );
@@ -127,6 +245,11 @@ static void test_settings( const char *dir )
     launcher_settings_read( &kv, &settings );
     assert( settings.dxvk_source == DXVK_SOURCE_GPLASYNC && !strcmp( settings.dxvk_version, "3.1.1-1" ) );
     assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "dxvk-source=gplasync\n" ) );
+    load_text( &kv, "d3d=dxvk+vkd3d\ndxvk-source=carafe\ndxvk-version=3.1.1-1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.d3d == LAUNCHER_D3D_DXVK_VKD3D && settings.dxvk_source == DXVK_SOURCE_CARAFE &&
+            !strcmp( settings.dxvk_version, "3.1.1-1" ) );
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "dxvk-source=carafe\n" ) );
     load_text( &kv, "dxvk-source=sarek\ndxvk-version=1.13.0\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.d3d == LAUNCHER_D3D_DXVK && settings.dxvk_source == DXVK_SOURCE_SAREK &&
@@ -151,6 +274,9 @@ static void test_settings( const char *dir )
     assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_OFFICIAL ), "dxvk64" ) );
     assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_SAREK ), "dxvk-sarek" ) );
     assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_GPLASYNC ), "dxvk-gplasync64" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x014c, DXVK_SOURCE_CARAFE ), "dxvk-carafe" ) );
+    assert( !strcmp( launcher_dxvk_directory( 0x8664, DXVK_SOURCE_CARAFE ), "dxvk-carafe64" ) );
+    assert( launcher_dxvk_vkd3d_compatible( DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
     assert( !launcher_dxvk_directory( 0xaa64, DXVK_SOURCE_OFFICIAL ) &&
             !launcher_dxvk_directory( 0, DXVK_SOURCE_OFFICIAL ) );
     assert( LAUNCHER_HUD_COUNT == 4 );
@@ -218,6 +344,7 @@ static void test_settings( const char *dir )
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
+    settings.verbose = settings.profile = settings.framebuffer = settings.picture_mode = -1;
     strcpy( settings.title, "Need for Speed" );
     settings.hidden = 1;
     settings.verbose = -1;
@@ -230,13 +357,13 @@ static void test_settings( const char *dir )
     assert( !strcmp( kv.text, "# written by hand\ntitle=Need for Speed\nhidden=1\nprofile=1\nwindows=compositor\ndxvk-version=2.7.1\n" ) );
     launcher_settings_read( &kv, &back );
     assert( !strcmp( back.title, settings.title ) && back.hidden == 1 && back.verbose == -1 && back.profile == 1 );
-    assert( back.framebuffer == 0 && back.d3d == LAUNCHER_D3D_DXVK && !strcmp( back.dxvk_version, "2.7.1" ) );
+    assert( back.framebuffer == 0 && back.picture_mode == -1 && back.d3d == LAUNCHER_D3D_DXVK && !strcmp( back.dxvk_version, "2.7.1" ) );
 
     /* Back to the global settings: only the comment stays; without it the file goes. */
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
     settings.d3d = LAUNCHER_D3D_DXVK;
-    settings.verbose = settings.profile = settings.framebuffer = -1;
+    settings.verbose = settings.profile = settings.framebuffer = settings.picture_mode = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     assert( launcher_settings_write( &kv, &settings ) && !strcmp( kv.text, "# written by hand\n" ) );
     assert( launcher_kv_save( &kv, path ) && !access( path, F_OK ) );
@@ -259,6 +386,45 @@ static void test_settings( const char *dir )
     assert( !strcmp( path, "sdmc:/Games/Test/Game.wine-nx.txt" ) );
 }
 
+/* Reset to defaults: what the menus set goes, the title, hidden, the game fix
+ * the player was asked about and the controls stay, and the FEX and DXVK
+ * options are left for the launcher to clear. */
+static void test_reset(void)
+{
+    struct launcher_kv kv, empty = {{0}, 0};
+    struct launcher_settings settings, defaults;
+    char value[64];
+
+    load_text( &kv, "title=My Game\nhidden=1\ngame-fix-skip=vampire 3\nbutton-layout=xbox\n"
+                    "sync=horizon\ncpu=box64\nfex-build=carafe\nfour-cores=0\nlazy-file-views=1\nlarge-address-aware=1\ngl-old-extensions=1\ngl-thread=1\n"
+                    "orchestrator=1\nlock-boost=1\nserver-pool=1\nwindows=framebuffer\npicture=edges\n"
+                    "mode-emulation=0\ngraphics-driver=zink\nd3d=wine\ndxvk-hud=fps\nvsync=0\nlsfg=1\n"
+                    "large-pages=1\nyield-backoff=0\nfpslocker=0\nverbose=1\nprofile=0\nFEX_TSOENABLED=1\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.gl_thread == 1 && settings.gl_old_extensions == 1 );
+    assert( launcher_settings_reset( &kv ) );
+    memset( &settings, 0, sizeof(settings) );  /* padding and unused bytes alike, for memcmp */
+    memset( &defaults, 0, sizeof(defaults) );
+    launcher_settings_read( &kv, &settings );
+    launcher_settings_read( &empty, &defaults );
+    assert( !strcmp( settings.title, "My Game" ) && settings.hidden == 1 );
+    memcpy( defaults.title, settings.title, sizeof(defaults.title) );
+    defaults.hidden = 1;
+    assert( !memcmp( &settings, &defaults, sizeof(settings) ) );
+    assert( launcher_kv_get( &kv, "game-fix-skip", value, sizeof(value) ) && !strcmp( value, "vampire 3" ) );
+    assert( launcher_kv_get( &kv, "button-layout", value, sizeof(value) ) && !strcmp( value, "xbox" ) );
+    assert( launcher_kv_get( &kv, "FEX_TSOENABLED", value, sizeof(value) ) );  /* the launcher's to clear */
+    assert( !strstr( kv.text, "sync=" ) && !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "mode-emulation" ) &&
+            !strstr( kv.text, "large-pages" ) && !strstr( kv.text, "yield-backoff" ) && !strstr( kv.text, "verbose" ) &&
+            !strstr( kv.text, "fpslocker" ) && !strstr( kv.text, "large-address" ) && !strstr( kv.text, "gl-old" ) &&
+            !strstr( kv.text, "gl-thread" ) &&
+            !strstr( kv.text, "d3d=" ) && !strstr( kv.text, "cpu=" ) && !strstr( kv.text, "lsfg" ) );
+
+    /* An empty file stays empty but for what the defaults always write. */
+    kv = empty;
+    assert( launcher_settings_reset( &kv ) && !strstr( kv.text, "title" ) && !strstr( kv.text, "hidden" ) );
+}
+
 int main(void)
 {
     char dir[] = "/tmp/launcher-settings.XXXXXX", command[64];
@@ -267,6 +433,7 @@ int main(void)
     test_get();
     test_set();
     test_settings( dir );
+    test_reset();
     snprintf( command, sizeof(command), "rm -rf '%s'", dir );
     system( command );
     printf( "launcher_settings: all tests passed\n" );

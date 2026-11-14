@@ -4988,6 +4988,10 @@ static void nx_trace_window_words( HWND hwnd )
 }
 #endif
 
+#ifdef __SWITCH__
+unsigned int wine_nx_dialogs_shown;
+#endif
+
 static BOOL show_window( HWND hwnd, INT cmd )
 {
     WND *win;
@@ -5008,6 +5012,24 @@ static BOOL show_window( HWND hwnd, INT cmd )
      * manager.  Maximize its ownerless overlapped top-level window while
      * leaving popups, dialogs and child controls under application control. */
     nx_fullscreen = !(style & (WS_CHILD | WS_POPUP)) && !get_window_relative( hwnd, GW_OWNER );
+    /* A window smaller than a game's (winnx_drv.c's WINE_NX_GAME_WINDOW_MIN_W
+     * by _H) is a dialog made to be seen at its own size, as a game's
+     * configurator is: maximized, its controls stay where they were laid out
+     * and the rest of the screen is empty. It keeps its size and place, and
+     * the startup info's SW_SHOWMAXIMIZED (runtime.c) is used up on it. */
+    if (nx_fullscreen && cmd != SW_HIDE && !(style & WS_MAXIMIZE))
+    {
+        RECT rect;
+
+        if (get_window_rect( hwnd, &rect, get_thread_dpi() ) &&
+            (rect.right - rect.left < 640 || rect.bottom - rect.top < 400))
+        {
+            nx_fullscreen = FALSE;
+            if (set_startup_info_flags( STARTF_USESHOWWINDOW, 0 ) & STARTF_USESHOWWINDOW)
+                nx_window_trace( "[NXWIN] hwnd %p keeps its own size, %dx%d: smaller than a game's window",
+                                 hwnd, (int)(rect.right - rect.left), (int)(rect.bottom - rect.top) );
+        }
+    }
     if (!(style & WS_CHILD))
     {
         nx_window_trace( "[NXWIN] thread %04x shows hwnd %p with %d (style %#x, visible %d%s)",
@@ -5015,6 +5037,9 @@ static BOOL show_window( HWND hwnd, INT cmd )
                          is_iconic( hwnd ) ? ", minimized" : "" );
         nx_trace_window_words( hwnd );
     }
+    if (!(style & WS_CHILD) && cmd != SW_HIDE &&
+        get_class_long( hwnd, GCW_ATOM, FALSE ) == LOWORD(DIALOG_CLASS_ATOM))
+        __atomic_add_fetch( &wine_nx_dialogs_shown, 1, __ATOMIC_RELAXED );
     if (nx_fullscreen && (cmd == SW_SHOW || cmd == SW_SHOWNORMAL || cmd == SW_SHOWDEFAULT))
         cmd = SW_SHOWMAXIMIZED;
 #endif

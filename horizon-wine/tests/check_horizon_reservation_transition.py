@@ -44,6 +44,7 @@ typedef struct { u64 addr, size; u32 type, perm, attr; } MemoryInfo;
 #define MAP_PRIVATE 2
 #define MAP_ANON 0x20
 #define HORIZON_POOL_ARENA (2 * 1024 * 1024ul)
+#define HORIZON_ANONYMOUS_BACKING_MIN 4096ul
 #define MemType_Unmapped 0
 #define R_SUCCEEDED(result) ((result) == 0)
 typedef struct { uintptr_t start, end; int used; } VirtmemReservation;
@@ -115,6 +116,7 @@ for name in ['static struct horizon_file_source *file_source_ref(', 'static void
              'static void inherit_file_source(', 'static void free_mapping(']:
     fixture += function(name)
 fixture += 'static int map_backing_at(void *, size_t, int, int, off_t, int, int);\n'
+fixture += 'static int map_anonymous_backings(void *, size_t, int, int, int);\n'
 fixture += function('static int replace_reservation_mapping(')
 fixture += function('static int change_reservation_mapping(')
 fixture += function('static int split_reservation_mapping(')

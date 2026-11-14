@@ -1,0 +1,122 @@
+Carafe: with CompactReturns, a return keeps only the call-return stack check in line (pop, compare, branch on a miss,
+ret). The lookup for a return that misses the stack, with the profiler's miss count, goes after the block's code with
+the other out-of-line pieces. With the bridge return in place almost no return misses, so those 40-64 bytes at every
+return site sat in hot instruction cache lines unused; on the A57 an instruction costs three to four times as much
+once the hot code outgrows the 48 KB instruction cache. Off by default.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -672,6 +672,15 @@
+           "matches it, others take the lookup as before."
+         ]
+       },
++      "CompactReturns": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "A return keeps only the call-return stack check in line; the lookup for a return that misses the stack goes",
++          "after the block's code, so the hot code takes fewer instruction cache lines."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -207,6 +207,15 @@
+       (void)Bind(&NotOnTop);
+     }
+ 
++    if (Op->Hint == IR::BranchHint::Return && CompactReturns()) {
++      ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
++      sub(TMP1, TMP1, RipReg.X());
++      auto& ReturnLookup = PendingReturnLookups.emplace_back(PendingReturnLookup {.RipReg = RipReg});
++      cbnz_OrRestart(ARMEmitter::Size::i64Bit, TMP1, &ReturnLookup.Label);
++      ret(TMP2);
++      return;
++    }
++
+     if (Op->Hint == IR::BranchHint::Return) {
+       // First try to pop from the call-ret stack, otherwise follow the normal path (but ending in a ret)
+       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
+@@ -287,6 +296,34 @@
+   }
+ }
+ 
++void Arm64JITCore::EmitReturnLookup(ARMEmitter::Register RipReg) {
++  ARMEmitter::ForwardLabel Found;
++
++  if (ProfileStats()) {
++    ARMEmitter::ForwardLabel NoStats;
++    ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Thread));
++    ldr(TMP1, TMP1, offsetof(FEXCore::Core::InternalThreadState, ThreadStats));
++    (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &NoStats);
++    ldr(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++    add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 1);
++    str(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++    (void)Bind(&NoStats);
++  }
++
++  eor(ARMEmitter::Size::i64Bit, TMP1, RipReg, RipReg, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++  ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Mask));
++  and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1);
++  ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
++  add(TMP1, TMP1, TMP2);
++  ldp<ARMEmitter::IndexType::OFFSET>(TMP2, TMP1, TMP1, 0);
++  sub(TMP1, TMP1, RipReg.X());
++  (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &Found);
++  ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherLoopTop));
++  str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
++  (void)Bind(&Found);
++  ret(TMP2);
++}
++
+ DEF_OP(JumpTableEntry) {
+   auto Op = IROp->C<IR::IROp_JumpTableEntry>();
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -131,6 +131,15 @@
+   fextl::vector<PendingJumpTableCase> PendingJumpTableCases;
+   fextl::vector<PendingJumpTable> PendingJumpTables;
+ 
++  struct PendingReturnLookup {
++    ARMEmitter::ForwardLabel Label;
++    ARMEmitter::Register RipReg;
++  };
++  fextl::vector<PendingReturnLookup> PendingReturnLookups;
++  FEX_CONFIG_OPT(CompactReturns, COMPACTRETURNS);
++
++  void EmitReturnLookup(ARMEmitter::Register RipReg);
++
+   static uint64_t IndirectCallLink(FEXCore::Core::CpuStateFrame* Frame, IndirectCallCacheRecord* Record);
+ 
+   Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempCodeBufferAllocator;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -931,6 +931,7 @@
+   PendingCallCaches.clear();
+   PendingJumpTableCases.clear();
+   PendingJumpTables.clear();
++  PendingReturnLookups.clear();
+   JumpTargets.resize(IR->GetHeader()->BlockCount, {});
+   Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
+ 
+@@ -1063,6 +1064,11 @@
+   }
+   PendingTargetLabel = nullptr;
+ 
++  for (auto& ReturnLookup : PendingReturnLookups) {
++    BindOrRestart(&ReturnLookup.Label);
++    EmitReturnLookup(ReturnLookup.RipReg);
++  }
++
+   ARMEmitter::ForwardLabel l_ExitLink;
+   for (auto& PendingJumpThunk : PendingJumpThunks) {
+     // Align as 64-bit atomics are used on the HostCode field.

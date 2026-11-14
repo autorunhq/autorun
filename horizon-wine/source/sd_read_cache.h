@@ -166,6 +166,9 @@ struct sd_cache_file
     long long fill_end;      /* where the last fill ended: a miss there reads on in order */
     int size_known;          /* a fill came back short: the file ends at size */
     long long size;
+    /* For the [SDFILES] line (sd_cache.c): what the program asked of this
+     * open and what the card gave for it, and how much was reported. */
+    unsigned long long asked, card, asked_told, card_told;
     struct sd_cache_line lines[SD_CACHE_LINES];
     struct sd_cache_file *next;
 };

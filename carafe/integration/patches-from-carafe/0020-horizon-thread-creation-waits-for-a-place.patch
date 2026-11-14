@@ -1,0 +1,125 @@
+Carafe: a thread that finds no free place among the 96 waits up to 5 s for one instead of being refused.
+Games start short loading and shader threads in bursts; when such a burst meets the limit, the creator now waits
+in 2 ms steps for a thread to end, so the burst is served a little later instead of failing. DXVK, for one, ends
+the process when it is refused a thread. The wait applies only while the program runs and not while it is being
+closed; the runtime's start-up, which fills the limit on purpose, is refused at once as before. [BUDGET] counts
+the waits, those that ended without a place and the time spent, and the first waits are logged as [THREAD] lines.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -3518,6 +3518,9 @@
+ static unsigned int carafe_server_live;
+ static unsigned int carafe_server_ended[4];
+ static unsigned int carafe_threads_refused;
++static unsigned int carafe_threads_waits;
++static unsigned int carafe_threads_waits_lost;
++static unsigned long long carafe_threads_waited_ns;
+ static unsigned long long carafe_server_reported;
+ 
+ static void carafe_server_report( void )
+@@ -3539,11 +3542,15 @@
+         svcGetResourceLimitPeakValue( &peak, resource, LimitableResource_Threads );
+         svcCloseHandle( resource );
+     }
+-    snprintf( line, sizeof(line), "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u refused=%u",
++    snprintf( line, sizeof(line),
++              "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u refused=%u waits=%u/%u waited_ms=%llu",
+               (long long)used, (long long)limit, (long long)peak,
+               (int)__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ),
+               __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+-              __atomic_load_n( &carafe_threads_refused, __ATOMIC_RELAXED ) );
++              __atomic_load_n( &carafe_threads_refused, __ATOMIC_RELAXED ),
++              __atomic_load_n( &carafe_threads_waits_lost, __ATOMIC_RELAXED ),
++              __atomic_load_n( &carafe_threads_waits, __ATOMIC_RELAXED ),
++              __atomic_load_n( &carafe_threads_waited_ns, __ATOMIC_RELAXED ) / 1000000ull );
+     wine_nx_runtime_trace( line );
+     for (i = 0; i < CARAFE_SERVER_REQS; i++)
+     {
+@@ -3604,6 +3611,28 @@
+     carafe_server_report();
+ }
+ 
++static int carafe_thread_may_wait( void )
++{
++    extern volatile int wine_nx_quit_requested __attribute__((weak));
++
++    if (&wine_nx_quit_requested && wine_nx_quit_requested) return 0;
++    return __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) > 0;
++}
++
++static void carafe_thread_waited( unsigned long long ns, int placed )
++{
++    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
++    unsigned int waits = __atomic_add_fetch( &carafe_threads_waits, 1, __ATOMIC_RELAXED );
++    char line[128];
++
++    __atomic_add_fetch( &carafe_threads_waited_ns, ns, __ATOMIC_RELAXED );
++    if (!placed) __atomic_add_fetch( &carafe_threads_waits_lost, 1, __ATOMIC_RELAXED );
++    if (!&wine_nx_runtime_trace || (waits > 8 && (waits & (waits - 1)))) return;
++    snprintf( line, sizeof(line), "[THREAD] limit reached; waited %llu ms, %s (wait %u)", ns / 1000000ull,
++              placed ? "a place came free" : "no place came free", waits );
++    wine_nx_runtime_trace( line );
++}
++
+ static void carafe_server_client_ended( unsigned int requests )
+ {
+     unsigned int bucket = requests <= 4 ? 0 : requests <= 50 ? 1 : requests <= 500 ? 2 : 3;
+@@ -3619,6 +3648,8 @@
+ #define CARAFE_SERVER_ENDED( requests ) carafe_server_client_ended( requests )
+ #define CARAFE_SERVER_STARTED() __atomic_add_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
+ #define CARAFE_THREAD_REFUSED() carafe_threads_refusal()
++#define CARAFE_THREAD_MAY_WAIT() carafe_thread_may_wait()
++#define CARAFE_THREAD_WAITED( ns, placed ) carafe_thread_waited( ns, placed )
+ #else
+ #define CARAFE_DIAG_EVENT( kind, actor, target, value ) do { } while (0)
+ #define CARAFE_SERVER_NOW() 0ull
+@@ -3627,7 +3658,11 @@
+ #define CARAFE_SERVER_ENDED( requests ) do { (void)(requests); } while (0)
+ #define CARAFE_SERVER_STARTED() do { } while (0)
+ #define CARAFE_THREAD_REFUSED() do { } while (0)
++#define CARAFE_THREAD_MAY_WAIT() 0
++#define CARAFE_THREAD_WAITED( ns, placed ) do { (void)(ns); (void)(placed); } while (0)
+ #endif
++#define CARAFE_THREAD_WAIT_NS 5000000000ull
++#define CARAFE_THREAD_WAIT_STEP_NS 2000000ll
+ static void horizon_sync_notify_object_locked( struct horizon_server_object *object, int satisfy );
+ static void horizon_sync_notify_async_locked(void);
+ 
+@@ -20092,7 +20127,8 @@
+ 
+ extern Result __real_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core );
+ 
+-Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
++static Result horizon_create_thread_once( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority,
++                                          s32 core, unsigned int *tls_retries )
+ {
+     Result rc = 0;
+     unsigned int retries = 0;
+@@ -20123,6 +20159,26 @@
+         }
+     }
+     pthread_mutex_unlock( &mapping_mutex );
++    *tls_retries += retries;
++    return rc;
++}
++
++Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
++{
++    unsigned long long waited_from = 0, now = 0;
++    unsigned int retries = 0;
++    Result rc;
++
++    for (;;)
++    {
++        rc = horizon_create_thread_once( handle, entry, arg, stack, priority, core, &retries );
++        if (rc != MAKERESULT( Module_Kernel, KernelError_OutOfResource ) || !CARAFE_THREAD_MAY_WAIT()) break;
++        now = armTicksToNs( armGetSystemTick() );
++        if (!waited_from) waited_from = now;
++        else if (now - waited_from >= CARAFE_THREAD_WAIT_NS) break;
++        svcSleepThread( CARAFE_THREAD_WAIT_STEP_NS );
++    }
++    if (waited_from) CARAFE_THREAD_WAITED( armTicksToNs( armGetSystemTick() ) - waited_from, R_SUCCEEDED(rc) );
+     if (R_FAILED(rc))
+     {
+         u64 resource = 0;

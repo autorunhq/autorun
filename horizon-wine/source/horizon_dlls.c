@@ -28,11 +28,16 @@ static void hash_begin( hash_context *c ) { CC_SHA256_Init( c ); }
 static void hash_add( hash_context *c, const void *data, size_t size ) { CC_SHA256_Update( c, data, (CC_LONG)size ); }
 static void hash_end( hash_context *c, unsigned char out[32] ) { CC_SHA256_Final( out, c ); }
 #else
+/* A Linux host's tests: OpenSSL 3 calls these deprecated, which -Werror would
+ * stop the build on, and they still do what is asked of them. */
 #include <openssl/sha.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 typedef SHA256_CTX hash_context;
 static void hash_begin( hash_context *c ) { SHA256_Init( c ); }
 static void hash_add( hash_context *c, const void *data, size_t size ) { SHA256_Update( c, data, size ); }
 static void hash_end( hash_context *c, unsigned char out[32] ) { SHA256_Final( out, c ); }
+#pragma GCC diagnostic pop
 #endif
 
 /* The published manifest is a MB or two; this is room for it to grow. */

@@ -1,0 +1,23 @@
+Carafe: FEX_FLAGSWITHOUTFLAGM is one more option the runtime passes to FEX, on unless a program turns it off.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/fex_options.h
++++ b/horizon-wine/source/fex_options.h
+@@ -33,6 +33,7 @@
+     NX_FEX_X87_FAST_STACK,
+     NX_FEX_X87_SINGLE_PRECISION,
+     NX_FEX_GDB_SYMBOLS,
++    NX_FEX_FLAGS_WITHOUT_FLAGM,
+     NX_FEX_OPTION_COUNT
+ };
+ 
+@@ -126,6 +127,9 @@
+     { NX_FEX_GDB_SYMBOLS, "FEX_GDBSYMBOLS",
+       "Records every x86 instruction in each translated block's address map, so the profiler names each one. The code is the same.",
+       1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
++    { NX_FEX_FLAGS_WITHOUT_FLAGM, "FEX_FLAGSWITHOUTFLAGM",
++      "On CPUs without FlagM, spends fewer instructions on x86 flags.",
++      1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+ };
+ 
+ static inline int nx_fex_option_choice( const struct nx_fex_option *option, const char *value )

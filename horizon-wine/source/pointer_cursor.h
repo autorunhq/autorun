@@ -33,6 +33,8 @@ struct pointer_cursor
     double motion_x, motion_y; /* movement not yet handed over, sub-pixel */
     int width, height; /* screen size */
     double speed;      /* pixels per second at full tilt; 0 means the default */
+    int custom_deadzone; /* nonzero to use `deadzone` (including 0) instead of the built-in dead zone */
+    double deadzone;   /* radial stick dead zone in libnx counts (0..POINTER_CURSOR_STICK_MAX) */
     uint32_t under[POINTER_CURSOR_W * POINTER_CURSOR_H];
 };
 
@@ -56,6 +58,18 @@ static inline void pointer_cursor_place( struct pointer_cursor *c, double x, dou
     c->y = y < 0 ? 0 : y > c->height - 1 ? c->height - 1 : y;
 }
 
+/* Move by a physical mouse delta in pixels, keeping the relative motion even at
+ * screen edges or when the program warps the cursor back to center. */
+static inline int pointer_cursor_move_delta( struct pointer_cursor *c, double dx, double dy )
+{
+    int old_x = (int)c->x, old_y = (int)c->y;
+
+    c->motion_x += dx;
+    c->motion_y += dy;
+    pointer_cursor_place( c, c->x + dx, c->y + dy );
+    return (int)c->x != old_x || (int)c->y != old_y;
+}
+
 /* Move by the stick deflection (libnx axes: y up) held for elapsed_ns.
  * Returns nonzero when the whole-pixel position changed. */
 static inline int pointer_cursor_step( struct pointer_cursor *c, int stick_x, int stick_y,
@@ -63,11 +77,14 @@ static inline int pointer_cursor_step( struct pointer_cursor *c, int stick_x, in
 {
     int old_x = (int)c->x, old_y = (int)c->y;
     double dx = stick_x, dy = -(double)stick_y;
-    double deflection = sqrt( dx * dx + dy * dy ), tilt, distance, speed;
+    double deflection = sqrt( dx * dx + dy * dy ), dead_zone, tilt, distance, speed;
 
-    if (deflection <= POINTER_CURSOR_DEAD_ZONE) return 0;
+    dead_zone = c->custom_deadzone ? c->deadzone : POINTER_CURSOR_DEAD_ZONE;
+    if (dead_zone < 0.0) dead_zone = 0.0;
+    if (dead_zone >= POINTER_CURSOR_STICK_MAX) dead_zone = POINTER_CURSOR_STICK_MAX - 1.0;
+    if (deflection <= dead_zone) return 0;
     if (elapsed_ns > POINTER_CURSOR_MAX_STEP_NS) elapsed_ns = POINTER_CURSOR_MAX_STEP_NS;
-    tilt = (deflection - POINTER_CURSOR_DEAD_ZONE) / (POINTER_CURSOR_STICK_MAX - POINTER_CURSOR_DEAD_ZONE);
+    tilt = (deflection - dead_zone) / (POINTER_CURSOR_STICK_MAX - dead_zone);
     if (tilt > 1) tilt = 1;
     /* The caller's speed, or the built-in one when it left it at zero. */
     speed = c->speed > 0 ? c->speed : POINTER_CURSOR_SPEED;
@@ -161,6 +178,23 @@ static inline void pointer_cursor_paint( struct pointer_cursor *c, uint32_t *bit
                 *saved = *pixel;
                 *pixel = shape == 'W' ? 0xffffffffu : 0xff000000u;
             }
+        }
+    }
+}
+
+/* Fill POINTER_CURSOR_W * POINTER_CURSOR_H pixels (RGBA8888 / BGRA8888 identical)
+ * for GPU overlay rendering in OpenGL and Vulkan drivers. */
+static inline void pointer_cursor_rgba( uint32_t *out )
+{
+    int i, j;
+
+    for (j = 0; j < POINTER_CURSOR_H; j++)
+    {
+        for (i = 0; i < POINTER_CURSOR_W; i++)
+        {
+            char shape = pointer_cursor_shape[j][i];
+            out[j * POINTER_CURSOR_W + i] = shape == 'W' ? 0xffffffffu :
+                                            shape == 'B' ? 0xff000000u : 0x00000000u;
         }
     }
 }

@@ -44,7 +44,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(msg);
 WINE_DECLARE_DEBUG_CHANNEL(key);
 WINE_DECLARE_DEBUG_CHANNEL(relay);
 
+/* Count of key messages a program has pulled out of its queue (PM_REMOVE), for
+ * winnx_drv.c's check that keyboard input is actually reaching a running window. */
+unsigned int wine_nx_keys_taken;
+
 #ifdef __SWITCH__
+extern void wine_nx_screen_input_waits( unsigned int thread ) __attribute__((weak));
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int wine_nx_runtime_verbose __attribute__((weak));
 
@@ -3230,6 +3235,10 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
                     continue;  /* ignore it */
                 }
                 *msg = info.msg;
+                if ((flags & PM_REMOVE) &&
+                    (info.msg.message == WM_KEYDOWN || info.msg.message == WM_SYSKEYDOWN ||
+                     info.msg.message == WM_KEYUP || info.msg.message == WM_SYSKEYUP))
+                    __atomic_add_fetch( &wine_nx_keys_taken, 1, __ATOMIC_RELAXED );
                 thread_info->message_pos   = MAKELONG( info.msg.pt.x, info.msg.pt.y );
                 thread_info->message_time  = info.msg.time;
                 thread_info->message_extra = msg_data->hardware.info;
@@ -3501,6 +3510,10 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
 
     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
+#ifdef __SWITCH__
+    if (!(changed_mask & QS_SMRESULT) && wine_nx_screen_input_waits)
+        wine_nx_screen_input_waits( GetCurrentThreadId() );
+#endif
 
 #ifdef __SWITCH__
     /* The Switch display driver polls controller and touch input from the
@@ -3735,6 +3748,7 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
     {
 #ifdef __SWITCH__
         LARGE_INTEGER delay = {.QuadPart = -100000}; /* poll every 10 ms until Horizon queues are event-backed */
+        if (wine_nx_screen_input_waits) wine_nx_screen_input_waits( GetCurrentThreadId() );
         NtDelayExecution( FALSE, &delay );
         check_for_driver_events();
 #else
@@ -3858,6 +3872,10 @@ static NTSTATUS post_dde_message_call( HWND hwnd, UINT msg, WPARAM wparam, LPARA
 }
 
 
+#ifdef __SWITCH__
+__thread int wine_nx_reply_waits;
+#endif
+
 /***********************************************************************
  *           wait_message_reply
  *
@@ -3892,7 +3910,13 @@ static void wait_message_reply( UINT flags )
             continue;
         }
 
+#ifdef __SWITCH__
+        wine_nx_reply_waits++;
+#endif
         wait_message( 1, &server_queue, INFINITE, wake_mask, wake_mask, 0 );
+#ifdef __SWITCH__
+        wine_nx_reply_waits--;
+#endif
     }
 }
 

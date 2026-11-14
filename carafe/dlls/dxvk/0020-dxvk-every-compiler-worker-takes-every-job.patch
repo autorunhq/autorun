@@ -1,0 +1,43 @@
+Carafe: with dxvk.allCompilerWorkers = True (or DXVK_ALL_CORES=1, DXVK-Sarek's switch), every compiler worker
+takes jobs of every priority. On three cores DXVK otherwise leaves the shader libraries and the optimized pipelines
+to one worker of three, and keeps the other two for high-priority jobs only.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -29,6 +29,7 @@
+     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
+ 
+     skipRedundantPipelineBinds = config.getOption<bool>("dxvk.skipRedundantPipelineBinds", false);
++    allCompilerWorkers = config.getOption<bool>("dxvk.allCompilerWorkers", false);
+ 
+     std::string rateMethod = env::getEnvVar("DXVK_FRAME_RATE_METHOD");
+ 
+diff -ruN a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -102,6 +102,8 @@
+ 
+     bool skipRedundantPipelineBinds = false;
+ 
++    bool allCompilerWorkers = false;
++
+     uint32_t frameRateMethod = 0;
+ 
+     uint32_t frameRatePacing = 0;
+diff -ruN a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -106,6 +106,11 @@
+       uint32_t npWorkerCount = std::clamp(((coreCount - 1) * 5) / 7, 1u, workerCount);
+       uint32_t lpWorkerCount = std::clamp(((coreCount - 1) * 2) / 7, 1u, workerCount);
+ 
++      if (m_device->config().allCompilerWorkers || env::getEnvVar("DXVK_ALL_CORES") == "1") {
++        npWorkerCount = workerCount;
++        lpWorkerCount = workerCount;
++      }
++
+       m_workers.reserve(workerCount);
+ 
+       for (size_t i = 0; i < workerCount; i++) {

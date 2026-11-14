@@ -1,0 +1,39 @@
+Carafe: the runtime's build manifest names the DXVK in the system folders as "system-dxvk" with its version.
+When it is there and no other version is asked for, that DXVK is installed and bundled, and its version decides
+which DXVK settings apply; it has no folder of its own. Without it, the DXVK folders are looked up as before.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/dxvk_releases.c
++++ b/horizon-wine/source/dxvk_releases.c
+@@ -967,6 +967,16 @@
+     return 0;
+ }
+ 
++static int backend_system_version( const struct release_backend *backend, const char *runtime_dir,
++                                   char *version, size_t size )
++{
++    char path[920];
++
++    return backend == &dxvk_backend &&
++           (size_t)snprintf( path, sizeof(path), "%s/build-manifest.json", runtime_dir ) < sizeof(path) &&
++           manifest_version( path, "system-dxvk", version, size );
++}
++
+ static void backend_resolve_version( const struct release_backend *backend, const char *runtime_dir,
+                                     unsigned short machine, const char *requested, struct dxvk_version *selected )
+ {
+@@ -975,6 +985,14 @@
+     DIR *directory;
+ 
+     memset( selected, 0, sizeof(*selected) );
++    if (backend_system_version( backend, runtime_dir, bundled, sizeof(bundled) ) &&
++        (!requested || !requested[0] || !strcmp( requested, bundled )))
++    {
++        strcpy( selected->version, bundled );
++        selected->installed = selected->bundled = 1;
++        return;
++    }
++    bundled[0] = 0;
+     if (!payload_path( backend, runtime_dir, machine, "", root, sizeof(root) )) return;
+     if (requested && requested[0])
+     {

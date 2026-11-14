@@ -1,0 +1,102 @@
+Carafe: with dxvk.skipRedundantPipelineBinds = True, a graphics pipeline that is already bound in the command
+buffer being recorded is not bound again, as DXVK-Sarek does. The command list remembers the last graphics
+pipeline bound to the execution buffer and forgets it whenever that buffer changes: a new one, a secondary one
+begun or ended, or secondary ones executed. Off by default.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -233,6 +233,8 @@
+     m_vkd           (device->vkd()),
+     m_vki           (device->vki()),
+     m_checkpoints   (device->getCheckpointBuffer()) {
++    m_skipRedundantBinds = device->config().skipRedundantPipelineBinds;
++
+     const auto& graphicsQueue = m_device->queues().graphics;
+     const auto& transferQueue = m_device->queues().transfer;
+ 
+@@ -912,6 +914,7 @@
+       bindDescriptorBuffers(secondary);
+ 
+     m_execBuffer = std::exchange(m_cmd.cmdBuffers[uint32_t(DxvkCmdBuffer::ExecBuffer)], secondary);
++    m_boundGraphicsPipeline = VK_NULL_HANDLE;
+   }
+ 
+ 
+@@ -923,6 +926,7 @@
+ 
+     m_cmd.cmdBuffers[uint32_t(DxvkCmdBuffer::ExecBuffer)] = m_execBuffer;
+     m_execBuffer = VK_NULL_HANDLE;
++    m_boundGraphicsPipeline = VK_NULL_HANDLE;
+     return cmd;
+   }
+ 
+@@ -931,6 +935,7 @@
+           uint32_t                count,
+           VkCommandBuffer*        commandBuffers) {
+     m_cmd.execCommands = true;
++    m_boundGraphicsPipeline = VK_NULL_HANDLE;
+ 
+     VkCommandBuffer primary = getCmdBuffer();
+     m_vkd->vkCmdExecuteCommands(primary, count, commandBuffers);
+@@ -1044,6 +1049,9 @@
+       ? m_transferPool->getCommandBuffer(type)
+       : m_graphicsPool->getCommandBuffer(type);
+ 
++    if (type == DxvkCmdBuffer::ExecBuffer)
++      m_boundGraphicsPipeline = VK_NULL_HANDLE;
++
+     if (type <= DxvkCmdBuffer::InitBarriers && m_device->canUseDescriptorHeap()) {
+       bindSamplerHeap(cmdBuffer);
+       bindResourceHeap(cmdBuffer);
+diff -ruN a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -647,6 +647,13 @@
+             DxvkCmdBuffer           cmdBuffer,
+             VkPipelineBindPoint     pipelineBindPoint,
+             VkPipeline              pipeline) {
++      if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS && cmdBuffer == DxvkCmdBuffer::ExecBuffer) {
++        if (m_skipRedundantBinds && pipeline == m_boundGraphicsPipeline)
++          return;
++
++        m_boundGraphicsPipeline = pipeline;
++      }
++
+       m_vkd->vkCmdBindPipeline(getCmdBuffer(cmdBuffer),
+         pipelineBindPoint, pipeline);
+     }
+@@ -1355,6 +1362,8 @@
+   private:
+     
+     DxvkDevice*               m_device;
++    bool                      m_skipRedundantBinds = false;
++    VkPipeline                m_boundGraphicsPipeline = VK_NULL_HANDLE;
+     Rc<vk::DeviceFn>          m_vkd;
+     Rc<vk::InstanceFn>        m_vki;
+ 
+diff -ruN a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -28,6 +28,8 @@
+     lowerSinCos           = config.getOption<Tristate>("dxvk.lowerSinCos",            Tristate::Auto);
+     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
+ 
++    skipRedundantPipelineBinds = config.getOption<bool>("dxvk.skipRedundantPipelineBinds", false);
++
+     std::string method = env::getEnvVar("DXVK_SHADER_COMPILATION_METHOD");
+ 
+     if (method.empty())
+diff -ruN a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -100,6 +100,8 @@
+ 
+     DxvkShaderCompileMethod shaderCompileMethod = DxvkShaderCompileMethod::None;
+ 
++    bool skipRedundantPipelineBinds = false;
++
+   };
+ 
+ }

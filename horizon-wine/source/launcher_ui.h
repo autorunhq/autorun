@@ -267,6 +267,10 @@ struct ui_list
     int editing;
     /* Whether the focus has gone up to the arrow back in the header. */
     int in_header;
+    /* ui_list_run: what A is called instead of Choose, and, when set, what Y
+     * does for every row that is not disabled (UI_ACTION_EXTRA) in place of
+     * Default. NULL for neither. */
+    const char *choose_label, *extra_label;
 };
 
 enum ui_action
@@ -277,6 +281,7 @@ enum ui_action
     UI_ACTION_RIGHT,
     UI_ACTION_RESET,
     UI_ACTION_QUIT,     /* the system asked the launcher to close */
+    UI_ACTION_EXTRA,    /* Y, in a list with an extra_label */
 };
 
 enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *title, const char *context,

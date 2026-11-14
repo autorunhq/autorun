@@ -297,6 +297,8 @@ static int phase_damaged( void )
     CHECK( update() == HORIZON_DLLS_HASH );
     after = read_all( path, &size_after );
     CHECK( before && after && size_before == size_after && !memcmp( before, after, size_before ) );
+    free( before );
+    free( after );
     strcat( path, ".part" );
     CHECK( access( path, F_OK ) );
     /* The download stopped at the first file that failed; the other, whose

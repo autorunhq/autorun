@@ -49,13 +49,125 @@ void set_process_instrumentation_callback( void *callback )
     (void)callback;
 }
 
+#define KERNEL_FRAME_SIZE  416
+#define KERNEL_FRAME_WORDS (KERNEL_FRAME_SIZE / sizeof(ULONG_PTR))
+
+extern const void *wine_nx_kernel_enter( const void *frame );
+extern const void *wine_nx_kernel_leave( void );
+extern int wine_nx_suspend_requested( void );
+extern void horizon_contexts_from_server( CONTEXT *context, const void *server_contexts );
+extern __thread const void *wine_nx_kernel_frame;
+
+void wine_nx_kernel_context( const void *frame, CONTEXT *context )
+{
+    const ULONG_PTR *saved = frame;
+    unsigned int i;
+
+    memset( context, 0, sizeof(*context) );
+    context->ContextFlags = CONTEXT_ARM64_FULL | CONTEXT_ARM64_X18;
+    context->Fp = saved[0];
+    context->Lr = saved[1];
+    for (i = 0; i < 4; i++) context->X[19 + i] = saved[2 + i];
+    context->X18 = saved[6];
+    for (i = 0; i < 8; i++) memcpy( &context->V[8 + i], saved + 12 + 2 * i, sizeof(context->V[0]) );
+    for (i = 0; i < 2; i++) memcpy( &context->V[6 + i], saved + 28 + 2 * i, sizeof(context->V[0]) );
+    for (i = 0; i < 6; i++) context->X[23 + i] = saved[32 + i];
+    context->Pc = saved[38];
+    for (i = 0; i < 9; i++) context->X[i] = saved[40 + i];
+    context->Fpcr = saved[49];
+    context->Fpsr = saved[50];
+    context->Sp = (ULONG_PTR)(saved + KERNEL_FRAME_WORDS);
+}
+
+static BOOL program_frame( const ULONG_PTR *frame )
+{
+    CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;
+    ULONG_PTR sp = frame ? (ULONG_PTR)(frame + KERNEL_FRAME_WORDS) : (ULONG_PTR)__builtin_frame_address( 0 );
+
+    if (horizon_suspend_pending) return FALSE;
+    if (!area) return TRUE;
+    if (area->InSimulation || area->InSyscallCallback) return FALSE;
+    return sp < area->EmulatorStackLimit || sp > area->EmulatorStackBase;
+}
+
+static void continue_changed( const void *changed )
+{
+    CONTEXT context;
+
+    if (!changed) return;
+    horizon_contexts_from_server( &context, changed );
+    signal_set_full_context( &context );
+}
+
+static void return_to_kernel( const void *frame )
+{
+    const void *changed;
+
+    if (!frame)
+    {
+        wine_nx_kernel_frame = NULL;
+        wine_nx_kernel_enter( NULL );
+        return;
+    }
+    do
+    {
+        wine_nx_kernel_frame = frame;
+        changed = wine_nx_kernel_enter( frame );
+        continue_changed( changed );
+    } while (changed);
+}
+
+static const void *enter_kernel( const ULONG_PTR *frame )
+{
+    const void *outer = wine_nx_kernel_frame;
+
+    return_to_kernel( program_frame( frame ) ? frame : NULL );
+    return outer;
+}
+
+static void leave_kernel( const void *outer )
+{
+    const void *changed = wine_nx_kernel_frame ? wine_nx_kernel_leave() : NULL;
+
+    wine_nx_kernel_frame = NULL;
+    continue_changed( changed );
+    return_to_kernel( outer );
+}
+
+static const void *enter_program( void )
+{
+    const void *outer = wine_nx_kernel_frame;
+    const void *changed = outer ? wine_nx_kernel_leave() : NULL;
+
+    wine_nx_kernel_frame = NULL;
+    continue_changed( changed );
+    return outer;
+}
+
 NTSTATUS signal_set_full_context( CONTEXT *context )
 {
     extern void horizon_continue_context( const CONTEXT *context );
+    const void *changed;
     CONTEXT resume;
 
     if (!context || (context->ContextFlags & CONTEXT_ARM64_FULL) != CONTEXT_ARM64_FULL)
         return STATUS_INVALID_PARAMETER;
+    if (wine_nx_kernel_frame)
+    {
+        changed = wine_nx_kernel_leave();
+        wine_nx_kernel_frame = NULL;
+        if (changed)
+        {
+            horizon_contexts_from_server( &resume, changed );
+            context = &resume;
+        }
+    }
+    else if (wine_nx_suspend_requested() && !horizon_suspend_pending)
+    {
+        resume = *context;
+        wait_suspend( &resume );
+        context = &resume;
+    }
     if (is_arm64ec())
     {
         void *start, *end;
@@ -85,6 +197,7 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
     horizon_trace( "[CONTINUE] flags=%08x pc=%llx sp=%llx x18=%llx\n",
                    context->ContextFlags, (unsigned long long)context->Pc,
                    (unsigned long long)context->Sp, (unsigned long long)context->X18 );
+    wine_nx_kernel_enter( NULL );
     horizon_continue_context( context );
     return STATUS_UNSUCCESSFUL; /* The restore routine does not return. */
 }
@@ -106,9 +219,30 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
 {
     BOOL self;
     NTSTATUS status = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
+    DWORD flags = context->ContextFlags;
+    CONTEXT full;
 
     if (status || !self) return status;
-    return STATUS_NOT_SUPPORTED;
+    if (!wine_nx_kernel_frame) return STATUS_NOT_SUPPORTED;
+    wine_nx_kernel_context( wine_nx_kernel_frame, &full );
+    if ((flags & CONTEXT_ARM64_CONTROL) == CONTEXT_ARM64_CONTROL)
+    {
+        full.Fp = context->Fp;
+        full.Lr = context->Lr;
+        full.Sp = context->Sp;
+        full.Pc = context->Pc;
+        full.Cpsr = context->Cpsr;
+    }
+    if ((flags & CONTEXT_ARM64_INTEGER) == CONTEXT_ARM64_INTEGER)
+        memcpy( full.X, context->X, 29 * sizeof(full.X[0]) );
+    if ((flags & CONTEXT_ARM64_FLOATING_POINT) == CONTEXT_ARM64_FLOATING_POINT)
+    {
+        memcpy( full.V, context->V, sizeof(full.V) );
+        full.Fpcr = context->Fpcr;
+        full.Fpsr = context->Fpsr;
+    }
+    if ((flags & CONTEXT_ARM64_X18) == CONTEXT_ARM64_X18) full.X18 = context->X18;
+    return signal_set_full_context( &full );
 }
 
 NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
@@ -118,6 +252,14 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
 
     status = get_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
     if (status || !self) return status;
+    if (wine_nx_kernel_frame)
+    {
+        DWORD flags = context->ContextFlags;
+
+        wine_nx_kernel_context( wine_nx_kernel_frame, context );
+        context->ContextFlags = flags;
+        return STATUS_SUCCESS;
+    }
     return horizon_capture_context( context ) ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
 }
 
@@ -135,29 +277,65 @@ static NTSTATUS check_current_thread_context_access( HANDLE handle, ACCESS_MASK 
     return (info.GrantedAccess & access) == access ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
 }
 
+static NTSTATUS wow64_context_thread( HANDLE handle, ACCESS_MASK access, struct thread_data **data )
+{
+    NTSTATUS status = check_current_thread_context_access( handle, access );
+    OBJECT_BASIC_INFORMATION info;
+    TEB *teb = NULL;
+
+    *data = get_thread_data();
+    if (status != STATUS_NOT_IMPLEMENTED) return status;
+    /* A handle to another thread has to grant the access too, as one to this thread does. */
+    if ((status = NtQueryObject( handle, ObjectBasicInformation, &info, sizeof(info), NULL ))) return status;
+    if ((info.GrantedAccess & access) != access) return STATUS_ACCESS_DENIED;
+    SERVER_START_REQ( get_thread_info )
+    {
+        req->handle = wine_server_obj_handle( handle );
+        req->access = access;
+        if (!(status = wine_server_call( req ))) teb = wine_server_get_ptr( reply->teb );
+    }
+    SERVER_END_REQ;
+    if (status) return status;
+    if (!teb || !(*data = ((struct teb_data *)&teb->GdiTebBatch)->thread)) return STATUS_INVALID_PARAMETER;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wow64_wait_stopped( HANDLE handle, struct thread_data *data )
+{
+    CONTEXT context;
+    BOOL self;
+
+    if (data == get_thread_data()) return STATUS_SUCCESS;
+    memset( &context, 0, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_CONTROL;
+    return get_thread_context( handle, &context, &self, IMAGE_FILE_MACHINE_ARM64 );
+}
+
 NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size )
 {
-    WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    struct thread_data *data;
+    WOW64_CPURESERVED *cpu;
     NTSTATUS status;
 
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
-    if ((status = check_current_thread_context_access( handle, THREAD_SET_CONTEXT ))) return status;
-    if (!cpu) return STATUS_INVALID_PARAMETER;
-    return horizon_transfer_i386_context( cpu,
-                                          get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ),
+    if ((status = wow64_context_thread( handle, THREAD_SET_CONTEXT, &data ))) return status;
+    if ((status = wow64_wait_stopped( handle, data ))) return status;
+    if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
+    return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ),
                                           (I386_CONTEXT *)ctx, TRUE );
 }
 
 NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
 {
-    WOW64_CPURESERVED *cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    struct thread_data *data;
+    WOW64_CPURESERVED *cpu;
     NTSTATUS status;
 
     if (size != sizeof(I386_CONTEXT)) return STATUS_INFO_LENGTH_MISMATCH;
-    if ((status = check_current_thread_context_access( handle, THREAD_GET_CONTEXT ))) return status;
-    if (!cpu) return STATUS_INVALID_PARAMETER;
-    return horizon_transfer_i386_context( cpu,
-                                          get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
+    if ((status = wow64_context_thread( handle, THREAD_GET_CONTEXT, &data ))) return status;
+    if ((status = wow64_wait_stopped( handle, data ))) return status;
+    if (!(cpu = data->teb->TlsSlots[WOW64_TLS_CPURESERVED])) return STATUS_INVALID_PARAMETER;
+    return horizon_transfer_i386_context( cpu, get_cpu_area( data, IMAGE_FILE_MACHINE_I386 ), ctx, FALSE );
 }
 
 extern void wine_nx_call_pe_apc( PNTAPCFUNC func, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
@@ -184,12 +362,15 @@ __ASM_GLOBAL_FUNC( wine_nx_call_pe_apc,
 NTSTATUS call_user_apc_dispatcher( CONTEXT *context, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
                                    ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status )
 {
+    const void *outer;
     CONTEXT here;
 
     if (flags) FIXME( "flags %#x are not supported.\n", flags );
+    outer = enter_program();
     if (!horizon_capture_context( &here ))
         wine_nx_call_pe_apc( func, arg1, arg2, arg3, &here, NtCurrentTeb() );
     if (context) return signal_set_full_context( context );
+    return_to_kernel( outer );
     return status;
 }
 
@@ -334,6 +515,7 @@ NTSTATUS KeUserModeCallback( ULONG id, const void *args, ULONG len, void **ret_p
     PEB *peb = teb ? teb->Peb : NULL;
     KERNEL_CALLBACK_PROC *table;
     struct switch_callback_frame *frame;
+    const void *outer;
 
     if (ret_ptr) *ret_ptr = NULL;
     if (ret_len) *ret_len = 0;
@@ -363,6 +545,7 @@ NTSTATUS KeUserModeCallback( ULONG id, const void *args, ULONG len, void **ret_p
     frame->ret_len = 0;
     frame->status = STATUS_SUCCESS;
     switch_cb_top = frame;
+    outer = enter_program();
 
     if (!setjmp( frame->jmp ))
     {
@@ -371,6 +554,7 @@ NTSTATUS KeUserModeCallback( ULONG id, const void *args, ULONG len, void **ret_p
     }
     /* else: NtCallbackReturn longjmp'd here with frame.{ret_ptr,ret_len,status} set */
 
+    return_to_kernel( outer );
     switch_cb_top = frame->prev;
     free( frame->args );
     frame->args = NULL;
@@ -548,6 +732,38 @@ unsigned int wine_nx_syscall_counts[0x2000];
 static __thread unsigned int wine_nx_syscall_sample;
 void *wine_nx_arm64ec_dispatch_ret;
 
+#ifdef __SWITCH__
+extern int wine_nx_stop_state( int *code ) __attribute__((weak));
+
+void wine_nx_stop_point( void )
+{
+    int code = 0, stop;
+    CONTEXT context;
+
+    if (!&wine_nx_stop_state || !(stop = wine_nx_stop_state( &code ))) return;
+    if ((stop & 1) && !wine_nx_kernel_frame && program_frame( NULL ))
+    {
+        memset( &context, 0, sizeof(context) );
+        if (!horizon_capture_context( &context )) wait_suspend( &context );
+        stop = wine_nx_stop_state( &code );
+    }
+    if (stop & 2) NtTerminateThread( GetCurrentThread(), code );
+}
+
+void wine_nx_stop_end( void )
+{
+    for (;;) wine_nx_stop_point();
+}
+
+static void end_point( void )
+{
+    int code = 0;
+
+    if (&wine_nx_stop_state && (wine_nx_stop_state( &code ) & 2))
+        NtTerminateThread( GetCurrentThread(), code );
+}
+#endif
+
 ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
                               ULONG_PTR x0, ULONG_PTR x1,
                               ULONG_PTR x2, ULONG_PTR x3,
@@ -557,6 +773,8 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
 {
     unsigned int table_idx = (syscall_id >> 12) & 3;
     unsigned int func_idx  = syscall_id & 0xfff;
+    const ULONG_PTR *frame = (const ULONG_PTR *)stack_args - KERNEL_FRAME_WORDS;
+    const void *outer = enter_kernel( frame );
 #ifdef __SWITCH__
     /* + and - ask for the launcher back. A thread cannot be ended from outside
      * on Horizon, so each ends itself here, where every one of them passes. */
@@ -566,6 +784,7 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
 
         if (&wine_nx_quit_requested && wine_nx_quit_requested && &wine_nx_quit_point) wine_nx_quit_point();
     }
+    end_point();
 #endif
     SYSTEM_SERVICE_TABLE *table = &KeServiceDescriptorTable[table_idx];
     ULONG_PTR *handler;
@@ -574,12 +793,11 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
     BOOL trace_syscall = &wine_nx_runtime_verbose && wine_nx_runtime_verbose &&
                          !(table_idx == 1 && func_idx == 1051); /* NtUserGetMessage idle polling */
 
-    if (func_idx >= table->ServiceLimit)
+    if (func_idx >= table->ServiceLimit || !(handler = (ULONG_PTR *)table->ServiceTable[func_idx]))
+    {
+        leave_kernel( outer );
         return STATUS_INVALID_SYSTEM_SERVICE;
-
-    handler = (ULONG_PTR *)table->ServiceTable[func_idx];
-    if (!handler)
-        return STATUS_INVALID_SYSTEM_SERVICE;
+    }
     /* winebox64 reads each x86 syscall's stack arguments through this. */
     if ((void *)handler == (void *)NtReadVirtualMemory) trace_syscall = FALSE;
     else if (!(++wine_nx_syscall_sample & 63))
@@ -646,6 +864,10 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
         wine_nx_runtime_trace( buf );
     }
 
+#ifdef __SWITCH__
+    leave_kernel( outer );
+    end_point();
+#endif
     return result;
 }
 
@@ -671,7 +893,19 @@ __asm__(
     ".type __wine_syscall_dispatcher, %function\n"
     "__wine_syscall_dispatcher:\n"
     "    /* save callee-saved regs + LR + x18 (PE TEB register) */\n"
-    "    stp x29, x30, [sp, #-256]!\n"
+    "    stp x29, x30, [sp, #-416]!\n"
+    "    str x30, [sp, #304]\n"
+    "    stp x0, x1, [sp, #320]\n"
+    "    stp x2, x3, [sp, #336]\n"
+    "    stp x4, x5, [sp, #352]\n"
+    "    stp x6, x7, [sp, #368]\n"
+    "    str x8, [sp, #384]\n"
+    "    mrs x16, fpcr\n"
+    "    mrs x17, fpsr\n"
+    "    stp x16, x17, [sp, #392]\n"
+    "    stp x23, x24, [sp, #256]\n"
+    "    stp x25, x26, [sp, #272]\n"
+    "    stp x27, x28, [sp, #288]\n"
     /* x30 at entry = address of `ret` in PE syscall stub (set by `blr x16`).
      * Stub saved the real PE caller's LR into x9 before the blr.
      * Overwrite the saved x30 slot with x9 so our final `ret` jumps directly
@@ -692,7 +926,7 @@ __asm__(
     "    mov w19, w8\n"          /* syscall_id */
     "    mov x20, x0\n"         /* save original x0 */
     "    mov x21, x7\n"         /* save original x7 */
-    "    add x22, x29, #256\n"  /* caller's SP (where stack args live) */
+    "    add x22, x29, #416\n"  /* caller's SP (where stack args live) */
 
     "    /* set up call to wine_nx_do_syscall(stack_args, x0..x7, syscall_id) */\n"
     "    /* arg 0 (x0): stack_args = caller SP */\n"
@@ -730,7 +964,7 @@ __asm__(
     "    ldp q12, q13, [x29, #160]\n"
     "    ldp q14, q15, [x29, #192]\n"
     "    ldp q6, q7, [x29, #224]\n"
-    "    ldp x29, x30, [sp], #256\n"
+    "    ldp x29, x30, [sp], #416\n"
     "    lsr x16, x30, #39\n"
     "    cbnz x16, 1f\n"
     "    ldr x16, [x18, #0x60]\n"
@@ -768,11 +1002,18 @@ void __wine_syscall_dispatcher_return(void)
  */
 typedef NTSTATUS (*unixlib_entry_t)( void *args );
 
-NTSTATUS __wine_unix_call_dispatcher_impl( unixlib_handle_t handle, unsigned int index, void *args )
+NTSTATUS __wine_unix_call_dispatcher_impl( unixlib_handle_t handle, unsigned int index, void *args,
+                                           const ULONG_PTR *frame )
 {
     const unixlib_entry_t *table = (const unixlib_entry_t *)(ULONG_PTR)handle;
+    const void *outer;
+    NTSTATUS status;
+
     if (!table) return STATUS_INVALID_PARAMETER;
-    return table[index]( args );
+    outer = enter_kernel( frame );
+    status = table[index]( args );
+    leave_kernel( outer );
+    return status;
 }
 
 __asm__(
@@ -783,27 +1024,41 @@ __asm__(
     "__wine_unix_call_dispatcher:\n"
     "wine_nx_pe_unix_call_dispatcher:\n"
     "    /* x0=handle, x1=index, x2=args — save x18 (PE TEB) then forward */\n"
-    "    stp x29, x30, [sp, #-208]!\n"
+    "    stp x29, x30, [sp, #-416]!\n"
     "    mov x29, sp\n"
-    "    str x18, [sp, #16]\n"
-    "    str x19, [sp, #24]\n"
-    "    stp q8, q9, [sp, #48]\n"
-    "    stp q10, q11, [sp, #80]\n"
-    "    stp q12, q13, [sp, #112]\n"
-    "    stp q14, q15, [sp, #144]\n"
-    "    stp q6, q7, [sp, #176]\n"
+    "    stp x19, x20, [sp, #16]\n"
+    "    stp x21, x22, [sp, #32]\n"
+    "    str x18, [sp, #48]\n"
+    "    stp q8, q9, [sp, #96]\n"
+    "    stp q10, q11, [sp, #128]\n"
+    "    stp q12, q13, [sp, #160]\n"
+    "    stp q14, q15, [sp, #192]\n"
+    "    stp q6, q7, [sp, #224]\n"
+    "    stp x23, x24, [sp, #256]\n"
+    "    stp x25, x26, [sp, #272]\n"
+    "    stp x27, x28, [sp, #288]\n"
+    "    str x30, [sp, #304]\n"
+    "    stp x0, x1, [sp, #320]\n"
+    "    stp x2, x3, [sp, #336]\n"
+    "    stp x4, x5, [sp, #352]\n"
+    "    stp x6, x7, [sp, #368]\n"
+    "    str x8, [sp, #384]\n"
+    "    mrs x16, fpcr\n"
+    "    mrs x17, fpsr\n"
+    "    stp x16, x17, [sp, #392]\n"
+    "    mov x3, sp\n"
     "    bl __wine_unix_call_dispatcher_impl\n"
     "    mov x19, x0\n"
     "    bl wine_nx_current_teb\n"
     "    mov x18, x0\n"
     "    mov x0, x19\n"
-    "    ldr x19, [sp, #24]\n"
-    "    ldp q8, q9, [sp, #48]\n"
-    "    ldp q10, q11, [sp, #80]\n"
-    "    ldp q12, q13, [sp, #112]\n"
-    "    ldp q14, q15, [sp, #144]\n"
-    "    ldp q6, q7, [sp, #176]\n"
-    "    ldp x29, x30, [sp], #208\n"
+    "    ldr x19, [sp, #16]\n"
+    "    ldp q8, q9, [sp, #96]\n"
+    "    ldp q10, q11, [sp, #128]\n"
+    "    ldp q12, q13, [sp, #160]\n"
+    "    ldp q14, q15, [sp, #192]\n"
+    "    ldp q6, q7, [sp, #224]\n"
+    "    ldp x29, x30, [sp], #416\n"
     "    ret\n"
     ".size __wine_unix_call_dispatcher, . - __wine_unix_call_dispatcher\n"
     ".size wine_nx_pe_unix_call_dispatcher, . - wine_nx_pe_unix_call_dispatcher\n"

@@ -1,0 +1,166 @@
+Carafe: the registry tells Carafe when it is loaded and lets Carafe read and change it.
+After the hives are read, carafeRegistryLoaded lays the package's entries and the changes made in the
+settings menu over them; the wine_nx_registry_* calls walk, read and change keys under the objects lock
+for the settings menu.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon_registry_server.h
++++ b/dlls/ntdll/unix/horizon_registry_server.h
+@@ -275,6 +275,8 @@
+     if (!--object->refs) horizon_server_free_object( object );
+ }
+ 
++extern void carafeRegistryLoaded( void ) __attribute__((weak));
++
+ static unsigned int horizon_registry_init(void)
+ {
+     struct horizon_reg_key *machine, *user;
+@@ -341,6 +343,7 @@
+     memset( horizon_registry_generation, 0, sizeof(horizon_registry_generation) );
+     memset( horizon_registry_saved, 0, sizeof(horizon_registry_saved) );
+     horizon_registry.changed = horizon_registry_changed;
++    if (carafeRegistryLoaded) carafeRegistryLoaded();
+     return 0;
+ }
+ 
+@@ -600,3 +603,140 @@
+     free(out);
+     return status;
+ }
++
++static struct horizon_reg_key *wine_nx_registry_walk( int hive, const unsigned short *path, unsigned int len,
++                                                      int create )
++{
++    struct horizon_reg_key *key;
++    unsigned int at = 0;
++
++    if (hive < 0 || hive > 1 || !(key = horizon_registry_hives[hive])) return NULL;
++    len /= 2;
++    while (at < len && key)
++    {
++        struct horizon_reg_key *sub;
++        unsigned int end = at, index;
++
++        while (end < len && path[end] != '\\') end++;
++        if (end > at)
++        {
++            if (!(sub = horizon_reg_find_subkey( key, path + at, (end - at) * 2, &index )))
++            {
++                if (!create) return NULL;
++                if (!(sub = horizon_reg_alloc_key( path + at, (end - at) * 2, horizon_registry.now() ))) return NULL;
++                if (horizon_reg_link( key, sub, index ))
++                {
++                    horizon_reg_release( &horizon_registry, sub );
++                    return NULL;
++                }
++                horizon_reg_touch( &horizon_registry, key, HORIZON_REG_CHANGE_NAME );
++            }
++            key = sub;
++        }
++        at = end + 1;
++    }
++    return key;
++}
++
++static void wine_nx_registry_delete_subtree( struct horizon_reg_key *key )
++{
++    while (key->subkey_count) wine_nx_registry_delete_subtree( key->subkeys[key->subkey_count - 1] );
++    horizon_reg_delete( &horizon_registry, key );
++}
++
++int wine_nx_registry_lock( void )
++{
++    pthread_mutex_lock( &horizon_server_objects_mutex );
++    if (!horizon_registry_init()) return 0;
++    pthread_mutex_unlock( &horizon_server_objects_mutex );
++    return -1;
++}
++
++void wine_nx_registry_unlock( void )
++{
++    pthread_mutex_unlock( &horizon_server_objects_mutex );
++}
++
++unsigned int wine_nx_registry_set( int hive, const unsigned short *path, unsigned int path_len,
++                                   const unsigned short *name, unsigned int name_len,
++                                   unsigned int type, const void *data, unsigned int size )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 1 );
++
++    if (!key) return HORIZON_REG_NO_MEMORY;
++    return horizon_reg_set_value( &horizon_registry, key, name, name_len, type, data, size );
++}
++
++unsigned int wine_nx_registry_delete_value( int hive, const unsigned short *path, unsigned int path_len,
++                                            const unsigned short *name, unsigned int name_len )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 0 );
++
++    if (!key) return HORIZON_REG_NAME_NOT_FOUND;
++    return horizon_reg_delete_value( &horizon_registry, key, name, name_len );
++}
++
++unsigned int wine_nx_registry_delete_key( int hive, const unsigned short *path, unsigned int path_len )
++{
++    struct horizon_reg_key *key;
++
++    if (path_len < 2) return HORIZON_REG_INVALID_PARAMETER;
++    if (!(key = wine_nx_registry_walk( hive, path, path_len, 0 ))) return HORIZON_REG_NAME_NOT_FOUND;
++    if (key == horizon_registry_hives[hive]) return HORIZON_REG_INVALID_PARAMETER;
++    wine_nx_registry_delete_subtree( key );
++    return HORIZON_REG_SUCCESS;
++}
++
++int wine_nx_registry_key_info( int hive, const unsigned short *path, unsigned int path_len,
++                               unsigned int *subkeys, unsigned int *values )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 0 );
++
++    if (!key) return -1;
++    *subkeys = key->subkey_count;
++    *values = key->value_count;
++    return 0;
++}
++
++int wine_nx_registry_subkey( int hive, const unsigned short *path, unsigned int path_len, unsigned int index,
++                             const unsigned short **name, unsigned int *name_len )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 0 );
++
++    if (!key || index >= key->subkey_count) return -1;
++    *name = key->subkeys[index]->name;
++    *name_len = key->subkeys[index]->namelen;
++    return 0;
++}
++
++int wine_nx_registry_value( int hive, const unsigned short *path, unsigned int path_len, unsigned int index,
++                            const unsigned short **name, unsigned int *name_len,
++                            unsigned int *type, const unsigned char **data, unsigned int *size )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 0 );
++    const struct horizon_reg_value *value;
++
++    if (!key || index >= key->value_count) return -1;
++    value = &key->values[index];
++    *name = value->name;
++    *name_len = value->namelen;
++    *type = value->type;
++    *data = value->data;
++    *size = value->len;
++    return 0;
++}
++
++int wine_nx_registry_get( int hive, const unsigned short *path, unsigned int path_len,
++                          const unsigned short *name, unsigned int name_len,
++                          unsigned int *type, const unsigned char **data, unsigned int *size )
++{
++    struct horizon_reg_key *key = wine_nx_registry_walk( hive, path, path_len, 0 );
++    const struct horizon_reg_value *value;
++    unsigned int index;
++
++    if (!key || !(value = horizon_reg_find_value( key, name, name_len & ~1u, &index ))) return -1;
++    *type = value->type;
++    *data = value->data;
++    *size = value->len;
++    return 0;
++}

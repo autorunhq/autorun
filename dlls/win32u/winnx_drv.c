@@ -48,10 +48,15 @@ extern int   wine_nx_runtime_verbose __attribute__((weak));
  * framebuffer (starting it on the first call); each window surface then feeds
  * a layer of it (horizon-wine/source/compositor.h). */
 extern int   wine_nx_compositor_enabled( void );
+extern int   wine_nx_screen_wants_pictures( void ) __attribute__((weak));
+extern void  wine_nx_screen_picture_drawn( DWORD thread, int redrawn ) __attribute__((weak));
+extern int   wine_nx_layer_redrawn( struct wine_nx_layer *layer, const uint32_t *pixels, int stride,
+                                    int left, int top, int right, int bottom ) __attribute__((weak));
 
 /* Buttons reported by wine_nx_pointer_poll(). */
-#define WINE_NX_POINTER_LEFT  0x1
-#define WINE_NX_POINTER_RIGHT 0x2
+#define WINE_NX_POINTER_LEFT   0x1
+#define WINE_NX_POINTER_RIGHT  0x2
+#define WINE_NX_POINTER_MIDDLE 0x4
 
 struct wine_nx_surface
 {
@@ -59,9 +64,12 @@ struct wine_nx_surface
     BOOL initial_redraw_done;
     RECT present_rect;
     POINT screen_origin;
+    SIZE dst_size;
     RECT clip_rect;
     BOOL has_clip;
     struct wine_nx_layer *layer;  /* the compositor's copy of the pixels, when it presents */
+    RECT client_rect;
+    LONG drawn;
 };
 
 struct wine_nx_surface_entry
@@ -161,6 +169,94 @@ static void nxdrv_trace_hot( const char *fmt, int a, int b, int c, int d )
     nxdrv_trace( fmt, a, b, c, d );
 }
 
+static void nxdrv_say( const char *line )
+{
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+}
+
+extern unsigned int wine_nx_keys_taken;
+
+static pthread_mutex_t nxdrv_key_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct
+{
+    BOOL pending;
+    DWORD tick;
+    unsigned int taken;
+    WORD vk;
+    BOOL up;
+    unsigned int reported;
+} nxdrv_key_watch;
+
+static void nxdrv_note_key_sent( WORD vk, BOOL up )
+{
+    pthread_mutex_lock( &nxdrv_key_watch_lock );
+    if (!nxdrv_key_watch.pending && nxdrv_key_watch.reported < 24)
+    {
+        nxdrv_key_watch.pending = TRUE;
+        nxdrv_key_watch.tick = NtGetTickCount();
+        nxdrv_key_watch.taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+        nxdrv_key_watch.vk = vk;
+        nxdrv_key_watch.up = up;
+    }
+    pthread_mutex_unlock( &nxdrv_key_watch_lock );
+}
+
+static void nxdrv_check_key_taken( void )
+{
+    unsigned int taken;
+    DWORD elapsed;
+    WORD vk;
+    BOOL up, report = FALSE;
+    char line[160];
+
+    pthread_mutex_lock( &nxdrv_key_watch_lock );
+    if (nxdrv_key_watch.pending)
+    {
+        elapsed = NtGetTickCount() - nxdrv_key_watch.tick;
+        taken = __atomic_load_n( &wine_nx_keys_taken, __ATOMIC_RELAXED );
+        if (taken != nxdrv_key_watch.taken)
+        {
+            nxdrv_key_watch.pending = FALSE;
+        }
+        else if (elapsed >= 400)
+        {
+            nxdrv_key_watch.pending = FALSE;
+            nxdrv_key_watch.reported++;
+            vk = nxdrv_key_watch.vk;
+            up = nxdrv_key_watch.up;
+            report = TRUE;
+        }
+    }
+    pthread_mutex_unlock( &nxdrv_key_watch_lock );
+    if (!report) return;
+    snprintf( line, sizeof(line), "[KEY] the key %x %s sent %u ms ago was not taken from the queue yet",
+              vk, up ? "up" : "down", (unsigned int)elapsed );
+    nxdrv_say( line );
+}
+
+static void nxdrv_trace_key_target( void )
+{
+    static HWND last_focus, last_active, last_fg;
+    static unsigned int told;
+    GUITHREADINFO info = { .cbSize = sizeof(info) };
+    HWND fg;
+    char line[160];
+
+    if (told >= 24) return;
+    NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info );
+    fg = NtUserGetForegroundWindow();
+    if (info.hwndFocus == last_focus && info.hwndActive == last_active && fg == last_fg) return;
+    last_focus = info.hwndFocus;
+    last_active = info.hwndActive;
+    last_fg = fg;
+    told++;
+    snprintf( line, sizeof(line), "[KEY] target focus=%x active=%x fg=%x tid=%u",
+              (int)(ULONG_PTR)info.hwndFocus, (int)(ULONG_PTR)info.hwndActive,
+              (int)(ULONG_PTR)fg, (unsigned int)GetCurrentThreadId() );
+    nxdrv_say( line );
+}
+
 /* get_dib_stride / get_dib_image_size come from the win32u private headers. */
 
 static void trace_surface_samples( const BITMAPINFO *color_info, const void *color_bits )
@@ -194,6 +290,12 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
                                    const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
                                    const BITMAPINFO *shape_info, const void *shape_bits );
 static const struct window_surface_funcs wine_nx_surface_funcs;
+
+void wine_nx_driver_surface_drawn( struct window_surface *surface )
+{
+    if (surface && surface->funcs == &wine_nx_surface_funcs)
+        InterlockedExchange( &wine_nx_surface_from_base( surface )->drawn, 1 );
+}
 
 static void wine_nx_surface_mark_full_dirty( struct window_surface *surface )
 {
@@ -277,13 +379,40 @@ static struct wine_nx_surface_entry *wine_nx_find_surface_entry( HWND hwnd, BOOL
     return entry;
 }
 
+#define WINE_NX_SCREEN_W 1280
+#define WINE_NX_SCREEN_H 720
+
 /* With the compositor, each window shows through the layer of its current
  * surface. A surface forgets its layer here before destroying it, so a layer
  * found under the entries mutex stays alive while the mutex is held. */
 static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, const POINT *origin,
-                                       const RECT *present )
+                                       int dst_w, int dst_h, const RECT *present )
 {
     struct wine_nx_surface_entry *entry;
+    static POINT last_origin;
+    static SIZE last_dst;
+    static RECT last_present;
+    static unsigned int told;
+    int src_w = present->right - present->left;
+    int src_h = present->bottom - present->top;
+
+    if (told < 24 && (origin->x != last_origin.x || origin->y != last_origin.y ||
+                      dst_w != last_dst.cx || dst_h != last_dst.cy ||
+                      src_w != last_present.right - last_present.left ||
+                      src_h != last_present.bottom - last_present.top))
+    {
+        char line[160];
+
+        last_origin = *origin;
+        last_dst.cx = dst_w;
+        last_dst.cy = dst_h;
+        last_present = *present;
+        told++;
+        snprintf( line, sizeof(line), "[NXCOMP] hwnd %x picture at %d,%d %dx%d from %dx%d of the %dx%d screen",
+                  (int)(ULONG_PTR)hwnd, (int)origin->x, (int)origin->y, dst_w, dst_h,
+                  src_w, src_h, WINE_NX_SCREEN_W, WINE_NX_SCREEN_H );
+        nxdrv_say( line );
+    }
 
     pthread_mutex_lock( &wine_nx_surface_entries_mutex );
     if ((entry = find_surface_entry_locked( hwnd, TRUE )))
@@ -292,7 +421,8 @@ static void wine_nx_show_window_layer( HWND hwnd, struct wine_nx_layer *layer, c
         if (entry->layer && entry->layer != layer) wine_nx_layer_place( entry->layer, 0, 0, 0, 0 );
         entry->layer = layer;
     }
-    wine_nx_layer_place( layer, origin->x, origin->y, present->right, present->bottom );
+    wine_nx_layer_place_scaled( layer, origin->x, origin->y, dst_w, dst_h,
+                                present->left, present->top, src_w, src_h );
     pthread_mutex_unlock( &wine_nx_surface_entries_mutex );
 }
 
@@ -348,14 +478,16 @@ static BOOL wine_nx_get_cached_screen_rect( HWND hwnd, RECT *rect )
     return TRUE;
 }
 
-static void wine_nx_note_surface_present( HWND hwnd, const POINT *origin, const RECT *present_rect )
+static void wine_nx_note_surface_present( HWND hwnd, const POINT *origin, int dst_w, int dst_h )
 {
     struct wine_nx_surface_entry *entry = wine_nx_find_surface_entry( hwnd, TRUE );
 
     if (!entry) return;
-    entry->screen_rect = *present_rect;
-    OffsetRect( &entry->screen_rect, origin->x, origin->y );
-    entry->visible = !IsRectEmpty( &entry->screen_rect );
+    entry->screen_rect.left = origin->x;
+    entry->screen_rect.top = origin->y;
+    entry->screen_rect.right = origin->x + dst_w;
+    entry->screen_rect.bottom = origin->y + dst_h;
+    entry->visible = dst_w > 0 && dst_h > 0;
 }
 
 static void wine_nx_note_surface_hidden( HWND hwnd )
@@ -448,6 +580,24 @@ static void wine_nx_surface_set_clip( struct window_surface *surface, const RECT
     nx_surface->clip_rect = clip;
 }
 
+static BOOL wine_nx_client_lit( struct wine_nx_surface *nx_surface, const RECT *dirty,
+                                const void *color_bits, int stride, int sh )
+{
+    const DWORD *bits = color_bits;
+    RECT area, bounds = { 0, 0, stride, sh };
+    int x, y;
+
+    if (!bits || stride <= 0 || sh <= 0) return FALSE;
+    if (!intersect_rect( &area, dirty, &nx_surface->client_rect )) return FALSE;
+    if (!intersect_rect( &area, &area, &nx_surface->present_rect )) return FALSE;
+    if (!intersect_rect( &area, &area, &bounds )) return FALSE;
+
+    for (y = area.top; y < area.bottom; y++)
+        for (x = area.left; x < area.right; x++)
+            if (bits[(size_t)y * stride + x] & 0xffffff) return TRUE;
+    return FALSE;
+}
+
 /* Blit the dirty region of the (BGRX, top-down) DIB to the linear RGBA8888
  * framebuffer at the surface's screen position, clipped to the screen. */
 static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *rect, const RECT *dirty,
@@ -456,6 +606,7 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
 {
     struct wine_nx_surface *nx_surface = wine_nx_surface_from_base( surface );
     struct wine_nx_surface_entry *entry = wine_nx_find_surface_entry( surface->hwnd, FALSE );
+    BOOL drawn = InterlockedExchange( &nx_surface->drawn, 0 );
     RECT blit = *dirty;
     int sw = color_info->bmiHeader.biWidth;
     int sh = abs( color_info->bmiHeader.biHeight );
@@ -464,6 +615,13 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
     int sy, sx;
 
     (void)rect;
+
+    if (drawn && entry && entry->visible && wine_nx_screen_wants_pictures && wine_nx_screen_wants_pictures() &&
+        wine_nx_screen_picture_drawn && wine_nx_client_lit( nx_surface, dirty, color_bits, sw, sh ))
+        wine_nx_screen_picture_drawn( NtUserGetWindowThread( surface->hwnd, NULL ),
+                                      wine_nx_layer_redrawn ? wine_nx_layer_redrawn( nx_surface->layer, color_bits, sw,
+                                                                                     dirty->left, dirty->top,
+                                                                                     dirty->right, dirty->bottom ) : 0 );
 
     /* The compositor keeps every pixel; where the window shows is its placement. */
     if (nx_surface->layer)
@@ -485,25 +643,67 @@ static BOOL wine_nx_surface_flush( struct window_surface *surface, const RECT *r
     nxdrv_trace_hot( "[NXDRV] fb_lock -> fb=%d fbw=%d fbh=%d stride=%d", fb ? 1 : 0, fbw, fbh, fbstride );
     if (!fb) return TRUE;
 
-    for (sy = blit.top; sy < blit.bottom; sy++)
     {
-        int v = sy;
-        int dy = nx_surface->screen_origin.y + sy;
-        const DWORD *src;
-        DWORD *dst;
+        int pw = nx_surface->present_rect.right - nx_surface->present_rect.left;
+        int ph = nx_surface->present_rect.bottom - nx_surface->present_rect.top;
+        int dw = nx_surface->dst_size.cx > 0 ? nx_surface->dst_size.cx : pw;
+        int dh = nx_surface->dst_size.cy > 0 ? nx_surface->dst_size.cy : ph;
 
-        if (v < 0 || v >= sh || dy < 0 || dy >= fbh) continue;
-        src = (const DWORD *)color_bits + (size_t)v * sw;
-        dst = fb + (size_t)dy * fbstride;
-        for (sx = blit.left; sx < blit.right; sx++)
+        if (pw > 0 && ph > 0 && dw > 0 && dh > 0)
         {
-            int u = sx;
-            int dx = nx_surface->screen_origin.x + sx;
-            DWORD p;
-            if (u < 0 || u >= sw || dx < 0 || dx >= fbw) continue;
-            p = src[u];
-            /* BGRX (0x00RRGGBB) -> RGBA8888 (R,G,B,A bytes), opaque */
-            dst[dx] = 0xff000000u | (p & 0x0000ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+            if (dw == pw && dh == ph)
+            {
+                for (sy = blit.top; sy < blit.bottom; sy++)
+                {
+                    int v = sy;
+                    int dy = nx_surface->screen_origin.y + (sy - nx_surface->present_rect.top);
+                    const DWORD *src;
+                    DWORD *dst;
+
+                    if (v < 0 || v >= sh || dy < 0 || dy >= fbh) continue;
+                    src = (const DWORD *)color_bits + (size_t)v * sw;
+                    dst = fb + (size_t)dy * fbstride;
+                    for (sx = blit.left; sx < blit.right; sx++)
+                    {
+                        int u = sx;
+                        int dx = nx_surface->screen_origin.x + (sx - nx_surface->present_rect.left);
+                        DWORD p;
+                        if (u < 0 || u >= sw || dx < 0 || dx >= fbw) continue;
+                        p = src[u];
+                        dst[dx] = 0xff000000u | (p & 0x0000ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+                    }
+                }
+            }
+            else
+            {
+                int ox = nx_surface->screen_origin.x;
+                int oy = nx_surface->screen_origin.y;
+                int x0 = ox + (blit.left - nx_surface->present_rect.left) * dw / pw;
+                int y0 = oy + (blit.top - nx_surface->present_rect.top) * dh / ph;
+                int x1 = ox + ((blit.right - nx_surface->present_rect.left) * dw + pw - 1) / pw;
+                int y1 = oy + ((blit.bottom - nx_surface->present_rect.top) * dh + ph - 1) / ph;
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 > fbw) x1 = fbw;
+                if (y1 > fbh) y1 = fbh;
+                for (int dy = y0; dy < y1; dy++)
+                {
+                    int v = nx_surface->present_rect.top + (dy - oy) * ph / dh;
+                    const DWORD *src;
+                    DWORD *dst;
+                    if (v < 0 || v >= sh) continue;
+                    src = (const DWORD *)color_bits + (size_t)v * sw;
+                    dst = fb + (size_t)dy * fbstride;
+                    for (int dx = x0; dx < x1; dx++)
+                    {
+                        int u = nx_surface->present_rect.left + (dx - ox) * pw / dw;
+                        DWORD p;
+                        if (u < 0 || u >= sw) continue;
+                        p = src[u];
+                        dst[dx] = 0xff000000u | (p & 0x0000ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+                    }
+                }
+            }
         }
     }
 
@@ -528,6 +728,9 @@ static void wine_nx_surface_destroy( struct window_surface *surface )
     nx_surface->layer = NULL;
 }
 
+static LONG wine_nx_fit_pending;
+static DWORD wine_nx_fit_thread;
+
 static const struct window_surface_funcs wine_nx_surface_funcs =
 {
     .size = sizeof(struct wine_nx_surface),
@@ -542,9 +745,6 @@ static const struct window_surface_funcs wine_nx_surface_funcs =
  * Report a single 1280x720 primary monitor so win32u has a real virtual
  * screen; without it the desktop is 0x0 and every window clips to nothing.
  */
-#define WINE_NX_SCREEN_W 1280
-#define WINE_NX_SCREEN_H 720
-
 UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void *param )
 {
     static const DWORD source_flags = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP |
@@ -575,6 +775,8 @@ UINT wine_nx_drv_UpdateDisplayDevices( const struct gdi_device_manager *dm, void
 /**********************************************************************
  *           wine_nx_drv_ProcessEvents
  */
+static void wine_nx_fit_screen_to_game( void );
+
 /* The button flags that take the delivered buttons (last) to the held ones,
  * in two steps: a button pressed and released since the last delivery clicks
  * (down, then up), and one released and pressed again goes up, then down. */
@@ -583,9 +785,9 @@ static void wine_nx_pointer_flags( unsigned int last, unsigned int held, unsigne
 {
     static const struct { unsigned int button; DWORD down, up; } map[] =
     {
-        { WINE_NX_POINTER_LEFT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP },
-        { WINE_NX_POINTER_RIGHT, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP },
-        { 4, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP },
+        { WINE_NX_POINTER_LEFT,   MOUSEEVENTF_LEFTDOWN,   MOUSEEVENTF_LEFTUP },
+        { WINE_NX_POINTER_RIGHT,  MOUSEEVENTF_RIGHTDOWN,  MOUSEEVENTF_RIGHTUP },
+        { WINE_NX_POINTER_MIDDLE, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP },
     };
     unsigned int i;
 
@@ -619,6 +821,8 @@ static void wine_nx_send_key( const struct input_key_event *event )
     input.ki.wScan = scan & 0xff;
     if ((scan & 0xff00) == 0xe000 || event->code == INPUT_NUMPAD_ENTER) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     NtUserSendHardwareInput( 0, 0, &input, 0 );
+    nxdrv_note_key_sent( input.ki.wVk, !event->down );
+    nxdrv_trace_key_target();
 }
 
 static void wine_nx_send_extra_mouse( unsigned int last, unsigned int held, unsigned int pressed,
@@ -732,6 +936,7 @@ extern void wine_nx_keyboard_open( void ) __attribute__((weak));
 
 static BOOL wine_nx_send_keyboard_keys( void )
 {
+    static unsigned int osk_logged;
     unsigned long long now;
     unsigned short vk;
     HKL layout = 0;
@@ -744,7 +949,21 @@ static BOOL wine_nx_send_keyboard_keys( void )
     {
         if (!sent) layout = NtUserGetKeyboardLayout( 0 );
         wine_nx_send_vk( layout, vk, up );
+        nxdrv_note_key_sent( vk, up );
+        if (osk_logged++ < 40)
+        {
+            BYTE state[256] = {0};
+            char line[96];
+
+            get_async_keyboard_state( state );
+            snprintf( line, sizeof(line), "[OSK] sent vk=%02x %s -> async=%02x",
+                      vk, up ? "up" : "down", state[vk & 0xff] );
+            nxdrv_say( line );
+        }
         sent = TRUE;
+        /* One tap per frame at a time: a program polling GetAsyncKeyState gets
+         * to see the key down before the release clears it. */
+        if (up) break;
     }
     return sent;
 }
@@ -793,6 +1012,7 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     int x, y, dx, dy;
 
     (void)mask;
+    wine_nx_fit_screen_to_game();
     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
     wine_nx_fb_present();
     /* Poll here too, then deliver everything the polls saw since the last
@@ -816,10 +1036,17 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     while (key_after && !key_events[key_after - 1].down) key_after--;
     for (unsigned int i = 0; i < key_after; i++) wine_nx_send_key( key_events + i );
     wine_nx_pointer_flags( last_buttons, buttons, pressed, released, &first, &second );
+    /* The arrow is drawn where the stick has taken it, so that is where a
+     * button has to land: the movement goes first, or a press made after the
+     * stick came to rest is taken at the place the cursor had a pass ago,
+     * which is far off under a program that looks for input a few times a
+     * second. A finger says where it is by itself, and what the stick did
+     * meanwhile is added to that. */
+    if (stepped && !placed) wine_nx_send_mouse_motion( dx, dy );
     if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
-    if (stepped) wine_nx_send_mouse_motion( dx, dy );
+    if (stepped && placed) wine_nx_send_mouse_motion( dx, dy );
     if (second) wine_nx_send_mouse( x, y, second );
-    wine_nx_flush_mouse();
+    if (placed || first || stepped || second) wine_nx_flush_mouse();
     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
     for (unsigned int i = key_after; i < key_count; i++) wine_nx_send_key( key_events + i );
     if (moved || placed || stepped)
@@ -851,10 +1078,24 @@ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
     last_buttons = buttons;
     keys = key_count || wheel || hwheel || ((pressed | released) & 0x1c);
     keys |= wine_nx_send_keyboard_keys();
+    nxdrv_check_key_taken();
     wine_nx_update_cursor();
     wine_nx_fb_present();
     __atomic_store_n( &delivering, 0, __ATOMIC_RELEASE );
-    return moved || first || keys;
+    return moved || stepped || first || keys;
+}
+
+/**********************************************************************
+ *           wine_nx_drv_GetCursorPos
+ *
+ * Where the pointer is, for GetCursorPos(). win32u asks the driver only when
+ * the server's answer is older than 100 ms, and the null driver's answer is
+ * "no": a program that draws its own cursor read a position that stopped
+ * moving, or a call that failed, whenever the pointer stood still.
+ */
+BOOL wine_nx_drv_GetCursorPos( POINT *pos )
+{
+    return wine_nx_cursor_pos( pos );
 }
 
 /**********************************************************************
@@ -912,6 +1153,18 @@ BOOL wine_nx_drv_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surfa
     int width  = surface_rect->right - surface_rect->left;
     int height = surface_rect->bottom - surface_rect->top;
 
+    /* win32u hands back the window's surface while it still fits the rect
+     * (create_window_surface, dce.c): keep it, as winex11 does. Made anew it
+     * starts black, and update_window_state (SWP_NOREDRAW) copies only the
+     * window's own pixels into it, never its children's: a .NET configurator,
+     * whose layered form has SetLayeredWindowAttributes call
+     * update_window_state, showed none of its controls until the cursor went
+     * over each. */
+    if (*surface && (*surface)->funcs == &wine_nx_surface_funcs && EqualRect( &(*surface)->rect, surface_rect ))
+    {
+        nxdrv_trace( "[NXDRV] CreateWindowSurface keeps the surface %dx%d", width, height, 0, 0 );
+        return TRUE;
+    }
     if (*surface) window_surface_release( *surface );
     *surface = NULL;
     if (width <= 0 || height <= 0) return TRUE;
@@ -943,6 +1196,128 @@ BOOL wine_nx_drv_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surfa
     return TRUE;
 }
 
+#define WINE_NX_GAME_WINDOW_MIN_W 640
+#define WINE_NX_GAME_WINDOW_MIN_H 400
+
+extern LONG wine_nx_fit_screen( UINT width, UINT height );
+extern __thread int wine_nx_reply_waits;
+
+static BOOL wine_nx_game_window( HWND hwnd, RECT *client )
+{
+    struct ratio dpi = get_thread_dpi();
+    DWORD style = get_window_long( hwnd, GWL_STYLE );
+    DWORD pid = 0;
+
+    if (!(style & WS_VISIBLE) || (style & (WS_CHILD | WS_MINIMIZE))) return FALSE;
+    if (get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_TOOLWINDOW) return FALSE;
+    if (get_window_relative( hwnd, GW_OWNER )) return FALSE;
+    if (!NtUserGetWindowThread( hwnd, &pid ) || pid != GetCurrentProcessId()) return FALSE;
+    if (!get_client_rect( hwnd, client, dpi )) return FALSE;
+    map_window_points( hwnd, 0, (POINT *)client, 2, dpi );
+    return client->right - client->left >= WINE_NX_GAME_WINDOW_MIN_W &&
+           client->bottom - client->top >= WINE_NX_GAME_WINDOW_MIN_H;
+}
+
+static void wine_nx_log_window( HWND hwnd, BOOL chosen )
+{
+    static unsigned int logged;
+    struct ratio dpi = get_thread_dpi();
+    RECT client = {0};
+    DWORD pid = 0;
+    char line[200];
+
+    if (!&wine_nx_runtime_trace || logged >= 40) return;
+    logged++;
+    NtUserGetWindowThread( hwnd, &pid );
+    if (get_client_rect( hwnd, &client, dpi )) map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
+    snprintf( line, sizeof(line), "[NXSCREEN] window %p style %08x exstyle %08x owner %p pid %u client %d,%d %dx%d: %s",
+              hwnd, (unsigned int)get_window_long( hwnd, GWL_STYLE ), (unsigned int)get_window_long( hwnd, GWL_EXSTYLE ),
+              get_window_relative( hwnd, GW_OWNER ), (unsigned int)pid, (int)client.left, (int)client.top,
+              (int)(client.right - client.left), (int)(client.bottom - client.top), chosen ? "a candidate" : "skipped" );
+    wine_nx_runtime_trace( line );
+}
+
+static HWND wine_nx_find_game_window( RECT *client )
+{
+    HWND *list, game = 0;
+    RECT rect;
+    LONGLONG area, best = 0;
+    unsigned int i;
+
+    if (!(list = list_window_children( NtUserGetDesktopWindow() ))) return 0;
+    for (i = 0; list[i]; i++)
+    {
+        BOOL candidate = wine_nx_game_window( list[i], &rect );
+
+        if (get_window_long( list[i], GWL_STYLE ) & WS_VISIBLE) wine_nx_log_window( list[i], candidate );
+        if (!candidate) continue;
+        area = (LONGLONG)(rect.right - rect.left) * (rect.bottom - rect.top);
+        if (area <= best) continue;
+        best = area;
+        game = list[i];
+        *client = rect;
+    }
+    free( list );
+    return game;
+}
+
+static void wine_nx_fit_screen_to_game( void )
+{
+    struct ratio dpi = get_thread_dpi();
+    int width, height, screen_width, screen_height;
+    RECT client, window;
+    HWND game;
+    UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    LONG ret;
+    char line[160];
+
+    if (__atomic_load_n( &wine_nx_fit_thread, __ATOMIC_ACQUIRE ) != GetCurrentThreadId()) return;
+    if (wine_nx_reply_waits) return;
+    if (!InterlockedExchange( &wine_nx_fit_pending, 0 )) return;
+    if (!(game = wine_nx_find_game_window( &client ))) return;
+    if (NtUserGetWindowThread( game, NULL ) != GetCurrentThreadId())
+    {
+        __atomic_store_n( &wine_nx_fit_thread, NtUserGetWindowThread( game, NULL ), __ATOMIC_RELEASE );
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+        return;
+    }
+    width = client.right - client.left;
+    height = client.bottom - client.top;
+    screen_width = get_system_metrics( SM_CXSCREEN );
+    screen_height = get_system_metrics( SM_CYSCREEN );
+    if (width != screen_width || height != screen_height)
+    {
+        ret = wine_nx_fit_screen( width, height );
+        if (&wine_nx_runtime_trace)
+        {
+            snprintf( line, sizeof(line), "[NXSCREEN] the screen follows the game's window: %dx%d, was %dx%d, result %d",
+                      width, height, screen_width, screen_height, (int)ret );
+            wine_nx_runtime_trace( line );
+        }
+        if (ret != DISP_CHANGE_SUCCESSFUL || !wine_nx_game_window( game, &client )) return;
+        flags |= SWP_FRAMECHANGED;
+    }
+    if (!client.left && !client.top) flags |= SWP_NOMOVE;
+    if ((flags & SWP_NOMOVE) && !(flags & SWP_FRAMECHANGED)) return;
+    if (!get_window_rect( game, &window, dpi )) return;
+    NtUserSetWindowPos( game, 0, window.left - client.left, window.top - client.top, 0, 0, flags );
+    NtUserRedrawWindow( game, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
+    if (!(flags & SWP_NOMOVE) && &wine_nx_runtime_trace)
+    {
+        snprintf( line, sizeof(line), "[NXSCREEN] the game's window moved by %d,%d to the screen's corner",
+                  (int)-client.left, (int)-client.top );
+        wine_nx_runtime_trace( line );
+    }
+}
+
+static RECT wine_nx_shown_rect( const struct window_rects *rects )
+{
+    RECT shown;
+
+    if (!intersect_rect( &shown, &rects->visible, &rects->window )) shown = rects->visible;
+    return shown;
+}
+
 /**********************************************************************
  *           wine_nx_drv_WindowPosChanged
  *
@@ -956,6 +1331,11 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
     BOOL has_old_screen_rect = wine_nx_get_cached_screen_rect( hwnd, &old_screen_rect );
 
     nxdrv_trace( "[NXDRV] WindowPosChanged surface=%d swp=%x", surface ? 1 : 0, swp_flags, 0, 0 );
+    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
+    {
+        __atomic_store_n( &wine_nx_fit_thread, NtUserGetWindowThread( hwnd, NULL ), __ATOMIC_RELEASE );
+        InterlockedExchange( &wine_nx_fit_pending, 1 );
+    }
     if (swp_flags & SWP_HIDEWINDOW)
     {
         wine_nx_note_surface_hidden( hwnd );
@@ -972,36 +1352,64 @@ void wine_nx_drv_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint
             struct wine_nx_surface *nx_surface = wine_nx_surface_from_base( surface );
             RECT allocation = { 0, 0, surface->rect.right - surface->rect.left,
                                 surface->rect.bottom - surface->rect.top };
-            int new_width = new_rects->visible.right - new_rects->visible.left;
-            int new_height = new_rects->visible.bottom - new_rects->visible.top;
+            RECT shown = wine_nx_shown_rect( new_rects );
+            int new_width = shown.right - shown.left;
+            int new_height = shown.bottom - shown.top;
+            struct ratio dpi = get_dpi_for_window( hwnd ), raw_dpi;
+            RECT src_rect;
 
             if (!nx_surface->layer && nx_surface->initial_redraw_done &&
-                (nx_surface->screen_origin.x != new_rects->visible.left ||
-                 nx_surface->screen_origin.y != new_rects->visible.top ||
-                 nx_surface->present_rect.right != new_width ||
-                 nx_surface->present_rect.bottom != new_height))
+                (nx_surface->screen_origin.x != shown.left ||
+                 nx_surface->screen_origin.y != shown.top ||
+                 nx_surface->dst_size.cx != new_width ||
+                 nx_surface->dst_size.cy != new_height))
                 wine_nx_restore_popup_owner( hwnd, owner_hint,
                                              has_old_screen_rect ? &old_screen_rect : NULL );
 
+            get_win_monitor_dpi( hwnd, &raw_dpi );
+            if (dpi.num && raw_dpi.num)
+            {
+                RECT vis_virt = map_rect_raw_to_virt( new_rects->visible, dpi );
+                RECT shown_virt = map_rect_raw_to_virt( shown, dpi );
+                OffsetRect( &shown_virt, -vis_virt.left, -vis_virt.top );
+                src_rect = map_dpi_rect( shown_virt, dpi, raw_dpi );
+            }
+            else
+            {
+                SetRect( &src_rect, 0, 0, new_width, new_height );
+            }
+            intersect_rect( &src_rect, &src_rect, &allocation );
+
             initial_redraw = !nx_surface->initial_redraw_done;
             nx_surface->initial_redraw_done = TRUE;
-            nx_surface->screen_origin.x = new_rects->visible.left;
-            nx_surface->screen_origin.y = new_rects->visible.top;
-            nx_surface->present_rect.left = nx_surface->present_rect.top = 0;
-            nx_surface->present_rect.right = new_width;
-            nx_surface->present_rect.bottom = new_height;
-            intersect_rect( &nx_surface->present_rect, &nx_surface->present_rect, &allocation );
-            wine_nx_note_surface_present( hwnd, &nx_surface->screen_origin, &nx_surface->present_rect );
+            nx_surface->screen_origin.x = shown.left;
+            nx_surface->screen_origin.y = shown.top;
+            nx_surface->dst_size.cx = new_width;
+            nx_surface->dst_size.cy = new_height;
+            nx_surface->present_rect = src_rect;
+            if (dpi.num && raw_dpi.num)
+            {
+                RECT shown_virt = map_rect_raw_to_virt( shown, dpi );
+                RECT client_virt = map_rect_raw_to_virt( new_rects->client, dpi );
+                OffsetRect( &client_virt, -shown_virt.left, -shown_virt.top );
+                nx_surface->client_rect = map_dpi_rect( client_virt, dpi, raw_dpi );
+            }
+            else
+            {
+                nx_surface->client_rect = new_rects->client;
+                OffsetRect( &nx_surface->client_rect, -shown.left, -shown.top );
+            }
+            wine_nx_note_surface_present( hwnd, &nx_surface->screen_origin, new_width, new_height );
             if (nx_surface->layer)
             {
                 /* Only the visible part is drawn, never the rest of the allocation. */
                 wine_nx_show_window_layer( hwnd, nx_surface->layer, &nx_surface->screen_origin,
-                                           &nx_surface->present_rect );
+                                           new_width, new_height, &nx_surface->present_rect );
                 wine_nx_restack_layers();
             }
             nxdrv_trace( "[NXDRV] present rect=%d,%d %dx%d",
                          nx_surface->screen_origin.x, nx_surface->screen_origin.y,
-                         nx_surface->present_rect.right, nx_surface->present_rect.bottom );
+                         new_width, new_height );
 
             wine_nx_surface_mark_full_dirty( surface );
             if (!wine_nx_surface_present_full( surface ))

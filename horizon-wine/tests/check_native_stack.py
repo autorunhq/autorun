@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native stack binding with the production Horizon helper."""
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -59,4 +60,7 @@ with tempfile.TemporaryDirectory(prefix='wine-nx-native-stack-') as temp:
     src, exe = Path(temp) / 'test.c', Path(temp) / 'test'
     src.write_text(fixture + source[start:end] + tests)
     subprocess.run(['cc', '-fsanitize=address,undefined', str(src), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+    # The helper asks whether its own frame is inside the thread's stack. The
+    # address sanitizer may keep locals on a stack of its own, away from it.
+    subprocess.run([str(exe)], check=True,
+                   env={**os.environ, 'ASAN_OPTIONS': 'detect_stack_use_after_return=0'})

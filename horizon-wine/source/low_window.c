@@ -11,6 +11,19 @@ extern void *__real_virtmemFindCodeMemory( size_t size, size_t guard );
 static int profile_checked, low_window;
 static VirtmemReservation *guest_reservation;
 
+static VirtmemReservation *reserve_32bit_guest_range( u64 aslr_end )
+{
+    const u64 window_max = 768ull * 1024 * 1024;
+    u64 start, size, window, end;
+
+    if (aslr_end > 0x100000000ull ||
+        R_FAILED(svcGetInfo( &start, InfoType_StackRegionAddress, CUR_PROCESS_HANDLE, 0 )) ||
+        R_FAILED(svcGetInfo( &size, InfoType_StackRegionSize, CUR_PROCESS_HANDLE, 0 ))) return NULL;
+    window = size / 8 * 5 < window_max ? size / 8 * 5 : window_max;
+    end = (start + size - window) & ~0xffffull;
+    return end > start ? __real_virtmemAddReservation( (void *)start, end - start ) : NULL;
+}
+
 int wine_nx_low_window_reserve(void)
 {
     u64 base, size;
@@ -20,6 +33,7 @@ int wine_nx_low_window_reserve(void)
         if (R_FAILED(svcGetInfo( &base, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0 )) ||
             R_FAILED(svcGetInfo( &size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0 ))) return 0;
         low_window = wine_nx_is_low_window( base, size );
+        if (!low_window) guest_reservation = reserve_32bit_guest_range( base + size );
         profile_checked = 1;
     }
     if (!low_window) return 1;

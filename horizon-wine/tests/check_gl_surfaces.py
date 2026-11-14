@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -46,6 +47,14 @@ typedef struct mock_surface { int window, width, height; } *EGLSurface;
 #define EGL_HEIGHT 2
 #define EGL_VENDOR 3
 #define EGL_VERSION 4
+#define EGL_CONFIG_ID 5
+#define EGL_RED_SIZE 6
+#define EGL_GREEN_SIZE 7
+#define EGL_BLUE_SIZE 8
+#define EGL_ALPHA_SIZE 9
+#define EGL_DEPTH_SIZE 10
+#define EGL_STENCIL_SIZE 11
+#define EGL_SAMPLES 12
 #define GL_FRONT_LEFT 0x400
 #define GL_FRONT 0x404
 #define GL_BACK 0x405
@@ -53,6 +62,7 @@ typedef struct mock_surface { int window, width, height; } *EGLSurface;
 #define GL_BACK_RIGHT 0x403
 #define GL_FRONT_AND_BACK 0x408
 #define GL_FLUSH_INTERVAL 2
+#define GL_FLUSH_UPDATED 0x04
 #define WND_DESKTOP ((WND *)1)
 #define WND_OTHER_PROCESS ((WND *)2)
 #define CONTAINING_RECORD(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))
@@ -112,6 +122,10 @@ static const struct opengl_drawable_funcs nx_drawable_funcs;
 static struct client_surface *clients[64];
 static unsigned int live_drawables, live_surfaces, acquires, releases, swaps, overlays, intervals, style_reads;
 static BOOL screen_busy, fail_pbuffer, fail_window, fail_drawable, fail_client;
+/* A DXVK payload with its own ddraw.dll, once Vulkan is started (off here). */
+extern int wine_nx_dxvk_wraps_ddraw __attribute__((weak));
+extern int wine_nx_vk_served __attribute__((weak));
+extern void wine_nx_runtime_trace(const char *msg) __attribute__((weak));
 static int get_window_long(HWND hwnd, int offset) { style_reads++; return ((WND *)hwnd)->visible ? WS_VISIBLE : 0; }
 static BOOL is_window_visible(HWND hwnd) {
     for (WND *win = hwnd; win; win = win->parent) if (!win->visible) return FALSE;
@@ -168,6 +182,19 @@ static void mock_interval(void *display, int value) { intervals++; }
 static int mock_error(void) { return 0; }
 static const char *mock_string(void *display, int name) { return "mock"; }
 static void nx_osk_draw(struct opengl_drawable *base) { overlays++; }
+/* FPSLocker's target (tests/check_fpslocker.py runs the real one). */
+static EGLint nx_swap_interval_set = -1;
+static void nx_fps_lock_frame(struct opengl_drawable *base) { (void)base; }
+#define NX_SCREEN_CLEARS 8
+static BOOL nx_osk_shown;
+static unsigned int nx_screen_clears;
+static void (*p_glBindFramebuffer)(int, int);
+static void nx_screen_clear(void) {}
+/* The surface at the size of a program's display mode: check_screen_fit.py's. */
+static SIZE nx_screen_size, nx_screen_refused;
+static void nx_screen_fit(struct opengl_drawable *base) { (void)base; }
+struct nx_gl_drawable;
+static void nx_screen_first_frame(struct nx_gl_drawable *gl, int format) { (void)gl; (void)format; }
 static unsigned long long horizon_interrupt_time(void) { static unsigned int ticks; return ++ticks; }
 static unsigned int wine_nx_gl_swaps;
 static unsigned long long wine_nx_gl_swap_time;
@@ -180,10 +207,18 @@ struct opengl_funcs {
     const char *(*p_eglQueryString)(void *, int);
     BOOL (*p_eglSwapBuffers)(void *, EGLSurface);
     void (*p_eglSwapInterval)(void *, int);
+    BOOL (*p_eglGetConfigAttrib)(void *, EGLConfig, EGLint, EGLint *);
 };
+/* What the first window's log line says of its config. */
+static BOOL mock_config_attrib(void *display, EGLConfig config, EGLint attribute, EGLint *value) {
+    (void)display;
+    *value = attribute == EGL_CONFIG_ID ? config : attribute == EGL_DEPTH_SIZE ? 24 :
+             attribute == EGL_STENCIL_SIZE ? 8 : attribute == EGL_SAMPLES ? 0 : 8;
+    return TRUE;
+}
 static const struct egl_platform platform = { .configs = {1, 2}, .config_count = 2 };
 static const struct egl_platform *egl = &platform;
-static const struct opengl_funcs functions = {mock_create_pbuffer, mock_create_window, mock_destroy_surface, mock_error, mock_string, mock_swap, mock_interval};
+static const struct opengl_funcs functions = {mock_create_pbuffer, mock_create_window, mock_destroy_surface, mock_error, mock_string, mock_swap, mock_interval, mock_config_attrib};
 static const struct opengl_funcs *funcs = &functions;
 '''
 
@@ -341,7 +376,8 @@ with tempfile.TemporaryDirectory(prefix="autorun-gl-surfaces-") as directory:
     source = path / "gl_surfaces.c"
     source.write_text(fixture + implementation + checks)
     executable = path / "gl_surfaces"
-    subprocess.run(["clang", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+    cc = shutil.which("clang") or "gcc"
+    subprocess.run([cc, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                     "-Wno-unused-parameter", "-Wno-unused-variable", "-fsanitize=address,undefined", "-pthread",
                     str(source), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

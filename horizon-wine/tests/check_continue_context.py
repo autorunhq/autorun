@@ -19,12 +19,21 @@ fixture = r'''
 #include <stdio.h>
 #define CONTEXT_ARM64 0x400000
 #define CONTEXT_ARM64_X18 0x400010
+typedef uintptr_t ULONG_PTR;
 typedef union { uint64_t x; } reg;
 typedef struct { reg cpu_gprs[29], fp, lr, sp, pc; uint32_t pstate; unsigned char fpu_gprs[512]; } ThreadExceptionDump;
-typedef struct { uint32_t ContextFlags; uint64_t X[29], Fp, Lr, Sp, Pc; uint32_t Cpsr, Fpcr, Fpsr; unsigned char V[512]; } CONTEXT;
+/* X18 is X[18], as in winnt.h's ARM64 CONTEXT. */
+typedef struct { uint32_t ContextFlags; union { uint64_t X[29]; struct { uint64_t X0_17[18], X18; }; };
+                 uint64_t Fp, Lr, Sp, Pc; uint32_t Cpsr, Fpcr, Fpsr; unsigned char V[512]; } CONTEXT;
 static ThreadExceptionDump result;
 static void *NtCurrentTeb(void) { return (void *)0x7ffc0000; }
 static void horizon_restore_exception_context(ThreadExceptionDump *dump) { result = *dump; }
+/* A program FEX runs: the context goes to FEX instead (which never returns
+ * there; here the conversion after it runs as well, and is checked the same). */
+static int fex_active, fex_calls;
+static CONTEXT fex_context;
+static int horizon_uses_fex(void) { return fex_active; }
+static void wine_nx_fex_continue_context(const CONTEXT *context) { fex_context = *context; fex_calls++; }
 '''
 tests = r'''
 int main(void) {
@@ -40,7 +49,17 @@ int main(void) {
     ctx.ContextFlags |= CONTEXT_ARM64_X18;
     horizon_continue_context(&ctx);
     assert(result.cpu_gprs[18].x == 118);
-    puts("NtContinue context conversion: integer/control/SIMD and implicit/explicit x18 passed");
+    assert(!fex_calls);
+    /* Under FEX the context goes to it whole, x18 the TEB unless given. */
+    fex_active = 1;
+    ctx.ContextFlags = 0x400007;
+    horizon_continue_context(&ctx);
+    assert(fex_calls == 1 && fex_context.X18 == 0x7ffc0000 && fex_context.X[17] == 117 && fex_context.Pc == 500);
+    assert(ctx.X18 == 118);  /* the caller's own context is left as it was */
+    ctx.ContextFlags |= CONTEXT_ARM64_X18;
+    horizon_continue_context(&ctx);
+    assert(fex_calls == 2 && fex_context.X18 == 118);
+    puts("NtContinue context conversion: integer/control/SIMD, implicit/explicit x18 and FEX's hand-off passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='wine-nx-continue-') as tmp:

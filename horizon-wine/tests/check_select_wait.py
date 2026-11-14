@@ -24,6 +24,7 @@ fixture = r'''
 #define HORIZON_SERVER_POLL_INTERVAL 10000LL
 #define HORIZON_STATUS_USER_APC 0xc0
 #define HORIZON_STATUS_KERNEL_APC 0x100
+#define HORIZON_STATUS_THREAD_IS_TERMINATING 0xc000004bu
 #define HORIZON_SELECT_ALERTABLE 1
 #define HORIZON_APC_CALL_SIZE 64
 #define HORIZON_APC_RESULT_SIZE 64
@@ -32,7 +33,7 @@ fixture = r'''
 #define TRACE(...) ((void)0)
 #define min(a, b) ((a) < (b) ? (a) : (b))
 typedef struct { long long QuadPart; } LARGE_INTEGER;
-struct horizon_server_object { struct { unsigned tid; } thread; };
+struct horizon_server_object { struct { unsigned tid; } thread; int ending; };
 struct horizon_server_connection { int reply_fd; unsigned tid; struct horizon_server_object *thread; void *direct_reply; };
 struct horizon_select_request { struct { unsigned reply_size; } header; int flags; long long timeout;
                                 unsigned size; unsigned prev_apc; };
@@ -106,7 +107,7 @@ fixture += legacy_sync_support(source)
 tests = r'''
 static void run(long long timeout, unsigned ready, unsigned expected, unsigned attempts) {
     struct horizon_select_request r = { .header = { 64 }, .timeout = timeout, .size = 8 };
-    struct horizon_server_object t = { { 4 } };
+    struct horizon_server_object t = { .thread = { 4 } };
     struct horizon_server_connection c = { .reply_fd = 1, .tid = 4, .thread = &t };
     ticks = 100000; calls = signals = sleeps = 0; ready_after = ready;
     timer_passes = 0;
@@ -145,7 +146,7 @@ int main(void) {
     ticks = 100000; calls = signals = sleeps = timer_passes = 0; ready_after = 100;
     {
         struct horizon_select_request r = { .header = { 64 }, .timeout = 0x7fffffffffffffffLL, .size = 8 };
-        struct horizon_server_object t = { { 4 } };
+        struct horizon_server_object t = { .thread = { 4 } };
         struct horizon_server_connection c = { .reply_fd = 1, .tid = 4, .thread = &t };
         horizon_server_handle_select(&c, (const unsigned char *)&r, NULL, 0);
         assert(reply_status == HORIZON_STATUS_KERNEL_APC && async_given == 1 && calls == 2);
@@ -159,6 +160,9 @@ int main(void) {
         r.size = sizeof(sw);
         horizon_server_handle_select(&c, (const unsigned char *)&r, (const void *)&sw, sizeof(sw));
         assert(reply_status == HORIZON_STATUS_KERNEL_APC && signals == 1 && !calls && async_given == 2);
+        t.ending = 1;
+        horizon_server_handle_select(&c, (const unsigned char *)&r, NULL, 0);
+        assert(reply_status == HORIZON_STATUS_THREAD_IS_TERMINATING);
     }
     puts("Horizon waits: deadlines, infinite pending, queue polling, signal once, wait-any index, atomic wait-all, abandoned, system APCs passed");
 }

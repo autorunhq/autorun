@@ -19,8 +19,11 @@ int padIsConnected(PadState *pad) { (void)pad; return mock_connected; }
 HidAnalogStickState padGetStickPos(PadState *pad, int index) { (void)pad; return mock_sticks[index]; }
 u64 padGetButtons(PadState *pad) { (void)pad; return mock_buttons; }
 u64 armGetSystemTick(void) { return mock_tick; }
-static int mock_keyboard;
+static int mock_keyboard, mock_panel;
 int wine_nx_osk_visible( void ) { return mock_keyboard; }
+int wine_nx_osk_map_visible( void ) { return mock_panel; }
+/* The [XINPUT] lines nx_xinput_note writes into the log. */
+void wine_nx_runtime_trace( const char *msg ) { (void)msg; }
 
 int main(void)
 {
@@ -87,7 +90,13 @@ int main(void)
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && !state.state.Gamepad.wButtons && !state.state.Gamepad.bRightTrigger &&
                !state.state.Gamepad.sThumbLX);
+        /* And the controls/tasks panels likewise. */
         mock_keyboard = 0;
+        mock_panel = 1;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(state.connected && !state.state.Gamepad.wButtons && !state.state.Gamepad.bRightTrigger &&
+               !state.state.Gamepad.sThumbLX);
+        mock_panel = 0;
         wine_nx_xinput_unix_funcs[nx_xinput_set_state](&vibration);
         assert(vibration.connected);
         wine_nx_input_profile.pad[1] = (struct input_binding){{1, 3}, 2};
@@ -103,15 +112,42 @@ int main(void)
         wine_nx_input_profile.mode = INPUT_CONTROLLER;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(state.connected && state.state.Gamepad.wButtons);
-        mock_buttons = NX_PAD_MINUS | NX_PAD_STICKR;
+        /* Overlay combinations (- + B keyboard, - + Y tasks, - + A controls)
+         * are not the program's to see. */
+        mock_buttons = NX_PAD_MINUS | NX_PAD_B;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(!state.state.Gamepad.wButtons);
+        mock_buttons = NX_PAD_MINUS | NX_PAD_Y;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.state.Gamepad.wButtons);
+        mock_buttons = NX_PAD_MINUS | NX_PAD_A;
+        wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+        assert(!state.state.Gamepad.wButtons);
+        /* Nintendo button layout: Switch A sends Xbox A, B sends B, X sends X, Y sends Y. */
+        {
+            struct launcher_kv kv = {0};
+            input_profile_defaults( &wine_nx_input_profile, 1 );
+            launcher_kv_set( &kv, "button-layout", "1" );
+            input_profile_apply( &wine_nx_input_profile, &kv );
+            mock_buttons = NX_PAD_A;
+            wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+            assert(state.state.Gamepad.wButtons == XINPUT_GAMEPAD_A);
+            mock_buttons = NX_PAD_B;
+            wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+            assert(state.state.Gamepad.wButtons == XINPUT_GAMEPAD_B);
+            mock_buttons = NX_PAD_X;
+            wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+            assert(state.state.Gamepad.wButtons == XINPUT_GAMEPAD_X);
+            mock_buttons = NX_PAD_Y;
+            wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
+            assert(state.state.Gamepad.wButtons == XINPUT_GAMEPAD_Y);
+        }
         state.index = 1;
         state.connected = 1;
         wine_nx_xinput_unix_funcs[nx_xinput_get_state](&state);
         assert(!state.connected);
     }
 
-    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer, layout and the floating keyboard passed" );
+    puts( "XInput Switch pad: mapping, native and WoW64 tables, 64-bit call pointer, layout, the floating keyboard and the tasks passed" );
     return 0;
 }

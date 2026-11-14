@@ -1,0 +1,230 @@
+Carafe: dxvk.shaderCompilationMethod (or DXVK_SHADER_COMPILATION_METHOD) carries DXVK-Sarek's choice of how
+pipelines are built over to DXVK 3. With "async", a draw whose pipeline cannot be linked at once from ready shader
+libraries is skipped, and the pipeline is compiled in full on a high-priority worker; the draw comes back once it
+is ready, so the frame never waits for a compiler. "dyasync" builds the first pipeline of each shader set while
+drawing, as before, and defers the later ones. Sarek's dyasync draws with a neighbouring variant meanwhile; DXVK 3
+links such a stand-in from the shader libraries itself, and a variant built for other state would break Vulkan's
+rules for dynamic state, so a deferred draw is skipped instead. "none", the default, keeps DXVK's behaviour.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1097,12 +1097,25 @@
+       instance = this->findInstance(state);
+ 
+       if (!instance) {
++        int deferred = this->deferBuild(state);
++
++        if (deferred) {
++          lock.unlock();
++          m_stats->drawsSkipped += 1;
++
++          if (deferred > 1)
++            m_workers->compileGraphicsPipeline(this, state, DxvkPipelinePriority::High);
++
++          return DxvkGraphicsPipelineHandle();
++        }
++
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         auto t0 = dxvk::high_resolution_clock::now();
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
+         instance = this->createInstance(state, canCreateBasePipeline);
+         auto t1 = dxvk::high_resolution_clock::now();
++        m_builtOnce = true;
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
+@@ -1129,6 +1142,9 @@
+ 
+   void DxvkGraphicsPipeline::compilePipeline(
+     const DxvkGraphicsPipelineStateInfo& state) {
++    if (this->compileDeferred(state))
++      return;
++
+     if (m_device->config().enableGraphicsPipelineLibrary == Tristate::True)
+       return;
+ 
+@@ -1346,6 +1362,75 @@
+ 
+     return true;
+   }
++
++
++  bool DxvkGraphicsPipeline::canLinkWithoutWaiting(
++    const DxvkGraphicsPipelineStateInfo& state) const {
++    return m_vsLibrary && m_fsLibrary
++        && this->canCreateBasePipeline(state)
++        && m_vsLibrary->hasPipelineHandle()
++        && m_fsLibrary->hasPipelineHandle();
++  }
++
++
++  int DxvkGraphicsPipeline::deferBuild(
++    const DxvkGraphicsPipelineStateInfo& state) {
++    DxvkShaderCompileMethod method = m_device->config().shaderCompileMethod;
++
++    if (method == DxvkShaderCompileMethod::None
++     || (method == DxvkShaderCompileMethod::Dyasync && !m_builtOnce)
++     || this->canLinkWithoutWaiting(state))
++      return 0;
++
++    for (const auto& entry : m_pending) {
++      if (entry.eq(state))
++        return 1;
++    }
++
++    m_pending.push_back(state);
++    return 2;
++  }
++
++
++  bool DxvkGraphicsPipeline::compileDeferred(
++    const DxvkGraphicsPipelineStateInfo& state) {
++    if (m_device->config().shaderCompileMethod == DxvkShaderCompileMethod::None)
++      return false;
++
++    { std::unique_lock<dxvk::mutex> lock(m_mutex);
++      bool pending = false;
++
++      for (const auto& entry : m_pending)
++        pending |= entry.eq(state);
++
++      if (!pending)
++        return false;
++    }
++
++    VkPipeline pipeline = this->validatePipelineState(state, false)
++      ? this->getOptimizedPipeline(state)
++      : VK_NULL_HANDLE;
++
++    std::unique_lock<dxvk::mutex> lock(m_mutex);
++
++    if (!this->findInstance(state)) {
++      m_stats->numGraphicsPipelines += 1;
++      m_pipelines.add(state, VK_NULL_HANDLE, pipeline, computeAttachmentMask(state));
++      m_builtOnce = true;
++    }
++
++    for (auto entry = m_pending.begin(); entry != m_pending.end(); entry++) {
++      if (entry->eq(state)) {
++        m_pending.erase(entry);
++        break;
++      }
++    }
++
++    if (!pipeline)
++      this->logPipelineState(LogLevel::Error, state);
++
++    return true;
++  }
+ 
+ 
+   VkPipeline DxvkGraphicsPipeline::getBasePipeline(
+diff -ruN a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -635,6 +635,8 @@
+       DxvkGraphicsPipelineStateInfo,
+       DxvkGraphicsPipelineInstance>               m_pipelines;
+     uint32_t                                      m_useCount = 0;
++    bool                                          m_builtOnce = false;
++    std::vector<DxvkGraphicsPipelineStateInfo>    m_pending;
+ 
+     std::unordered_map<
+       DxvkGraphicsPipelineBaseInstanceKey,
+@@ -657,6 +659,15 @@
+     bool canCreateBasePipeline(
+       const DxvkGraphicsPipelineStateInfo& state) const;
+ 
++    bool canLinkWithoutWaiting(
++      const DxvkGraphicsPipelineStateInfo& state) const;
++
++    int deferBuild(
++      const DxvkGraphicsPipelineStateInfo& state);
++
++    bool compileDeferred(
++      const DxvkGraphicsPipelineStateInfo& state);
++
+     VkPipeline getBasePipeline(
+       const DxvkGraphicsPipelineStateInfo& state);
+ 
+diff -ruN a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -28,6 +28,16 @@
+     lowerSinCos           = config.getOption<Tristate>("dxvk.lowerSinCos",            Tristate::Auto);
+     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
+ 
++    std::string method = env::getEnvVar("DXVK_SHADER_COMPILATION_METHOD");
++
++    if (method.empty())
++      method = config.getOption<std::string>("dxvk.shaderCompilationMethod", "none");
++
++    if (method == "async")
++      shaderCompileMethod = DxvkShaderCompileMethod::Async;
++    else if (method == "dyasync")
++      shaderCompileMethod = DxvkShaderCompileMethod::Dyasync;
++
+     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
+     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;
+   }
+diff -ruN a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -7,6 +7,12 @@
+ 
+ namespace dxvk {
+ 
++  enum class DxvkShaderCompileMethod : uint32_t {
++    None    = 0,
++    Async   = 1,
++    Dyasync = 2,
++  };
++
+   struct DxvkOptions {
+     DxvkOptions() { }
+     DxvkOptions(const Config& config);
+@@ -91,6 +97,9 @@
+ 
+     /// Device name
+     std::string deviceFilter;
++
++    DxvkShaderCompileMethod shaderCompileMethod = DxvkShaderCompileMethod::None;
++
+   };
+ 
+ }
+diff -ruN a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -232,6 +232,16 @@
+   }
+ 
+ 
++  bool DxvkShaderPipelineLibrary::hasPipelineHandle() {
++    if (!m_mutex.try_lock())
++      return false;
++
++    bool ready = m_pipeline && m_pipeline->handle;
++    m_mutex.unlock();
++    return ready;
++  }
++
++
+   void DxvkShaderPipelineLibrary::releasePipelineHandle() {
+     if (m_device->mustTrackPipelineLifetime()) {
+       std::lock_guard lock(m_mutex);
+diff -ruN a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
+--- a/src/dxvk/dxvk_shader.h
++++ b/src/dxvk/dxvk_shader.h
+@@ -623,6 +623,8 @@
+      */
+     void compilePipeline();
+ 
++    bool hasPipelineHandle();
++
+   private:
+ 
+     DxvkDevice*                     m_device = nullptr;

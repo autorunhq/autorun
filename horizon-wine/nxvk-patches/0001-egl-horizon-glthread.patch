@@ -1,0 +1,128 @@
+diff --git a/src/egl/drivers/horizon/egl_horizon.c b/src/egl/drivers/horizon/egl_horizon.c
+index 61c7fbb..08df1d2 100644
+--- a/src/egl/drivers/horizon/egl_horizon.c
++++ b/src/egl/drivers/horizon/egl_horizon.c
+@@ -32,7 +32,9 @@
+ #include "util/u_inlines.h"
+ 
+ #include "frontend/api.h"
++#include "main/glthread.h"
+ #include "state_tracker/st_context.h"
++#include "util/u_debug.h"
+ 
+ #include <vulkan/vulkan.h>
+ 
+@@ -166,6 +168,16 @@ horizon_get_param(struct pipe_frontend_screen *fscreen,
+ 
+ /* #pragma mark - EGLSurface */
+ 
++/* glthread's thread calls this as it starts (st_set_background_context), and
++ * the pointer must not be NULL. Mesa's DRI frontend adds the thread's queue
++ * to its HUD here. This EGL has no HUD.
++ */
++static void
++horizon_set_background_context(struct st_context *st,
++                               struct util_queue_monitoring *queue_info)
++{
++}
++
+ static _EGLSurface *
+ horizon_create_surface(_EGLDisplay *disp, EGLint type, _EGLConfig *conf,
+                        void *native_window, const EGLint *attrib_list)
+@@ -255,12 +267,25 @@ horizon_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
+    return NULL;
+ }
+ 
++/* With glthread on, GL calls run on a thread of their own. Before this
++ * thread uses the pipe context or a drawable the GL thread may be using, it
++ * has to have run everything it was given, as Mesa's DRI frontend does.
++ */
++static void
++horizon_glthread_finish(struct st_context *st)
++{
++   if (st)
++      _mesa_glthread_finish(st->ctx);
++}
++
+ static EGLBoolean
+ horizon_destroy_surface(_EGLDisplay *disp, _EGLSurface *base)
+ {
+    if (_eglPutSurface(base)) {
+       struct horizon_egl_surface *surf = horizon_egl_surface(base);
+ 
++      horizon_glthread_finish(st_api_get_current());
++
+       for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++)
+          pipe_resource_reference(&surf->att[i], NULL);
+ 
+@@ -300,6 +325,8 @@ horizon_swap_buffers(_EGLDisplay *disp, _EGLSurface *base)
+    struct st_context *st = hctx->st;
+    struct horizon_flush_args args = { st->pipe, back };
+ 
++   horizon_glthread_finish(st);
++
+    /* flush_resource has to land after the pending GL work is submitted but
+     * before the pipe flush.
+     */
+@@ -327,8 +354,10 @@ horizon_swap_interval(_EGLDisplay *disp, _EGLSurface *base, EGLint interval)
+    struct pipe_resource *back = surf->att[ST_ATTACHMENT_BACK_LEFT];
+ 
+    surf->info.initial_swap_interval = interval;
+-   if (surf->is_window && back)
++   if (surf->is_window && back) {
++      horizon_glthread_finish(st_api_get_current());
+       zink_kopper_set_swap_interval(surf->pscreen, back, interval);
++   }
+ 
+    return EGL_TRUE;
+ }
+@@ -407,6 +436,7 @@ horizon_initialize_impl(_EGLDisplay *disp)
+ 
+    hdpy->fscreen.screen = hdpy->pscreen;
+    hdpy->fscreen.get_param = horizon_get_param;
++   hdpy->fscreen.set_background_context = horizon_set_background_context;
+ 
+    disp->ClientAPIs = 0;
+    if (_eglIsApiValid(EGL_OPENGL_API))
+@@ -541,6 +571,13 @@ horizon_create_context(_EGLDisplay *disp, _EGLConfig *conf,
+       goto fail;
+    }
+ 
++   /* Off unless mesa_glthread=true: the DRI frontend's own default turns it
++    * off on a machine with fewer than four CPUs, and the Switch gives a
++    * program three.
++    */
++   if (debug_get_bool_option("mesa_glthread", false))
++      _mesa_glthread_init(ctx->st->ctx);
++
+    return &ctx->base;
+ 
+ fail:
+@@ -554,6 +591,7 @@ horizon_destroy_context(_EGLDisplay *disp, _EGLContext *base)
+    if (_eglPutContext(base)) {
+       struct horizon_egl_context *ctx = horizon_egl_context(base);
+ 
++      horizon_glthread_finish(ctx->st);
+       st_destroy_context(ctx->st);
+       free(ctx);
+    }
+@@ -580,12 +618,15 @@ horizon_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
+       return EGL_TRUE;
+    }
+ 
++   horizon_glthread_finish(st_api_get_current());
+    if (!base) {
+       st_api_make_current(NULL, NULL, NULL);
+-   } else if (!st_api_make_current(ctx->st,
+-                                   dsurf_h ? &dsurf_h->drawable : NULL,
+-                                   rsurf_h ? &rsurf_h->drawable : NULL)) {
+-      return _eglError(EGL_BAD_MATCH, "eglMakeCurrent");
++   } else {
++      horizon_glthread_finish(ctx->st);
++      if (!st_api_make_current(ctx->st,
++                               dsurf_h ? &dsurf_h->drawable : NULL,
++                               rsurf_h ? &rsurf_h->drawable : NULL))
++         return _eglError(EGL_BAD_MATCH, "eglMakeCurrent");
+    }
+ 
+    if (old_dsurf)

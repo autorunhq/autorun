@@ -15,6 +15,7 @@ header = (root / 'horizon-wine/source/config_json.h').read_text()
 fixture = r'''
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 @HEADER@
@@ -38,7 +39,7 @@ int main( int argc, char **argv )
 {
     struct wine_nx_config config;
     char text[4096], value[256];
-    const char *path = argv[1];
+    const char *path = argc > 1 ? argv[1] : "settings.json";
 
     /* Nothing at all is every setting at its default. */
     assert( !wine_nx_config_load( &config, "/nonexistent/settings.json" ) );
@@ -94,6 +95,37 @@ int main( int argc, char **argv )
     assert( wine_nx_config_bool( &config, "core-balancing", 0 ) == 1 );
     /* And something that is not an object at all is nothing. */
     assert( !wine_nx_config_parse( &config, "core-balancing=1\n" ) && !config.count );
+    /* Cut short just after a backslash, in a value or in a key: the end is not
+     * escaped, and nothing past it is read (the address sanitizer watches a
+     * buffer of exactly that size). */
+    {
+        static const char *const cut[] = { "{ \"core-balancing\": true, \"target\": \"C:\\\\Games\\",
+                                           "{ \"core-balancing\": true, \"tar\\" };
+        unsigned int k;
+
+        for (k = 0; k < 2; k++)
+        {
+            size_t len = strlen( cut[k] );
+            char *copy = malloc( len + 1 );
+
+            assert( copy );
+            memcpy( copy, cut[k], len + 1 );
+            assert( !wine_nx_config_parse( &config, copy ) && config.count == 1 );
+            assert( wine_nx_config_bool( &config, "core-balancing", 0 ) == 1 );
+            free( copy );
+        }
+    }
+    /* A key with a quote or a backslash in it is written so that it reads back. */
+    {
+        struct wine_nx_config again;
+
+        assert( wine_nx_config_parse( &config, "{\"a\\\"b\\\\c\": 1, \"after\": true}" ) && config.count == 2 );
+        assert( !strcmp( config.entries[0].key, "a\"b\\c" ) );
+        written( &config, text, sizeof(text) );
+        assert( wine_nx_config_parse( &again, text ) && again.count == 2 );
+        assert( !strcmp( again.entries[0].key, "a\"b\\c" ) );
+        assert( wine_nx_config_bool( &again, "after", 0 ) == 1 );
+    }
 
     printf( "settings: booleans, strings, defaults, a key a later build added, and a file cut short\n" );
     return 0;
@@ -104,7 +136,9 @@ with tempfile.TemporaryDirectory() as tmp:
     source = Path(tmp) / 'config.c'
     source.write_text(fixture.replace('@HEADER@', header))
     binary = Path(tmp) / 'config'
-    subprocess.run(['cc', '-o', str(binary), str(source)], check=True)
-    out = subprocess.run([str(binary), str(Path(tmp) / 'settings.json')],
-                         check=True, capture_output=True, text=True)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-g', '-fsanitize=address,undefined',
+                    '-fno-sanitize-recover=all', '-o', str(binary), str(source)], check=True)
+    out = subprocess.run([str(binary), str(Path(tmp) / 'settings.json')], capture_output=True, text=True)
+    if out.returncode:
+        raise SystemExit(out.stdout + out.stderr)
     print(out.stdout.strip())

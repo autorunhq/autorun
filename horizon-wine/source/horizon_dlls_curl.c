@@ -3,6 +3,7 @@
  * one DNS lookup and TLS session, as sphaira's downloader does, so the second
  * connection does not pay for a handshake the first already made. */
 #include "horizon_dlls_curl.h"
+#include "game_fixes.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -106,10 +107,14 @@ static int report( void *opaque, curl_off_t total, curl_off_t current, curl_off_
 
 /* Only the repository and its release, over HTTPS; the engine checks the rest
  * of the URL, and what comes back against the manifest. */
+/* Only the two repositories these connections are for: the DLL repository
+ * (its files and its release bundle) and the game fixes repository, whose
+ * index and fix files launcher_fixes.c fetches through the same transport. */
 static int allowed( const char *url )
 {
     return !strncmp( url, HORIZON_DLLS_RAW, sizeof(HORIZON_DLLS_RAW) - 1 ) ||
-           !strncmp( url, HORIZON_DLLS_RELEASE, sizeof(HORIZON_DLLS_RELEASE) - 1 );
+           !strncmp( url, HORIZON_DLLS_RELEASE, sizeof(HORIZON_DLLS_RELEASE) - 1 ) ||
+           !strncmp( url, GAME_FIXES_RAW, sizeof(GAME_FIXES_RAW) - 1 );
 }
 
 static enum horizon_dlls_result perform( struct horizon_dlls_curl *c, const char *url, const char *range,

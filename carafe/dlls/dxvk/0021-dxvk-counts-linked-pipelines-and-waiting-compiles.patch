@@ -1,0 +1,55 @@
+Carafe: the [DXVK pipelines] line also gives how many pipeline lookups of the CS thread handed out a pipeline
+linked from shader libraries, which the GPU runs slower than an optimized one, and how many compiler jobs wait,
+so a game held up by a long queue of optimized pipelines shows it.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1136,7 +1136,13 @@
+       }
+     }
+ 
+-    return instance->getHandle();
++    DxvkGraphicsPipelineHandle handle = instance->getHandle();
++    m_stats->binds += 1;
++
++    if (handle.type == DxvkGraphicsPipelineType::BasePipeline)
++      m_stats->linkedBinds += 1;
++
++    return handle;
+   }
+ 
+ 
+diff -ruN a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -387,11 +387,15 @@
+     uint64_t rebuilds = m_stats.libraryRebuilds.exchange(0u);
+     uint64_t rebuildUs = m_stats.libraryRebuildUs.exchange(0u);
+     uint64_t skipped = m_stats.drawsSkipped.exchange(0u);
++    uint64_t binds = m_stats.binds.exchange(0u);
++    uint64_t linkedBinds = m_stats.linkedBinds.exchange(0u);
++    DxvkPipelineWorkerStats workers = m_workers.getStats();
+ 
+     Logger::info(str::format("[DXVK pipelines] ", (now - last) / 1000, " ms, ", frames, " frames: ",
+       builds, " built while drawing (", linked, " linked, ", full, " full) in ", buildUs / 1000,
+       " ms, longest ", maxUs / 1000, " ms; ", rebuilds, " shader libraries rebuilt in ", rebuildUs / 1000,
+-      " ms; ", skipped, " draws skipped"));
++      " ms; ", skipped, " draws skipped; ", linkedBinds, " of ", binds, " pipeline binds linked; ",
++      workers.tasksTotal - workers.tasksCompleted, " compiler jobs waiting"));
+   }
+ 
+ 
+diff -ruN a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -39,6 +39,8 @@
+     std::atomic<uint64_t> libraryRebuilds       = { 0u };
+     std::atomic<uint64_t> libraryRebuildUs      = { 0u };
+     std::atomic<uint64_t> drawsSkipped          = { 0u };
++    std::atomic<uint64_t> binds                 = { 0u };
++    std::atomic<uint64_t> linkedBinds           = { 0u };
+     std::atomic<uint64_t> frames                = { 0u };
+     std::atomic<int64_t>  reportedAt            = { 0 };
+   };

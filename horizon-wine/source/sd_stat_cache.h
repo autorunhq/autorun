@@ -90,6 +90,38 @@ static inline struct sd_stat_entry *sd_stat_find( struct sd_stat_cache *cache, c
     return NULL;
 }
 
+/* Whether a directory above path is one the card said is not there, so that
+ * path is not there either. Doom 3 looks for a loose file beside its archives
+ * before it reads one out of them, thousands under base/textures, which it
+ * does not have; Wine asks for each whole path before it looks for the
+ * missing directory, and every one went to the card. A directory comes to be
+ * only through this device, which forgets the path it makes (or everything,
+ * for a rename). */
+static inline int sd_stat_missing_parent( struct sd_stat_cache *cache, const char *path )
+{
+    char parent[512];
+    size_t len = strlen( path ), i = 0;
+
+    if (len >= sizeof(parent)) return 0;
+    if (!strncmp( path, "sdmc:", 5 )) i = 5;
+    while (path[i] == '/') i++;  /* the root is there */
+    for (; i < len; i++)
+    {
+        struct sd_stat_entry *entry;
+
+        /* Each directory a slash ends that a name follows. */
+        if (path[i] != '/' || path[i + 1] == '/' || !path[i + 1]) continue;
+        memcpy( parent, path, i );
+        parent[i] = 0;
+        if ((entry = sd_stat_find( cache, parent, sd_stat_hash( parent ) )) && entry->error == ENOENT)
+        {
+            entry->used = ++cache->clock;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* 1 with what stat said, in *st or *error; 0 when the card has to be asked. */
 static inline int sd_stat_lookup( struct sd_stat_cache *cache, const char *path, struct stat *st, int *error )
 {
@@ -103,6 +135,12 @@ static inline int sd_stat_lookup( struct sd_stat_cache *cache, const char *path,
     }
     if (!sd_stat_cacheable( path ) || !(entry = sd_stat_find( cache, path, sd_stat_hash( path ) )))
     {
+        if (sd_stat_cacheable( path ) && sd_stat_missing_parent( cache, path ))
+        {
+            cache->hits++;
+            *error = ENOENT;
+            return 1;
+        }
         cache->misses++;
         return 0;
     }

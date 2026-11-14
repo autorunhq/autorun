@@ -8,7 +8,7 @@
 struct VirtmemReservation { uintptr_t base; size_t size; };
 static struct VirtmemReservation reservation;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-static u64 aslr_base, aslr_end, heap_base, occupied;
+static u64 aslr_base, aslr_end, heap_base, stack_base, stack_size, occupied;
 static unsigned int reserved_count, find_count, mapped_count, logs;
 static int info_fail, reservation_fail, map_fail, permission_fail, query_fail;
 static void *mapped_address, *mapped_backing;
@@ -46,6 +46,8 @@ Result svcGetInfo(u64 *value, InfoType type, Handle process, u64 sub)
     if (info_fail) return 1;
     if (type == InfoType_AslrRegionAddress) *value = aslr_base;
     else if (type == InfoType_AslrRegionSize) *value = aslr_end - aslr_base;
+    else if (type == InfoType_StackRegionAddress) *value = stack_base ? stack_base : heap_base;
+    else if (type == InfoType_StackRegionSize) *value = stack_size;
     else *value = heap_base;
     return 0;
 }
@@ -111,6 +113,8 @@ static void reset(u64 base, u64 end)
     aslr_base = base;
     aslr_end = end;
     heap_base = 0x1000000000;
+    stack_base = 0;
+    stack_size = 0;
     occupied = 0;
 }
 static void *worker(void *unused)
@@ -138,6 +142,12 @@ int main(void)
     for (unsigned int i = 0; i < 16; i++) assert(!pthread_create(&workers[i], NULL, worker, NULL));
     for (unsigned int i = 0; i < 16; i++) assert(!pthread_join(workers[i], NULL));
     assert(reserved_count == 1 && find_count == 32);
+    /* 32-bit stock ASLR profile with a 32-bit StackRegion reserves the non-window stack tail (0007). */
+    reset(0x200000, 0x100000000);
+    stack_base = 0x40000000;
+    stack_size = 0x80000000;
+    worker(NULL);
+    assert(reserved_count == 1 && reservation.base == 0x40000000 && reservation.size == 0x50000000);
     reset(WINE_NX_GUEST_BASE, WINE_NX_HOST_LIMIT);
     virtmemLock();
     info_fail = 1;

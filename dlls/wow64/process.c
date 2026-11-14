@@ -1131,10 +1131,11 @@ NTSTATUS WINAPI wow64_NtSuspendProcess( UINT *args )
  */
 NTSTATUS WINAPI wow64_NtSuspendThread( UINT *args )
 {
+    extern NTSTATUS wow64_suspend_thread( HANDLE handle, ULONG *count );
     HANDLE handle = get_handle( &args );
     ULONG *count = get_ptr( &args );
 
-    return NtSuspendThread( handle, count );
+    return wow64_suspend_thread( handle, count );
 }
 
 

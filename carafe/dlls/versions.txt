@@ -1,0 +1,9 @@
+# The versions the Carafe builds are published under. Raise the number after the
+# dash whenever the patches, the pins or the build change: a card sees a new
+# release only under a new version.
+fex=2609-1
+# The experimental FEX: Carafe's above plus carafe/dlls/fex-experimental. It has
+# releases of its own (fex-experimental-<version>), so raising it never touches
+# the Carafe build.
+fex-experimental=2609-3
+dxvk=3.1.1-1

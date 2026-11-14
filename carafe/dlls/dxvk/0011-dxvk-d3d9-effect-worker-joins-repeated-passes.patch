@@ -1,0 +1,680 @@
+Carafe: with d3d9.effectPassMerge on top of d3d9.effectThread, the effect worker joins passes. A game that ends a
+pass and begins the same pass again, with only parameter changes, draws, vertex and index streams and states the pass
+does not set in between, gets the pass kept open and its changed parameters committed instead of every state of the
+pass applied again. The states a pass sets are recorded on the downstream front end while the effect library applies
+them; anything else ends the pass as the game asked, and so does every wait for the queue, so the game never sees an
+effect left in a pass. With the profiler on, the passes begun and joined per frame and what ended the joins are logged
+every 600 presents.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4495,6 +4495,7 @@
+     uint32_t self = D3D9FrontEnd::CurrentThread();
+     if (m_d3d9Options.effectThread && D3D9EffectHooks::InstallQueue()) {
+       m_effectFrontEnd.SetDownstream(&m_frontEnd);
++      m_effectFrontEnd.SetPassMerge(m_d3d9Options.effectPassMerge);
+       m_effectFrontEnd.Start(self, "d3dx-effects", false, true);
+       if (m_effectFrontEnd.Active()) {
+         m_frontEnd.Start(m_effectFrontEnd.Worker(), "dxvk-frontend", true, false);
+diff -ruN a/src/d3d9/d3d9_front_end.cpp b/src/d3d9/d3d9_front_end.cpp
+--- a/src/d3d9/d3d9_front_end.cpp
++++ b/src/d3d9/d3d9_front_end.cpp
+@@ -152,6 +152,36 @@
+         dxvk::high_resolution_clock::now().time_since_epoch()).count());
+     }
+ 
++    constexpr uint32_t EffectTechnique = 60;
++    constexpr uint32_t EffectBeginPass = 66;
++    constexpr uint32_t EffectCommit    = 67;
++    constexpr uint32_t EffectEndPass   = 68;
++
++    constexpr uint32_t PassEverything  = 1u << 31;
++
++    HRESULT CallEffect(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pValues) {
++      void* function = D3D9EffectHooks::Original(Slot);
++      switch (ArgCount) {
++        case 0: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*)>(function)(pEffect);
++        case 1: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t)>(function)(pEffect,
++          pValues[0]);
++        case 2: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t)>(function)(pEffect,
++          pValues[0], pValues[1]);
++        default: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t, uint32_t)>(
++          function)(pEffect, pValues[0], pValues[1], pValues[2]);
++      }
++    }
++
++    const char* const OpNames[] = {
++      "wrap", "render state", "sampler state", "texture stage state", "texture", "stream source",
++      "stream frequency", "indices", "render target", "depth stencil", "stretch rect", "effect", "vertex shader",
++      "pixel shader", "vertex declaration", "fvf", "vertex float constants", "vertex int constants",
++      "vertex bool constants", "pixel float constants", "pixel int constants", "pixel bool constants", "transform",
++      "multiply transform", "viewport", "scissor rect", "material", "light", "light enable", "clip plane", "clear",
++      "draw", "draw indexed", "draw up", "draw indexed up", "begin scene", "end scene", "present",
++      "state block apply", "state block capture", "buffer upload", "wait for the queue", "stop",
++    };
++
+   }
+ 
+ 
+@@ -275,6 +305,10 @@
+ 
+ 
+   void D3D9FrontEnd::DrainProducer() {
++    if (m_mayHoldPass) {
++      m_mayHoldPass = false;
++      Allocate(D3D9FrontEndOp::EffectFlush, 0);
++    }
+     if (!m_pending)
+       return;
+     uint64_t start = NowUs();
+@@ -337,6 +371,8 @@
+       return false;
+     }
+     TextureRefPrivate(pTexture, true);
++    if (m_passMerge && Slot == EffectEndPass)
++      m_mayHoldPass = true;
+     auto args = reinterpret_cast<EffectArgs*>(Allocate(D3D9FrontEndOp::Effect, sizeof(EffectArgs) + DataBytes));
+     args->effect = pEffect;
+     args->slot = Slot;
+@@ -362,6 +398,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetTexture(DWORD StateSampler, IDirect3DBaseTexture9* pTexture) {
++    Touch(D3D9FrontEndOp::Texture, StateSampler);
+     if (likely(!Recording())) {
+       Refresh();
+       if (m_shadow.textures[StateSampler] == pTexture)
+@@ -522,6 +559,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetVertexShader(IDirect3DVertexShader9* pShader) {
++    Touch(D3D9FrontEndOp::VertexShader, 0);
+     D3D9VertexShader* shader = static_cast<D3D9VertexShader*>(pShader);
+     RefPrivate<D3D9VertexShader>(shader, true);
+     auto args = reinterpret_cast<ObjectArgs*>(Allocate(D3D9FrontEndOp::VertexShader, sizeof(ObjectArgs)));
+@@ -531,6 +569,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetPixelShader(IDirect3DPixelShader9* pShader) {
++    Touch(D3D9FrontEndOp::PixelShader, 0);
+     D3D9PixelShader* shader = static_cast<D3D9PixelShader*>(pShader);
+     RefPrivate<D3D9PixelShader>(shader, true);
+     auto args = reinterpret_cast<ObjectArgs*>(Allocate(D3D9FrontEndOp::PixelShader, sizeof(ObjectArgs)));
+@@ -540,6 +579,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetVertexDeclaration(IDirect3DVertexDeclaration9* pDecl) {
++    Touch(D3D9FrontEndOp::VertexDeclaration, 0);
+     D3D9VertexDecl* decl = static_cast<D3D9VertexDecl*>(pDecl);
+     if (likely(!Recording())) {
+       Refresh();
+@@ -584,6 +624,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetFVF(DWORD FVF) {
++    Touch(D3D9FrontEndOp::Fvf, 0);
+     if (likely(!Recording())) {
+       Refresh();
+       m_shadow.vertexDeclKnown = false;
+@@ -594,6 +635,7 @@
+ 
+   HRESULT D3D9FrontEnd::SetConstants(D3D9FrontEndOp Op, UINT StartRegister, const void* pData, UINT Count,
+       UINT ElementSize) {
++    Touch(Op, StartRegister, Count);
+     uint32_t bytes = Count * ElementSize;
+     if (unlikely(pData == nullptr || bytes > MaxRecord)) {
+       auto direct = Direct();
+@@ -624,6 +666,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetTransform(D3D9FrontEndOp Op, D3DTRANSFORMSTATETYPE State, const D3DMATRIX* pMatrix) {
++    Touch(Op, 0);
+     if (unlikely(pMatrix == nullptr))
+       return D3DERR_INVALIDCALL;
+     auto args = reinterpret_cast<TransformArgs*>(Allocate(Op, sizeof(TransformArgs)));
+@@ -634,6 +677,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetViewport(const D3DVIEWPORT9* pViewport) {
++    Touch(D3D9FrontEndOp::Viewport, 0);
+     if (unlikely(pViewport == nullptr))
+       return D3DERR_INVALIDCALL;
+     *reinterpret_cast<D3DVIEWPORT9*>(Allocate(D3D9FrontEndOp::Viewport, sizeof(D3DVIEWPORT9))) = *pViewport;
+@@ -642,6 +686,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetScissorRect(const RECT* pRect) {
++    Touch(D3D9FrontEndOp::ScissorRect, 0);
+     if (unlikely(pRect == nullptr))
+       return D3DERR_INVALIDCALL;
+     *reinterpret_cast<RECT*>(Allocate(D3D9FrontEndOp::ScissorRect, sizeof(RECT))) = *pRect;
+@@ -650,6 +695,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetMaterial(const D3DMATERIAL9* pMaterial) {
++    Touch(D3D9FrontEndOp::Material, 0);
+     if (unlikely(pMaterial == nullptr))
+       return D3DERR_INVALIDCALL;
+     *reinterpret_cast<D3DMATERIAL9*>(Allocate(D3D9FrontEndOp::Material, sizeof(D3DMATERIAL9))) = *pMaterial;
+@@ -658,6 +704,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::SetLight(DWORD Index, const D3DLIGHT9* pLight) {
++    Touch(D3D9FrontEndOp::Light, 0);
+     if (unlikely(pLight == nullptr))
+       return D3DERR_INVALIDCALL;
+     auto args = reinterpret_cast<LightArgs*>(Allocate(D3D9FrontEndOp::Light, sizeof(LightArgs)));
+@@ -668,11 +715,13 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::LightEnable(DWORD Index, BOOL Enable) {
++    Touch(D3D9FrontEndOp::LightEnable, 0);
+     return Queue3(D3D9FrontEndOp::LightEnable, Index, uint32_t(Enable), 0);
+   }
+ 
+ 
+   HRESULT D3D9FrontEnd::SetClipPlane(DWORD Index, const float* pPlane) {
++    Touch(D3D9FrontEndOp::ClipPlane, 0);
+     if (unlikely(pPlane == nullptr))
+       return D3DERR_INVALIDCALL;
+     auto args = reinterpret_cast<ClipPlaneArgs*>(Allocate(D3D9FrontEndOp::ClipPlane, sizeof(ClipPlaneArgs)));
+@@ -861,6 +910,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::StateBlockApply(D3D9StateBlock* pStateBlock) {
++    Touch(D3D9FrontEndOp::StateBlockApply, 0);
+     if (unlikely(Recording()))
+       return D3DERR_INVALIDCALL;
+     Refresh();
+@@ -917,6 +967,7 @@
+ 
+ 
+   HRESULT D3D9FrontEnd::StateBlockCapture(D3D9StateBlock* pStateBlock) {
++    Touch(D3D9FrontEndOp::StateBlockCapture, 0);
+     if (unlikely(Recording()))
+       return D3DERR_INVALIDCALL;
+     Refresh();
+@@ -1038,6 +1089,25 @@
+     if (!locks.empty())
+       Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " locks that wait:", locks));
+     m_waitingLocks = { };
++    if (m_passMerge) {
++      std::string breaks;
++      for (uint32_t op = 0; op < m_passBreakOps.size(); op++) {
++        if (m_passBreakOps[op] == 0 || op == uint32_t(D3D9FrontEndOp::Effect))
++          continue;
++        breaks += str::format(", ", op < std::size(OpNames) ? OpNames[op] : "other", " ", m_passBreakOps[op]);
++      }
++      for (uint32_t slot = 0; slot < m_passBreakSlots.size(); slot++) {
++        if (m_passBreakSlots[slot] != 0)
++          breaks += str::format(", effect +0x", std::hex, slot * 4, std::dec, " ", m_passBreakSlots[slot]);
++      }
++      Logger::info(str::format("[D3D9 effects] passes per frame: begun ", uint64_t(double(m_statPasses) / frames),
++        ", joined to the one before ", uint64_t(double(m_statJoined) / frames), "; in all, joins ended by",
++        breaks.empty() ? std::string(" nothing") : breaks.substr(1)));
++      m_statPasses = 0;
++      m_statJoined = 0;
++      m_passBreakOps = { };
++      m_passBreakSlots = { };
++    }
+     m_drainSites = { };
+     m_statQueued = 0;
+     m_statDropped = 0;
+@@ -1050,6 +1120,268 @@
+   }
+ 
+ 
++  bool D3D9FrontEnd::Footprint(D3D9PassFootprint& Print, D3D9FrontEndOp Op, uint32_t A, uint32_t Count, bool Mark) {
++    auto flag = [&] (uint32_t& Word, uint32_t Bit) {
++      bool hit = (Word & Bit) != 0 || (Print.other & PassEverything) != 0;
++      if (Mark)
++        Word |= Bit;
++      return hit;
++    };
++    auto bits = [&] (std::bitset<256>& Set) {
++      if (A >= Set.size() || Count > Set.size() - A)
++        return flag(Print.other, PassEverything);
++      bool hit = (Print.other & PassEverything) != 0;
++      for (uint32_t i = A; i < A + Count; i++) {
++        hit |= Set[i];
++        if (Mark)
++          Set[i] = true;
++      }
++      return hit;
++    };
++    switch (Op) {
++      case D3D9FrontEndOp::RenderState:        Count = 1; return bits(Print.renderStates);
++      case D3D9FrontEndOp::SamplerState:
++      case D3D9FrontEndOp::Texture:            return flag(Print.samplers, 1u << (A & 31u));
++      case D3D9FrontEndOp::TextureStageState:  return flag(Print.stages, 1u << (A & 31u));
++      case D3D9FrontEndOp::VertexShader:       return flag(Print.other, 1u << 0);
++      case D3D9FrontEndOp::PixelShader:        return flag(Print.other, 1u << 1);
++      case D3D9FrontEndOp::VertexDeclaration:
++      case D3D9FrontEndOp::Fvf:                return flag(Print.other, 1u << 2);
++      case D3D9FrontEndOp::VertexConstantsF:   return bits(Print.vertexConstants);
++      case D3D9FrontEndOp::PixelConstantsF:    return bits(Print.pixelConstants);
++      case D3D9FrontEndOp::VertexConstantsI:   return flag(Print.other, 1u << 3);
++      case D3D9FrontEndOp::VertexConstantsB:   return flag(Print.other, 1u << 4);
++      case D3D9FrontEndOp::PixelConstantsI:    return flag(Print.other, 1u << 5);
++      case D3D9FrontEndOp::PixelConstantsB:    return flag(Print.other, 1u << 6);
++      case D3D9FrontEndOp::Transform:
++      case D3D9FrontEndOp::MultiplyTransform:  return flag(Print.other, 1u << 7);
++      case D3D9FrontEndOp::Viewport:           return flag(Print.other, 1u << 8);
++      case D3D9FrontEndOp::ScissorRect:        return flag(Print.other, 1u << 9);
++      case D3D9FrontEndOp::Material:           return flag(Print.other, 1u << 10);
++      case D3D9FrontEndOp::Light:
++      case D3D9FrontEndOp::LightEnable:        return flag(Print.other, 1u << 11);
++      case D3D9FrontEndOp::ClipPlane:          return flag(Print.other, 1u << 12);
++      default:                                 return flag(Print.other, PassEverything);
++    }
++  }
++
++
++  bool D3D9FrontEnd::StateBlockHits(D3D9StateBlock* pStateBlock) {
++    D3D9PassFootprint& print = m_open.footprint;
++    if (print.other & PassEverything)
++      return true;
++    D3D9StateCaptures& captures = pStateBlock->m_captures;
++    auto hit = [&] (D3D9FrontEndOp Op, uint32_t A) {
++      return Footprint(print, Op, A, 1, false);
++    };
++    auto any = [] (auto& Set) {
++      for (uint32_t i = 0; i < Set.dwordCount(); i++) {
++        if (Set.dword(i) != 0)
++          return true;
++      }
++      return false;
++    };
++    auto constants = [&] (auto& Set, D3D9FrontEndOp Op) {
++      for (uint32_t i = 0; i < Set.dwordCount(); i++) {
++        for (uint32_t bit : bit::BitMask(Set.dword(i))) {
++          if (hit(Op, i * 32 + bit))
++            return true;
++        }
++      }
++      return false;
++    };
++    const auto& flags = captures.flags;
++    if (flags.test(D3D9CapturedStateFlag::VertexDecl) && hit(D3D9FrontEndOp::VertexDeclaration, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::RenderStates)) {
++      for (uint32_t i = 0; i < captures.renderStates.dwordCount(); i++) {
++        for (uint32_t rs : bit::BitMask(captures.renderStates.dword(i))) {
++          if (hit(D3D9FrontEndOp::RenderState, i * 32 + rs))
++            return true;
++        }
++      }
++    }
++    if (flags.test(D3D9CapturedStateFlag::SamplerStates)) {
++      for (uint32_t sampler : bit::BitMask(captures.samplers.dword(0))) {
++        if (hit(D3D9FrontEndOp::SamplerState, sampler))
++          return true;
++      }
++    }
++    if (flags.test(D3D9CapturedStateFlag::Textures)) {
++      for (uint32_t sampler : bit::BitMask(captures.textures.dword(0))) {
++        if (hit(D3D9FrontEndOp::Texture, sampler))
++          return true;
++      }
++    }
++    if (flags.test(D3D9CapturedStateFlag::TextureStages)) {
++      for (uint32_t stage : bit::BitMask(captures.textureStages.dword(0))) {
++        if (hit(D3D9FrontEndOp::TextureStageState, stage))
++          return true;
++      }
++    }
++    if (flags.test(D3D9CapturedStateFlag::VertexShader) && hit(D3D9FrontEndOp::VertexShader, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::PixelShader) && hit(D3D9FrontEndOp::PixelShader, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::Viewport) && hit(D3D9FrontEndOp::Viewport, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::ScissorRect) && hit(D3D9FrontEndOp::ScissorRect, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::ClipPlanes) && hit(D3D9FrontEndOp::ClipPlane, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::Transforms) && hit(D3D9FrontEndOp::Transform, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::Material) && hit(D3D9FrontEndOp::Material, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::Lights) && hit(D3D9FrontEndOp::Light, 0))
++      return true;
++    if (flags.test(D3D9CapturedStateFlag::VsConstants)) {
++      if (constants(captures.vsConsts.fConsts, D3D9FrontEndOp::VertexConstantsF))
++        return true;
++      if (any(captures.vsConsts.iConsts) && hit(D3D9FrontEndOp::VertexConstantsI, 0))
++        return true;
++      if (any(captures.vsConsts.bConsts) && hit(D3D9FrontEndOp::VertexConstantsB, 0))
++        return true;
++    }
++    if (flags.test(D3D9CapturedStateFlag::PsConstants)) {
++      if (constants(captures.psConsts.fConsts, D3D9FrontEndOp::PixelConstantsF))
++        return true;
++      if (any(captures.psConsts.iConsts) && hit(D3D9FrontEndOp::PixelConstantsI, 0))
++        return true;
++      if (any(captures.psConsts.bConsts) && hit(D3D9FrontEndOp::PixelConstantsB, 0))
++        return true;
++    }
++    return false;
++  }
++
++
++  bool D3D9FrontEnd::PassContinues(D3D9FrontEndOp Op, const void* pBody) {
++    switch (Op) {
++      case D3D9FrontEndOp::Wrap:
++      case D3D9FrontEndOp::StreamSource:
++      case D3D9FrontEndOp::StreamSourceFreq:
++      case D3D9FrontEndOp::Indices:
++      case D3D9FrontEndOp::Clear:
++      case D3D9FrontEndOp::Draw:
++      case D3D9FrontEndOp::DrawIndexed:
++      case D3D9FrontEndOp::DrawUp:
++      case D3D9FrontEndOp::DrawIndexedUp:
++      case D3D9FrontEndOp::BufferUpload:
++        return true;
++
++      case D3D9FrontEndOp::Effect: {
++        auto args = static_cast<const EffectArgs*>(pBody);
++        if (args->effect != m_open.effect)
++          return false;
++        return args->slot < EffectTechnique || args->slot == EffectCommit
++          || (args->slot == EffectBeginPass && args->args[0] == m_open.pass);
++      }
++
++      case D3D9FrontEndOp::RenderState:
++      case D3D9FrontEndOp::SamplerState:
++      case D3D9FrontEndOp::TextureStageState:
++        return !Footprint(m_open.footprint, Op, static_cast<const Args3*>(pBody)->a, 1, false);
++
++      case D3D9FrontEndOp::Texture:
++        return !Footprint(m_open.footprint, Op, static_cast<const ObjectArgs*>(pBody)->a, 1, false);
++
++      case D3D9FrontEndOp::VertexConstantsF:
++      case D3D9FrontEndOp::VertexConstantsI:
++      case D3D9FrontEndOp::VertexConstantsB:
++      case D3D9FrontEndOp::PixelConstantsF:
++      case D3D9FrontEndOp::PixelConstantsI:
++      case D3D9FrontEndOp::PixelConstantsB: {
++        auto args = static_cast<const ConstantArgs*>(pBody);
++        return !Footprint(m_open.footprint, Op, args->start, args->count, false);
++      }
++
++      case D3D9FrontEndOp::VertexShader:
++      case D3D9FrontEndOp::PixelShader:
++      case D3D9FrontEndOp::VertexDeclaration:
++      case D3D9FrontEndOp::Fvf:
++      case D3D9FrontEndOp::Transform:
++      case D3D9FrontEndOp::MultiplyTransform:
++      case D3D9FrontEndOp::Viewport:
++      case D3D9FrontEndOp::ScissorRect:
++      case D3D9FrontEndOp::Material:
++      case D3D9FrontEndOp::Light:
++      case D3D9FrontEndOp::LightEnable:
++      case D3D9FrontEndOp::ClipPlane:
++        return !Footprint(m_open.footprint, Op, 0, 1, false);
++
++      case D3D9FrontEndOp::StateBlockApply:
++        return !StateBlockHits(static_cast<const StateBlockArgs*>(pBody)->block);
++
++      default:
++        return false;
++    }
++  }
++
++
++  void D3D9FrontEnd::ClosePass(D3D9FrontEndOp Op, uint32_t Slot) {
++    m_open.ended = false;
++    void* effect = std::exchange(m_open.effect, nullptr);
++    CallEffect(effect, EffectEndPass, 0, nullptr);
++    m_passBreakOps[std::min<uint32_t>(uint32_t(Op), m_passBreakOps.size() - 1)]++;
++    if (Op == D3D9FrontEndOp::Effect)
++      m_passBreakSlots[std::min<uint32_t>(Slot, m_passBreakSlots.size() - 1)]++;
++  }
++
++
++  HRESULT D3D9FrontEnd::TrackedCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pValues,
++      bool& Tracked) {
++    D3D9FrontEnd* downstream = m_downstream;
++    bool track = downstream != nullptr && downstream->Queues() && downstream->m_footprint == nullptr;
++    uint32_t directs = track ? downstream->m_directs : 0u;
++    if (track)
++      downstream->m_footprint = &m_open.footprint;
++    HRESULT hr = CallEffect(pEffect, Slot, ArgCount, pValues);
++    if (track)
++      downstream->m_footprint = nullptr;
++    Tracked = track && downstream->m_directs == directs && downstream->Queues();
++    return hr;
++  }
++
++
++  bool D3D9FrontEnd::EffectPass(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pValues) {
++    bool tracked = false;
++    if (Slot == EffectBeginPass) {
++      if (m_open.ended) {
++        m_open.ended = false;
++        TrackedCall(pEffect, EffectCommit, 0, nullptr, tracked);
++        if (!tracked)
++          m_open.footprint.other |= PassEverything;
++        m_statJoined++;
++        return true;
++      }
++      m_open.effect = nullptr;
++      m_open.footprint = D3D9PassFootprint();
++      HRESULT hr = TrackedCall(pEffect, EffectBeginPass, ArgCount, pValues, tracked);
++      m_statPasses++;
++      if (tracked && SUCCEEDED(hr)) {
++        m_open.effect = pEffect;
++        m_open.pass = pValues[0];
++      }
++      return true;
++    }
++    if (pEffect != m_open.effect)
++      return false;
++    if (Slot == EffectCommit && m_open.ended)
++      return true;
++    if (Slot == EffectEndPass) {
++      m_open.ended = true;
++      return true;
++    }
++    if (Slot < EffectTechnique || Slot == EffectCommit) {
++      TrackedCall(pEffect, Slot, ArgCount, pValues, tracked);
++      if (!tracked)
++        m_open.footprint.other |= PassEverything;
++      return true;
++    }
++    return false;
++  }
++
++
+   void D3D9FrontEnd::Run() {
+     env::setThreadName(m_threadName);
+     if (m_fpuControl != 0)
+@@ -1096,6 +1428,8 @@
+         uint32_t size = header->size;
+ 
+         if (unlikely(header->op == D3D9FrontEndOp::Stop)) {
++          if (m_open.ended)
++            ClosePass(D3D9FrontEndOp::Stop, 0);
+           read += size;
+           complete();
+           return;
+@@ -1118,8 +1452,14 @@
+     const void* body = pRecord + sizeof(Header);
+     D3D9DeviceEx* device = m_device;
+ 
++    if (unlikely(m_open.ended) && !PassContinues(header->op, body)) {
++      uint32_t slot = header->op == D3D9FrontEndOp::Effect ? static_cast<const EffectArgs*>(body)->slot : 0u;
++      ClosePass(header->op, slot);
++    }
++
+     switch (header->op) {
+       case D3D9FrontEndOp::Wrap:
++      case D3D9FrontEndOp::EffectFlush:
+         break;
+ 
+       case D3D9FrontEndOp::RenderState: {
+@@ -1162,15 +1502,10 @@
+         std::memcpy(values, args->args, sizeof(values));
+         if (args->dataBytes != 0)
+           values[args->dataArg] = uint32_t(reinterpret_cast<uintptr_t>(args + 1));
+-        void* function = D3D9EffectHooks::Original(args->slot);
+-        switch (args->argCount) {
+-          case 0: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*)>(function)(args->effect); break;
+-          case 1: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t)>(function)(args->effect,
+-            values[0]); break;
+-          case 2: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t)>(function)(args->effect,
+-            values[0], values[1]); break;
+-          default: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t, uint32_t)>(function)(
+-            args->effect, values[0], values[1], values[2]); break;
++        if (!m_passMerge || !EffectPass(args->effect, args->slot, args->argCount, values)) {
++          CallEffect(args->effect, args->slot, args->argCount, values);
++          if (args->effect == m_open.effect && args->slot >= EffectTechnique && args->slot != EffectCommit)
++            m_open.effect = nullptr;
+         }
+         TextureRefPrivate(args->texture, false);
+       } break;
+diff -ruN a/src/d3d9/d3d9_front_end.h b/src/d3d9/d3d9_front_end.h
+--- a/src/d3d9/d3d9_front_end.h
++++ b/src/d3d9/d3d9_front_end.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <atomic>
++#include <bitset>
+ #include <cstring>
+ 
+ #include "d3d9_include.h"
+@@ -62,6 +63,7 @@
+     StateBlockApply,
+     StateBlockCapture,
+     BufferUpload,
++    EffectFlush,
+     Stop,
+   };
+ 
+@@ -86,6 +88,15 @@
+     bool                                                                            vertexDeclKnown;
+   };
+ 
++  struct D3D9PassFootprint {
++    std::bitset<256> renderStates;
++    std::bitset<256> vertexConstants;
++    std::bitset<256> pixelConstants;
++    uint32_t         samplers = 0;
++    uint32_t         stages   = 0;
++    uint32_t         other    = 0;
++  };
++
+   class D3D9FrontEnd {
+ 
+   public:
+@@ -135,6 +146,10 @@
+       m_downstream = pDownstream;
+     }
+ 
++    void SetPassMerge(bool Enable) {
++      m_passMerge = Enable;
++    }
++
+     void DrainProducer();
+ 
+     bool EffectCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pArgs, const void* pData,
+@@ -172,6 +187,7 @@
+         return DirectScope(this, 0u);
+       DrainProducer();
+       m_stale = true;
++      m_directs++;
+       return DirectScope(this, std::exchange(m_producer, 0u));
+     }
+ 
+@@ -184,6 +200,7 @@
+     }
+ 
+     HRESULT SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
++      Touch(D3D9FrontEndOp::RenderState, uint32_t(State));
+       if (likely(m_filter) && likely(uint32_t(State) < RenderStateCount) && likely(!Recording())) {
+         Refresh();
+         if (m_shadow.renderStates[State] == Value)
+@@ -194,6 +211,7 @@
+     }
+ 
+     HRESULT SetSamplerState(DWORD StateSampler, D3DSAMPLERSTATETYPE Type, DWORD Value) {
++      Touch(D3D9FrontEndOp::SamplerState, StateSampler);
+       if (likely(m_filter) && likely(uint32_t(Type) < SamplerStateCount) && likely(!Recording())) {
+         Refresh();
+         if (m_shadow.samplerStates[StateSampler][Type] == Value)
+@@ -204,6 +222,7 @@
+     }
+ 
+     HRESULT SetTextureStageState(DWORD Stage, D3D9TextureStageStateTypes Type, DWORD Value) {
++      Touch(D3D9FrontEndOp::TextureStageState, Stage);
+       if (likely(m_filter) && likely(Stage < caps::TextureStageCount && uint32_t(Type) < TextureStageStateCount)
+        && likely(!Recording())) {
+         Refresh();
+@@ -378,6 +397,41 @@
+ 
+     std::array<uint32_t, 128> m_waitingLocks = { };
+ 
++    struct OpenPass {
++      void*             effect = nullptr;
++      uint32_t          pass   = 0;
++      bool              ended  = false;
++      D3D9PassFootprint footprint;
++    };
++
++    bool               m_passMerge   = false;
++    bool               m_mayHoldPass = false;
++    D3D9PassFootprint* m_footprint   = nullptr;
++    uint32_t           m_directs     = 0;
++    OpenPass           m_open;
++
++    uint64_t m_statPasses = 0;
++    uint64_t m_statJoined = 0;
++    std::array<uint32_t, 64> m_passBreakOps   = { };
++    std::array<uint32_t, 96> m_passBreakSlots = { };
++
++    static bool Footprint(D3D9PassFootprint& Print, D3D9FrontEndOp Op, uint32_t A, uint32_t Count, bool Mark);
++
++    void Touch(D3D9FrontEndOp Op, uint32_t A, uint32_t Count = 1) {
++      if (unlikely(m_footprint != nullptr))
++        Footprint(*m_footprint, Op, A, Count, true);
++    }
++
++    bool PassContinues(D3D9FrontEndOp Op, const void* pBody);
++
++    bool StateBlockHits(D3D9StateBlock* pStateBlock);
++
++    void ClosePass(D3D9FrontEndOp Op, uint32_t Slot);
++
++    HRESULT TrackedCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pValues, bool& Tracked);
++
++    bool EffectPass(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pValues);
++
+     static uint32_t Load(std::atomic<uint32_t>& value) {
+       return value.fetch_add(0u);
+     }
+diff -ruN a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -80,6 +80,7 @@
+     this->unchangedStateFastPath        = config.getOption<bool>        ("d3d9.unchangedStateFastPath",        true);
+     this->frontEndThread                = config.getOption<bool>        ("d3d9.frontEndThread",                false);
+     this->effectThread                  = config.getOption<bool>        ("d3d9.effectThread",                  false);
++    this->effectPassMerge               = config.getOption<bool>        ("d3d9.effectPassMerge",               false);
+ 
+     // D3D8 options
+     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
+diff -ruN a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -178,6 +178,8 @@
+     bool frontEndThread;
+ 
+     bool effectThread;
++
++    bool effectPassMerge;
+   };
+ 
+ }

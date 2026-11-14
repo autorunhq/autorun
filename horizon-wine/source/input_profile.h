@@ -34,8 +34,8 @@ struct input_source { const char *name, *label; uint64_t button; };
 struct input_profile
 {
     struct input_binding pad[INPUT_SOURCE_COUNT], keys[INPUT_SOURCE_COUNT];
-    int mode, deadzone[2], keyboard_auto;
-    unsigned int left_inherit;
+    int mode, face_layout, deadzone[2], keyboard_auto;
+    unsigned int left_inherit, pad_custom;
     int mouse_speed;   /* percent of the built-in cursor speed; 100 is the default */
 };
 struct input_pad { uint64_t buttons; int axis[4]; };
@@ -49,6 +49,7 @@ struct input_output
 extern const struct input_source input_sources[INPUT_SOURCE_COUNT];
 extern const char *const input_pad_labels[INPUT_PAD_TARGET_COUNT];
 extern const char *const input_mode_labels[2];
+extern const char *const input_face_layout_labels[2];
 void input_profile_defaults( struct input_profile *profile, int keyboard_auto );
 void input_profile_apply( struct input_profile *profile, const struct launcher_kv *kv );
 int input_profile_global( const char *root, int keyboard_auto, struct input_profile *profile,
