@@ -393,6 +393,13 @@ changes, and fails if the pinned text moves.
   mark is `registry/components-1.done`, so a reset registry runs it again.
 - A 32-bit address space leaves a program about 2 GiB of addresses and caps the
   whole process at 2 GiB of memory.
+- With display mode emulation off, the screen's OpenGL surface takes the size
+  of the program's display mode and the console's scaler stretches it over
+  the screen (`nx_screen_fit`, through mesa-switch's
+  `EGL_MESA_horizon_surface_resize`); pointer coordinates are mapped as
+  `stretched` whatever **Picture of another mode** says, except `own-size`,
+  which leaves the picture at its own size. The log says
+  `[NXGL] the screen's surface is WxH`.
 - A game of the Quake 2 years can crash as it starts drawing: it copies the
   OpenGL extension list into a buffer sized for the drivers of its day, and
   Mesa's list overruns it (Kingpin: a write past the top of its stack, then

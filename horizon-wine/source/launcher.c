@@ -2677,7 +2677,8 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                  "A game that asks for a resolution of its own draws into a hidden picture of that size, which "
                  "is then copied to the screen. Off lets the game draw to the screen's surface directly, as "
                  "upstream Autorun does: turn it off for an OpenGL or old Direct3D game that freezes soon "
-                 "after it starts (Vampire: The Masquerade - Redemption)."
+                 "after it starts (Vampire: The Masquerade - Redemption). With it off, a picture of another "
+                 "resolution is always stretched over the screen."
                  " Global follows the setting in Settings (X on the library)." );
         row->adjustable = 1;
         snprintf( row->value, sizeof(row->value), "%s",

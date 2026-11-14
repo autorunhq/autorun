@@ -774,6 +774,8 @@ static void nx_fps_lock_frame( struct opengl_drawable *base )
     }
 }
 
+static void nx_screen_fit( struct opengl_drawable *base );
+
 static BOOL nx_drawable_swap( struct opengl_drawable *base )
 {
     unsigned long long start;
@@ -799,7 +801,63 @@ static BOOL nx_drawable_swap( struct opengl_drawable *base )
             ;
         if (clears) nx_screen_clear();
     }
+    if (ret) nx_screen_fit( base );
     return ret;
+}
+
+/* With display mode emulation off a program draws straight into the screen's
+ * surface, which was always 1280x720: a game in 800x600 drew into a corner of
+ * it, at its own size. The surface takes the size of the program's display
+ * mode instead and the console's own scaler stretches it over the screen, with
+ * no framebuffer object of win32u's in between (that path is what breaks nvc0
+ * for some games; winnx_opengl.c, nx_screen_first_frame). mesa-switch does the
+ * resize (EGL_MESA_horizon_surface_resize: the surface must be the calling
+ * thread's draw surface, which it is after a swap). The picture is stretched,
+ * and win32u's mapping of a finger's points says the same
+ * (source_virt_to_raw_ratios); own size leaves it as it was. The overlays
+ * (keyboard, menu, cursor, frame rate) already measure the surface. */
+extern int wine_nx_picture_mode __attribute__((weak));  /* runtime.c */
+typedef EGLBoolean (*PFN_eglResizeSurfaceMESA)( EGLDisplay display, EGLSurface surface, EGLint width, EGLint height );
+static SIZE nx_screen_size = { 1280, 720 };    /* of the screen's surface; the swapping thread's */
+static SIZE nx_screen_refused;                 /* a size the driver would not give */
+
+static void nx_screen_fit( struct opengl_drawable *base )
+{
+    static PFN_eglResizeSurfaceMESA resize;
+    static BOOL looked;
+    SIZE want = { 1280, 720 };
+
+    if (emulate_modeset) return;
+    if (&wine_nx_picture_mode && wine_nx_picture_mode == 3) return;
+    /* A window over the whole screen in a mode of its own; anything else
+     * draws at the screen's size, as before. */
+    if (base->monitor_size.cx >= 1280 && base->monitor_size.cy >= 720 &&
+        base->virtual_size.cx >= 320 && base->virtual_size.cy >= 200 &&
+        base->virtual_size.cx <= 4096 && base->virtual_size.cy <= 4096)
+        want = base->virtual_size;
+    if (want.cx == nx_screen_size.cx && want.cy == nx_screen_size.cy) return;
+    if (want.cx == nx_screen_refused.cx && want.cy == nx_screen_refused.cy) return;
+    if (!looked)
+    {
+        resize = (void *)funcs->p_eglGetProcAddress( "eglResizeSurfaceMESA" );
+        looked = TRUE;
+        if (!resize) nx_log( "[NXGL] this Mesa cannot resize the screen's surface: a program's picture stays at its own size" );
+    }
+    if (!resize) return;
+    if (resize( egl->display, base->surface, want.cx, want.cy ))
+    {
+        nx_log( "[NXGL] the screen's surface is %dx%d, was %dx%d: the console stretches the program's picture over the screen",
+                (int)want.cx, (int)want.cy, (int)nx_screen_size.cx, (int)nx_screen_size.cy );
+        nx_screen_size = want;
+        nx_screen_refused.cx = nx_screen_refused.cy = 0;
+    }
+    else
+    {
+        nx_log( "[NXGL] the screen's surface stays %dx%d: resizing it to %dx%d failed, error 0x%x",
+                (int)nx_screen_size.cx, (int)nx_screen_size.cy, (int)want.cx, (int)want.cy,
+                (unsigned int)funcs->p_eglGetError() );
+        nx_screen_refused = want;
+    }
 }
 
 /* The first frame of a surface that takes the screen while the loading screen
@@ -945,6 +1003,9 @@ static BOOL nx_surface_create( struct client_surface *client, int format, struct
     nx_screen_refs = 1;
     pthread_mutex_unlock( &nx_screen_mutex );
     nx_swap_interval_set = -1;  /* a new surface: its interval is set again before its first frame */
+    nx_screen_size.cx = 1280;   /* and it is the screen's size (wine_nx_gl_acquire_window) */
+    nx_screen_size.cy = 720;
+    nx_screen_refused.cx = nx_screen_refused.cy = 0;
     if (!previous) nx_screen_first_frame( gl, format );
 
     TRACE( "created drawable %s with EGL surface %p\n", debugstr_opengl_drawable( &gl->base ), gl->base.surface );

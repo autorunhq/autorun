@@ -190,6 +190,9 @@ static BOOL nx_osk_shown;
 static unsigned int nx_screen_clears;
 static void (*p_glBindFramebuffer)(int, int);
 static void nx_screen_clear(void) {}
+/* The surface at the size of a program's display mode: check_screen_fit.py's. */
+static SIZE nx_screen_size, nx_screen_refused;
+static void nx_screen_fit(struct opengl_drawable *base) { (void)base; }
 struct nx_gl_drawable;
 static void nx_screen_first_frame(struct nx_gl_drawable *gl, int format) { (void)gl; (void)format; }
 static unsigned long long horizon_interrupt_time(void) { static unsigned int ticks; return ++ticks; }

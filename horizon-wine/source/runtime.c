@@ -1121,6 +1121,9 @@ void wine_nx_gl_release_window(void)
         log_line( "[NXVK] a Vulkan surface let go of the screen; %d still hold it", surfaces );
         return;
     }
+    /* The surface may have had a program's display mode for its size
+     * (winnx_opengl.c, nx_screen_fit); it is gone, and its buffers with it. */
+    nwindowSetDimensions( nwindowGetDefault(), WINE_NX_FB_W, WINE_NX_FB_H );
     log_line( "[NXGL] screen returned to the %s", compositor ? "compositor" : "framebuffer" );
     if (compositor) wine_nx_compositor_resume();
 }

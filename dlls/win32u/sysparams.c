@@ -2371,6 +2371,10 @@ static void source_virt_to_raw_ratios( struct source *source, UINT *num_x, UINT 
 #ifdef __SWITCH__
     int mode = (&wine_nx_picture_mode) ? wine_nx_picture_mode : 0;
 
+    /* With display mode emulation off the screen's surface takes the mode's
+     * size and the console stretches it over the screen
+     * (winnx_opengl.c, nx_screen_fit): a finger's points follow. */
+    if (!emulate_modeset && mode != 3) mode = 2;
     if (mode == 3)
     {
         *num_x = *den_x = *num_y = *den_y = 1;
