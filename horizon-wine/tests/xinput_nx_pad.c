@@ -22,6 +22,8 @@ u64 armGetSystemTick(void) { return mock_tick; }
 static int mock_keyboard, mock_panel;
 int wine_nx_osk_visible( void ) { return mock_keyboard; }
 int wine_nx_osk_map_visible( void ) { return mock_panel; }
+/* The [XINPUT] lines nx_xinput_note writes into the log. */
+void wine_nx_runtime_trace( const char *msg ) { (void)msg; }
 
 int main(void)
 {
