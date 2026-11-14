@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-src="$root/horizon-wine/toolchains/boot-payloads/atmosphere-1.12.1"
+src="$root/horizon-wine/toolchains/boot-payloads/atmosphere-1.12.2"
 out="$root/horizon-wine/toolchains/low-window-2"
 runtime="${1:?Pass the rebuilt wine-nx-runtime.nro}"
 

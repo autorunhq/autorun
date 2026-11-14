@@ -153,8 +153,8 @@ static void fixture_init(struct fixture *fixture)
     memset(fixture->kernel, 0xaa, sizeof(fixture->kernel));
     memset(fixture->package, 0x44, sizeof(fixture->package));
     fixture->manifest.version = 2;
-    strcpy(fixture->manifest.release, "ams-1.12.1-hoc-2.6.0");
-    fixture->manifest.atmosphere_version = UINT32_C(0x010c01);
+    strcpy(fixture->manifest.release, "ams-1.12.2-hoc-2.6.0");
+    fixture->manifest.atmosphere_version = UINT32_C(0x010c02);
     fill_payload(&fixture->manifest.stock, fixture->stock, sizeof(fixture->stock));
     fill_payload(&fixture->manifest.hoc, fixture->hoc, sizeof(fixture->hoc));
     fill_payload(&fixture->manifest.mesosphere, fixture->kernel, sizeof(fixture->kernel));
@@ -216,7 +216,7 @@ static void test_validation(void)
     strcpy(f.manifest.release, "../../evil");
     assert(install(&f) == SETUP_BOOT_INVALID);
     no_writes(&f);
-    strcpy(f.manifest.release, "ams-1.12.1-hoc-2.6.0");
+    strcpy(f.manifest.release, "ams-1.12.2-hoc-2.6.0");
     f.manifest.stock.sha256[0] ^= 1;
     assert(install(&f) == SETUP_BOOT_MISSING);
     no_writes(&f);
@@ -330,8 +330,8 @@ static void test_update(int hoc)
     assert(!setup_boot_needs_update(f.root, &f.manifest, NULL));
     assert(read_file(f.root, SETUP_BOOT_INI, INI_LIMIT, &before) == 1);
     refresh_entry(&f);
-    strcpy(f.manifest.release, "ams-1.12.1-hoc-2.6.0");
-    f.manifest.atmosphere_version = UINT32_C(0x010c01);
+    strcpy(f.manifest.release, "ams-1.12.2-hoc-2.6.0");
+    f.manifest.atmosphere_version = UINT32_C(0x010c02);
     f.kernel[0] ^= 1;
     fill_payload(&f.manifest.mesosphere, f.kernel, sizeof(f.kernel));
     replace_file(f.payloads, "mesosphere.bin", f.kernel, sizeof(f.kernel));
