@@ -18,7 +18,11 @@ notepad="$root/horizon-dlls/switch/wine/drive_c/windows/syswow64/notepad.exe"
 build="$(mktemp -d "${TMPDIR:-/tmp}/wine-nx-launcher.XXXXXX")"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
 font="${LAUNCHER_FONT:-/System/Library/Fonts/Supplemental/Arial.ttf}"
+# Linux has no Arial where macOS keeps it: DejaVu Sans, as CI's keyboard test uses.
+[ -n "${LAUNCHER_FONT:-}" ] || [ -f "$font" ] || font=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 shots="${LAUNCHER_SHOTS:-$build}"
+# OpenSSL's SHA-256 for horizon_dlls.c on Linux; macOS has it in CommonCrypto.
+crypto=""; [ "$(uname -s)" = Linux ] && crypto=-lcrypto
 
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
@@ -33,7 +37,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
     -I "$horizon_wine/source" -I "$horizon_wine/tests" -I/opt/homebrew/include \
     "-DGAME_FIXES_INDEX_PATH=\"$root/game-fixes/switch/wine/game-fixes/index.json\"" \
     "$horizon_wine/tests/game_settings.c" "$horizon_wine/source/game_fixes.c" "$horizon_wine/source/horizon_dlls.c" \
-    -L/opt/homebrew/lib -lzstd -lz -o "$build/game_settings"
+    -L/opt/homebrew/lib -lzstd -lz $crypto -o "$build/game_settings"
 "$build/game_settings"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$horizon_wine/tests/launcher_svg.c" "$horizon_wine/source/launcher_svg.c" -o "$build/launcher_svg"
@@ -97,7 +101,10 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
     "$horizon_wine/tests/osk.c" "$horizon_wine/source/osk.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -o "$build/osk"
-"$build/osk" "$font" "$shots"
+# Its font stays loaded for the life of the process, as on the console; CI runs
+# it the same way (.github/workflows/build.yml), and LeakSanitizer is on by
+# default on Linux.
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" "$build/osk" "$font" "$shots"
 
 card="$build/card/sdmc:"
 mkdir -p "$card/switch/wine/drive_c/openttd" "$card/games/deep/er/still"

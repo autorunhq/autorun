@@ -10,11 +10,13 @@ repo="$root/horizon-dlls"
 [ -f "$repo/switch/wine/horizon-dlls/manifest.json" ] || { echo "no DLL repository in $repo" >&2; exit 1; }
 build="$(mktemp -d "${TMPDIR:-/tmp}/horizon-dlls.XXXXXX")"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
+# OpenSSL's SHA-256 for horizon_dlls.c on Linux; macOS has it in CommonCrypto.
+crypto=""; [ "$(uname -s)" = Linux ] && crypto=-lcrypto
 
 python3 "$horizon_wine/tools/runtime_features.py" > "$build/features.txt"
 clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g \
     -fsanitize=address,undefined -fno-omit-frame-pointer -I "$horizon_wine/source" \
-    -I/opt/homebrew/include "$horizon_wine/tests/horizon_dlls.c" "$horizon_wine/source/horizon_dlls.c" -L/opt/homebrew/lib -lzstd -lz \
+    -I/opt/homebrew/include "$horizon_wine/tests/horizon_dlls.c" "$horizon_wine/source/horizon_dlls.c" -L/opt/homebrew/lib -lzstd -lz $crypto \
     -o "$build/horizon_dlls"
 
 # Three states of the repository: a part of it (1), then with d3d9.dll changed
