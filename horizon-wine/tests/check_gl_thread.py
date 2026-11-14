@@ -24,6 +24,10 @@ assert re.findall(r'^\+\+\+ b/(\S+)', patch, re.M) == ['src/egl/drivers/horizon/
 added = '\n'.join(line[1:] for line in patch.splitlines() if line.startswith('+') and not line.startswith('+++'))
 assert '#include "main/glthread.h"' in added and '#include "util/u_debug.h"' in added
 assert re.search(r'if \(debug_get_bool_option\("mesa_glthread", false\)\)\s*_mesa_glthread_init\(ctx->st->ctx\);', added)
+# glthread's thread calls the frontend's set_background_context as it starts:
+# left NULL, Doom 3 jumped to address 0 there before its first frame.
+assert 'hdpy->fscreen.set_background_context = horizon_set_background_context;' in added
+assert 'horizon_set_background_context(struct st_context *st,' in added
 assert 'horizon_glthread_finish(struct st_context *st)' in added and '_mesa_glthread_finish(st->ctx);' in added
 # Each place the application's thread reaches into the context, in the hunk of
 # the function it belongs to.

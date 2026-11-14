@@ -1,5 +1,5 @@
 diff --git a/src/egl/drivers/horizon/egl_horizon.c b/src/egl/drivers/horizon/egl_horizon.c
-index 61c7fbb..be7cbf7 100644
+index 61c7fbb..08df1d2 100644
 --- a/src/egl/drivers/horizon/egl_horizon.c
 +++ b/src/egl/drivers/horizon/egl_horizon.c
 @@ -32,7 +32,9 @@
@@ -12,7 +12,24 @@ index 61c7fbb..be7cbf7 100644
  
  #include <vulkan/vulkan.h>
  
-@@ -255,12 +257,25 @@ horizon_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
+@@ -166,6 +168,16 @@ horizon_get_param(struct pipe_frontend_screen *fscreen,
+ 
+ /* #pragma mark - EGLSurface */
+ 
++/* glthread's thread calls this as it starts (st_set_background_context), and
++ * the pointer must not be NULL. Mesa's DRI frontend adds the thread's queue
++ * to its HUD here. This EGL has no HUD.
++ */
++static void
++horizon_set_background_context(struct st_context *st,
++                               struct util_queue_monitoring *queue_info)
++{
++}
++
+ static _EGLSurface *
+ horizon_create_surface(_EGLDisplay *disp, EGLint type, _EGLConfig *conf,
+                        void *native_window, const EGLint *attrib_list)
+@@ -255,12 +267,25 @@ horizon_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
     return NULL;
  }
  
@@ -38,7 +55,7 @@ index 61c7fbb..be7cbf7 100644
        for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++)
           pipe_resource_reference(&surf->att[i], NULL);
  
-@@ -300,6 +315,8 @@ horizon_swap_buffers(_EGLDisplay *disp, _EGLSurface *base)
+@@ -300,6 +325,8 @@ horizon_swap_buffers(_EGLDisplay *disp, _EGLSurface *base)
     struct st_context *st = hctx->st;
     struct horizon_flush_args args = { st->pipe, back };
  
@@ -47,7 +64,7 @@ index 61c7fbb..be7cbf7 100644
     /* flush_resource has to land after the pending GL work is submitted but
      * before the pipe flush.
      */
-@@ -327,8 +344,10 @@ horizon_swap_interval(_EGLDisplay *disp, _EGLSurface *base, EGLint interval)
+@@ -327,8 +354,10 @@ horizon_swap_interval(_EGLDisplay *disp, _EGLSurface *base, EGLint interval)
     struct pipe_resource *back = surf->att[ST_ATTACHMENT_BACK_LEFT];
  
     surf->info.initial_swap_interval = interval;
@@ -59,7 +76,15 @@ index 61c7fbb..be7cbf7 100644
  
     return EGL_TRUE;
  }
-@@ -541,6 +560,13 @@ horizon_create_context(_EGLDisplay *disp, _EGLConfig *conf,
+@@ -407,6 +436,7 @@ horizon_initialize_impl(_EGLDisplay *disp)
+ 
+    hdpy->fscreen.screen = hdpy->pscreen;
+    hdpy->fscreen.get_param = horizon_get_param;
++   hdpy->fscreen.set_background_context = horizon_set_background_context;
+ 
+    disp->ClientAPIs = 0;
+    if (_eglIsApiValid(EGL_OPENGL_API))
+@@ -541,6 +571,13 @@ horizon_create_context(_EGLDisplay *disp, _EGLConfig *conf,
        goto fail;
     }
  
@@ -73,7 +98,7 @@ index 61c7fbb..be7cbf7 100644
     return &ctx->base;
  
  fail:
-@@ -554,6 +580,7 @@ horizon_destroy_context(_EGLDisplay *disp, _EGLContext *base)
+@@ -554,6 +591,7 @@ horizon_destroy_context(_EGLDisplay *disp, _EGLContext *base)
     if (_eglPutContext(base)) {
        struct horizon_egl_context *ctx = horizon_egl_context(base);
  
@@ -81,7 +106,7 @@ index 61c7fbb..be7cbf7 100644
        st_destroy_context(ctx->st);
        free(ctx);
     }
-@@ -580,12 +607,15 @@ horizon_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
+@@ -580,12 +618,15 @@ horizon_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
        return EGL_TRUE;
     }
  
