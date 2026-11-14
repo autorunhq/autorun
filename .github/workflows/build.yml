@@ -122,10 +122,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: minizip, zlib and OpenSSL
+      - name: minizip, zlib, OpenSSL and fonts
+        # The fonts are for check_font_tables, a CJK collection among them.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libminizip-dev zlib1g-dev libssl-dev
+          sudo apt-get install -y --no-install-recommends libminizip-dev zlib1g-dev libssl-dev \
+            fonts-dejavu-core fonts-wqy-zenhei
 
       - name: The runtime's console checks
         # Horizon's file access, memory, registry, queues, pad and the
@@ -165,7 +167,7 @@ jobs:
                        check_delete_on_close check_desktop_ancestry check_directshow_reg \
                        check_display_expose_cursor check_download_hosts check_dsound_resample \
                        check_exception_restore check_fex_jit_bridge check_fex_memory check_fex_smc \
-                       check_free_space check_gl_surfaces check_graphics_driver \
+                       check_font_tables check_free_space check_gl_surfaces check_graphics_driver \
                        check_horizon_address_space_limit check_horizon_async check_horizon_async_sockets \
                        check_horizon_byte_pipes check_horizon_fast_sync check_horizon_fragmented_memory \
                        check_horizon_mappings check_horizon_native_view check_horizon_pipe_descriptors \

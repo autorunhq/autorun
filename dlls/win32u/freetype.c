@@ -113,6 +113,8 @@ static int munmap( void *addr, size_t length )
     free( addr );
     return 0;
 }
+
+#include "font_tables_switch.h"
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(font);
@@ -142,6 +144,22 @@ static void nxft_trace_wpath( const char *tag, const WCHAR *path, int ret )
         pathA[i] = (path[i] >= 32 && path[i] < 127) ? (char)path[i] : '?';
     pathA[i] = 0;
     nxft_trace( "[NXFONT] %s ret=%d path=%s", tag, ret, pathA );
+}
+
+/* The [FONTS] line: what reading the font files for their names cost. */
+static unsigned int font_tables_files;
+static unsigned long long font_tables_bytes, font_tables_file_bytes;
+static DWORD font_tables_ms;
+
+static void font_tables_report(void)
+{
+    char buf[160];
+
+    if (!&wine_nx_runtime_trace || !font_tables_files) return;
+    snprintf( buf, sizeof(buf), "[FONTS] %u font files in %u ms, %llu KB read of %llu KB",
+              font_tables_files, (unsigned int)font_tables_ms, font_tables_bytes / 1024,
+              font_tables_file_bytes / 1024 );
+    wine_nx_runtime_trace( buf );
 }
 #endif
 
@@ -982,12 +1000,18 @@ static struct unix_face *unix_face_create( const char *unix_name, void *data_ptr
     struct stat st;
     DWORD face_count;
     int fd, length;
+#ifdef __SWITCH__
+    struct font_tables tables = {0};
+#endif
 
     TRACE( "unix_name %s, face_index %u, data_ptr %p, data_size %u, flags %#x\n",
            unix_name, face_index, data_ptr, data_size, flags );
 
     if (unix_name)
     {
+#ifdef __SWITCH__
+        DWORD start = NtGetTickCount();
+#endif
         if ((fd = open( unix_name, O_RDONLY )) == -1)
         {
 #ifdef __SWITCH__
@@ -1004,8 +1028,30 @@ static struct unix_face *unix_face_create( const char *unix_name, void *data_ptr
             return NULL;
         }
         data_size = st.st_size;
+#ifdef __SWITCH__
+        /* What the parser below reads of the file, not all of it: see font_tables_switch.h. */
+        if (font_tables_load( fd, data_size, face_index, &tables ))
+        {
+            data_ptr = tables.data;
+            font_tables_bytes += tables.read;
+        }
+        else
+        {
+            data_ptr = mmap( NULL, data_size, PROT_READ, MAP_PRIVATE, fd, 0 );
+            if (data_ptr != MAP_FAILED) font_tables_bytes += data_size;
+        }
+#else
         data_ptr = mmap( NULL, data_size, PROT_READ, MAP_PRIVATE, fd, 0 );
+#endif
         close( fd );
+#ifdef __SWITCH__
+        font_tables_ms += NtGetTickCount() - start;
+        if (!face_index)
+        {
+            font_tables_files++;
+            font_tables_file_bytes += data_size;
+        }
+#endif
         if (data_ptr == MAP_FAILED)
         {
 #ifdef __SWITCH__
@@ -1014,7 +1060,8 @@ static struct unix_face *unix_face_create( const char *unix_name, void *data_ptr
             return NULL;
         }
 #ifdef __SWITCH__
-        nxft_trace( "[NXFONT] map_font_ok path=%s size=%u", unix_name, (unsigned int)data_size );
+        nxft_trace( "[NXFONT] map_font_ok path=%s size=%u read=%llu", unix_name, (unsigned int)data_size,
+                    data_ptr == tables.data ? tables.read : (unsigned long long)data_size );
 #endif
     }
 
@@ -1681,6 +1728,10 @@ static void freetype_load_fonts(void)
     load_mac_fonts();
 #elif defined(__ANDROID__)
     ReadFontDir("/system/fonts", TRUE);
+#endif
+#ifdef __SWITCH__
+    /* font.c has read C:\windows\fonts and share/wine/fonts by now. */
+    font_tables_report();
 #endif
 }
 
