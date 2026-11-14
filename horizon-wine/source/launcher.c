@@ -4285,13 +4285,25 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
 
 /* A program started from the file browser and left out of the library: a
  * setup, a patch, a tool. It runs with the settings a new game would have,
- * or its own if it already has a file of them. */
+ * or its own if it already has a file of them. Chosen through a shortcut or
+ * a batch file, it gets the arguments that gives it, kept beside it as Add
+ * Game keeps them (NAME.args.txt, which is where the runtime reads a
+ * program's arguments), unless it has its own already. */
 static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size )
 {
     struct program program;
+    char args[LAUNCHER_SHORTCUT_TEXT], args_path[512];
     int index;
 
-    if ((index = find_program( l, path )) >= 0) return start_program( l, &l->programs[index], target, size );
+    snprintf( args, sizeof(args), "%s", picked_args );
+    if (args[0] && launcher_args_path( path, args_path, sizeof(args_path) ) && !file_exists( args_path ) &&
+        write_line( args_path, args ))
+        launcher_log( "[LAUNCHER] Arguments of %s: %s", path, args );
+    if ((index = find_program( l, path )) >= 0)
+    {
+        if (args[0]) load_program_settings( l, &l->programs[index] );
+        return start_program( l, &l->programs[index], target, size );
+    }
     if (!describe_program( l, &program, path ))
     {
         ui_message( &l->ui, title, "Autorun cannot run this executable." );

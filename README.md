@@ -129,7 +129,8 @@ copies.
 2. In Autorun, press **+** -> **Add game** and choose the game's `.exe`.
    A shortcut (`.lnk`) or a batch file (`.bat`, `.cmd`) kept with the game's
    files can be chosen instead: the program it starts is added, with the
-   arguments it gives it.
+   arguments it gives it. **+ -> Run a program once** takes one the same
+   way, and starts its program with those arguments.
 3. Press **A** to play.
 
 Adding a game gives it DXVK, which draws Direct3D through the Switch's Vulkan

@@ -140,6 +140,41 @@ fi
 rm -f "$card/switch/wine/launcher-library-v2.ini" "$card/switch/wine/target.txt"
 echo "launcher host run: + Run a program once starts it without adding it"
 
+# Run once through a batch file: the program it starts, with its arguments
+# kept beside it (NAME.args.txt, as Add Game keeps them), still out of the
+# library. On a card of its own, so the runs below see no arguments file.
+batcard="$build/card-bat/sdmc:"
+mkdir -p "$batcard/switch/wine/drive_c/Game"
+ln -s "$notepad" "$batcard/switch/wine/drive_c/Game/game.exe"
+printf '@echo off\r\ncd /d "%%~dp0"\r\nstart "" game.exe -windowed -nosound\r\n' > "$batcard/switch/wine/drive_c/Game/play.bat"
+cat > "$build/bat-script.txt" <<SCRIPT
+wait 10
+key plus
+wait 3
+key down
+wait 2
+key a
+wait 3
+key a
+wait 3
+key a
+wait 3
+key down
+wait 2
+key a
+wait 5
+SCRIPT
+( cd "$build/card-bat" && SDL_VIDEODRIVER=dummy "$build/launcher_host" "$font" "$build/bat-script.txt" \
+    > "$build/bat-out.txt" 2>&1 ) || { cat "$build/bat-out.txt"; exit 1; }
+grep -q "launcher returned 1 target 'sdmc:/switch/wine/drive_c/Game/game.exe'" "$build/bat-out.txt" || {
+    cat "$build/bat-out.txt"; exit 1; }
+grep -qx -- "-windowed -nosound" "$batcard/switch/wine/drive_c/Game/game.args.txt" || {
+    cat "$build/bat-out.txt"; exit 1; }
+if [ -f "$batcard/switch/wine/launcher-library-v2.ini" ] && grep -q '^\[game ' "$batcard/switch/wine/launcher-library-v2.ini"; then
+    cat "$batcard/switch/wine/launcher-library-v2.ini"; exit 1
+fi
+echo "launcher host run: + Run a program once through a batch file starts its program with its arguments"
+
 # An empty explicit catalog must stay empty even though drive_c contains several
 # executables. Add OpenTTD through the browser, verify that adding did not launch
 # it, then open its options with Y and start it from there. The browser asks
