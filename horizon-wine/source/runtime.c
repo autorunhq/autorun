@@ -305,6 +305,9 @@ static void runtime_report_swap_io(void)
 
 static volatile int stall_watch_quit;
 static int stall_watch_running;
+/* Set once the program is about to start: the launcher draws no frame the
+ * watch counts, and while someone picks a game there is no thread to look at. */
+static int stall_watch_armed;
 static Thread stall_watch_thread;
 
 /* Flushing each line to the SD card serialized every thread behind the file
@@ -542,7 +545,11 @@ static void stall_watch( void *arg )
                  (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
                  wine_nx_compositor_frames_fast() +
                  (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
-        if (frames != last_frames) { quiet = 0; reported = 0; }
+        if (frames != last_frames || !__atomic_load_n( &stall_watch_armed, __ATOMIC_ACQUIRE ))
+        {
+            quiet = 0;
+            reported = 0;
+        }
         else quiet++;
         last_frames = frames;
         /* Ten seconds without a frame. A game loading a level does that too, so
@@ -5770,6 +5777,7 @@ int main( int argc, char **argv )
     log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
               wine_nx_yield_backoff ? ": after 2 ms of quick Sleep(0) or SwitchToThread, each sleeps 100 us" : "" );
     log_line( "[TARGET] %s", target );
+    __atomic_store_n( &stall_watch_armed, 1, __ATOMIC_RELEASE );
     if (wine_nx_fpslocker && !runtime_components_run) wine_nx_saltynx_start();
 
     status = runtime_target_machine( target, &target_machine );
