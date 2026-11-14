@@ -79,14 +79,28 @@ if [ "$flavour" = experimental ]; then
     echo "FEX: $tried experimental patches applied"
 fi
 
+# Carafe's build is compiled for any ARM64 CPU and without link-time
+# optimization, and stays so. The experimental one is compiled for the
+# console's CPU, a Cortex-A57 (as the Proton builds for the Switch do,
+# github.com/Azkali/proton-arm64-a57), and with FEX's own default of link-time
+# optimization: both make FEX's own code faster, the translator and the
+# helpers translated code calls, not the code it emits.
+tune=none
+lto=OFF
+if [ "$flavour" = experimental ]; then
+    tune=cortex-a57
+    lto=ON
+fi
+
 # Newer CMake refuses the old minimum versions some of FEX's externals name.
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake -S "$src" -B "$build" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$src/Data/CMake/toolchain_mingw.cmake" \
     -DMINGW_TRIPLE=aarch64-w64-mingw32 -DCMAKE_BUILD_TYPE=Release \
     -DOVERRIDE_VERSION=FEX-2609 -DOVERRIDE_HASH="$revision" \
-    -DENABLE_LTO=OFF -DBUILD_TESTING=OFF -DBUILD_FEXCONFIG=OFF \
-    -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF -DENABLE_OFFLINE_TELEMETRY=OFF -DTUNE_CPU=none \
+    -DENABLE_LTO=$lto -DBUILD_TESTING=OFF -DBUILD_FEXCONFIG=OFF \
+    -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF -DENABLE_OFFLINE_TELEMETRY=OFF -DTUNE_CPU=$tune \
     -DFEX_HORIZON=ON -DFEX_HORIZON_ABI_DIR="$horizon_wine/fex"
 cmake --build "$build" --target wow64fex -j "${WINE_NX_JOBS:-4}"
 ls -l "$build/Bin/libwow64fex.dll"
+echo "FEX: built for CPU \"$tune\", link-time optimization $lto, preserve_all $(grep -q '^HAS_CLANG_PRESERVE_ALL:INTERNAL=1' "$build/CMakeCache.txt" 2>/dev/null && grep -q 'CLANG_MINIMUM_VERSION' "$src/CMakeLists.txt" && echo on || echo off)"

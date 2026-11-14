@@ -132,7 +132,7 @@ jobs:
             gh release create "$tag" "$asset" --target "$GITHUB_SHA" --latest=false \
               --title "FEX, ${{ matrix.title }} $version" --notes "$notes"
           fi
-          echo "::notice::released $tag"
+          echo "::notice::released $tag: $(grep -m 1 '^FEX: built for' "$RUNNER_TEMP/build.log" | cut -c6-)"
 
   dxvk:
     name: DXVK

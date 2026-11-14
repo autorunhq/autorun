@@ -10,6 +10,13 @@ runs on it only when its settings say so: **Game settings, Emulation, FEX
 build, Experimental** (`fex-build=experimental`). Carafe's build and the games
 set to it are not touched by anything here.
 
+## What each version tries
+
+| Version | On top of Carafe's `fex=2609-1` |
+| --- | --- |
+| `2609-1` | Nothing: Carafe's build under another name. |
+| `2609-2` | FEX's own code compiled for the console's CPU (`-mcpu=cortex-a57`) and with link-time optimization, FEX's default. No patch: the translated code is the same, the translator and its helpers are faster. |
+
 To try something:
 
 1. Add a patch against the tree the Carafe series leaves, named like those
