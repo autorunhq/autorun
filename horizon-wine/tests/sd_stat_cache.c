@@ -141,9 +141,53 @@ static void test_impossible_names(void)
     sd_stat_forget_all( &cache );
 }
 
+/* Doom 3's loose files: under a directory the card said is not there, every
+ * path is not there, however it is spelled, until that directory is made. */
+static void test_missing_parent(void)
+{
+    static struct sd_stat_cache cache;
+    struct stat got, dir = {0};
+    int error = 0;
+
+    dir.st_mode = S_IFDIR | 0777;
+    sd_stat_store( &cache, "sdmc:/Roms/Doom 3/base", &dir, 0 );
+    sd_stat_store( &cache, "sdmc:/Roms/Doom 3/base/textures", NULL, ENOENT );
+    assert( sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base/textures/object/bluetex4espec.tga", &got, &error ) &&
+            error == ENOENT );
+    error = 0;
+    assert( sd_stat_lookup( &cache, "/roms//DOOM 3/Base/Textures/a.tga", &got, &error ) && error == ENOENT );
+    assert( sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base/textures/", &got, &error ) && error == ENOENT );
+    /* Beside it, or a name it begins, is another path. */
+    assert( !sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base/texturesX/a.tga", &got, &error ) );
+    assert( !sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base/pak000.pk4", &got, &error ) );
+    assert( sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base", &got, &error ) && !error && S_ISDIR( got.st_mode ) );
+    /* A file that is there says nothing of what is under it. */
+    sd_stat_store( &cache, "/Roms/Doom 3/base/default.cfg", &dir, 0 );
+    assert( !sd_stat_lookup( &cache, "/Roms/Doom 3/base/default.cfg/x", &got, &error ) );
+    /* Made (mkdir forgets its path): what is under it is asked again. */
+    sd_stat_forget( &cache, "sdmc:/Roms/Doom 3/base/textures" );
+    assert( !sd_stat_lookup( &cache, "sdmc:/Roms/Doom 3/base/textures/object/bluetex4espec.tga", &got, &error ) );
+    /* A missing root says nothing; a path too long to take apart is asked. */
+    sd_stat_store( &cache, "sdmc:/", NULL, ENOENT );
+    assert( !sd_stat_lookup( &cache, "sdmc:/switch/x", &got, &error ) );
+    {
+        char path[700];
+
+        sd_stat_store( &cache, "/deep", NULL, ENOENT );
+        memset( path, 'a', sizeof(path) - 1 );
+        path[sizeof(path) - 1] = 0;
+        memcpy( path, "/deep/", 6 );
+        assert( !sd_stat_lookup( &cache, path, &got, &error ) );
+        path[100] = 0;
+        assert( sd_stat_lookup( &cache, path, &got, &error ) && error == ENOENT );
+    }
+    sd_stat_forget_all( &cache );
+}
+
 int main(void)
 {
     test_impossible_names();
+    test_missing_parent();
     test_missing_files_asked_again();
     test_path_spellings();
     test_forget();
