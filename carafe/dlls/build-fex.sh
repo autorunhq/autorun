@@ -77,6 +77,12 @@ if [ "$flavour" = experimental ]; then
         echo "FEX: applied experimental $(basename "$patch")"
     done
     echo "FEX: $tried experimental patches applied"
+    # The disk cache of translated code is keyed by this (patch 0003): code
+    # one experimental build stored is not run by another.
+    experimental_version="$(python3 "$here/package.py" fex-experimental-version)"
+    printf '#pragma once\n#define FEX_EXPERIMENTAL_BUILD "%s"\n' "$experimental_version" \
+        > "$src/FEXCore/Source/Interface/Core/ExperimentalBuild.h"
+    echo "FEX: disk cache keyed for experimental build $experimental_version"
 fi
 
 # Carafe's build is compiled for any ARM64 CPU, and stays so. The experimental
