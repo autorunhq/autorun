@@ -88,3 +88,16 @@ launcher = (hw / 'source/launcher.c').read_text()
 assert 'ROW_GL_THREAD' in launcher and 'p->settings.gl_thread = action == UI_ACTION_RESET ? 0 : !p->settings.gl_thread;' in launcher
 print('gl-thread: the nxvk patch starts glthread on mesa_glthread and finishes it before swaps, make-current and '
       'destruction; build-nxvk.sh applies it; the setting reaches nxvk only')
+
+# 0002: a Mesa queue signals a condition only when a thread waits on it. libnx's
+# signal is a system call whether or not anyone waits, one for every job handed
+# to glthread and to Zink's thread, and again for every job they take.
+queue = (hw / 'nxvk-patches/0002-util-queue-signal-waiters-only.patch').read_text()
+assert sorted(re.findall(r'^\+\+\+ b/(\S+)', queue, re.M)) == ['src/util/u_queue.c', 'src/util/u_queue.h']
+for cond in ('has_queued', 'has_space'):
+    # Counted around the wait, under the queue's lock, and asked before the signal.
+    assert re.search(rf'\+\s+queue->{cond}_waiters\+\+;\n\s+cnd_wait\(&queue->{cond}_cond, &queue->lock\);\n'
+                     rf'\+\s+queue->{cond}_waiters--;', queue), cond
+    assert re.search(rf'\+\s+if \(queue->{cond}_waiters\)\n\+\s+cnd_signal\(&queue->{cond}_cond\);', queue), cond
+assert 'cnd_broadcast' not in queue  # ending the queue's threads still wakes them all
+print('gl-thread: Mesa queues signal only waiting threads')

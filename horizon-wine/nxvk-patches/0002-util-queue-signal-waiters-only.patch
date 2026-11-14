@@ -1,0 +1,60 @@
+diff --git a/src/util/u_queue.c b/src/util/u_queue.c
+index 6c13521..9cdd8f8 100644
+--- a/src/util/u_queue.c
++++ b/src/util/u_queue.c
+@@ -274,7 +274,9 @@ util_queue_thread_func(void *input)
+       /* wait if the queue is empty */
+       while (thread_index < queue->num_threads && queue->num_queued == 0) {
+          util_perfetto_thread_flush();
++         queue->has_queued_waiters++;
+          cnd_wait(&queue->has_queued_cond, &queue->lock);
++         queue->has_queued_waiters--;
+       }
+ 
+       /* only kill threads that are above "num_threads" */
+@@ -288,7 +290,8 @@ util_queue_thread_func(void *input)
+       queue->read_idx = (queue->read_idx + 1) % queue->max_jobs;
+ 
+       queue->num_queued--;
+-      cnd_signal(&queue->has_space_cond);
++      if (queue->has_space_waiters)
++         cnd_signal(&queue->has_space_cond);
+       if (job.job)
+          queue->total_jobs_size -= job.job_size;
+       mtx_unlock(&queue->lock);
+@@ -609,7 +612,9 @@ util_queue_add_job_locked(struct util_queue *queue,
+          /* Wait until there is a free slot. */
+          while (queue->num_queued == queue->max_jobs) {
+             util_perfetto_thread_flush();
++            queue->has_space_waiters++;
+             cnd_wait(&queue->has_space_cond, &queue->lock);
++            queue->has_space_waiters--;
+          }
+       }
+    }
+@@ -627,7 +632,8 @@ util_queue_add_job_locked(struct util_queue *queue,
+    queue->total_jobs_size += ptr->job_size;
+ 
+    queue->num_queued++;
+-   cnd_signal(&queue->has_queued_cond);
++   if (queue->has_queued_waiters)
++      cnd_signal(&queue->has_queued_cond);
+    if (!locked)
+       mtx_unlock(&queue->lock);
+ }
+diff --git a/src/util/u_queue.h b/src/util/u_queue.h
+index 7cbb89c..f037776 100644
+--- a/src/util/u_queue.h
++++ b/src/util/u_queue.h
+@@ -227,6 +227,11 @@ struct util_queue {
+    bool create_threads_on_demand;
+    cnd_t has_queued_cond;
+    cnd_t has_space_cond;
++   /* Threads waiting on each condition, counted under the lock: a signal
++    * nobody waits for is a system call on Horizon, one for every job.
++    */
++   unsigned has_queued_waiters;
++   unsigned has_space_waiters;
+    thrd_t *threads;
+    unsigned flags;
+    int num_queued;
