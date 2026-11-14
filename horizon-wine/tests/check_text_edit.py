@@ -139,6 +139,14 @@ int main( void )
     assert( !launcher_text_setting( "=1", &key, &key_len, &value ) );
     assert( !launcher_text_setting( "seta r_mode \"4\"", &key, &key_len, &value ) );
 
+    /* Characters as the keyboard counts its 500: UTF-16 code units, not bytes. */
+    assert( launcher_text_utf16_length( "" ) == 0 );
+    assert( launcher_text_utf16_length( "Width=1280" ) == 10 );
+    assert( launcher_text_utf16_length( "\xc5\xbelu\xc5\xa5ou\xc4\x8dk\xc3\xbd" ) == 9 );     /* žluťoučký: 13 bytes */
+    assert( launcher_text_utf16_length( "\xe6\x97\xa5\xe6\x9c\xac" ) == 2 );                 /* 日本: 6 bytes */
+    assert( launcher_text_utf16_length( "\xf0\x9d\x84\x9e" ) == 2 );                          /* 𝄞: a surrogate pair */
+    assert( launcher_text_utf16_length( "a\xff" "b" ) == 3 );                                   /* a byte that is not UTF-8 */
+
     {
         static const unsigned char before[] = ''' + c_bytes(changed_before)[0] + r''', after[] = ''' + c_bytes(changed_after)[0] + r''';
         static const unsigned char ansi_before[] = ''' + c_bytes(ansi_before)[0] + r''', ansi_after[] = ''' + c_bytes(ansi_after)[0] + r''';
@@ -165,6 +173,10 @@ edit = (source / 'launcher_text_edit.c').read_text()
 for extension in ('".ini"', '".cfg"', '".txt"'):
     assert extension in edit, extension
 assert '".wine-nx.txt"' in edit
+# A line is too long for the keyboard by its characters, and what the keyboard
+# gives back has room for 500 of any kind.
+assert 'launcher_text_utf16_length( text ) <= TEXT_EDIT_PROMPT' in edit
+assert edit.count('[TEXT_EDIT_BUFFER]') == 2 and 'TEXT_EDIT_PROMPT + 1]' not in edit
 # Saved beside the file first, then put in its place.
 assert '%s.autorun-new' in edit and 'rename( fresh, path )' in edit
 

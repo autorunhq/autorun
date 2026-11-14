@@ -93,6 +93,24 @@ static inline size_t launcher_text_utf8_put( char *out, uint32_t c )
     return 4;
 }
 
+/* The characters of a UTF-8 line as the console's keyboard counts them: UTF-16
+ * code units, two for a character past U+FFFF, one for a byte that is not
+ * UTF-8. */
+static inline size_t launcher_text_utf16_length( const char *line )
+{
+    const unsigned char *text = (const unsigned char *)line;
+    size_t size = strlen( line ), pos = 0, units = 0;
+
+    while (pos < size)
+    {
+        int32_t c = launcher_text_utf8_next( text, size, &pos );
+
+        if (c < 0) pos++;
+        units += c >= 0x10000 ? 2 : 1;
+    }
+    return units;
+}
+
 static inline void launcher_text_free( struct launcher_text *text )
 {
     for (int i = 0; i < text->count; i++) free( text->lines[i] );

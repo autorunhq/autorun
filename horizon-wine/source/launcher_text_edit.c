@@ -21,8 +21,11 @@
 
 #define TEXT_EDIT_MAX_SIZE  (2u << 20)
 #define TEXT_EDIT_MAX_LINES 8000
-/* What the keyboard takes (launcher_platform_prompt: swkbd's 500 characters). */
+/* What the keyboard takes (launcher_platform_prompt: swkbd's 500 characters,
+ * counted in UTF-16 code units), and the UTF-8 room that many need: three
+ * bytes a unit at most, a character past U+FFFF being two units in four. */
 #define TEXT_EDIT_PROMPT    500
+#define TEXT_EDIT_BUFFER    (TEXT_EDIT_PROMPT * 3 + 1)
 
 int launcher_text_edit_offers( const char *name )
 {
@@ -153,7 +156,7 @@ static void one_line( char *text )
 
 static int too_long( struct ui *ui, const char *text )
 {
-    if (strlen( text ) <= TEXT_EDIT_PROMPT) return 0;
+    if (launcher_text_utf16_length( text ) <= TEXT_EDIT_PROMPT) return 0;
     ui_message( ui, "Text file", "This line is longer than the keyboard takes (500 characters), so it cannot be "
                 "changed here. Edit it on a computer." );
     return 1;
@@ -164,7 +167,7 @@ static int too_long( struct ui *ui, const char *text )
 static int edit_line( struct ui *ui, struct launcher_text *text, int index, int whole )
 {
     const char *line = text->lines[index];
-    char edited[TEXT_EDIT_PROMPT + 1], header[100], *joined;
+    char edited[TEXT_EDIT_BUFFER], header[100], *joined;
     size_t key, key_len, value;
     int ok;
 
@@ -194,7 +197,7 @@ static int line_menu( struct ui *ui, struct launcher_text *text, int *selection 
 {
     static const char *const items[] = { "Change the whole line", "Add a line below", "Add a line above",
                                          "Remove this line" };
-    char added[TEXT_EDIT_PROMPT + 1];
+    char added[TEXT_EDIT_BUFFER];
     int index = *selection, choice = ui_menu( ui, "Line", items, 4, 0 ), at;
 
     switch (choice)
