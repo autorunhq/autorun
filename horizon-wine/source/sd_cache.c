@@ -77,6 +77,9 @@ struct sd_cache_fill_ctx
     void *fd;
 };
 
+/* What this thread has read from the card, so a read can tell what it cost. */
+static __thread unsigned long long sd_cache_thread_card;
+
 static ssize_t sd_cache_base_read( struct _reent *r, void *fd, char *ptr, size_t len )
 {
     u64 start = armGetSystemTick();
@@ -96,8 +99,67 @@ static ssize_t sd_cache_base_read( struct _reent *r, void *fd, char *ptr, size_t
 
     __atomic_add_fetch( &wine_nx_sd_reads, 1, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_sd_read_ns, armTicksToNs( armGetSystemTick() - start ), __ATOMIC_RELAXED );
-    if (ret > 0) __atomic_add_fetch( &wine_nx_sd_bytes, (unsigned long long)ret, __ATOMIC_RELAXED );
+    if (ret > 0)
+    {
+        __atomic_add_fetch( &wine_nx_sd_bytes, (unsigned long long)ret, __ATOMIC_RELAXED );
+        sd_cache_thread_card += (unsigned long long)ret;
+    }
     return ret;
+}
+
+/* A read of len bytes of fd, which cost the card what this thread read since
+ * card_before. Called with the lock held. */
+static void sd_cache_account_locked( void *fd, size_t len, unsigned long long card_before )
+{
+    struct sd_cache_file *file = sd_cache_find( sd_cache_files, fd );
+
+    if (!file) return;
+    file->asked += len;
+    file->card += sd_cache_thread_card - card_before;
+}
+
+/* [SDFILES]: the open files the card gave the most to since the last report,
+ * against what the program asked of them. The card can give several times
+ * what a game asks for (whole chunks for scattered small reads, chunks read
+ * again after the file's few lines moved on): Doom 3 took 1.75 GB from it
+ * while its level loaded for 305 MB asked. Called by the [PROGRESS] report. */
+void wine_nx_sd_cache_report_files( void )
+{
+    struct { char name[48]; unsigned long long asked, card; } top[3];
+    unsigned long long total = 0;
+    struct sd_cache_file *file;
+    unsigned int count = 0, i, j;
+    char line[320];
+    int len;
+
+    if (!sd_cache_base) return;
+    memset( top, 0, sizeof(top) );
+    pthread_mutex_lock( &sd_cache_mutex );
+    for (file = sd_cache_files; file; file = file->next)
+    {
+        unsigned long long card = file->card - file->card_told, asked = file->asked - file->asked_told;
+        const char *name = file->path ? strrchr( file->path, '/' ) : NULL;
+
+        file->card_told = file->card;
+        file->asked_told = file->asked;
+        total += card;
+        if (!card) continue;
+        for (i = 0; i < count && top[i].card >= card; i++) ;
+        if (i >= 3) continue;
+        for (j = count < 3 ? count : 2; j > i; j--) top[j] = top[j - 1];
+        snprintf( top[i].name, sizeof(top[i].name), "%s", name ? name + 1 : file->path ? file->path : "?" );
+        top[i].asked = asked;
+        top[i].card = card;
+        if (count < 3) count++;
+    }
+    pthread_mutex_unlock( &sd_cache_mutex );
+    /* Only when the card was busy: 16 MB or more since the last report. */
+    if (!count || total < (16ull << 20)) return;
+    len = snprintf( line, sizeof(line), "[SDFILES] the card gave open files %llu MB:", total >> 20 );
+    for (i = 0; i < count && len > 0 && (size_t)len < sizeof(line); i++)
+        len += snprintf( line + len, sizeof(line) - len, "%s %s %llu MB for %llu MB asked", i ? ";" : "",
+                         top[i].name, top[i].card >> 20, top[i].asked >> 20 );
+    wine_nx_runtime_trace( line );
 }
 
 /* The game's own memory comes first: the cache grows into the heap left free
@@ -396,6 +458,7 @@ static void sd_cache_report_short_read( struct _reent *r, void *fd, long long go
 static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t len )
 {
     struct sd_cache_fill_ctx ctx = { r, fd };
+    unsigned long long card_before = sd_cache_thread_card;
     struct sd_cache_file *file;
     unsigned int fills = 0;
     long long got = SD_CACHE_BYPASS;
@@ -415,6 +478,12 @@ static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t
         ssize_t direct = sd_cache_base_read( r, fd, ptr, len );
 
         if (len && (size_t)direct != len) sd_cache_report_short_read( r, fd, direct, len );
+        if (len)
+        {
+            pthread_mutex_lock( &sd_cache_mutex );
+            sd_cache_account_locked( fd, len, card_before );
+            pthread_mutex_unlock( &sd_cache_mutex );
+        }
         return direct;
     }
 
@@ -424,6 +493,11 @@ static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t
         (pos = sd_cache_base->seek_r( r, fd, 0, SEEK_CUR )) != -1)
     {
         got = sd_cache_read( file, &sd_cache_pool, pos, copy, len, sd_cache_fill, &ctx, &fills );
+        if (got != SD_CACHE_BYPASS)
+        {
+            file->asked += len;
+            file->card += sd_cache_thread_card - card_before;
+        }
         /* The file position ends after the bytes returned, as for a plain read. */
         sd_cache_base->seek_r( r, fd, got >= 0 ? pos + got : pos, SEEK_SET );
     }
@@ -440,6 +514,9 @@ static ssize_t sd_cache_read_file( struct _reent *r, void *fd, char *ptr, size_t
         ssize_t direct = sd_cache_base_read( r, fd, ptr, len );
 
         if ((size_t)direct != len) sd_cache_report_short_read( r, fd, direct, len );
+        pthread_mutex_lock( &sd_cache_mutex );
+        sd_cache_account_locked( fd, len, card_before );
+        pthread_mutex_unlock( &sd_cache_mutex );
         return direct;
     }
     if ((size_t)got != len) sd_cache_report_short_read( r, fd, got, len );

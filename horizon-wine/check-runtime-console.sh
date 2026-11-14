@@ -33,6 +33,12 @@ flags="-std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-f
 "$build/sd_stat_cache"
 "$build/sd_write_buffer"
 "$build/sd_read_cache"
+# The device over libnx's sdmc (source/sd_cache.c) with a card in memory.
+# mallinfo's fields are int on the host and size_t on the Switch, where
+# glibc also calls it deprecated: those two warnings are the host's.
+"${CC:-clang}" $flags -Wno-deprecated-declarations -Wno-sign-compare -pthread \
+    -I"$root/horizon-wine/tests/sd-cache-shims" "$root/horizon-wine/tests/sd_cache_device.c" -o "$build/sd_cache_device"
+"$build/sd_cache_device"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/box64_code_arena.c" -o "$build/box64_code_arena"
 "$build/box64_code_arena"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/horizon_registry.c" -o "$build/registry"

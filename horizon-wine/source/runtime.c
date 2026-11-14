@@ -2280,9 +2280,11 @@ static void runtime_report_interpreter(void)
         {
             extern void wine_nx_thread_report( void );
             extern void horizon_memory_pool_stats( char *buffer, size_t size );
+            extern void wine_nx_sd_cache_report_files( void ) __attribute__((weak));
             char pool_stats[256];
             horizon_memory_pool_stats( pool_stats, sizeof(pool_stats) );
             log_line( "%s", pool_stats );
+            if (&wine_nx_sd_cache_report_files) wine_nx_sd_cache_report_files();
             wine_nx_thread_report();
         }
         return;
