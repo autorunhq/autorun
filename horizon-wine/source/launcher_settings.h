@@ -206,6 +206,9 @@ struct launcher_settings
     /* A 32-bit program gets addresses up to 4 GB, as if its file had been
      * patched large address aware (dlls/ntdll/unix/virtual.c). */
     int large_address_aware;
+    /* An OpenGL program is shown only the extensions a driver of the Quake 2
+     * years had (dlls/opengl32/unix_wgl.c). */
+    int gl_old_extensions;
     /* Carafe's two ways with threads, off unless asked for: its orchestrator
      * lays the busy threads out over the cores (source/orchestrator.c), and a
      * program thread waits for a runtime lock one priority higher
@@ -453,6 +456,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
     settings->large_address_aware = launcher_setting_state( kv, "large-address-aware" ) == 1;
+    settings->gl_old_extensions = launcher_setting_state( kv, "gl-old-extensions" ) == 1;
     settings->orchestrator = launcher_setting_state( kv, "orchestrator" ) == 1;
     settings->lock_boost = launcher_setting_state( kv, "lock-boost" ) == 1;
     settings->server_pool = launcher_setting_state( kv, "server-pool" ) == 1;
@@ -568,6 +572,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "large-address-aware", settings->large_address_aware ? "1" : NULL ) &&
+           launcher_kv_set( kv, "gl-old-extensions", settings->gl_old_extensions ? "1" : NULL ) &&
            launcher_kv_set( kv, "orchestrator", settings->orchestrator ? "1" : NULL ) &&
            launcher_kv_set( kv, "lock-boost", settings->lock_boost ? "1" : NULL ) &&
            launcher_kv_set( kv, "server-pool", settings->server_pool ? "1" : NULL ) &&

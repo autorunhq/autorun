@@ -1808,7 +1808,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GL_OLD_EXTENSIONS, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LARGE_ADDRESS, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
@@ -2684,6 +2684,14 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                   state_text( p->settings.mode_emulation > 0 ? 1 : p->settings.mode_emulation < 0 ? 0 : -1,
                               l->options->mode_emulation, "On", "Off", buffer, sizeof(buffer) ) );
 
+        ADD_ROW( ROW_GL_OLD_EXTENSIONS, SECTION_GRAPHICS, "Old OpenGL extension list",
+                 "Shows an OpenGL game only the extensions a graphics card of its day had. For a game of the "
+                 "Quake 2 years that crashes as it starts drawing, because today's list overruns the room it "
+                 "keeps for it (Kingpin: Life of Crime). Leave it off for anything newer." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.gl_old_extensions;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.gl_old_extensions ? "Enabled" : "Disabled" );
+
         if (l->options->vulkan)
         {
             char nxvk[512];
@@ -3168,6 +3176,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 
         case ROW_LOCK_BOOST:
             p->settings.lock_boost = action == UI_ACTION_RESET ? 0 : !p->settings.lock_boost;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_GL_OLD_EXTENSIONS:
+            p->settings.gl_old_extensions = action == UI_ACTION_RESET ? 0 : !p->settings.gl_old_extensions;
             save_program_settings( l, p );
             break;
 

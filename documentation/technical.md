@@ -393,6 +393,12 @@ changes, and fails if the pinned text moves.
   mark is `registry/components-1.done`, so a reset registry runs it again.
 - A 32-bit address space leaves a program about 2 GiB of addresses and caps the
   whole process at 2 GiB of memory.
+- A game of the Quake 2 years can crash as it starts drawing: it copies the
+  OpenGL extension list into a buffer sized for the drivers of its day, and
+  Mesa's list overruns it (Kingpin: a write past the top of its stack, then
+  jumps to 0x745f6c69, the letters "il_t"). **Old OpenGL extension list** in
+  the game's settings (`gl-old-extensions=1`) shows the program the short list
+  such a driver had; `[NXGL] old extension list` in the log says how many.
 - A 32-bit program whose image is not large address aware is given addresses
   below 2 GiB only. **Large address aware** in the game's settings
   (`large-address-aware=1`) gives it those up to 4 GiB without patching the

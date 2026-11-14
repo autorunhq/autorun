@@ -593,6 +593,57 @@ static BOOL driver_maps_fit_wow64(void)
 }
 #endif
 
+#ifdef __SWITCH__
+/* horizon-wine/source/runtime.c: gl-old-extensions=1 in a program's settings.
+ * A game of the Quake 2 years copies glGetString( GL_EXTENSIONS ) into a
+ * buffer sized for the drivers of its day; today's list is several times that
+ * and runs over its stack (Kingpin: a write past the top of the stack, then
+ * its handlers jumping to the text of an extension's name). The program is
+ * then shown only the extensions such a driver had. What Wine itself uses is
+ * not touched, and the functions of the OpenGL version stay. */
+extern int wine_nx_gl_old_extensions __attribute__((weak));
+
+static const char *const old_gl_extensions[] =
+{
+    "GL_ARB_multitexture", "GL_ARB_texture_env_add", "GL_ARB_texture_env_combine", "GL_ARB_texture_env_dot3",
+    "GL_ARB_texture_compression", "GL_ARB_texture_cube_map", "GL_ARB_texture_border_clamp",
+    "GL_ARB_texture_mirrored_repeat", "GL_ARB_transpose_matrix", "GL_ARB_multisample", "GL_ARB_point_parameters",
+    "GL_ARB_depth_texture", "GL_ARB_shadow", "GL_ARB_window_pos",
+    "GL_EXT_abgr", "GL_EXT_bgra", "GL_EXT_blend_color", "GL_EXT_blend_func_separate", "GL_EXT_blend_minmax",
+    "GL_EXT_blend_subtract", "GL_EXT_compiled_vertex_array", "GL_EXT_draw_range_elements", "GL_EXT_fog_coord",
+    "GL_EXT_multi_draw_arrays", "GL_EXT_packed_pixels", "GL_EXT_point_parameters", "GL_EXT_polygon_offset",
+    "GL_EXT_rescale_normal", "GL_EXT_secondary_color", "GL_EXT_separate_specular_color", "GL_EXT_stencil_wrap",
+    "GL_EXT_texture3D", "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_cube_map", "GL_EXT_texture_edge_clamp",
+    "GL_EXT_texture_env_add", "GL_EXT_texture_env_combine", "GL_EXT_texture_env_dot3",
+    "GL_EXT_texture_filter_anisotropic", "GL_EXT_texture_lod_bias", "GL_EXT_texture_object", "GL_EXT_vertex_array",
+    "GL_NV_blend_square", "GL_NV_fog_distance", "GL_NV_light_max_exponent", "GL_NV_texgen_reflection",
+    "GL_S3_s3tc", "GL_SGIS_generate_mipmap", "GL_SGIS_multitexture", "GL_SGIS_texture_edge_clamp",
+    "GL_SGIS_texture_lod",
+};
+
+static void keep_old_gl_extensions( struct opengl_client_context *client, const char *const *names )
+{
+    static int reported;
+    unsigned int i, j, kept = 0, had = 0;
+    char msg[160];
+
+    for (i = 0; i < WGL_FIRST_EXTENSION; i++)
+    {
+        if (!client->extensions[i]) continue;
+        had++;
+        for (j = 0; j < ARRAY_SIZE(old_gl_extensions); j++) if (!strcmp( names[i], old_gl_extensions[j] )) break;
+        if (j < ARRAY_SIZE(old_gl_extensions)) kept++;
+        else client->extensions[i] = FALSE;
+    }
+    if (&wine_nx_runtime_trace && !__atomic_exchange_n( &reported, 1, __ATOMIC_RELAXED ))
+    {
+        snprintf( msg, sizeof(msg), "[NXGL] old extension list (gl-old-extensions): the program is shown %u of the driver's %u extensions",
+                  kept, had );
+        wine_nx_runtime_trace( msg );
+    }
+}
+#endif
+
 static void init_client_context( TEB *teb, struct opengl_client_context *client, const struct opengl_context *ctx )
 {
 #define USE_GL_EXT(x) #x,
@@ -650,6 +701,9 @@ static void init_client_context( TEB *teb, struct opengl_client_context *client,
         }
     }
 
+#ifdef __SWITCH__
+    if (&wine_nx_gl_old_extensions && wine_nx_gl_old_extensions) keep_old_gl_extensions( client, extension_names );
+#endif
     for (i = 0; i < WGL_FIRST_EXTENSION; i++) if (client->extensions[i]) client->extension_array[count++] = i;
     if (client->extensions[WGL_EXT_extensions_string]) client->extension_array[count++] = WGL_EXT_extensions_string;
     if (client->extensions[WGL_EXT_swap_control])      client->extension_array[count++] = WGL_EXT_swap_control;

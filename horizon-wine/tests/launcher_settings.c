@@ -384,7 +384,7 @@ static void test_reset(void)
     char value[64];
 
     load_text( &kv, "title=My Game\nhidden=1\ngame-fix-skip=vampire 3\nbutton-layout=xbox\n"
-                    "sync=horizon\ncpu=box64\nfex-build=carafe\nfour-cores=0\nlazy-file-views=1\nlarge-address-aware=1\n"
+                    "sync=horizon\ncpu=box64\nfex-build=carafe\nfour-cores=0\nlazy-file-views=1\nlarge-address-aware=1\ngl-old-extensions=1\n"
                     "orchestrator=1\nlock-boost=1\nserver-pool=1\nwindows=framebuffer\npicture=edges\n"
                     "mode-emulation=0\ngraphics-driver=zink\nd3d=wine\ndxvk-hud=fps\nvsync=0\nlsfg=1\n"
                     "large-pages=1\nyield-backoff=0\nfpslocker=0\nverbose=1\nprofile=0\nFEX_TSOENABLED=1\n" );
@@ -402,7 +402,7 @@ static void test_reset(void)
     assert( launcher_kv_get( &kv, "FEX_TSOENABLED", value, sizeof(value) ) );  /* the launcher's to clear */
     assert( !strstr( kv.text, "sync=" ) && !strstr( kv.text, "orchestrator" ) && !strstr( kv.text, "mode-emulation" ) &&
             !strstr( kv.text, "large-pages" ) && !strstr( kv.text, "yield-backoff" ) && !strstr( kv.text, "verbose" ) &&
-            !strstr( kv.text, "fpslocker" ) && !strstr( kv.text, "large-address" ) &&
+            !strstr( kv.text, "fpslocker" ) && !strstr( kv.text, "large-address" ) && !strstr( kv.text, "gl-old" ) &&
             !strstr( kv.text, "d3d=" ) && !strstr( kv.text, "cpu=" ) && !strstr( kv.text, "lsfg" ) );
 
     /* An empty file stays empty but for what the defaults always write. */
