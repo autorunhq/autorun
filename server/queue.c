@@ -2475,6 +2475,14 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
     msg->wparam = vkey;
     msg->lparam = (flags << 16) | lparam | 1u /* repeat count */;
 
+    /* A low-level hook that answers for the key stops the message, not the
+     * key: on Windows the desktop's key state still says the key is down, and
+     * that state is what a program polling GetAsyncKeyState or - through it -
+     * GetKeyboardState and DirectInput reads. Recording it here, before the
+     * hook is asked, is what keeps a game whose input device has a hook
+     * installed from being unable to see a key pressed while it is not
+     * reading its messages. */
+    update_desktop_key_state( desktop, message_code, vkey );
     if (!(wait = send_hook_ll_message( desktop, msg, WH_KEYBOARD_LL, lparam | hook_vkey, sender )))
         queue_hardware_message( desktop, msg, 1 );
 

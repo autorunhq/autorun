@@ -178,6 +178,17 @@ enum launcher_d3d_renderer
     LAUNCHER_D3D_DXVK_VKD3D
 };
 
+enum launcher_graphics_driver
+{
+    LAUNCHER_GRAPHICS_NVC0,
+    LAUNCHER_GRAPHICS_ZINK,
+    LAUNCHER_GRAPHICS_NXVK,
+    LAUNCHER_GRAPHICS_COUNT
+};
+static const char *const launcher_graphics_labels[] =
+    { "mesa-switch (nvc0)", "mesa-switch (Zink)", "nxvk (Zink + NVK)" };
+static const char *const launcher_graphics_values[] = { NULL, "zink", "nxvk" };
+
 struct launcher_settings
 {
     char title[128];  /* empty: the title from the program's resources */
@@ -186,9 +197,39 @@ struct launcher_settings
     int profile;      /* the sampling profiler */
     int fast_sync;
     int fex;
+    /* Which FEX a 32-bit program runs on: 0 the DLL repository's, 1 the one
+     * with Carafe's patches, of fex_version or the newest installed. */
+    int fex_carafe;
+    char fex_version[32];
     int four_cores;
     int lazy_file_views;  /* views of files read from the card on demand */
+    /* A 32-bit program gets addresses up to 4 GB, as if its file had been
+     * patched large address aware (dlls/ntdll/unix/virtual.c). */
+    int large_address_aware;
+    /* Carafe's two ways with threads, off unless asked for: its orchestrator
+     * lays the busy threads out over the cores (source/orchestrator.c), and a
+     * program thread waits for a runtime lock one priority higher
+     * (source/carafe_lock_boost.c). */
+    int orchestrator;
+    int lock_boost;
+    /* Carafe's server thread pool: with Horizon synchronization, the program's
+     * threads share a few server threads instead of having one each
+     * (dlls/ntdll/unix/horizon.c). Off unless asked for. */
+    int server_pool;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
+    /* A display mode of the program's own: -1 the shared setting, 0 the whole
+     * picture with black bars, 1 filling the screen with its edges cropped,
+     * 2 stretched to it, 3 at its own size in the middle. */
+    int picture_mode;
+    /* win32u's emulation of a display mode the program asks for (its OpenGL
+     * drawn into a framebuffer object that an internal context blits to the
+     * window): 0 the shared setting, 1 on, -1 off. Zero is the shared setting
+     * so that settings nobody filled in leave it alone. */
+    int mode_emulation;
+    /* Which Mesa draws: mesa-switch with OpenGL through nvc0 (the default) or
+     * through Zink, or nxvk, Vulkan and OpenGL (through Zink) from another
+     * runtime on the card, wine-nx-runtime-nxvk.nro (source/runtime.c). */
+    enum launcher_graphics_driver graphics_driver;
     enum launcher_d3d_renderer d3d;
     enum dxvk_source dxvk_source;
     char vkd3d_version[32];
@@ -278,7 +319,8 @@ static inline const char *launcher_dxvk_directory( unsigned short machine, enum 
     {
         { "dxvk", "dxvk64" },
         { "dxvk-sarek", "dxvk-sarek64" },
-        { "dxvk-gplasync", "dxvk-gplasync64" }
+        { "dxvk-gplasync", "dxvk-gplasync64" },
+        { "dxvk-carafe", "dxvk-carafe64" }
     };
 
     if (source < 0 || source >= DXVK_SOURCE_COUNT) return NULL;
@@ -312,7 +354,7 @@ static inline int launcher_dxvk_vkd3d_compatible( enum dxvk_source source, const
     char *end, *minor_start;
     unsigned long major, minor;
 
-    if ((source != DXVK_SOURCE_OFFICIAL && source != DXVK_SOURCE_GPLASYNC) ||
+    if ((source != DXVK_SOURCE_OFFICIAL && source != DXVK_SOURCE_GPLASYNC && source != DXVK_SOURCE_CARAFE) ||
         !launcher_dxvk_version_valid( version )) return 0;
     major = strtoul( version, &end, 10 );
     if (end == version || *end != '.') return 0;
@@ -403,13 +445,42 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->profile = launcher_setting_state( kv, "profile" );
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = !launcher_kv_get( kv, "cpu", value, sizeof(value) ) || strcasecmp( value, "box64" );
+    settings->fex_carafe = launcher_kv_get( kv, "fex-build", value, sizeof(value) ) && !strcasecmp( value, "carafe" );
+    settings->fex_version[0] = 0;
+    if (settings->fex_carafe && launcher_kv_get( kv, "fex-version", value, sizeof(value) ) &&
+        launcher_dxvk_version_valid( value ))
+        memcpy( settings->fex_version, value, strlen( value ) + 1 );
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
+    settings->large_address_aware = launcher_setting_state( kv, "large-address-aware" ) == 1;
+    settings->orchestrator = launcher_setting_state( kv, "orchestrator" ) == 1;
+    settings->lock_boost = launcher_setting_state( kv, "lock-boost" ) == 1;
+    settings->server_pool = launcher_setting_state( kv, "server-pool" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
     {
         if (!strcasecmp( value, "framebuffer" )) settings->framebuffer = 1;
         else if (!strcasecmp( value, "compositor" )) settings->framebuffer = 0;
+    }
+    settings->picture_mode = -1;
+    if (launcher_kv_get( kv, "picture", value, sizeof(value) ))
+    {
+        if (!strcasecmp( value, "whole" )) settings->picture_mode = 0;
+        else if (!strcasecmp( value, "edges" )) settings->picture_mode = 1;
+        else if (!strcasecmp( value, "stretched" )) settings->picture_mode = 2;
+        else if (!strcasecmp( value, "own-size" )) settings->picture_mode = 3;
+    }
+    {
+        int emulation = launcher_setting_state( kv, "mode-emulation" );
+
+        settings->mode_emulation = emulation < 0 ? 0 : emulation ? 1 : -1;
+    }
+    settings->graphics_driver = LAUNCHER_GRAPHICS_NVC0;
+    if (launcher_kv_get( kv, "graphics-driver", value, sizeof(value) ) ||
+        launcher_kv_get( kv, "gl-driver", value, sizeof(value) ))  /* the key it had first */
+    {
+        if (!strcasecmp( value, "zink" )) settings->graphics_driver = LAUNCHER_GRAPHICS_ZINK;
+        else if (!strcasecmp( value, "nxvk" )) settings->graphics_driver = LAUNCHER_GRAPHICS_NXVK;
     }
     if (!launcher_kv_get( kv, "d3d", value, sizeof(value) ) &&
         !launcher_kv_get( kv, "d3d9", value, sizeof(value) )) value[0] = 0;
@@ -421,6 +492,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     {
         if (!strcasecmp( value, "sarek" )) settings->dxvk_source = DXVK_SOURCE_SAREK;
         else if (!strcasecmp( value, "gplasync" )) settings->dxvk_source = DXVK_SOURCE_GPLASYNC;
+        else if (!strcasecmp( value, "carafe" )) settings->dxvk_source = DXVK_SOURCE_CARAFE;
     }
     settings->vkd3d_version[0] = 0;
     if (launcher_kv_get( kv, "vkd3d-version", value, sizeof(value) ) && launcher_dxvk_version_valid( value ))
@@ -474,28 +546,47 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
 {
     static const char *states[] = { NULL, "0", "1" };
 
-    if (settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
+    if (settings->graphics_driver < 0 || settings->graphics_driver >= LAUNCHER_GRAPHICS_COUNT ||
+        settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
         settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
         settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
         settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
-        settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT) return 0;
+        settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT ||
+        settings->picture_mode < -1 || settings->picture_mode > 3 ||
+        settings->mode_emulation < -1 || settings->mode_emulation > 1) return 0;
     return launcher_kv_set( kv, "title", settings->title[0] ? settings->title : NULL ) &&
            launcher_kv_set( kv, "hidden", settings->hidden ? "1" : NULL ) &&
            launcher_kv_set( kv, "verbose", states[settings->verbose + 1] ) &&
            launcher_kv_set( kv, "profile", states[settings->profile + 1] ) &&
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
+           launcher_kv_set( kv, "fex-build", settings->fex_carafe ? "carafe" : NULL ) &&
+           launcher_kv_set( kv, "fex-version", settings->fex_carafe && settings->fex_version[0] ?
+                            settings->fex_version : NULL ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
+           launcher_kv_set( kv, "large-address-aware", settings->large_address_aware ? "1" : NULL ) &&
+           launcher_kv_set( kv, "orchestrator", settings->orchestrator ? "1" : NULL ) &&
+           launcher_kv_set( kv, "lock-boost", settings->lock_boost ? "1" : NULL ) &&
+           launcher_kv_set( kv, "server-pool", settings->server_pool ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
+           launcher_kv_set( kv, "picture", settings->picture_mode < 0 ? NULL :
+                                      settings->picture_mode == 1 ? "edges" :
+                                      settings->picture_mode == 2 ? "stretched" :
+                                      settings->picture_mode == 3 ? "own-size" : "whole" ) &&
+           launcher_kv_set( kv, "mode-emulation", !settings->mode_emulation ? NULL :
+                                                  settings->mode_emulation > 0 ? "1" : "0" ) &&
+           launcher_kv_set( kv, "gl-driver", NULL ) &&
+           launcher_kv_set( kv, "graphics-driver", launcher_graphics_values[settings->graphics_driver] ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&
            launcher_kv_set( kv, "d3d", settings->d3d == LAUNCHER_D3D_WINE ? "wine" :
                             settings->d3d == LAUNCHER_D3D_DXVK_VKD3D ? "dxvk+vkd3d" : NULL ) &&
            launcher_kv_set( kv, "dxvk-source", settings->dxvk_source == DXVK_SOURCE_SAREK ? "sarek" :
-                            settings->dxvk_source == DXVK_SOURCE_GPLASYNC ? "gplasync" : NULL ) &&
+                            settings->dxvk_source == DXVK_SOURCE_GPLASYNC ? "gplasync" :
+                            settings->dxvk_source == DXVK_SOURCE_CARAFE ? "carafe" : NULL ) &&
            launcher_kv_set( kv, "vkd3d-version", settings->vkd3d_version[0] ? settings->vkd3d_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-version", settings->dxvk_version[0] ? settings->dxvk_version : NULL ) &&
            launcher_kv_set( kv, "dxvk-hud", settings->dxvk_hud ? launcher_hud_values[settings->dxvk_hud] : NULL ) &&
@@ -510,6 +601,28 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
                             launcher_upscaling_values[settings->upscaling] : NULL ) &&
            launcher_kv_set( kv, "upscaling-sharpness", settings->upscaling == 1 && settings->upscaling_sharpness != 2 ?
                             launcher_sharpness_labels[settings->upscaling_sharpness] : NULL );
+}
+
+/* A game's Reset to defaults: every value its menus set goes back to its
+ * default, with the in-game menu's large-pages and the runtime's
+ * yield-backoff and fpslocker; its title, whether it is hidden and whatever
+ * else the file holds (the game fix it was asked about, its controls) stay.
+ * The FEX and DXVK options, which have tables of their own, are the caller's
+ * to clear.
+ * Returns 0 when the result would not fit. */
+static inline int launcher_settings_reset( struct launcher_kv *kv )
+{
+    struct launcher_kv empty = {{0}, 0};
+    struct launcher_settings settings, defaults;
+
+    launcher_settings_read( kv, &settings );
+    launcher_settings_read( &empty, &defaults );
+    memcpy( defaults.title, settings.title, sizeof(defaults.title) );
+    defaults.hidden = settings.hidden;
+    return launcher_settings_write( kv, &defaults ) &&
+           launcher_kv_set( kv, "large-pages", NULL ) &&
+           launcher_kv_set( kv, "yield-backoff", NULL ) &&
+           launcher_kv_set( kv, "fpslocker", NULL );
 }
 
 #endif

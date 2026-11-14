@@ -498,6 +498,7 @@ static const struct
 } options[INPUT_ROW_COUNT] =
 {
     { "input-mode", "Input mode", "Use controller input or keyboard and mouse mappings." },
+    { "button-layout", "Controller face buttons", "Match Xbox positions (B/A/Y/X) or Nintendo labels (A/B/X/Y)." },
     { NULL, "Controller remapping", "Change controller buttons and stick directions." },
     { NULL, "Keyboard / mouse mapping", "Assign keys and mouse actions to controller inputs." },
     { "keyboard-auto", "On-screen keyboard", "Automatic: open when a text field gains focus." },
@@ -509,7 +510,7 @@ static const struct
 static int option_count( int row )
 {
     if (row == INPUT_ROW_PAD || row == INPUT_ROW_KEYS) return 0;
-    if (row == INPUT_ROW_MODE || row == INPUT_ROW_KEYBOARD) return 2;
+    if (row == INPUT_ROW_MODE || row == INPUT_ROW_BUTTON_LAYOUT || row == INPUT_ROW_KEYBOARD) return 2;
     if (row == INPUT_ROW_MOUSE_SPEED) return INPUT_MOUSE_SPEED_COUNT;
     return 6;
 }
@@ -519,6 +520,7 @@ static int option_value( int row, const struct input_profile *p )
     switch (row)
     {
     case INPUT_ROW_MODE: return p->mode;
+    case INPUT_ROW_BUTTON_LAYOUT: return p->face_layout;
     case INPUT_ROW_KEYBOARD: return p->keyboard_auto;
     case INPUT_ROW_LEFT_ZONE: return p->deadzone[0];
     case INPUT_ROW_RIGHT_ZONE: return p->deadzone[1];
@@ -533,13 +535,14 @@ static int option_choice_value( int row, int item )
 {
     if (row == INPUT_ROW_MODE) return item + INPUT_CONTROLLER;
     if (row == INPUT_ROW_MOUSE_SPEED) return input_mouse_speed_values[item];
-    if (row >= INPUT_ROW_LEFT_ZONE) return item * 5;
+    if (row == INPUT_ROW_LEFT_ZONE || row == INPUT_ROW_RIGHT_ZONE) return item * 5;
     return item;
 }
 
 static void option_label( int row, int value, char *out, size_t size )
 {
     if (row == INPUT_ROW_MODE) snprintf(out, size, "%s", input_mode_labels[value - INPUT_CONTROLLER]);
+    else if (row == INPUT_ROW_BUTTON_LAYOUT) snprintf(out, size, "%s", input_face_layout_labels[value ? 1 : 0]);
     else if (row == INPUT_ROW_KEYBOARD) snprintf(out, size, "%s", value ? "Automatic" : "Manual");
     else if (row == INPUT_ROW_PAD || row == INPUT_ROW_KEYS) snprintf(out, size, "Configure");
     else snprintf(out, size, "%d%%", value);

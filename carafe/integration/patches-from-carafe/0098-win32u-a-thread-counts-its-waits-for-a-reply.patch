@@ -1,0 +1,31 @@
+Carafe: a thread that waits for the answer to a message it sent counts the wait, so the display driver can leave
+work that sends messages of its own until the wait is over.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -3858,6 +3858,10 @@
+ }
+ 
+ 
++#ifdef __SWITCH__
++__thread int wine_nx_reply_waits;
++#endif
++
+ /***********************************************************************
+  *           wait_message_reply
+  *
+@@ -3892,7 +3896,13 @@
+             continue;
+         }
+ 
++#ifdef __SWITCH__
++        wine_nx_reply_waits++;
++#endif
+         wait_message( 1, &server_queue, INFINITE, wake_mask, wake_mask, 0 );
++#ifdef __SWITCH__
++        wine_nx_reply_waits--;
++#endif
+     }
+ }
+ 

@@ -433,13 +433,16 @@ struct horizon_pipe
     pthread_cond_t can_write;
     unsigned int refs;
     int read_open;
-    int write_open;
+    int write_open;             /* written with the mutex held, as an atomic store: see used */
     size_t head;
     size_t tail;
-    size_t used;
+    size_t used;                /* written with the mutex held, as an atomic store: a pool thread
+                                 * reads it and write_open without this mutex */
     unsigned int read_waiters;  /* threads waiting in can_read, so only they are signaled */
     unsigned int write_waiters; /* threads waiting in can_write */
     unsigned int client_cores;  /* request pipes: the cores their client thread is pinned to */
+    int (*on_data)( void *context );
+    void *on_data_context;
     unsigned char buffer[HORIZON_PIPE_BUFFER_SIZE];
 };
 
@@ -449,10 +452,13 @@ struct horizon_pipe_file
     int write_end;
 };
 
+static void horizon_server_pool_start_worker( void );
+
 struct horizon_fd_message
 {
     int fd;
     unsigned int handle;
+    const struct horizon_pipe *owner;
     struct horizon_fd_message *next;
 };
 
@@ -516,6 +522,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_REGISTER_ASYNC 132
 #define HORIZON_REQ_CANCEL_ASYNC 133
 #define HORIZON_REQ_GET_ASYNC_RESULT 134
+#define HORIZON_REQ_READ 136
+#define HORIZON_REQ_WRITE 137
 #define HORIZON_REQ_IOCTL 138
 #define HORIZON_REQ_CREATE_NAMED_PIPE 140
 #define HORIZON_REQ_SET_NAMED_PIPE_INFO 141
@@ -640,6 +648,11 @@ struct horizon_fd_queue
 #define HORIZON_REQ_FREE_USER_HANDLE 279
 #define HORIZON_REQ_SET_CURSOR 280
 #define HORIZON_REQ_GET_NEXT_THREAD 295
+#define HORIZON_REQ_SET_HOOK 199
+#define HORIZON_REQ_REMOVE_HOOK 200
+#define HORIZON_REQ_START_HOOK_CHAIN 201
+#define HORIZON_REQ_FINISH_HOOK_CHAIN 202
+#define HORIZON_REQ_GET_HOOK_INFO 203
 #define HORIZON_STATUS_SUCCESS 0
 #define HORIZON_STATUS_OBJECT_NAME_EXISTS 0x40000000u
 #define HORIZON_STATUS_IMAGE_MACHINE_TYPE_MISMATCH 0x4000000eu
@@ -684,6 +697,7 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_NO_MEMORY 0xc0000017u
 #define HORIZON_STATUS_OBJECT_TYPE_MISMATCH 0xc0000024u
 #define HORIZON_STATUS_ACCESS_VIOLATION 0xc0000005u
+#define HORIZON_STATUS_THREAD_IS_TERMINATING 0xc000004bu
 #define HORIZON_STATUS_OBJECT_NAME_NOT_FOUND 0xc0000034u
 #define HORIZON_STATUS_OBJECT_NAME_COLLISION 0xc0000035u
 #define HORIZON_STATUS_FILE_IS_A_DIRECTORY 0xc00000bau
@@ -823,12 +837,24 @@ unsigned int horizon_set_process_machine( unsigned short machine )
 #define HORIZON_WM_NCLBUTTONDBLCLK 0x00a3
 #define HORIZON_WM_RBUTTONDOWN 0x0204
 #define HORIZON_WM_RBUTTONUP 0x0205
+#define HORIZON_WM_MBUTTONDOWN 0x0207
+#define HORIZON_WM_MBUTTONUP 0x0208
+#define HORIZON_WM_MOUSEWHEEL 0x020a
+#define HORIZON_WM_XBUTTONDOWN 0x020b
+#define HORIZON_WM_XBUTTONUP 0x020c
+#define HORIZON_WM_MOUSEHWHEEL 0x020e
 #define HORIZON_WM_NCMOUSEFIRST 0x00a0
 #define HORIZON_WM_MOUSEFIRST 0x0200
 #define HORIZON_MK_LBUTTON 0x0001
 #define HORIZON_MK_RBUTTON 0x0002
+#define HORIZON_MK_MBUTTON 0x0010
+#define HORIZON_MK_XBUTTON1 0x0020
+#define HORIZON_MK_XBUTTON2 0x0040
 #define HORIZON_VK_LBUTTON 0x01
 #define HORIZON_VK_RBUTTON 0x02
+#define HORIZON_VK_MBUTTON 0x04
+#define HORIZON_VK_XBUTTON1 0x05
+#define HORIZON_VK_XBUTTON2 0x06
 #define HORIZON_MSG_POSTED 6
 #define HORIZON_MSG_HARDWARE 7
 #define HORIZON_PM_REMOVE 0x0001
@@ -914,7 +940,8 @@ enum horizon_server_object_type
     HORIZON_SERVER_OBJECT_COMPLETION,
     HORIZON_SERVER_OBJECT_COMPLETION_WAIT,
     HORIZON_SERVER_OBJECT_NAMED_PIPE,
-    HORIZON_SERVER_OBJECT_NSI
+    HORIZON_SERVER_OBJECT_NSI,
+    HORIZON_SERVER_OBJECT_DEVICE
 };
 
 struct horizon_ratio
@@ -1662,6 +1689,18 @@ static unsigned int horizon_async_apc_ids;
 
 #define HORIZON_APC_USER      1
 #define HORIZON_APC_ASYNC_IO  2
+#define HORIZON_DEVICE_OUT_MAX 0x10000
+#define HORIZON_METHOD_BUFFERED 0
+
+extern void *carafeHidOpen( const unsigned short *name, unsigned int bytes ) __attribute__((weak));
+extern void carafeHidClose( void *file ) __attribute__((weak));
+extern unsigned int carafeHidIoctl( void *file, unsigned int code, const unsigned char *in, unsigned int in_size,
+                                    unsigned char *out, unsigned int out_max, unsigned int *out_size )
+    __attribute__((weak));
+extern unsigned int carafeHidRead( void *file, unsigned char *out, unsigned int out_max, unsigned int *out_size )
+    __attribute__((weak));
+extern unsigned int carafeHidWrite( void *file, const unsigned char *in, unsigned int size, unsigned int *written )
+    __attribute__((weak));
 #define HORIZON_APC_CALL_SIZE 64  /* union apc_call */
 #define HORIZON_STATUS_NOT_FOUND 0xc0000225u
 #define HORIZON_NT_ERROR(status) (((status) >> 30) == 3)
@@ -3301,6 +3340,11 @@ struct horizon_server_connection
     void *direct_reply;
     void *direct_data;
     size_t direct_size;
+    struct horizon_server_connection *pool_next;
+    int pooled;
+    int pool_queued;
+    unsigned int pool_served;
+    void *pool_diag;
 };
 
 struct horizon_sync_waiter
@@ -3348,9 +3392,15 @@ struct horizon_server_object
     };
 #ifndef HORIZON_STANDALONE_SYNTAX
     struct context_data *thread_contexts;
+    struct context_data *frozen_context;
+    Handle frozen;
+    struct context_data *held_contexts;
+    unsigned int held_count;
+    int held, held_changed;
 #endif
     unsigned int thread_context_count;
     int thread_context_valid;
+    int ending;
     struct horizon_user_apc *apc_first, *apc_last;
     unsigned int rootdir;
     unsigned int name_len;
@@ -3408,6 +3458,7 @@ struct horizon_server_object
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
     struct horizon_server_object *mapping_shared_file;
     struct horizon_pe_version *mapping_version;
+    void *device_file;
 };
 
 struct horizon_server_handle_entry
@@ -3429,6 +3480,316 @@ static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t horizon_server_objects_cond = PTHREAD_COND_INITIALIZER;
 static unsigned int horizon_server_sleepers;  /* guarded by horizon_server_objects_mutex */
 static struct horizon_sync_waiter *horizon_sync_waiters;
+
+#define HORIZON_SERVER_POOL_SPARE 2
+
+static struct
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    struct horizon_server_connection *head, *tail;
+    unsigned int workers, idle, blocked;
+} horizon_server_pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, 0, 0, 0 };
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+#define CARAFE_DIAG_EVENTS 512
+#define CARAFE_DIAG_DUMPED 96
+#define CARAFE_DIAG_CONNECTIONS 128
+
+enum carafe_diag_kind
+{
+    CARAFE_DIAG_NEW_THREAD,
+    CARAFE_DIAG_SERVER_START,
+    CARAFE_DIAG_SERVER_END,
+    CARAFE_DIAG_SUSPEND,
+    CARAFE_DIAG_RESUME,
+    CARAFE_DIAG_TERMINATE,
+    CARAFE_DIAG_SUSPENDED_WAIT,
+    CARAFE_DIAG_SUSPENDED_DONE,
+};
+
+static const char *const carafe_diag_names[] =
+{
+    "new_thread", "server_start", "server_end", "suspend", "resume", "terminate",
+    "select_waits_suspended", "select_resumed",
+};
+
+struct carafe_diag_event
+{
+    unsigned long long tick;
+    unsigned int kind, actor, target, value;
+};
+
+struct carafe_diag_connection
+{
+    struct horizon_server_connection *connection;
+    unsigned int tid, requests, handled, last_req;
+    int busy;
+};
+
+static struct carafe_diag_event carafe_diag_events[CARAFE_DIAG_EVENTS];
+static unsigned int carafe_diag_next;
+static struct carafe_diag_connection carafe_diag_connections[CARAFE_DIAG_CONNECTIONS];
+static pthread_mutex_t carafe_diag_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void carafe_diag_event( unsigned int kind, unsigned int actor, unsigned int target, unsigned int value )
+{
+    unsigned int slot = __atomic_fetch_add( &carafe_diag_next, 1, __ATOMIC_RELAXED ) % CARAFE_DIAG_EVENTS;
+    struct carafe_diag_event *event = &carafe_diag_events[slot];
+
+    event->tick = armGetSystemTick();
+    event->kind = kind;
+    event->actor = actor;
+    event->target = target;
+    event->value = value;
+}
+
+static struct carafe_diag_connection *carafe_diag_track( struct horizon_server_connection *connection )
+{
+    struct carafe_diag_connection *found = NULL;
+    unsigned int i;
+
+    pthread_mutex_lock( &carafe_diag_mutex );
+    for (i = 0; i < CARAFE_DIAG_CONNECTIONS && !found; i++)
+    {
+        if (carafe_diag_connections[i].connection) continue;
+        found = &carafe_diag_connections[i];
+        memset( found, 0, sizeof(*found) );
+        found->connection = connection;
+        found->tid = connection->tid;
+    }
+    pthread_mutex_unlock( &carafe_diag_mutex );
+    return found;
+}
+
+static void carafe_diag_untrack( struct carafe_diag_connection *slot )
+{
+    if (!slot) return;
+    pthread_mutex_lock( &carafe_diag_mutex );
+    slot->connection = NULL;
+    pthread_mutex_unlock( &carafe_diag_mutex );
+}
+
+void carafe_diag_dump( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    unsigned long long now = armGetSystemTick();
+    unsigned int next = __atomic_load_n( &carafe_diag_next, __ATOMIC_RELAXED );
+    unsigned int count = next < CARAFE_DIAG_DUMPED ? next : CARAFE_DIAG_DUMPED;
+    int objects_locked = pthread_mutex_trylock( &horizon_server_objects_mutex ) == 0;
+    char line[256];
+    unsigned int i;
+
+    if (!&wine_nx_runtime_trace) return;
+    snprintf( line, sizeof(line), "[CARAFE-DIAG] objects lock %s, %u events so far",
+              objects_locked ? "free" : "HELD", next );
+    wine_nx_runtime_trace( line );
+    pthread_mutex_lock( &carafe_diag_mutex );
+    for (i = 0; i < CARAFE_DIAG_CONNECTIONS; i++)
+    {
+        struct carafe_diag_connection *slot = &carafe_diag_connections[i];
+        struct horizon_server_object *thread;
+
+        if (!slot->connection) continue;
+        thread = slot->connection->thread;
+        snprintf( line, sizeof(line),
+                  "[CARAFE-DIAG] connection tid=%u (started as %u) requests=%u handled=%u last_req=%u %s"
+                  " suspend=%d terminated=%d",
+                  slot->connection->tid, slot->tid, slot->requests, slot->handled, slot->last_req,
+                  slot->busy ? "IN HANDLER" : "idle", thread ? (int)thread->thread.suspend : -1,
+                  thread ? (int)thread->thread.terminated : -1 );
+        wine_nx_runtime_trace( line );
+    }
+    pthread_mutex_unlock( &carafe_diag_mutex );
+    for (i = next - count; i != next; i++)
+    {
+        const struct carafe_diag_event *event = &carafe_diag_events[i % CARAFE_DIAG_EVENTS];
+        unsigned long long ago = armTicksToNs( now - event->tick ) / 1000000ull;
+
+        snprintf( line, sizeof(line), "[CARAFE-DIAG] -%llu ms %s actor=%u target=%u value=%u", ago,
+                  event->kind < ARRAY_SIZE(carafe_diag_names) ? carafe_diag_names[event->kind] : "?",
+                  event->actor, event->target, event->value );
+        wine_nx_runtime_trace( line );
+    }
+    if (objects_locked) pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+#define CARAFE_SERVER_REQS 512
+#define CARAFE_SERVER_TOP 10
+#define CARAFE_SERVER_REPORT_NS 30000000000ull
+
+static unsigned int carafe_server_counts[CARAFE_SERVER_REQS];
+static unsigned long long carafe_server_busy_ns[CARAFE_SERVER_REQS];
+static unsigned int carafe_server_direct;
+static unsigned int carafe_server_live;
+static unsigned int carafe_server_ended[4];
+static unsigned int carafe_threads_refused;
+static unsigned int carafe_threads_waits;
+static unsigned int carafe_threads_waits_lost;
+static unsigned long long carafe_threads_waited_ns;
+static unsigned long long carafe_server_reported;
+
+static void carafe_server_report( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    unsigned int counts[CARAFE_SERVER_REQS];
+    unsigned int total = 0, i, j;
+    unsigned long long busy = 0;
+    s64 used = -1, limit = -1, peak = -1;
+    u64 resource = 0;
+    char line[512];
+    int len;
+
+    if (!&wine_nx_runtime_trace) return;
+    if (R_SUCCEEDED(svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 )))
+    {
+        svcGetResourceLimitCurrentValue( &used, resource, LimitableResource_Threads );
+        svcGetResourceLimitLimitValue( &limit, resource, LimitableResource_Threads );
+        svcGetResourceLimitPeakValue( &peak, resource, LimitableResource_Threads );
+        svcCloseHandle( resource );
+    }
+    snprintf( line, sizeof(line),
+              "[BUDGET] threads=%lld/%lld peak=%lld windows=%d servers=%u pool=%u/%u/%u refused=%u waits=%u/%u "
+              "waited_ms=%llu",
+              (long long)used, (long long)limit, (long long)peak,
+              (int)__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.workers, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.idle, __ATOMIC_RELAXED ),
+              __atomic_load_n( &horizon_server_pool.blocked, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_refused, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waits_lost, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waits, __ATOMIC_RELAXED ),
+              __atomic_load_n( &carafe_threads_waited_ns, __ATOMIC_RELAXED ) / 1000000ull );
+    wine_nx_runtime_trace( line );
+    for (i = 0; i < CARAFE_SERVER_REQS; i++)
+    {
+        counts[i] = __atomic_load_n( &carafe_server_counts[i], __ATOMIC_RELAXED );
+        total += counts[i];
+        busy += __atomic_load_n( &carafe_server_busy_ns[i], __ATOMIC_RELAXED );
+    }
+    len = snprintf( line, sizeof(line),
+                    "[SERVED] requests=%u busy_ms=%llu direct=%u clients=%u ended=%u/%u/%u/%u top=",
+                    total, busy / 1000000ull, __atomic_load_n( &carafe_server_direct, __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_live, __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[0], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[1], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[2], __ATOMIC_RELAXED ),
+                    __atomic_load_n( &carafe_server_ended[3], __ATOMIC_RELAXED ) );
+    for (j = 0; j < CARAFE_SERVER_TOP && len > 0 && len < (int)sizeof(line); j++)
+    {
+        unsigned int req = 0;
+
+        for (i = 1; i < CARAFE_SERVER_REQS; i++)
+            if (counts[i] > counts[req]) req = i;
+        if (!counts[req]) break;
+        len += snprintf( line + len, sizeof(line) - len, "%s%u:%u/%llums", j ? "," : "", req, counts[req],
+                         __atomic_load_n( &carafe_server_busy_ns[req], __ATOMIC_RELAXED ) / 1000000ull );
+        counts[req] = 0;
+    }
+    wine_nx_runtime_trace( line );
+}
+
+static void carafe_server_count( unsigned int req, unsigned long long start )
+{
+    unsigned long long now = armTicksToNs( armGetSystemTick() );
+    unsigned long long last = __atomic_load_n( &carafe_server_reported, __ATOMIC_RELAXED );
+
+    if (req < CARAFE_SERVER_REQS)
+    {
+        __atomic_add_fetch( &carafe_server_counts[req], 1, __ATOMIC_RELAXED );
+        __atomic_add_fetch( &carafe_server_busy_ns[req], now - start, __ATOMIC_RELAXED );
+    }
+    if (!last)
+    {
+        __atomic_compare_exchange_n( &carafe_server_reported, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED );
+        return;
+    }
+    if (now - last < CARAFE_SERVER_REPORT_NS) return;
+    if (!__atomic_compare_exchange_n( &carafe_server_reported, &last, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+        return;
+    carafe_server_report();
+}
+
+static void carafe_threads_refusal( void )
+{
+    unsigned int refused;
+
+    if (!__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED )) return;
+    refused = __atomic_add_fetch( &carafe_threads_refused, 1, __ATOMIC_RELAXED );
+    if (refused & (refused - 1)) return;
+    carafe_server_report();
+}
+
+/* A creation that met the limit and waited for a place: how many, how many
+ * of them got none, and the time they took. The lines the log gets for them
+ * are written where the wait is, in __wrap_svcCreateThread. */
+static void carafe_thread_waited( unsigned long long ns, int placed )
+{
+    __atomic_add_fetch( &carafe_threads_waits, 1, __ATOMIC_RELAXED );
+    __atomic_add_fetch( &carafe_threads_waited_ns, ns, __ATOMIC_RELAXED );
+    if (!placed) __atomic_add_fetch( &carafe_threads_waits_lost, 1, __ATOMIC_RELAXED );
+}
+
+/* Who is waiting: the creator's handle and the return addresses up its
+ * stack, and with them the stall report, which says what every other thread
+ * is doing while no place comes free. */
+static void carafe_thread_waiter_report( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    extern void wine_nx_stall_report_soon( void ) __attribute__((weak));
+    Thread *self = threadGetSelf();
+    uintptr_t low = self ? (uintptr_t)self->stack_mirror : 0;
+    uintptr_t high = self ? low + self->stack_sz : 0;
+    uintptr_t *frame = __builtin_frame_address( 0 );
+    char line[256];
+    int len, depth;
+
+    len = snprintf( line, sizeof(line), "[THREAD] the thread waiting for a place: h=%#x, called from",
+                    threadGetCurHandle() );
+    for (depth = 0; depth < 12 && len > 0 && len < (int)sizeof(line) - 20; depth++)
+    {
+        uintptr_t *next;
+
+        if ((uintptr_t)frame < low || (uintptr_t)frame + 16 > high || ((uintptr_t)frame & 15)) break;
+        len += snprintf( line + len, sizeof(line) - len, " %#lx", (unsigned long)frame[1] );
+        next = (uintptr_t *)frame[0];
+        if (next <= frame) break;
+        frame = next;
+    }
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+    if (&wine_nx_stall_report_soon) wine_nx_stall_report_soon();
+}
+
+static void carafe_server_client_ended( unsigned int requests )
+{
+    unsigned int bucket = requests <= 4 ? 0 : requests <= 50 ? 1 : requests <= 500 ? 2 : 3;
+
+    __atomic_add_fetch( &carafe_server_ended[bucket], 1, __ATOMIC_RELAXED );
+}
+
+#define CARAFE_DIAG_EVENT( kind, actor, target, value ) carafe_diag_event( kind, actor, target, value )
+#define CARAFE_SERVER_NOW() armTicksToNs( armGetSystemTick() )
+#define CARAFE_SERVER_COUNT( req, start ) carafe_server_count( req, start )
+#define CARAFE_SERVER_DIRECT() __atomic_add_fetch( &carafe_server_direct, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_ENDED( requests ) carafe_server_client_ended( requests )
+#define CARAFE_SERVER_STARTED() __atomic_add_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_STOPPED() __atomic_sub_fetch( &carafe_server_live, 1, __ATOMIC_RELAXED )
+#define CARAFE_THREAD_REFUSED() carafe_threads_refusal()
+#define CARAFE_THREAD_WAITED( ns, placed ) carafe_thread_waited( ns, placed )
+#define CARAFE_THREAD_WAITER_REPORT() carafe_thread_waiter_report()
+#else
+#define CARAFE_DIAG_EVENT( kind, actor, target, value ) do { } while (0)
+#define CARAFE_SERVER_NOW() 0ull
+#define CARAFE_SERVER_COUNT( req, start ) do { (void)(start); } while (0)
+#define CARAFE_SERVER_DIRECT() do { } while (0)
+#define CARAFE_SERVER_ENDED( requests ) do { (void)(requests); } while (0)
+#define CARAFE_SERVER_STARTED() do { } while (0)
+#define CARAFE_SERVER_STOPPED() do { } while (0)
+#define CARAFE_THREAD_REFUSED() do { } while (0)
+#define CARAFE_THREAD_WAITED( ns, placed ) do { (void)(ns); (void)(placed); } while (0)
+#define CARAFE_THREAD_WAITER_REPORT() do { } while (0)
+#endif
 static void horizon_sync_notify_object_locked( struct horizon_server_object *object, int satisfy );
 static void horizon_sync_notify_async_locked(void);
 static unsigned int horizon_server_find_io_object_locked( unsigned int handle, struct horizon_server_object **object );
@@ -3466,10 +3827,19 @@ static void horizon_server_signal_changed_locked(void)
     for (waiter = horizon_sync_waiters; waiter; waiter = waiter->next) horizon_sync_notify_locked( waiter );
 }
 
+/* The server thread pool (Carafe's patch 0023): set on a pool thread, and
+ * while it waits inside a request. A pool thread that is about to wait says so
+ * first, so that another one is there for the other clients. */
+static __thread int horizon_server_pool_worker;
+static __thread int horizon_server_pool_blocked;
+static __thread unsigned int horizon_server_pool_core_mask;
+static void horizon_server_pool_blocking_locked( void );
+
 /* Sleeps with horizon_server_objects_mutex held until an object changes or
  * timeout (100ns, at most HORIZON_SERVER_WAIT_SLICE) passes. */
 static void horizon_server_sleep_locked( long long timeout )
 {
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
     if (timeout > HORIZON_SERVER_WAIT_SLICE) timeout = HORIZON_SERVER_WAIT_SLICE;
     horizon_server_sleepers++;
     /* libnx's relative wait: newlib's pthread_cond_timedwait reads the realtime
@@ -3503,6 +3873,9 @@ static unsigned int horizon_server_running_threads;
 /* Each client connection is served by its own pthread. */
 static __thread struct horizon_server_connection *horizon_server_current;
 int horizon_fast_sync_enabled;
+/* With Horizon sync, the clients share a few server threads instead of having
+ * one each. Off unless a program's settings ask for it (runtime.c). */
+int horizon_server_pool_wanted;
 static struct horizon_zombie_list horizon_server_zombies = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0 };
 struct horizon_lifecycle_counters horizon_lifecycle;
 static unsigned int horizon_process_winstation;
@@ -4234,17 +4607,23 @@ static int horizon_pipe_close_r( struct _reent *r, void *fdptr )
 {
     struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
     struct horizon_pipe *pipe;
+    int need_worker = 0;
 
     (void)r;
     if (!file) return 0;
 
     pipe = file->pipe;
     pthread_mutex_lock( &pipe->mutex );
-    if (file->write_end) pipe->write_open = 0;
+    if (file->write_end)
+    {
+        __atomic_store_n( &pipe->write_open, 0, __ATOMIC_RELEASE );
+        if (pipe->on_data) need_worker = pipe->on_data( pipe->on_data_context );
+    }
     else pipe->read_open = 0;
     pthread_cond_broadcast( &pipe->can_read );
     pthread_cond_broadcast( &pipe->can_write );
     pthread_mutex_unlock( &pipe->mutex );
+    if (need_worker) horizon_server_pool_start_worker();
 
     free( file );
     *(struct horizon_pipe_file **)fdptr = NULL;
@@ -4288,6 +4667,7 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
     struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
     struct horizon_pipe *pipe;
     unsigned int wake;
+    int need_worker;
     size_t total = 0;
 
     if (!file || !file->write_end)
@@ -4325,15 +4705,17 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
         chunk = min( chunk, HORIZON_PIPE_BUFFER_SIZE - pipe->tail );
         memcpy( pipe->buffer + pipe->tail, ptr + total, chunk );
         pipe->tail = (pipe->tail + chunk) % HORIZON_PIPE_BUFFER_SIZE;
-        pipe->used += chunk;
+        __atomic_store_n( &pipe->used, pipe->used + chunk, __ATOMIC_RELEASE );
         total += chunk;
     }
     wake = pipe->read_waiters;
+    need_worker = pipe->on_data ? pipe->on_data( pipe->on_data_context ) : 0;
     pthread_mutex_unlock( &pipe->mutex );
     /* A signal is a system call on Horizon, so only for a waiting reader, and
      * after unlocking, or the reader wakes straight into this thread's lock and
      * the unlock becomes a second system call (2% of NFSU2's main thread). */
     if (wake) pthread_cond_signal( &pipe->can_read );
+    if (need_worker) horizon_server_pool_start_worker();
     return total;
 }
 
@@ -4376,7 +4758,7 @@ static ssize_t horizon_pipe_read_r( struct _reent *r, void *fdptr, char *ptr, si
         chunk = min( chunk, HORIZON_PIPE_BUFFER_SIZE - pipe->head );
         memcpy( ptr + total, pipe->buffer + pipe->head, chunk );
         pipe->head = (pipe->head + chunk) % HORIZON_PIPE_BUFFER_SIZE;
-        pipe->used -= chunk;
+        __atomic_store_n( &pipe->used, pipe->used - chunk, __ATOMIC_RELEASE );
         total += chunk;
     }
     wake = pipe->write_waiters;
@@ -4660,7 +5042,19 @@ int horizon_poll_pipe_write( int fd, size_t size, int timeout )
     return horizon_poll_pipe( &pfd, timeout, size );
 }
 
-static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle )
+static const struct horizon_pipe *horizon_fd_client_owner(void)
+{
+    struct thread_data *data = get_thread_data();
+    return data ? horizon_pipe_from_fd( data->request_fd ) : NULL;
+}
+
+static const struct horizon_pipe *horizon_fd_server_owner(void)
+{
+    return horizon_server_current ? horizon_server_current->request_pipe : NULL;
+}
+
+static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle,
+                                   const struct horizon_pipe *owner )
 {
     struct horizon_fd_message *message = malloc( sizeof(*message) );
 
@@ -4673,17 +5067,19 @@ static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsig
 
     message->fd = fd;
     message->handle = handle;
+    message->owner = owner;
     message->next = NULL;
 
     pthread_mutex_lock( &queue->mutex );
     if (queue->tail) queue->tail->next = message;
     else queue->head = message;
     queue->tail = message;
-    pthread_cond_signal( &queue->cond );
+    pthread_cond_broadcast( &queue->cond );
     pthread_mutex_unlock( &queue->mutex );
 }
 
-static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle )
+static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle,
+                                       const struct horizon_pipe *owner )
 {
     int passed_fd = dup( fd );
 
@@ -4693,23 +5089,50 @@ static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, u
         exit(1);
     }
 
-    horizon_fd_queue_push( queue, passed_fd, handle );
+    horizon_fd_queue_push( queue, passed_fd, handle, owner );
 }
 
-static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, unsigned int *handle )
+/* Carafe: how often a thread's fd was not the oldest in the queue, and how
+ * often none was its own, the first 16 times. */
+static void horizon_fd_queue_report( const char *queue_name, unsigned int skipped, int matched )
 {
-    struct horizon_fd_message *message;
+    extern void wine_nx_runtime_trace( const char *msg );
+    static unsigned int reports;
+    char message[160];
+
+    if (__atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) >= 16) return;
+    if (matched)
+        snprintf( message, sizeof(message), "[CARAFE] %s fd: own fd taken past %u of other threads",
+                  queue_name, skipped );
+    else
+        snprintf( message, sizeof(message), "[CARAFE] %s fd: none from this thread, took the oldest of %u",
+                  queue_name, skipped );
+    wine_nx_runtime_trace( message );
+}
+
+static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, const struct horizon_pipe *owner,
+                                 unsigned int *handle, const char *queue_name )
+{
+    struct horizon_fd_message *message, **link;
+    unsigned int skipped = 0;
     int fd;
 
     pthread_mutex_lock( &queue->mutex );
     while (!queue->head)
         horizon_cond_wait_quit( &queue->cond, &queue->mutex );
 
-    message = queue->head;
-    queue->head = message->next;
-    if (!queue->head) queue->tail = NULL;
+    for (link = &queue->head; *link && (*link)->owner != owner; link = &(*link)->next) skipped++;
+    if (!*link) link = &queue->head;
+    message = *link;
+    *link = message->next;
+    if (queue->tail == message)
+    {
+        queue->tail = NULL;
+        for (link = &queue->head; *link; link = &(*link)->next) queue->tail = *link;
+    }
     pthread_mutex_unlock( &queue->mutex );
 
+    if (skipped) horizon_fd_queue_report( queue_name, skipped, message->owner == owner );
     fd = message->fd;
     if (handle) *handle = message->handle;
     free( message );
@@ -4718,12 +5141,12 @@ static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, unsigned int *h
 
 void horizon_server_queue_fd( int fd, unsigned int handle )
 {
-    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle );
+    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle, horizon_fd_server_owner() );
 }
 
 int horizon_server_take_client_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_client_to_server_fds, handle );
+    return horizon_fd_queue_pop( &horizon_client_to_server_fds, horizon_fd_server_owner(), handle, "client" );
 }
 
 static int horizon_read_exact( int fd, void *buffer, size_t size )
@@ -5023,6 +5446,7 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (!object) return;
     if (object->type == HORIZON_SERVER_OBJECT_FILE) horizon_file_locks_release_locked( object );
     if (object->type == HORIZON_SERVER_OBJECT_TIMER) horizon_server_unlink_timer_locked( object );
+    if (object->type == HORIZON_SERVER_OBJECT_DEVICE && carafeHidClose) carafeHidClose( object->device_file );
     if (object->type == HORIZON_SERVER_OBJECT_THREAD)
     {
         struct horizon_server_object **ptr;
@@ -5034,6 +5458,12 @@ static void horizon_server_free_object( struct horizon_server_object *object )
             __atomic_sub_fetch( &horizon_lifecycle.thread_objects, 1, __ATOMIC_RELAXED );
             break;
         }
+#ifndef HORIZON_STANDALONE_SYNTAX
+        free( object->frozen_context );
+        object->frozen_context = NULL;
+        free( object->held_contexts );
+        object->held_contexts = NULL;
+#endif
     }
     while (object->apc_first)
     {
@@ -5122,9 +5552,10 @@ static unsigned int horizon_server_close_object_handle( unsigned int handle )
         object = entry->object;
         horizon_server_unlink_handle_locked( entry );
         if (object) horizon_sync_notify_object_locked( object, 0 );
-        /* What waits on a socket that is closed ends, as wineserver ends it. */
+        /* What waits on a socket, pipe, or device that is closed ends, as wineserver ends it. */
         if (object && (object->type == HORIZON_SERVER_OBJECT_SOCK ||
-                       object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE) && horizon_asyncs.head &&
+                       object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE ||
+                       object->type == HORIZON_SERVER_OBJECT_DEVICE) && horizon_asyncs.head &&
             horizon_async_cancel( &horizon_asyncs, handle, 0, 0, horizon_async_now(), 1 ))
             horizon_sync_notify_async_locked();
         /* server/completion.c's close_handle: closing a port's last handle
@@ -6361,6 +6792,9 @@ static unsigned long long horizon_server_timer_clock(void)
 static struct horizon_obj_locator horizon_free_queue_shm[32];
 static unsigned int horizon_free_queue_shm_count;
 
+static void horizon_server_publish_hooks_locked( struct horizon_msgq *queue );
+static void horizon_server_remove_thread_hooks_locked( unsigned int tid );
+
 /* The thread's message queue, created with its shared data and waitable
  * object on first use. */
 static struct horizon_msgq *horizon_server_queue_locked( unsigned int tid )
@@ -6401,6 +6835,7 @@ static struct horizon_msgq *horizon_server_queue_locked( unsigned int tid )
     queue->sync = sync;
     queue->shm_id = locator.id;
     queue->shm_offset = locator.offset;
+    horizon_server_publish_hooks_locked( queue );
     return queue;
 }
 
@@ -6478,6 +6913,7 @@ static void horizon_server_destroy_queue_locked( unsigned int tid )
     struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
     struct horizon_server_object *sync;
 
+    horizon_server_remove_thread_hooks_locked( tid );
     horizon_server_release_input_locked( tid );
     if (!queue) return;
     sync = queue->sync;
@@ -6653,6 +7089,557 @@ static int horizon_server_handle_free_user_handle( struct horizon_server_connect
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
+#define HORIZON_NTUSER_OBJ_HOOK 0x0f
+#define HORIZON_WH_MINHOOK (-1)
+#define HORIZON_WH_JOURNALPLAYBACK 1
+#define HORIZON_WH_CALLWNDPROCRET 12
+#define HORIZON_WH_KEYBOARD_LL 13
+#define HORIZON_WH_MOUSE_LL 14
+#define HORIZON_WH_WINEVENT 15
+#define HORIZON_HOOK_KINDS 17
+#define HORIZON_MSG_HOOK_LL 9
+#define HORIZON_HOOK_LL_PENDING_MAX 64
+
+struct horizon_set_hook_request
+{
+    struct horizon_server_request_header header;
+    int id;
+    unsigned int pid;
+    unsigned int tid;
+    int event_min;
+    int event_max;
+    unsigned long long proc;
+    int flags;
+    int unicode;
+};
+
+struct horizon_set_hook_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int handle;
+    char __pad_12[4];
+};
+
+struct horizon_remove_hook_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned long long proc;
+    int id;
+    char __pad_28[4];
+};
+
+struct horizon_start_hook_chain_request
+{
+    struct horizon_server_request_header header;
+    int id;
+    int event;
+    unsigned int window;
+    int object_id;
+    int child_id;
+};
+
+struct horizon_start_hook_chain_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int handle;
+    unsigned int pid;
+    unsigned int tid;
+    int unicode;
+    unsigned long long proc;
+};
+
+struct horizon_finish_hook_chain_request
+{
+    struct horizon_server_request_header header;
+    int id;
+};
+
+struct horizon_get_hook_info_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    int get_next;
+    int event;
+    unsigned int window;
+    int object_id;
+    int child_id;
+    char __pad_36[4];
+};
+
+struct horizon_get_hook_info_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int handle;
+    int id;
+    unsigned int pid;
+    unsigned int tid;
+    unsigned long long proc;
+    int unicode;
+    char __pad_36[4];
+};
+
+struct horizon_window_hook
+{
+    struct horizon_window_hook *next;
+    unsigned int handle;
+    int index;
+    unsigned int tid;
+    unsigned int owner;
+    unsigned long long proc;
+    int unicode;
+    unsigned char *module;
+    unsigned int module_size;
+};
+
+static struct horizon_window_hook *horizon_window_hooks;
+static int horizon_window_hook_chains[HORIZON_HOOK_KINDS];
+
+static struct horizon_window_hook *horizon_window_hook_from_locked( struct horizon_window_hook *hook, int index,
+                                                                    unsigned int tid, int global )
+{
+    for (; hook; hook = hook->next)
+        if (hook->index == index && hook->proc && (global ? !hook->tid : hook->tid == tid)) return hook;
+    return NULL;
+}
+
+static struct horizon_window_hook *horizon_window_hook_first_locked( int index, unsigned int tid )
+{
+    struct horizon_window_hook *hook = horizon_window_hook_from_locked( horizon_window_hooks, index, tid, 0 );
+
+    return hook ? hook : horizon_window_hook_from_locked( horizon_window_hooks, index, tid, 1 );
+}
+
+static struct horizon_window_hook *horizon_window_hook_next_locked( struct horizon_window_hook *hook, unsigned int tid )
+{
+    struct horizon_window_hook *next;
+
+    if (!hook->tid) return horizon_window_hook_from_locked( hook->next, hook->index, tid, 1 );
+    if ((next = horizon_window_hook_from_locked( hook->next, hook->index, tid, 0 ))) return next;
+    return horizon_window_hook_from_locked( horizon_window_hooks, hook->index, tid, 1 );
+}
+
+static struct horizon_window_hook *horizon_window_hook_find_locked( unsigned int handle )
+{
+    struct horizon_window_hook *hook;
+
+    for (hook = horizon_window_hooks; hook; hook = hook->next)
+        if (hook->handle == handle) return hook;
+    return NULL;
+}
+
+static int horizon_window_hook_low_level( int id )
+{
+    return id == HORIZON_WH_KEYBOARD_LL || id == HORIZON_WH_MOUSE_LL;
+}
+
+static unsigned int horizon_window_hook_runner_locked( const struct horizon_window_hook *hook, unsigned int tid )
+{
+    if (!horizon_window_hook_low_level( hook->index + HORIZON_WH_MINHOOK ) || hook->owner == tid) return 0;
+    return hook->owner;
+}
+
+static unsigned int horizon_server_hook_ll_pending_locked( const struct horizon_msgq *queue )
+{
+    const struct horizon_msgq_sent *sent;
+    unsigned int count = 0;
+
+    for (sent = queue->sent; sent; sent = sent->next)
+        if (sent->type == HORIZON_MSG_HOOK_LL) count++;
+    return count;
+}
+
+static void horizon_server_queue_hook_ll_locked( int id, unsigned int msg, unsigned long long lparam, int x, int y,
+                                                 unsigned int time, unsigned long long info, unsigned int flags )
+{
+    struct horizon_hardware_msg_data *data;
+    struct horizon_server_object *thread;
+    struct horizon_msgq_result *result;
+    struct horizon_window_hook *hook;
+    struct horizon_msgq_sent *sent;
+    struct horizon_msgq *queue;
+
+    if (!(hook = horizon_window_hook_from_locked( horizon_window_hooks, id - HORIZON_WH_MINHOOK, 0, 1 ))) return;
+    for (thread = horizon_server_threads; thread; thread = thread->thread_next)
+        if (thread->thread.tid == hook->owner && !thread->thread.terminated) break;
+    if (!thread || !(queue = horizon_server_queue_locked( hook->owner ))) return;
+    if (horizon_server_hook_ll_pending_locked( queue ) >= HORIZON_HOOK_LL_PENDING_MAX) return;
+
+    sent = calloc( 1, sizeof(*sent) );
+    data = calloc( 1, sizeof(*data) );
+    result = calloc( 1, sizeof(*result) );
+    if (!sent || !data || !result)
+    {
+        free( sent );
+        free( data );
+        free( result );
+        return;
+    }
+    data->info = info;
+    data->size = sizeof(*data);
+    data->flags = flags;
+    data->source.device = id == HORIZON_WH_KEYBOARD_LL ? HORIZON_IMDT_KEYBOARD : HORIZON_IMDT_MOUSE;
+    data->source.origin = HORIZON_IMO_HARDWARE;
+    sent->type = HORIZON_MSG_HOOK_LL;
+    sent->msg = id;
+    sent->wparam = msg;
+    sent->lparam = lparam;
+    sent->x = x;
+    sent->y = y;
+    sent->time = time;
+    sent->data = (unsigned char *)data;
+    sent->data_size = sizeof(*data);
+    sent->result = result;
+    result->msg = sent;
+    result->receiver = queue;
+    *queue->sent_tail = sent;
+    queue->sent_tail = &sent->next;
+    horizon_msgq_touch( queue, HORIZON_MSGQ_QS_SENDMESSAGE );
+    horizon_server_refresh_queue_locked( queue, horizon_server_timer_clock() );
+}
+
+static void horizon_server_publish_hooks_locked( struct horizon_msgq *queue )
+{
+    struct horizon_obj_locator locator = { queue->shm_id, queue->shm_offset };
+    struct horizon_shared_object *shared;
+    struct horizon_window_hook *hook;
+    int counts[HORIZON_HOOK_KINDS] = {0};
+
+    for (hook = horizon_window_hooks; hook; hook = hook->next)
+        if (hook->proc && (!hook->tid || hook->tid == queue->tid)) counts[hook->index]++;
+    if (!(shared = horizon_server_shared_object_locked( locator )) || shared->id != queue->shm_id) return;
+    if (!memcmp( shared->shm.queue.hooks_count, counts, sizeof(counts) )) return;
+    memcpy( shared->shm.queue.hooks_count, counts, sizeof(counts) );
+    horizon_server_flush_session_range_locked(
+        queue->shm_offset, offsetof( struct horizon_shared_object, shm ) + sizeof(struct horizon_queue_shm) );
+}
+
+static void horizon_server_publish_all_hooks_locked( void )
+{
+    struct horizon_msgq *queue;
+
+    for (queue = horizon_msg_queues.head; queue; queue = queue->next)
+        horizon_server_publish_hooks_locked( queue );
+}
+
+static void horizon_server_free_hook_handle_locked( unsigned int handle )
+{
+    unsigned int low = handle & 0xffff, index;
+    struct horizon_user_entry *entry;
+
+    if (!horizon_session_data || low < HORIZON_FIRST_USER_HANDLE || ((low - HORIZON_FIRST_USER_HANDLE) & 1)) return;
+    index = (low - HORIZON_FIRST_USER_HANDLE) >> 1;
+    if (index >= horizon_user_handle_count) return;
+    entry = &((struct horizon_session_shm *)horizon_session_data)->user_entries[index];
+    if (entry->type != HORIZON_NTUSER_OBJ_HOOK || entry->generation != (handle >> 16)) return;
+    entry->offset = 0;
+    entry->tid = 0;
+    entry->pid = 0;
+    entry->id = 0;
+    entry->uniq = (unsigned int)entry->generation << 16;
+    horizon_server_flush_session_range_locked(
+        offsetof( struct horizon_session_shm, user_entries ) + index * sizeof(*entry), sizeof(*entry) );
+}
+
+static void horizon_window_hook_free_locked( struct horizon_window_hook *hook )
+{
+    struct horizon_window_hook **link;
+
+    for (link = &horizon_window_hooks; *link; link = &(*link)->next)
+    {
+        if (*link != hook) continue;
+        *link = hook->next;
+        break;
+    }
+    horizon_server_free_hook_handle_locked( hook->handle );
+    free( hook->module );
+    free( hook );
+}
+
+static void horizon_window_hook_remove_locked( struct horizon_window_hook *hook )
+{
+    hook->proc = 0;
+    if (!horizon_window_hook_chains[hook->index]) horizon_window_hook_free_locked( hook );
+}
+
+static void horizon_window_hook_release_chain_locked( int index )
+{
+    struct horizon_window_hook *hook, *next;
+
+    if (!horizon_window_hook_chains[index]) return;
+    if (--horizon_window_hook_chains[index]) return;
+    for (hook = horizon_window_hooks; hook; hook = next)
+    {
+        next = hook->next;
+        if (hook->index == index && !hook->proc) horizon_window_hook_free_locked( hook );
+    }
+}
+
+static void horizon_server_remove_thread_hooks_locked( unsigned int tid )
+{
+    struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
+    struct horizon_window_hook *hook, *next;
+    int i, removed = 0;
+
+    if (queue)
+    {
+        for (i = 0; i < HORIZON_HOOK_KINDS; i++)
+        {
+            while (queue->hook_chains[i] > 0)
+            {
+                queue->hook_chains[i]--;
+                horizon_window_hook_release_chain_locked( i );
+            }
+        }
+    }
+    for (hook = horizon_window_hooks; hook; hook = next)
+    {
+        next = hook->next;
+        if (!hook->proc || (hook->tid != tid && hook->owner != tid)) continue;
+        horizon_window_hook_remove_locked( hook );
+        removed = 1;
+    }
+    if (removed) horizon_server_publish_all_hooks_locked();
+}
+
+static unsigned int horizon_window_hook_module_locked( const struct horizon_window_hook *hook, unsigned int max,
+                                                       unsigned char *module, unsigned int size )
+{
+    unsigned int length = hook->module_size;
+
+    if (length > max) length = max;
+    if (length > size) length = size;
+    if (length) memcpy( module, hook->module, length );
+    return length;
+}
+
+static int horizon_server_handle_set_hook( struct horizon_server_connection *connection,
+                                           const unsigned char *message, const unsigned char *data,
+                                           unsigned int data_size )
+{
+    const struct horizon_set_hook_request *request = (const void *)message;
+    struct horizon_obj_locator locator = {0};
+    struct horizon_set_hook_reply reply;
+    struct horizon_window_hook *hook = NULL;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!request->proc || request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT ||
+        (request->pid && request->pid != connection->pid))
+        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else if ((request->id > HORIZON_WH_CALLWNDPROCRET && !horizon_window_hook_low_level( request->id )) ||
+             (request->id >= 0 && request->id <= HORIZON_WH_JOURNALPLAYBACK))
+        reply.header.error = HORIZON_STATUS_NOT_IMPLEMENTED;
+    else if (horizon_window_hook_low_level( request->id ) && request->tid)
+        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else if (!(hook = calloc( 1, sizeof(*hook) )) || (data_size && !(hook->module = malloc( data_size ))))
+        reply.header.error = HORIZON_STATUS_NO_MEMORY;
+    if (!reply.header.error)
+    {
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        reply.header.error = horizon_server_alloc_user_handle_locked( HORIZON_NTUSER_OBJ_HOOK, locator,
+                                                                      connection->pid, connection->tid,
+                                                                      &hook->handle );
+        if (!reply.header.error)
+        {
+            hook->index = request->id - HORIZON_WH_MINHOOK;
+            hook->tid = request->tid;
+            hook->owner = connection->tid;
+            hook->proc = request->proc;
+            hook->unicode = request->unicode;
+            hook->module_size = data_size;
+            if (data_size) memcpy( hook->module, data, data_size );
+            hook->next = horizon_window_hooks;
+            horizon_window_hooks = hook;
+            reply.handle = hook->handle;
+            horizon_server_publish_all_hooks_locked();
+            hook = NULL;
+        }
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    if (hook)
+    {
+        free( hook->module );
+        free( hook );
+    }
+    {
+        /* Said without the verbose log, a few times. DirectInput puts a hook
+         * on the thread of the window a device was taken for, and gives the
+         * device up when that window stops being the active one: with the
+         * lines of [ACTIVE] and [RAWINPUT] this shows a mouse lost that way. */
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[128];
+
+            told++;
+            snprintf( line, sizeof(line), "[HOOK] thread %04x sets hook %d for thread %04x: %08x, status %08x",
+                      connection->tid, request->id, request->tid, reply.handle, reply.header.error );
+            wine_nx_runtime_trace( line );
+        }
+    }
+    horizon_trace( "[HZHOOK] set id=%d tid=%04x owner=%04x module=%u -> %08x err=%08x\n",
+                   request->id, request->tid, connection->tid, data_size, reply.handle, reply.header.error );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_remove_hook( struct horizon_server_connection *connection,
+                                              const unsigned char *message )
+{
+    const struct horizon_remove_hook_request *request = (const void *)message;
+    struct horizon_server_reply_header reply = { 0, 0 };
+    struct horizon_window_hook *hook = NULL;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (request->handle)
+    {
+        if (!(hook = horizon_window_hook_find_locked( request->handle )) || !hook->proc)
+            reply.error = HORIZON_STATUS_INVALID_HANDLE;
+    }
+    else if (!request->proc || request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
+        reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else
+    {
+        for (hook = horizon_window_hooks; hook; hook = hook->next)
+            if (hook->proc == request->proc && hook->tid == connection->tid &&
+                hook->index == request->id - HORIZON_WH_MINHOOK) break;
+        if (!hook) reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+    }
+    if (!reply.error)
+    {
+        horizon_window_hook_remove_locked( hook );
+        horizon_server_publish_all_hooks_locked();
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[96];
+
+            told++;
+            snprintf( line, sizeof(line), "[HOOK] thread %04x removes hook %08x, status %08x",
+                      connection->tid, request->handle, reply.error );
+            wine_nx_runtime_trace( line );
+        }
+    }
+    horizon_trace( "[HZHOOK] remove %08x err=%08x\n", request->handle, reply.error );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_start_hook_chain( struct horizon_server_connection *connection,
+                                                   const unsigned char *message )
+{
+    const struct horizon_start_hook_chain_request *request = (const void *)message;
+    struct horizon_start_hook_chain_reply reply;
+    struct horizon_window_hook *hook;
+    unsigned char module[520];
+
+    memset( &reply, 0, sizeof(reply) );
+    if (request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
+    {
+        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+        return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    }
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if ((hook = horizon_window_hook_first_locked( request->id - HORIZON_WH_MINHOOK, connection->tid )))
+    {
+        struct horizon_msgq *queue = horizon_server_queue_locked( connection->tid );
+
+        if (!queue) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        else
+        {
+            reply.handle = hook->handle;
+            reply.unicode = hook->unicode;
+            reply.proc = hook->proc;
+            if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
+            reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
+                                                                         module, sizeof(module) );
+            horizon_window_hook_chains[hook->index]++;
+            queue->hook_chains[hook->index]++;
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
+                                       reply.header.reply_size );
+}
+
+static int horizon_server_handle_finish_hook_chain( struct horizon_server_connection *connection,
+                                                    const unsigned char *message )
+{
+    const struct horizon_finish_hook_chain_request *request = (const void *)message;
+    struct horizon_server_reply_header reply = { 0, 0 };
+    struct horizon_msgq *queue;
+    int index = request->id - HORIZON_WH_MINHOOK;
+
+    if (request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
+        reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else
+    {
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        queue = horizon_msgq_find( &horizon_msg_queues, connection->tid );
+        if (!horizon_window_hook_chains[index] || !queue || queue->hook_chains[index] <= 0)
+            reply.error = HORIZON_STATUS_INVALID_PARAMETER;
+        else
+        {
+            queue->hook_chains[index]--;
+            horizon_window_hook_release_chain_locked( index );
+        }
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_get_hook_info( struct horizon_server_connection *connection,
+                                                const unsigned char *message )
+{
+    const struct horizon_get_hook_info_request *request = (const void *)message;
+    struct horizon_get_hook_info_reply reply;
+    struct horizon_window_hook *hook;
+    unsigned char module[520];
+
+    memset( &reply, 0, sizeof(reply) );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(hook = horizon_window_hook_find_locked( request->handle )) ||
+        (hook->tid && hook->tid != connection->tid))
+        reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
+    else if (!request->get_next || (hook = horizon_window_hook_next_locked( hook, connection->tid )))
+    {
+        reply.handle = hook->handle;
+        reply.id = hook->index + HORIZON_WH_MINHOOK;
+        reply.unicode = hook->unicode;
+        reply.proc = hook->proc;
+        if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
+        reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
+                                                                     module, sizeof(module) );
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
+                                       reply.header.reply_size );
+}
+
+static int horizon_server_handle_window_hook( struct horizon_server_connection *connection,
+                                              const unsigned char *message, int req,
+                                              const unsigned char *data, unsigned int data_size )
+{
+    switch (req)
+    {
+    case HORIZON_REQ_SET_HOOK:
+        return horizon_server_handle_set_hook( connection, message, data, data_size );
+    case HORIZON_REQ_REMOVE_HOOK:
+        return horizon_server_handle_remove_hook( connection, message );
+    case HORIZON_REQ_START_HOOK_CHAIN:
+        return horizon_server_handle_start_hook_chain( connection, message );
+    case HORIZON_REQ_FINISH_HOOK_CHAIN:
+        return horizon_server_handle_finish_hook_chain( connection, message );
+    default:
+        return horizon_server_handle_get_hook_info( connection, message );
+    }
+}
+
 static struct horizon_user_window *horizon_server_find_window_locked( unsigned int handle )
 {
     struct horizon_user_window *window;
@@ -6760,6 +7747,7 @@ static int horizon_server_object_is_signaled( const struct horizon_server_object
     case HORIZON_SERVER_OBJECT_SEMAPHORE:
         return object->count > 0;
     case HORIZON_SERVER_OBJECT_TIMER:
+    case HORIZON_SERVER_OBJECT_DEVICE:
         return object->signaled;
     case HORIZON_SERVER_OBJECT_THREAD:
         return object->thread.terminated;
@@ -7397,15 +8385,104 @@ static int horizon_server_handle_set_process_winstation( struct horizon_server_c
     return horizon_server_write_status( connection->reply_fd, status );
 }
 
+struct horizon_monitor_info
+{
+    struct horizon_rectangle raw;
+    struct horizon_rectangle virt;
+    unsigned int flags;
+    unsigned short dpi_num, dpi_den;
+    unsigned short raw_dpi_num, raw_dpi_den;
+};
+
+#define HORIZON_MAX_MONITORS 8
+#define HORIZON_MONITOR_FLAG_CLONE    0x02u
+#define HORIZON_MONITOR_FLAG_INACTIVE 0x04u
+
+static struct horizon_monitor_info horizon_monitors[HORIZON_MAX_MONITORS];
+static unsigned int horizon_monitor_count;
+
+static void horizon_server_raw_screen_rect_locked( struct horizon_rectangle *rect )
+{
+    struct horizon_rectangle out = { 0, 0, 0, 0 };
+    unsigned int i;
+    int have = 0;
+
+    for (i = 0; i < horizon_monitor_count; i++)
+    {
+        const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+
+        if (horizon_monitors[i].flags & (HORIZON_MONITOR_FLAG_CLONE | HORIZON_MONITOR_FLAG_INACTIVE)) continue;
+        if (raw->left >= raw->right || raw->top >= raw->bottom) continue;
+        if (!have)
+        {
+            out = *raw;
+            have = 1;
+        }
+        else
+        {
+            if (raw->left < out.left) out.left = raw->left;
+            if (raw->top < out.top) out.top = raw->top;
+            if (raw->right > out.right) out.right = raw->right;
+            if (raw->bottom > out.bottom) out.bottom = raw->bottom;
+        }
+    }
+    if (!have)
+    {
+        out.left = out.top = 0;
+        out.right = 1280;
+        out.bottom = 720;
+    }
+    *rect = out;
+}
+
+static void horizon_server_map_point_raw_to_virt_locked( int *x, int *y )
+{
+    const struct horizon_monitor_info *monitor = NULL, *first_active = NULL;
+    int width_from, height_from, width_to, height_to;
+    unsigned int i;
+
+    for (i = 0; i < horizon_monitor_count && !monitor; i++)
+    {
+        const struct horizon_rectangle *raw = &horizon_monitors[i].raw;
+
+        if (horizon_monitors[i].flags & (HORIZON_MONITOR_FLAG_CLONE | HORIZON_MONITOR_FLAG_INACTIVE)) continue;
+        if (!first_active) first_active = &horizon_monitors[i];
+        if (*x >= raw->left && *x < raw->right && *y >= raw->top && *y < raw->bottom) monitor = &horizon_monitors[i];
+    }
+    if (!monitor) monitor = first_active;
+    if (!monitor) return;
+    width_from = monitor->raw.right - monitor->raw.left;
+    height_from = monitor->raw.bottom - monitor->raw.top;
+    width_to = monitor->virt.right - monitor->virt.left;
+    height_to = monitor->virt.bottom - monitor->virt.top;
+    if (width_from <= 0 || height_from <= 0) return;
+
+    *x = *x * 2 - (monitor->raw.left * 2 + width_from);
+    *x = (*x * width_to * 2 + width_from) / (width_from * 2);
+    *x = (*x + monitor->virt.left * 2 + width_to) / 2;
+
+    *y = *y * 2 - (monitor->raw.top * 2 + height_from);
+    *y = (*y * height_to * 2 + height_from) / (height_from * 2);
+    *y = (*y + monitor->virt.top * 2 + height_to) / 2;
+}
+
 static int horizon_server_handle_set_winstation_monitors( struct horizon_server_connection *connection,
-                                                          const unsigned char *message )
+                                                          const unsigned char *message,
+                                                          const void *data, unsigned int data_size )
 {
     const struct horizon_set_winstation_monitors_request *request = (const void *)message;
     struct horizon_set_winstation_monitors_reply reply;
     struct horizon_server_object *winstation;
+    unsigned int count = data_size / sizeof(struct horizon_monitor_info);
 
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (count > HORIZON_MAX_MONITORS) count = HORIZON_MAX_MONITORS;
+    if (data && count)
+    {
+        memcpy( horizon_monitors, data, count * sizeof(struct horizon_monitor_info) );
+        horizon_monitor_count = count;
+    }
     if (!(winstation = horizon_server_find_handle_object_locked( horizon_process_winstation,
                                                                  HORIZON_SERVER_OBJECT_WINSTATION )))
         reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
@@ -7447,8 +8524,7 @@ static unsigned int horizon_server_create_desktop_locked( const struct horizon_o
         return status;
     shared = horizon_server_shared_object_locked( locator );
     shared->shm.desktop.flags = flags;
-    shared->shm.desktop.cursor.clip.right = 1280;
-    shared->shm.desktop.cursor.clip.bottom = 720;
+    horizon_server_raw_screen_rect_locked( &shared->shm.desktop.cursor.clip );
     if ((status = horizon_server_flush_session_range_locked( locator.offset, sizeof(*shared) )))
         return status;
 
@@ -8747,7 +9823,7 @@ static int horizon_server_handle_set_window_pos( struct horizon_server_connectio
     struct horizon_set_window_pos_reply reply;
     struct horizon_user_window *window, *previous;
     struct horizon_rectangle old_window, old_client;
-    int geometry_changed;
+    int geometry_changed, was_visible;
 
     memset( &reply, 0, sizeof(reply) );
     pthread_mutex_lock( &horizon_server_objects_mutex );
@@ -8779,6 +9855,7 @@ static int horizon_server_handle_set_window_pos( struct horizon_server_connectio
         window->visible_rect = data_size >= sizeof(*extra) ? extra[0] : request->window;
         window->surface_rect = data_size >= 2 * sizeof(*extra) ? extra[1] : window->visible_rect;
         window->paint_flags = request->paint_flags;
+        was_visible = !!(window->style & HORIZON_WS_VISIBLE);
         if (request->swp_flags & HORIZON_SWP_SHOWWINDOW) window->style |= HORIZON_WS_VISIBLE;
         if (request->swp_flags & HORIZON_SWP_HIDEWINDOW) window->style &= ~HORIZON_WS_VISIBLE;
         reply.new_style = window->style;
@@ -8813,6 +9890,18 @@ static int horizon_server_handle_set_window_pos( struct horizon_server_connectio
                                window->paint_flags, window->style );
             }
             reply.surface_win = window->handle;
+        }
+        if ((geometry_changed || !was_visible) && (window->style & HORIZON_WS_VISIBLE) &&
+            !(request->swp_flags & HORIZON_SWP_NOREDRAW))
+        {
+            struct horizon_rectangle win_screen, client_screen;
+
+            horizon_server_window_screen_rects_locked( window, &win_screen, &client_screen );
+            if (!was_visible) horizon_server_mark_window_update_locked( window, client_screen, 1 );
+            horizon_server_redraw_children_locked( window, win_screen, HORIZON_RDW_ALLCHILDREN );
+            horizon_trace( "[HZPAINT] setpos expose hwnd=%08x rect=%d,%d-%d,%d shown=%d\n",
+                           window->handle, win_screen.left, win_screen.top,
+                           win_screen.right, win_screen.bottom, !was_visible );
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -8950,6 +10039,7 @@ static struct horizon_user_window *horizon_server_shallow_window_from_point_lock
 {
     struct horizon_user_window *window;
 
+    horizon_server_map_point_raw_to_virt_locked( &x, &y );
     for (window = horizon_windows; window; window = window->next)
     {
         struct horizon_rectangle rect, client;
@@ -9148,7 +10238,8 @@ static int horizon_server_mouse_message_matches( const struct horizon_get_messag
     if (horizon_server_msg_in_filter( request, msg )) return 1;
     if (horizon_server_msg_in_filter( request, msg + HORIZON_WM_NCMOUSEFIRST - HORIZON_WM_MOUSEFIRST ))
         return 1;
-    if (msg != HORIZON_WM_LBUTTONDOWN && msg != HORIZON_WM_RBUTTONDOWN) return 0;
+    if (msg != HORIZON_WM_LBUTTONDOWN && msg != HORIZON_WM_RBUTTONDOWN &&
+        msg != HORIZON_WM_MBUTTONDOWN && msg != HORIZON_WM_XBUTTONDOWN) return 0;
     return horizon_server_msg_in_filter( request, msg + HORIZON_WM_LBUTTONDBLCLK - HORIZON_WM_LBUTTONDOWN ) ||
            horizon_server_msg_in_filter( request, msg + HORIZON_WM_NCLBUTTONDBLCLK - HORIZON_WM_LBUTTONDOWN );
 }
@@ -9157,17 +10248,58 @@ static int horizon_server_mouse_message_matches( const struct horizon_get_messag
 static const struct horizon_mouse_button_event
 {
     unsigned int flag;
+    unsigned int data;
     unsigned int msg;
     unsigned int mk;
     unsigned int vk;
     int down;
 } horizon_mouse_button_events[] =
 {
-    { HORIZON_MOUSEEVENTF_LEFTDOWN,  HORIZON_WM_LBUTTONDOWN, HORIZON_MK_LBUTTON, HORIZON_VK_LBUTTON, 1 },
-    { HORIZON_MOUSEEVENTF_LEFTUP,    HORIZON_WM_LBUTTONUP,   HORIZON_MK_LBUTTON, HORIZON_VK_LBUTTON, 0 },
-    { HORIZON_MOUSEEVENTF_RIGHTDOWN, HORIZON_WM_RBUTTONDOWN, HORIZON_MK_RBUTTON, HORIZON_VK_RBUTTON, 1 },
-    { HORIZON_MOUSEEVENTF_RIGHTUP,   HORIZON_WM_RBUTTONUP,   HORIZON_MK_RBUTTON, HORIZON_VK_RBUTTON, 0 },
+    { HORIZON_MOUSEEVENTF_LEFTDOWN,   0, HORIZON_WM_LBUTTONDOWN, HORIZON_MK_LBUTTON,  HORIZON_VK_LBUTTON,  1 },
+    { HORIZON_MOUSEEVENTF_LEFTUP,     0, HORIZON_WM_LBUTTONUP,   HORIZON_MK_LBUTTON,  HORIZON_VK_LBUTTON,  0 },
+    { HORIZON_MOUSEEVENTF_RIGHTDOWN,  0, HORIZON_WM_RBUTTONDOWN, HORIZON_MK_RBUTTON,  HORIZON_VK_RBUTTON,  1 },
+    { HORIZON_MOUSEEVENTF_RIGHTUP,    0, HORIZON_WM_RBUTTONUP,   HORIZON_MK_RBUTTON,  HORIZON_VK_RBUTTON,  0 },
+    { HORIZON_MOUSEEVENTF_MIDDLEDOWN, 0, HORIZON_WM_MBUTTONDOWN, HORIZON_MK_MBUTTON,  HORIZON_VK_MBUTTON,  1 },
+    { HORIZON_MOUSEEVENTF_MIDDLEUP,   0, HORIZON_WM_MBUTTONUP,   HORIZON_MK_MBUTTON,  HORIZON_VK_MBUTTON,  0 },
+    { HORIZON_MOUSEEVENTF_XDOWN,      1, HORIZON_WM_XBUTTONDOWN, HORIZON_MK_XBUTTON1, HORIZON_VK_XBUTTON1, 1 },
+    { HORIZON_MOUSEEVENTF_XUP,        1, HORIZON_WM_XBUTTONUP,   HORIZON_MK_XBUTTON1, HORIZON_VK_XBUTTON1, 0 },
+    { HORIZON_MOUSEEVENTF_XDOWN,      2, HORIZON_WM_XBUTTONDOWN, HORIZON_MK_XBUTTON2, HORIZON_VK_XBUTTON2, 1 },
+    { HORIZON_MOUSEEVENTF_XUP,        2, HORIZON_WM_XBUTTONUP,   HORIZON_MK_XBUTTON2, HORIZON_VK_XBUTTON2, 0 },
 };
+
+static void horizon_server_queue_mouse_hook_ll_locked( unsigned int flags, unsigned int data, int dx, int dy,
+                                                       unsigned int time, unsigned long long info )
+{
+    static const unsigned int messages[] =
+    {
+        HORIZON_WM_MOUSEMOVE, HORIZON_WM_LBUTTONDOWN, HORIZON_WM_LBUTTONUP, HORIZON_WM_RBUTTONDOWN,
+        HORIZON_WM_RBUTTONUP, HORIZON_WM_MBUTTONDOWN, HORIZON_WM_MBUTTONUP, HORIZON_WM_XBUTTONDOWN,
+        HORIZON_WM_XBUTTONUP, 0, 0, HORIZON_WM_MOUSEWHEEL, HORIZON_WM_MOUSEHWHEEL,
+    };
+    unsigned long long mouse_data = (unsigned long long)data << 16;
+    unsigned int i;
+
+    if (!horizon_window_hook_from_locked( horizon_window_hooks, HORIZON_WH_MOUSE_LL - HORIZON_WH_MINHOOK, 0, 1 ))
+        return;
+    for (i = 0; i < sizeof(messages) / sizeof(messages[0]); i++)
+    {
+        if (!messages[i] || !(flags & (1u << i))) continue;
+        horizon_server_queue_hook_ll_locked( HORIZON_WH_MOUSE_LL, messages[i], (i >= 7) ? mouse_data : 0,
+                                             i ? 0 : dx, i ? 0 : dy, time, info, 0 );
+    }
+}
+
+static void horizon_server_queue_key_hook_ll_locked( const struct horizon_hw_keyboard_input *kbd,
+                                                     const struct horizon_key_event *event, unsigned int time )
+{
+    unsigned int vkey = kbd->vkey & 0xff;
+
+    if (vkey == HORIZON_KBD_VK_MENU || vkey == HORIZON_KBD_VK_CONTROL || vkey == HORIZON_KBD_VK_SHIFT)
+        vkey = event->vkey;
+    horizon_server_queue_hook_ll_locked( HORIZON_WH_KEYBOARD_LL, event->message,
+                                         (unsigned long long)(kbd->scan & 0xff) << 16 | vkey, 0, 0, time, kbd->info,
+                                         event->data_flags );
+}
 
 /* A controller key (wine_nx_send_keys, dlls/win32u/winnx_drv.c), as
  * server/queue.c queues it: WM_INPUT for a raw keyboard registration, which is
@@ -9198,6 +10330,7 @@ static int horizon_server_handle_send_keyboard( struct horizon_server_connection
         time = kbd->time ? kbd->time : horizon_server_input_time();
         horizon_keyboard_event( desktop->keystate, &horizon_alt_pressed, kbd->vkey, kbd->scan, kbd->flags,
                                 (unsigned int)kbd->info, &event );
+        horizon_server_queue_key_hook_ll_locked( kbd, &event, time );
         if (request->win) focus = horizon_server_find_window_locked( request->win );
         if (!focus && input && input->focus) focus = horizon_server_find_window_locked( input->focus );
         if (!focus && input && input->active) focus = horizon_server_find_window_locked( input->active );
@@ -9320,10 +10453,14 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         }
         if (flags & HORIZON_MOUSEEVENTF_MOVE)
         {
-            if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
-            if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
-            if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
-            if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+            if (desktop->cursor.clip.left <= desktop->cursor.clip.right &&
+                desktop->cursor.clip.top <= desktop->cursor.clip.bottom)
+            {
+                if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
+                if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+                if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
+                if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
+            }
             if (legacy)
             {
                 desktop->cursor.x = x;
@@ -9349,13 +10486,48 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         if (target) target_handle = target->handle;
         horizon_server_log_mouse_target_locked( target, x, y, input ? input->capture : 0 );
         if (target) input = horizon_server_input_shared_locked( target->tid );
+        /* The hook's point is the cursor's when the hook runs plus this
+         * movement (horizon_server_hook_ll_point_locked). The cursor has moved
+         * already, so without the movement the point is where the cursor is,
+         * and DirectInput, which reads a low-level hook's point less the
+         * cursor's as the mouse's motion, saw none: Doom 3 had no mouse. */
+        horizon_server_queue_mouse_hook_ll_locked( flags, mouse->data, dx, dy, time, mouse->info );
 
         if (raw_device)
         {
             raw_target = raw_device->target ? horizon_server_find_window_locked( raw_device->target ) : target;
-            horizon_raw_mouse_event( flags, dx, dy, mouse->info, &raw );
+            {
+                static unsigned int told;
+
+                if (told < 4 && (flags & HORIZON_MOUSEEVENTF_MOVE))
+                {
+                    char line[160];
+
+                    told++;
+                    snprintf( line, sizeof(line), "[RAWINPUT] mouse moved %d,%d: raw to hwnd=%08x (asked %08x) "
+                              "tid=%u, flags %x, messages %s", dx, dy, raw_target ? raw_target->handle : 0,
+                              raw_device->target, raw_target ? raw_target->tid : 0, raw_device->flags,
+                              legacy ? "too" : "off" );
+                    wine_nx_runtime_trace( line );
+                }
+            }
+            horizon_raw_mouse_event_data( flags, mouse->data, dx, dy, mouse->info, &raw );
             if ((status = horizon_server_queue_raw_mouse_locked( raw_target, x, y, time, mouse->info, &raw )))
                 goto done;
+        }
+        else if (flags & HORIZON_MOUSEEVENTF_MOVE)
+        {
+            static unsigned int told;
+
+            if (!told)
+            {
+                char line[96];
+
+                told = 1;
+                snprintf( line, sizeof(line), "[RAWINPUT] mouse moved %d,%d: no raw mouse registration (%u devices)",
+                          dx, dy, horizon_rawinput_device_count );
+                wine_nx_runtime_trace( line );
+            }
         }
         if (legacy && (flags & HORIZON_MOUSEEVENTF_MOVE) &&
             (status = horizon_server_queue_mouse_locked( target, HORIZON_WM_MOUSEMOVE,
@@ -9365,18 +10537,33 @@ static int horizon_server_handle_send_hardware_message( struct horizon_server_co
         for (i = 0; i < sizeof(horizon_mouse_button_events) / sizeof(horizon_mouse_button_events[0]); i++)
         {
             const struct horizon_mouse_button_event *event = &horizon_mouse_button_events[i];
+            unsigned long long wparam;
 
             if (!(flags & event->flag)) continue;
+            if (event->data && !(mouse->data & event->data)) continue;
             if (event->down) horizon_mouse_buttons |= event->mk;
             else horizon_mouse_buttons &= ~event->mk;
             if (input) input->keystate[event->vk] = event->down ? 0x80 : 0;
             desktop->keystate[event->vk] = event->down ? 0x80 : 0;
             if (!legacy) continue;
+            wparam = ((unsigned long long)event->data << 16) | horizon_mouse_buttons;
             if ((status = horizon_server_queue_mouse_locked( target, event->msg,
-                                                             horizon_mouse_buttons, x, y, time,
+                                                             wparam, x, y, time,
                                                              mouse->info )))
                 goto done;
         }
+        if (legacy && (flags & HORIZON_MOUSEEVENTF_WHEEL) &&
+            (status = horizon_server_queue_mouse_locked(
+                 target, HORIZON_WM_MOUSEWHEEL,
+                 ((unsigned long long)(unsigned short)mouse->data << 16) | horizon_mouse_buttons,
+                 x, y, time, mouse->info )))
+            goto done;
+        if (legacy && (flags & HORIZON_MOUSEEVENTF_HWHEEL) &&
+            (status = horizon_server_queue_mouse_locked(
+                 target, HORIZON_WM_MOUSEHWHEEL,
+                 ((unsigned long long)(unsigned short)mouse->data << 16) | horizon_mouse_buttons,
+                 x, y, time, mouse->info )))
+            goto done;
         if (input) input->keystate_serial++;
         desktop->keystate_serial++;
 done:
@@ -9430,6 +10617,30 @@ static int horizon_server_handle_update_rawinput_devices( struct horizon_server_
         horizon_rawinput_devices = devices;
         horizon_rawinput_device_count = count;
         pthread_mutex_unlock( &horizon_server_objects_mutex );
+    }
+    {
+        /* Said without the verbose log, a few times: a program that reads the
+         * mouse through raw input, as DirectInput 8 does, gets no movement at
+         * all when its registration is not here, and the log has to show it. */
+        static unsigned int told;
+
+        if (told < 16)
+        {
+            char line[160];
+
+            told++;
+            snprintf( line, sizeof(line), "[RAWINPUT] thread %04x registers %u device(s), status %08x",
+                      connection->tid, count, status );
+            wine_nx_runtime_trace( line );
+            for (i = 0; !status && i < count && i < 4; i++)
+            {
+                snprintf( line, sizeof(line), "[RAWINPUT]   usage %08x flags %x target %08x",
+                          ((const struct horizon_rawinput_device *)data)[i].usage,
+                          ((const struct horizon_rawinput_device *)data)[i].flags,
+                          ((const struct horizon_rawinput_device *)data)[i].target );
+                wine_nx_runtime_trace( line );
+            }
+        }
     }
     horizon_trace( "[HZINPUT] update_rawinput_devices count=%u err=%08x\n", count, status );
     for (i = 0; devices && i < count; i++)
@@ -9564,6 +10775,21 @@ static int horizon_server_handle_set_foreground_window( struct horizon_server_co
         horizon_server_flush_input_locked( input->shared );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 16 && &wine_nx_runtime_trace)
+        {
+            char line[128];
+
+            told++;
+            snprintf( line, sizeof(line), "[ACTIVE] thread %04x puts hwnd=%08x in front, status %08x; "
+                      "the active window was %08x",
+                      connection->tid, request->handle, reply.header.error, reply.previous );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -9592,6 +10818,21 @@ static int horizon_server_handle_set_input_window( struct horizon_server_connect
         horizon_server_flush_input_locked( input );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (which == HORIZON_REQ_SET_ACTIVE_WINDOW && !reply.header.error && reply.previous != request->handle)
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int told;
+
+        if (told < 24 && &wine_nx_runtime_trace)
+        {
+            char line[96];
+
+            told++;
+            snprintf( line, sizeof(line), "[ACTIVE] thread %04x: active window %08x, was %08x",
+                      connection->tid, request->handle, reply.previous );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -9713,18 +10954,42 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
         reply.prev_y = desktop->cursor.y;
         if (request->flags & HORIZON_SET_CURSOR_HANDLE) input->cursor = request->handle;
         if (request->flags & HORIZON_SET_CURSOR_COUNT) input->cursor_count += request->show_count;
+        if (request->flags & HORIZON_SET_CURSOR_CLIP)
+        {
+            struct horizon_rectangle top_rect, new_rect = request->clip;
+
+            horizon_server_raw_screen_rect_locked( &top_rect );
+            if (new_rect.left   < top_rect.left)   new_rect.left   = top_rect.left;
+            if (new_rect.right  > top_rect.right)  new_rect.right  = top_rect.right;
+            if (new_rect.top    < top_rect.top)    new_rect.top    = top_rect.top;
+            if (new_rect.bottom > top_rect.bottom) new_rect.bottom = top_rect.bottom;
+            if (new_rect.left > new_rect.right || new_rect.top > new_rect.bottom) new_rect = top_rect;
+            desktop->cursor.clip = new_rect;
+        }
+        if (request->flags & HORIZON_SET_CURSOR_NOCLIP)
+            horizon_server_raw_screen_rect_locked( &desktop->cursor.clip );
         if (request->flags & HORIZON_SET_CURSOR_POS)
         {
             desktop->cursor.x = request->x;
             desktop->cursor.y = request->y;
             desktop->cursor.last_change = horizon_server_input_time();
         }
-        if (request->flags & HORIZON_SET_CURSOR_CLIP) desktop->cursor.clip = request->clip;
-        if (request->flags & HORIZON_SET_CURSOR_NOCLIP)
+        if ((request->flags & (HORIZON_SET_CURSOR_POS | HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)) &&
+            desktop->cursor.clip.left <= desktop->cursor.clip.right &&
+            desktop->cursor.clip.top <= desktop->cursor.clip.bottom)
         {
-            desktop->cursor.clip.left = desktop->cursor.clip.top = 0;
-            desktop->cursor.clip.right = 1280;
-            desktop->cursor.clip.bottom = 720;
+            int x = desktop->cursor.x, y = desktop->cursor.y;
+
+            if (x >= desktop->cursor.clip.right) x = desktop->cursor.clip.right - 1;
+            if (x < desktop->cursor.clip.left) x = desktop->cursor.clip.left;
+            if (y >= desktop->cursor.clip.bottom) y = desktop->cursor.clip.bottom - 1;
+            if (y < desktop->cursor.clip.top) y = desktop->cursor.clip.top;
+            if (x != desktop->cursor.x || y != desktop->cursor.y)
+            {
+                desktop->cursor.x = x;
+                desktop->cursor.y = y;
+                desktop->cursor.last_change = horizon_server_input_time();
+            }
         }
         reply.new_x = desktop->cursor.x;
         reply.new_y = desktop->cursor.y;
@@ -9736,6 +11001,31 @@ static int horizon_server_handle_set_cursor( struct horizon_server_connection *c
             offsetof( struct horizon_shared_object, shm ) + sizeof(struct horizon_desktop_shm) );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (!reply.header.error &&
+        (request->flags & (HORIZON_SET_CURSOR_POS | HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP)))
+    {
+        /* Said without the verbose log, a few times: DirectInput centres and
+         * clips the cursor when a program takes the mouse for itself and frees
+         * it when the mouse is given up, so these lines date both. */
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int clips, places;
+        int clip = !!(request->flags & (HORIZON_SET_CURSOR_CLIP | HORIZON_SET_CURSOR_NOCLIP));
+
+        if (&wine_nx_runtime_trace && (clip ? clips < 24 : places < 12))
+        {
+            char line[320];
+
+            if (clip) clips++;
+            else places++;
+            snprintf( line, sizeof(line), "[CURSOR] thread %04x, flags %x: asked for %d,%d and clip %d,%d-%d,%d; "
+                      "the cursor was at %d,%d and is at %d,%d, clip %d,%d-%d,%d",
+                      connection->tid, request->flags, request->x, request->y,
+                      request->clip.left, request->clip.top, request->clip.right, request->clip.bottom,
+                      reply.prev_x, reply.prev_y, reply.new_x, reply.new_y,
+                      reply.new_clip.left, reply.new_clip.top, reply.new_clip.right, reply.new_clip.bottom );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -10923,6 +12213,17 @@ static int horizon_server_posted_window_is_descendant( void *ctx, unsigned int c
     return horizon_server_window_is_descendant_locked( horizon_server_find_window_locked( child ), ancestor );
 }
 
+static void horizon_server_hook_ll_point_locked( struct horizon_get_message_reply *reply )
+{
+    struct horizon_obj_locator locator;
+    struct horizon_desktop_shm *desktop;
+
+    if (reply->type != HORIZON_MSG_HOOK_LL || reply->msg != HORIZON_WH_MOUSE_LL) return;
+    if (!(desktop = horizon_server_desktop_shared_locked( &locator ))) return;
+    reply->x += desktop->cursor.x;
+    reply->y += desktop->cursor.y;
+}
+
 static int horizon_server_handle_get_message( struct horizon_server_connection *connection,
                                               const unsigned char *message )
 {
@@ -10965,6 +12266,7 @@ static int horizon_server_handle_get_message( struct horizon_server_connection *
         reply.y = queue->sent->y;
         reply.time = queue->sent->time;
         reply.total = queue->sent->data_size;
+        horizon_server_hook_ll_point_locked( &reply );
         if (queue->sent->data_size > request->header.reply_size)
             reply.header.error = HORIZON_STATUS_BUFFER_OVERFLOW;
         else
@@ -11054,6 +12356,20 @@ static int horizon_server_handle_get_message( struct horizon_server_connection *
             else if (queued->raw_mouse)
             {
                 /* And RAWMOUSE for one, the same way. */
+                {
+                    static unsigned int told;
+
+                    if (told < 4)
+                    {
+                        char line[128];
+
+                        told++;
+                        snprintf( line, sizeof(line), "[RAWINPUT] thread %04x takes raw mouse %d,%d for hwnd=%08x%s",
+                                  connection->tid, (int)queued->raw_m.last_x, (int)queued->raw_m.last_y, queued->win,
+                                  (request->flags & HORIZON_PM_REMOVE) ? "" : " (peek)" );
+                        wine_nx_runtime_trace( line );
+                    }
+                }
                 hardware.size += sizeof(queued->raw_m);
                 hardware.rawinput.type = HORIZON_RIM_TYPEMOUSE;
                 hardware.rawinput.device = HORIZON_WINE_MOUSE_HANDLE;
@@ -11581,7 +12897,7 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
     struct horizon_server_handle_entry *entry;
 
     memset( &reply, 0, sizeof(reply) );
-    pthread_mutex_lock( &horizon_server_objects_mutex );
+    horizon_server_sync_lock( connection );
     entry = horizon_server_find_handle_locked( request->handle );
     if (!entry) reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
     else if ((entry->object->type != HORIZON_SERVER_OBJECT_FILE &&
@@ -11590,7 +12906,8 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
               entry->object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE) ||
              entry->object->file_fd == -1)
     {
-        if (entry->object->type == HORIZON_SERVER_OBJECT_FILE && entry->object->file_is_dir)
+        if ((entry->object->type == HORIZON_SERVER_OBJECT_FILE && entry->object->file_is_dir) ||
+            entry->object->type == HORIZON_SERVER_OBJECT_DEVICE)
             reply.header.error = HORIZON_STATUS_BAD_DEVICE_TYPE;
         else
             reply.header.error = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
@@ -11620,7 +12937,7 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
         horizon_server_queue_fd( entry->object->file_fd, request->handle );
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
-    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    return horizon_server_sync_reply( connection, &reply, sizeof(reply), NULL, 0 );
 }
 
 static char horizon_server_ascii_lower( char ch )
@@ -11858,6 +13175,14 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
  */
 
 static void *horizon_server_thread( void *param );
+static int horizon_server_pool_enabled( void );
+static int horizon_server_pool_add( struct horizon_server_connection *connection );
+
+#define HORIZON_STOP_SUSPEND 1
+#define HORIZON_STOP_END     2
+#define HORIZON_STOP_KERNEL  4
+#define HORIZON_STOP_HELD    8
+#define HORIZON_STOP_LEAVING 16
 
 #ifndef HORIZON_STANDALONE_SYNTAX
 static void horizon_server_set_suspend_doorbell_locked( struct horizon_server_object *object, int value )
@@ -11868,6 +13193,182 @@ static void horizon_server_set_suspend_doorbell_locked( struct horizon_server_ob
     if (!teb || !(area = teb->ChpeV2CpuAreaInfo) || !area->SuspendDoorbell) return;
     __atomic_store_n( area->SuspendDoorbell, value, __ATOMIC_RELEASE );
 }
+
+extern int wine_nx_thread_stop_request( const void *teb, unsigned int tid, int set, int clear, int code,
+                                        Handle *handle ) __attribute__((weak));
+extern int wine_nx_in_runtime_code( uint64_t address ) __attribute__((weak));
+extern int wine_nx_thread_pause_granted( void ) __attribute__((weak));
+extern int wine_nx_thread_hold( const void *teb, unsigned int tid, const void **frame, int *changed )
+    __attribute__((weak));
+extern void wine_nx_thread_release( const void *teb, unsigned int tid, const void *changed ) __attribute__((weak));
+extern int wine_nx_thread_state( const void *teb, unsigned int tid, const void **frame ) __attribute__((weak));
+extern void wine_nx_thread_wait_change( const void *teb, unsigned int tid, int observed ) __attribute__((weak));
+extern void wine_nx_thread_signal( const void *teb, unsigned int tid ) __attribute__((weak));
+extern void wine_nx_kernel_context( const void *frame, CONTEXT *context ) __attribute__((weak));
+extern unsigned int horizon_contexts_to_server( struct context_data server_contexts[2], CONTEXT *context )
+    __attribute__((weak));
+
+static int horizon_server_has_doorbell_locked( struct horizon_server_object *object )
+{
+    TEB *teb = (TEB *)(ULONG_PTR)object->thread.teb;
+
+    return teb && teb->ChpeV2CpuAreaInfo && teb->ChpeV2CpuAreaInfo->SuspendDoorbell;
+}
+
+static int horizon_server_stop_request_locked( struct horizon_server_object *object, int set, int clear, int code,
+                                               Handle *handle )
+{
+    const void *teb = (const void *)(ULONG_PTR)object->thread.teb;
+
+    if (!&wine_nx_thread_stop_request || !teb) return 0;
+    return wine_nx_thread_stop_request( teb, object->thread.tid, set, clear, code, handle );
+}
+
+static int horizon_server_can_pause( void )
+{
+    return &wine_nx_in_runtime_code && &wine_nx_thread_pause_granted && wine_nx_thread_pause_granted();
+}
+
+static void horizon_server_context_from_kernel( struct context_data *to, const ThreadContext *from )
+{
+    unsigned int i;
+
+    memset( to, 0, sizeof(*to) );
+    to->machine = HORIZON_IMAGE_FILE_MACHINE_ARM64;
+    to->flags = SERVER_CTX_CONTROL | SERVER_CTX_INTEGER | SERVER_CTX_FLOATING_POINT | SERVER_CTX_TLS |
+                SERVER_CTX_EXEC_SPACE;
+    to->ctl.arm64_regs.sp = from->sp;
+    to->ctl.arm64_regs.pc = from->pc.x;
+    to->ctl.arm64_regs.pstate = from->psr;
+    for (i = 0; i < 18; i++) to->integer.arm64_regs.x0[i] = from->cpu_gprs[i].x;
+    for (i = 0; i < 10; i++) to->integer.arm64_regs.x19[i] = from->cpu_gprs[19 + i].x;
+    to->integer.arm64_regs.x19[10] = from->fp;
+    to->integer.arm64_regs.x19[11] = from->lr;
+    to->tls.arm64_x18 = from->cpu_gprs[18].x;
+    for (i = 0; i < 32; i++) memcpy( &to->fp.arm64_regs.q[i], &from->fpu_gprs[i], sizeof(to->fp.arm64_regs.q[i]) );
+    to->fp.arm64_regs.fpcr = from->fpcr;
+    to->fp.arm64_regs.fpsr = from->fpsr;
+    to->exec_space.space.space = EXEC_SPACE_USERMODE;
+}
+
+static int horizon_server_freeze_leaving_locked( struct horizon_server_object *object )
+{
+    const void *frame = NULL;
+    CONTEXT context;
+    int state;
+
+    if (!&wine_nx_thread_state || !&wine_nx_kernel_context || !&horizon_contexts_to_server) return 0;
+    state = wine_nx_thread_state( (const void *)(ULONG_PTR)object->thread.teb, object->thread.tid, &frame );
+    if (state < 0 || !(state & HORIZON_STOP_LEAVING) || (state & HORIZON_STOP_KERNEL) || !frame) return 0;
+    if (!object->held_contexts && !(object->held_contexts = calloc( 2, sizeof(*object->held_contexts) ))) return 0;
+    wine_nx_kernel_context( frame, &context );
+    object->held_count = horizon_contexts_to_server( object->held_contexts, &context );
+    object->thread_contexts = object->held_contexts;
+    object->thread_context_count = object->held_count;
+    return 1;
+}
+
+static int horizon_server_freeze_locked( struct horizon_server_object *object )
+{
+    ThreadContext kernel;
+    Handle handle = 0, again = 0;
+
+    if (object->frozen) return 1;
+    if (!horizon_server_can_pause() || !object->thread.started || object->thread.terminated || object->ending ||
+        horizon_server_has_doorbell_locked( object ))
+        return 0;
+    if (!horizon_server_stop_request_locked( object, 0, 0, 0, &handle ) || !handle) return 0;
+    if (!object->frozen_context && !(object->frozen_context = malloc( sizeof(*object->frozen_context) ))) return 0;
+    if (R_FAILED( svcSetThreadActivity( handle, ThreadActivity_Paused ) )) return 0;
+    if (R_FAILED( svcGetThreadContext3( &kernel, handle ) ) ||
+        !horizon_server_stop_request_locked( object, 0, 0, 0, &again ) || again != handle)
+    {
+        svcSetThreadActivity( handle, ThreadActivity_Runnable );
+        return 0;
+    }
+    if (!wine_nx_in_runtime_code( kernel.pc.x ))
+    {
+        horizon_server_context_from_kernel( object->frozen_context, &kernel );
+        object->thread_contexts = object->frozen_context;
+        object->thread_context_count = 1;
+    }
+    else if (!horizon_server_freeze_leaving_locked( object ))
+    {
+        svcSetThreadActivity( handle, ThreadActivity_Runnable );
+        return 0;
+    }
+    object->frozen = handle;
+    object->thread_context_valid = 1;
+    return 1;
+}
+
+static void horizon_server_thaw_locked( struct horizon_server_object *object )
+{
+    if (!object->frozen) return;
+    svcSetThreadActivity( object->frozen, ThreadActivity_Runnable );
+    object->frozen = 0;
+    object->thread_contexts = NULL;
+    object->thread_context_count = 0;
+    object->thread_context_valid = 0;
+}
+
+static int horizon_server_hold_locked( struct horizon_server_object *object )
+{
+    const void *teb = (const void *)(ULONG_PTR)object->thread.teb;
+    const void *frame = NULL;
+    int changed = 0;
+    CONTEXT context;
+
+    if (object->held || object->frozen) return 1;
+    if (!object->thread.started || object->thread.terminated || object->ending ||
+        !&wine_nx_thread_hold || !&wine_nx_kernel_context || !&horizon_contexts_to_server)
+        return 0;
+    if (!object->held_contexts && !(object->held_contexts = calloc( 2, sizeof(*object->held_contexts) ))) return 0;
+    if (!wine_nx_thread_hold( teb, object->thread.tid, &frame, &changed )) return 0;
+    if (!changed)
+    {
+        wine_nx_kernel_context( frame, &context );
+        object->held_count = horizon_contexts_to_server( object->held_contexts, &context );
+    }
+    object->thread_contexts = object->held_contexts;
+    object->thread_context_count = object->held_count;
+    object->thread_context_valid = 1;
+    object->held = 1;
+    return 1;
+}
+
+static void horizon_server_release_locked( struct horizon_server_object *object )
+{
+    if (object->held)
+    {
+        object->held = 0;
+        object->thread_contexts = NULL;
+        object->thread_context_count = 0;
+        object->thread_context_valid = 0;
+    }
+    if (&wine_nx_thread_release)
+        wine_nx_thread_release( (const void *)(ULONG_PTR)object->thread.teb, object->thread.tid,
+                                object->held_changed ? object->held_contexts : NULL );
+    object->held_changed = 0;
+}
+
+static void horizon_server_wait_thread_locked( struct horizon_server_object *object )
+{
+    const void *teb = (const void *)(ULONG_PTR)object->thread.teb;
+    const void *frame;
+    int state = &wine_nx_thread_state ? wine_nx_thread_state( teb, object->thread.tid, &frame ) : -1;
+
+    if (state < 0 || (state & HORIZON_STOP_END) || !&wine_nx_thread_wait_change)
+    {
+        horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+        return;
+    }
+    if (state & (HORIZON_STOP_KERNEL | HORIZON_STOP_HELD)) return;
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    wine_nx_thread_wait_change( teb, object->thread.tid, state );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+}
 #endif
 
 /* A client thread and its connection thread take turns, so they share a core:
@@ -11875,12 +13376,13 @@ static void horizon_server_set_suspend_doorbell_locked( struct horizon_server_ob
  * threads stop crowding the process's default core. */
 static void horizon_server_follow_client( struct horizon_server_connection *connection )
 {
+    unsigned int *followed = horizon_server_pool_worker ? &horizon_server_pool_core_mask : &connection->core_mask;
     unsigned int mask;
 
     if (!connection->request_pipe) return;
     mask = __atomic_load_n( &connection->request_pipe->client_cores, __ATOMIC_RELAXED );
-    if (!mask || mask == connection->core_mask) return;
-    connection->core_mask = mask;
+    if (!mask || mask == *followed) return;
+    *followed = mask;
     svcSetThreadCoreMask( CUR_THREAD_HANDLE, lowest_set_core( mask ), mask );
 }
 
@@ -11942,7 +13444,11 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
         return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
     }
 
-    if ((errno = pthread_create( &thread, NULL, horizon_server_thread, thread_connection )))
+    if (horizon_server_pool_enabled())
+        errno = horizon_server_pool_add( thread_connection ) ? 0 : EBADF;
+    else
+        errno = pthread_create( &thread, NULL, horizon_server_thread, thread_connection );
+    if (errno)
     {
         pthread_mutex_lock( &horizon_server_objects_mutex );
         horizon_server_end_thread_locked( thread_connection );
@@ -11959,6 +13465,7 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
      * itself on horizon_server_zombies when it ends. */
 
     reply.tid = thread_connection->tid;
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_NEW_THREAD, connection->tid, thread_connection->tid, 0 );
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -11977,8 +13484,19 @@ static int horizon_server_handle_resume_thread( struct horizon_server_connection
         status = horizon_thread_resume( &object->thread, &reply.count );
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (!status && reply.count == 1)
+        {
             horizon_server_set_suspend_doorbell_locked( object, 0 );
+            horizon_server_thaw_locked( object );
+            horizon_server_stop_request_locked( object, 0, HORIZON_STOP_SUSPEND, 0, NULL );
+            horizon_server_release_locked( object );
+        }
 #endif
+        CARAFE_DIAG_EVENT(
+            CARAFE_DIAG_RESUME,
+            connection->tid,
+            object->thread.tid,
+            status ? 0xffffffffu : (unsigned int)reply.count
+        );
     }
     horizon_server_signal_changed_locked();  /* the start gate */
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12001,8 +13519,18 @@ static int horizon_server_handle_suspend_thread( struct horizon_server_connectio
         status = horizon_thread_suspend( &object->thread, &reply.count );
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (!status && object->thread.started && !reply.count)
+        {
+            horizon_server_stop_request_locked( object, HORIZON_STOP_SUSPEND, 0, 0, NULL );
             horizon_server_set_suspend_doorbell_locked( object, 1 );
+            if (!horizon_server_hold_locked( object )) horizon_server_freeze_locked( object );
+        }
 #endif
+        CARAFE_DIAG_EVENT(
+            CARAFE_DIAG_SUSPEND,
+            connection->tid,
+            object->thread.tid,
+            status ? 0xffffffffu : (unsigned int)reply.count
+        );
     }
     if (!status) horizon_server_signal_changed_locked();
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12068,10 +13596,11 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
         else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
         else
         {
-            while (!object->thread_context_valid && object->thread.suspend &&
-                   !object->thread.terminated)
+            object->refs++;
+            while (!object->thread_context_valid && object->thread.suspend && !object->thread.terminated &&
+                   !horizon_server_freeze_locked( object ) && !horizon_server_hold_locked( object ))
             {
-                horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                horizon_server_wait_thread_locked( object );
                 horizon_server_quit_check_locked();
             }
             if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
@@ -12085,6 +13614,7 @@ static int horizon_server_handle_get_thread_context( struct horizon_server_conne
                 break;
             }
             if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+            if (!--object->refs) horizon_server_free_object( object );
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12115,25 +13645,29 @@ static int horizon_server_handle_set_thread_context( struct horizon_server_conne
         {
             if (object == connection->thread) reply.self = 1;
             else if (!object->thread.suspend) status = HORIZON_STATUS_INVALID_PARAMETER;
-            else if (!object->thread.started) status = HORIZON_STATUS_NOT_SUPPORTED;
+            else if (!object->thread.started || object->frozen) status = HORIZON_STATUS_NOT_SUPPORTED;
             else
             {
+                object->refs++;
                 while (!object->thread_context_valid && object->thread.suspend &&
-                       !object->thread.terminated)
+                       !object->thread.terminated && !horizon_server_hold_locked( object ))
                 {
-                    horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
+                    horizon_server_wait_thread_locked( object );
                     horizon_server_quit_check_locked();
                 }
                 if (object->thread.terminated) status = HORIZON_STATUS_ACCESS_DENIED;
+                else if (object->frozen) status = HORIZON_STATUS_NOT_SUPPORTED;
                 else if (!object->thread.suspend) status = HORIZON_STATUS_UNSUCCESSFUL;
                 else for (i = 0; i < count; i++)
                     for (j = 0; j < object->thread_context_count; j++)
                         if (contexts[i].machine == object->thread_contexts[j].machine)
                         {
                             horizon_server_merge_context( &object->thread_contexts[j], &contexts[i] );
+                            object->held_changed = object->held;
                             found = 1;
                         }
                 if (!found && !status) status = HORIZON_STATUS_NOT_SUPPORTED;
+                if (!--object->refs) horizon_server_free_object( object );
             }
         }
         pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12172,6 +13706,7 @@ static int horizon_server_handle_terminate_thread( struct horizon_server_connect
     pthread_mutex_lock( &horizon_server_objects_mutex );
     if ((object = horizon_server_get_thread_locked( request->handle, &status )))
     {
+        CARAFE_DIAG_EVENT( CARAFE_DIAG_TERMINATE, connection->tid, object->thread.tid, object == connection->thread );
         if (object == connection->thread)
         {
             /* The client exits itself; the object signals when its pipe closes. */
@@ -12180,8 +13715,24 @@ static int horizon_server_handle_terminate_thread( struct horizon_server_connect
         }
         else if (!object->thread.terminated)
         {
-            status = HORIZON_STATUS_NOT_SUPPORTED;
             tid = object->thread.tid;
+#ifndef HORIZON_STANDALONE_SYNTAX
+            if (horizon_server_stop_request_locked( object, HORIZON_STOP_END, HORIZON_STOP_SUSPEND,
+                                                    request->exit_code, NULL ))
+            {
+                horizon_thread_set_exit_code( &object->thread, request->exit_code );
+                __atomic_store_n( &object->ending, 1, __ATOMIC_RELEASE );
+                object->thread.suspend = 0;
+                horizon_server_set_suspend_doorbell_locked( object, 0 );
+                horizon_server_thaw_locked( object );
+                object->held_changed = 0;
+                horizon_server_release_locked( object );
+                NtAlertThreadByThreadId( ULongToHandle( object->thread.tid ) );
+                horizon_server_signal_changed_locked();
+            }
+            else
+#endif
+            status = HORIZON_STATUS_NOT_SUPPORTED;
         }
     }
     pthread_mutex_unlock( &horizon_server_objects_mutex );
@@ -12617,6 +14168,7 @@ static void horizon_report_async( const char *what, const struct horizon_async *
     static LONG reported;
     char message[192];
 
+    if (async->kind == HORIZON_ASYNC_DEVICE_READ) return;
     if (__atomic_add_fetch( &reported, 1, __ATOMIC_RELAXED ) > 24) return;
     snprintf( message, sizeof(message), "[ASYNC] %s: socket %04x %s by %04x, status %08x%s%s",
               what, async->sock,
@@ -13306,8 +14858,28 @@ static int horizon_server_handle_open_file_object( struct horizon_server_connect
     unsigned int chars = data_size / 2;
     int is_afd = 0;
     int is_nsi = horizon_nsi_device_name( data, data_size );
+    void *device_file = carafeHidOpen && !(data_size & 1) ? carafeHidOpen( (const void *)data, data_size ) : NULL;
 
     memset( &reply, 0, sizeof(reply) );
+
+    if (device_file)
+    {
+        struct horizon_server_handle_entry *entry;
+
+        pthread_mutex_lock( &horizon_server_objects_mutex );
+        if ((entry = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_DEVICE )))
+        {
+            entry->object->device_file = device_file;
+            entry->object->file_access = request->access;
+            entry->object->file_options = request->options;
+            entry->object->signaled = 1;
+            reply.handle = entry->handle;
+        }
+        else reply.header.error = HORIZON_STATUS_NO_MEMORY;
+        pthread_mutex_unlock( &horizon_server_objects_mutex );
+        if (reply.header.error && carafeHidClose) carafeHidClose( device_file );
+        return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    }
 
     /* accept "\Device\Afd" and "\Device\Afd\..." in any case */
     if (chars >= 11)
@@ -13975,6 +15547,193 @@ static void horizon_server_ioctl_done( unsigned int tid, const struct horizon_as
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 }
 
+struct horizon_device_io_request
+{
+    struct horizon_server_request_header header;
+    char __pad_12[4];
+    struct horizon_async_data async;
+    long long pos;
+};
+
+struct horizon_device_io_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int wait;
+    unsigned int options;
+    unsigned int size;
+    char __pad_20[4];
+};
+
+typedef char horizon_device_io_async_offset[
+    offsetof( struct horizon_device_io_request, async ) == 16 ? 1 : -1];
+typedef char horizon_device_io_size_offset[offsetof( struct horizon_device_io_reply, size ) == 16 ? 1 : -1];
+
+static void horizon_server_device_done_locked( unsigned int handle )
+{
+    struct horizon_server_object *device;
+
+    if (horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, &device )) return;
+    if (device->signaled) return;
+    device->signaled = 1;
+    horizon_sync_notify_object_locked( device, 1 );
+}
+
+static void horizon_server_device_start_locked( struct horizon_server_object *device )
+{
+    device->signaled = 0;
+}
+
+void wine_nx_device_reports( void )
+{
+    struct horizon_async *async;
+    int ready = 0;
+
+    if (!carafeHidRead) return;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    for (async = horizon_asyncs.head; async; async = async->next)
+    {
+        struct horizon_server_object *device;
+        unsigned char *out;
+        unsigned int size = 0, status;
+
+        if (async->kind != HORIZON_ASYNC_DEVICE_READ || async->state != HORIZON_ASYNC_QUEUED) continue;
+        if (horizon_server_find_typed_object_locked( async->sock, HORIZON_SERVER_OBJECT_DEVICE, &device )) continue;
+        if (!(out = malloc( async->out_size ? async->out_size : 1 ))) continue;
+        status = carafeHidRead( device->device_file, out, async->out_size, &size );
+        if (status == HORIZON_STATUS_PENDING)
+        {
+            free( out );
+            continue;
+        }
+        free( async->out );
+        async->out = out;
+        async->out_size = size;
+        async->out_status = status;
+        async->out_info = size;
+        horizon_async_ready( &horizon_asyncs, async, HORIZON_STATUS_ALERTED, horizon_async_now() );
+        ready = 1;
+    }
+    if (ready) horizon_sync_notify_async_locked();
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+static int horizon_server_handle_device_read( struct horizon_server_connection *connection,
+                                              const unsigned char *message )
+{
+    const struct horizon_device_io_request *request = (const void *)message;
+    struct horizon_device_io_reply reply;
+    struct horizon_server_object *device;
+    struct horizon_async *async;
+    unsigned int max = request->header.reply_size, size = 0, status;
+    unsigned char *out;
+    int ret;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidRead)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    if (max > HORIZON_DEVICE_OUT_MAX) max = HORIZON_DEVICE_OUT_MAX;
+    if (!(out = malloc( max ? max : 1 )))
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+    {
+        horizon_server_device_start_locked( device );
+        status = carafeHidRead( device->device_file, out, max, &size );
+        if (status == HORIZON_STATUS_PENDING)
+        {
+            if (!(async = horizon_server_async_create_locked( connection, &request->async, HORIZON_ASYNC_READ,
+                                                              HORIZON_ASYNC_DEVICE_READ )))
+                status = HORIZON_STATUS_NO_MEMORY;
+            else
+            {
+                async->out_size = max;
+                async->state = HORIZON_ASYNC_QUEUED;
+                async->pending = 1;
+            }
+        }
+        if (status != HORIZON_STATUS_PENDING) horizon_server_device_done_locked( request->async.handle );
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (status != HORIZON_STATUS_PENDING)
+        horizon_server_ioctl_done( connection->tid, &request->async, status, size );
+    reply.header.error = status;
+    reply.header.reply_size = status == HORIZON_STATUS_PENDING ? 0 : size;
+    ret = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply),
+                                      reply.header.reply_size ? out : NULL, reply.header.reply_size );
+    free( out );
+    return ret;
+}
+
+static int horizon_server_handle_device_write( struct horizon_server_connection *connection,
+                                               const unsigned char *message,
+                                               const unsigned char *data, unsigned int data_size )
+{
+    const struct horizon_device_io_request *request = (const void *)message;
+    struct horizon_device_io_reply reply;
+    struct horizon_server_object *device;
+    unsigned int written = 0, status;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidWrite)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+        status = carafeHidWrite( device->device_file, data, data_size, &written );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    horizon_server_ioctl_done( connection->tid, &request->async, status, written );
+    reply.header.error = status;
+    reply.size = written;
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_device_ioctl( struct horizon_server_connection *connection,
+                                               const struct horizon_ioctl_request *request,
+                                               const unsigned char *data, unsigned int data_size )
+{
+    struct horizon_ioctl_reply reply;
+    struct horizon_server_object *device;
+    unsigned int max = request->header.reply_size, in_size = data_size, out_size = 0, status;
+    unsigned char *out;
+    int ret;
+
+    memset( &reply, 0, sizeof(reply) );
+    if (!carafeHidIoctl)
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NOT_SUPPORTED );
+    if (max > HORIZON_DEVICE_OUT_MAX) max = HORIZON_DEVICE_OUT_MAX;
+    if (!(out = calloc( 1, max ? max : 1 )))
+        return horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
+    if ((request->code & 3) != HORIZON_METHOD_BUFFERED && data_size >= request->header.reply_size)
+    {
+        in_size = data_size - request->header.reply_size;
+        memcpy( out, data + in_size, min( max, request->header.reply_size ) );
+    }
+    horizon_server_ioctl_start( &request->async );
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!(status = horizon_server_find_typed_object_locked( request->async.handle, HORIZON_SERVER_OBJECT_DEVICE,
+                                                            &device )))
+        status = carafeHidIoctl( device->device_file, request->code, data, in_size, out, max, &out_size );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (HORIZON_NT_ERROR( status )) out_size = 0;
+    else if (out_size > max) out_size = max;
+    horizon_server_ioctl_done( connection->tid, &request->async, status, out_size );
+    reply.header.error = status;
+    reply.header.reply_size = out_size;
+    ret = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), out_size ? out : NULL, out_size );
+    free( out );
+    return ret;
+}
+
+static int horizon_server_is_device_locked( unsigned int handle )
+{
+    struct horizon_server_object *device;
+
+    return !horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, &device );
+}
+
 static int horizon_server_handle_nsi_ioctl( struct horizon_server_connection *connection,
                                            const struct horizon_ioctl_request *request,
                                            const unsigned char *data, unsigned int data_size )
@@ -14102,6 +15861,12 @@ static int horizon_server_handle_ioctl( struct horizon_server_connection *connec
     unsigned int out_size = 0;
     unsigned int out_max = request->header.reply_size;
     unsigned int status;
+    int is_device;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    is_device = horizon_server_is_device_locked( handle );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    if (is_device) return horizon_server_handle_device_ioctl( connection, request, data, data_size );
 
     if ((request->code & 0xfffff000) == 0x00121000) /* Wine's private NSI ioctls */
         return horizon_server_handle_nsi_ioctl( connection, request, data, data_size );
@@ -14744,6 +16509,7 @@ unsigned long long horizon_next_thread_local_page( unsigned long long addr, unsi
 
 void horizon_get_address_space_limits( void **start, void **limit )
 {
+    static int traced;
     u64 base = 0, size = 0;
     Result rc_base, rc_size;
 
@@ -14753,9 +16519,11 @@ void horizon_get_address_space_limits( void **start, void **limit )
     {
         *start = (void *)base;
         *limit = (void *)(base + size);
-        horizon_trace( "[VA] Horizon ASLR region base=0x%llx size=0x%llx limit=0x%llx",
-                       (unsigned long long)base, (unsigned long long)size,
-                       (unsigned long long)(base + size) );
+        /* Asked for at every allocation that looks for room; said once. */
+        if (!__atomic_exchange_n( &traced, 1, __ATOMIC_RELAXED ))
+            horizon_trace( "[VA] Horizon ASLR region base=0x%llx size=0x%llx limit=0x%llx",
+                           (unsigned long long)base, (unsigned long long)size,
+                           (unsigned long long)(base + size) );
         return;
     }
 
@@ -15506,6 +17274,8 @@ static unsigned int horizon_server_find_io_object_locked( unsigned int handle, s
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NSI, object );
     if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NAMED_PIPE, object );
+    if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
+        status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_DEVICE, object );
     return status;
 }
 
@@ -16028,6 +17798,7 @@ static int horizon_sync_queue_locked( struct horizon_sync_waiter *waiter )
         case HORIZON_SERVER_OBJECT_MUTEX:
         case HORIZON_SERVER_OBJECT_SEMAPHORE:
         case HORIZON_SERVER_OBJECT_TIMER:
+        case HORIZON_SERVER_OBJECT_DEVICE:
         case HORIZON_SERVER_OBJECT_THREAD:
         case HORIZON_SERVER_OBJECT_MSG_QUEUE:
         case HORIZON_SERVER_OBJECT_COMPLETION:
@@ -16120,6 +17891,7 @@ static void horizon_sync_sleep_locked( struct horizon_sync_waiter *waiter, long 
     LARGE_INTEGER now;
     int have_time = 0;
 
+    if (horizon_server_pool_worker && !horizon_server_pool_blocked) horizon_server_pool_blocking_locked();
     /* Keep quit responsive without rechecking ordinary waits every 20 ms. */
     if (timeout > 2500000) timeout = 2500000;
     for (unsigned int i = 0; i < waiter->count; i++)
@@ -16304,6 +18076,7 @@ static void horizon_async_finish_locked( struct horizon_async *async, unsigned i
         event->object->signaled = 1;
         horizon_sync_notify_object_locked( event->object, 1 );
     }
+    if (async->kind == HORIZON_ASYNC_DEVICE_READ) horizon_server_device_done_locked( async->sock );
     if (async->pending) horizon_report_async( "done", async, status );
 }
 
@@ -16402,14 +18175,19 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
         }
     }
 #endif
-    for (int initial = 1;; initial = 0)
+    for (;;)
     {
         LARGE_INTEGER now;
         long long timeout = 0x7fffffffffffffffLL;
 
+        if (connection->thread && __atomic_load_n( &connection->thread->ending, __ATOMIC_ACQUIRE ))
+        {
+            reply.header.error = HORIZON_STATUS_THREAD_IS_TERMINATING;
+            break;
+        }
 #ifndef HORIZON_STANDALONE_SYNTAX
         if (connection->thread && connection->thread->thread.started &&
-            connection->thread->thread.suspend)
+            connection->thread->thread.suspend && (suspend_context_count || connection->thread->held))
         {
             struct horizon_server_object *thread = connection->thread;
 
@@ -16419,21 +18197,54 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 queued = -1;
             }
 
-            if (!thread->thread_context_valid)
+            if (suspend_context_count)
             {
+                unsigned int count = suspend_context_count;
+
+                if (thread->held && thread->held_changed && thread->held_count)
+                {
+                    if (count > thread->held_count) count = thread->held_count;
+                    memcpy( suspend_reply.contexts, thread->held_contexts,
+                            count * sizeof(*suspend_contexts) );
+                }
+                else
+                    memcpy( suspend_reply.contexts, suspend_contexts,
+                            suspend_context_count * sizeof(*suspend_contexts) );
+                thread->held = 0;
+                thread->held_changed = 0;
                 thread->thread_contexts = suspend_reply.contexts;
                 thread->thread_context_count = suspend_context_count;
-                if (suspend_context_count)
-                    memcpy( thread->thread_contexts, suspend_contexts,
-                            suspend_context_count * sizeof(*suspend_contexts) );
                 thread->thread_context_valid = 1;
                 horizon_server_signal_changed_locked();
+                if (&wine_nx_thread_signal)
+                    wine_nx_thread_signal( (const void *)(ULONG_PTR)thread->thread.teb, thread->thread.tid );
             }
+            else if (!thread->thread_context_valid)
+            {
+                thread->thread_contexts = suspend_reply.contexts;
+                thread->thread_context_count = 0;
+                thread->thread_context_valid = 1;
+                horizon_server_signal_changed_locked();
+                if (&wine_nx_thread_signal)
+                    wine_nx_thread_signal( (const void *)(ULONG_PTR)thread->thread.teb, thread->thread.tid );
+            }
+            CARAFE_DIAG_EVENT(
+                CARAFE_DIAG_SUSPENDED_WAIT,
+                connection->tid,
+                thread->thread.tid,
+                thread->thread.suspend
+            );
             while (thread->thread.suspend && !thread->thread.terminated)
             {
                 horizon_server_sleep_locked( HORIZON_SERVER_WAIT_SLICE );
                 horizon_server_quit_check_locked();
             }
+            CARAFE_DIAG_EVENT(
+                CARAFE_DIAG_SUSPENDED_DONE,
+                connection->tid,
+                thread->thread.tid,
+                thread->thread.terminated
+            );
             thread->thread_contexts = NULL;
             thread->thread_context_valid = 0;
             thread->thread_context_count = 0;
@@ -16450,6 +18261,7 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
                 reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
                 break;
             }
+            continue;
         }
 #endif
 
@@ -16459,11 +18271,12 @@ static int horizon_server_handle_select( struct horizon_server_connection *conne
             break;
         }
 
-        if (initial && signals)
+        if (signals)
         {
             const unsigned char *select_data = data;
             const struct horizon_select_signal_and_wait_op *op;
 
+            signals = 0;
             if (data_size >= HORIZON_APC_RESULT_SIZE + request->size) select_data += HORIZON_APC_RESULT_SIZE;
             op = (const void *)select_data;
             reply.header.error = horizon_server_wait_object_locked( op->wait, FALSE );
@@ -16582,6 +18395,7 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
     case HORIZON_REQ_QUERY_MUTEX: handler = horizon_server_handle_query_mutex; break;
     case HORIZON_REQ_RELEASE_SEMAPHORE: handler = horizon_server_handle_release_semaphore; break;
     case HORIZON_REQ_QUERY_SEMAPHORE: handler = horizon_server_handle_query_semaphore; break;
+    case HORIZON_REQ_GET_HANDLE_FD: handler = horizon_server_handle_get_handle_fd; break;
     default: return 0;
     }
     if (!horizon_sync_thread)
@@ -16602,6 +18416,7 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
     connection.direct_reply = reply;
     connection.direct_data = reply_data;
     connection.direct_size = request->reply_size;
+    connection.request_pipe = (struct horizon_pipe *)horizon_fd_client_owner();
     previous = horizon_server_current;
     horizon_server_current = &connection;
     if (handler) status = handler( &connection, message );
@@ -16614,24 +18429,20 @@ int horizon_server_sync_call( unsigned int tid, const void *message, const void 
         memset( reply, 0, HORIZON_SERVER_FIXED_MESSAGE_SIZE );
         header->error = HORIZON_STATUS_UNSUCCESSFUL;
     }
+    CARAFE_SERVER_DIRECT();
     return 1;
 }
 
-static void *horizon_server_thread( void *param )
+static int horizon_server_serve_one( struct horizon_server_connection *connection, void *diag_slot,
+                                     unsigned int *served )
 {
-    struct horizon_server_connection *connection = param;
     unsigned char message[HORIZON_SERVER_FIXED_MESSAGE_SIZE];
-    struct horizon_zombie *zombie;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    struct carafe_diag_connection *diag = diag_slot;
+#else
+    (void)diag_slot;
+#endif
 
-    horizon_server_current = connection;
-    connection->request_pipe = horizon_pipe_from_fd( connection->request_fd );
-    if (wine_nx_thread_register) wine_nx_thread_register( 's', connection->tid, NULL );
-    /* A client blocks until this thread replies. At the program threads'
-     * priority (59) it waited for a round-robin slice behind whatever else ran
-     * on the core: 0.1-0.9 ms per request in NFSU2. Above them, below the audio
-     * feeder (56), it answers as soon as the client blocks. */
-    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
-    for (;;)
     {
         {
             extern volatile int wine_nx_quit_requested __attribute__((weak));
@@ -16643,8 +18454,10 @@ static void *horizon_server_thread( void *param )
         unsigned char *request_data = NULL;
         int status = 0;
         int ret = horizon_read_exact( connection->request_fd, message, sizeof(message) );
+        unsigned long long request_start;
 
-        if (ret <= 0) break;
+        if (ret <= 0) return 0;
+        request_start = CARAFE_SERVER_NOW();
         horizon_server_follow_client( connection );
         if (header->request_size)
         {
@@ -16652,16 +18465,23 @@ static void *horizon_server_thread( void *param )
             {
                 if (connection->reply_fd != -1)
                     status = horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_NO_MEMORY );
-                if (status) goto done;
-                continue;
+                return !status;
             }
             if (horizon_read_exact( connection->request_fd, request_data, header->request_size ) <= 0)
             {
                 free( request_data );
-                break;
+                return 0;
             }
         }
 
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (diag)
+        {
+            diag->last_req = header->req;
+            diag->requests++;
+            diag->busy = 1;
+        }
+#endif
         switch (header->req)
         {
         case HORIZON_REQ_GET_TOKEN_SID:
@@ -16729,6 +18549,13 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_IOCTL:
             status = horizon_server_handle_ioctl( connection, message, request_data,
                                                   header->request_size );
+            break;
+        case HORIZON_REQ_READ:
+            status = horizon_server_handle_device_read( connection, message );
+            break;
+        case HORIZON_REQ_WRITE:
+            status = horizon_server_handle_device_write( connection, message, request_data,
+                                                         header->request_size );
             break;
         case HORIZON_REQ_CREATE_NAMED_PIPE:
             status = horizon_server_handle_create_named_pipe( connection, message, request_data,
@@ -17126,7 +18953,8 @@ static void *horizon_server_thread( void *param )
             status = horizon_server_handle_close_handle( connection, message );
             break;
         case HORIZON_REQ_SET_WINSTATION_MONITORS:
-            status = horizon_server_handle_set_winstation_monitors( connection, message );
+            status = horizon_server_handle_set_winstation_monitors( connection, message, request_data,
+                                                                    header->request_size );
             break;
         case HORIZON_REQ_GET_PROCESS_WINSTATION:
             status = horizon_server_handle_get_process_winstation( connection );
@@ -17208,6 +19036,14 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_GET_KEY_STATE:
             status = horizon_server_handle_get_key_state( connection, message );
             break;
+        case HORIZON_REQ_SET_HOOK:
+        case HORIZON_REQ_REMOVE_HOOK:
+        case HORIZON_REQ_START_HOOK_CHAIN:
+        case HORIZON_REQ_FINISH_HOOK_CHAIN:
+        case HORIZON_REQ_GET_HOOK_INFO:
+            status = horizon_server_handle_window_hook( connection, message, header->req, request_data,
+                                                        header->request_size );
+            break;
         default:
         {
             WARN( "unimplemented Horizon server request %d size %u reply_size %u.\n",
@@ -17219,10 +19055,37 @@ static void *horizon_server_thread( void *param )
         }
 
         free( request_data );
-        if (status) goto done;
+#ifndef HORIZON_STANDALONE_SYNTAX
+        if (diag)
+        {
+            diag->handled++;
+            diag->busy = 0;
+        }
+#endif
+        CARAFE_SERVER_COUNT( header->req, request_start );
+        (*served)++;
+        return !status;
     }
+}
 
-done:
+static void horizon_server_finish_connection( struct horizon_server_connection *connection, void *diag_slot,
+                                              unsigned int served )
+{
+    CARAFE_SERVER_ENDED( served );
+    if (!connection->pooled) CARAFE_SERVER_STOPPED();
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_END, connection->tid, 0, 0 );
+#ifndef HORIZON_STANDALONE_SYNTAX
+    carafe_diag_untrack( diag_slot );
+#else
+    (void)diag_slot;
+#endif
+    if (connection->pooled && connection->request_pipe)
+    {
+        pthread_mutex_lock( &connection->request_pipe->mutex );
+        connection->request_pipe->on_data = NULL;
+        connection->request_pipe->on_data_context = NULL;
+        pthread_mutex_unlock( &connection->request_pipe->mutex );
+    }
     /* The client closed its request pipe last in exit_thread: every Windows
      * frame is gone. Close our ends before signaling so a joiner observes
      * released pipes, then queue this pthread to be joined by another one. */
@@ -17238,6 +19101,179 @@ done:
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     horizon_server_current = NULL;
     free( connection );
+}
+
+static void *horizon_server_thread( void *param )
+{
+    struct horizon_server_connection *connection = param;
+    struct horizon_zombie *zombie;
+    unsigned int served = 0;
+    void *diag = NULL;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+    diag = carafe_diag_track( connection );
+#endif
+    horizon_server_current = connection;
+    connection->request_pipe = horizon_pipe_from_fd( connection->request_fd );
+    if (wine_nx_thread_register) wine_nx_thread_register( 's', connection->tid, NULL );
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
+    CARAFE_SERVER_STARTED();
+    /* A client blocks until this thread replies. At the program threads'
+     * priority (59) it waited for a round-robin slice behind whatever else ran
+     * on the core: 0.1-0.9 ms per request in NFSU2. Above them, below the audio
+     * feeder (56), it answers as soon as the client blocks. */
+    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
+    while (horizon_server_serve_one( connection, diag, &served )) {}
+    horizon_server_finish_connection( connection, diag, served );
+    if (wine_nx_thread_unregister) wine_nx_thread_unregister();
+    horizon_zombie_reap( &horizon_server_zombies );
+    if ((zombie = malloc( sizeof(*zombie) )))
+        horizon_zombie_push( &horizon_server_zombies, zombie, pthread_self() );
+    return NULL;
+}
+
+static void *horizon_server_pool_thread( void *param );
+
+/* Standard sync waits in the server on the client's behalf, so there every
+ * client keeps a thread of its own. */
+static int horizon_server_pool_enabled( void )
+{
+    return horizon_fast_sync_enabled && horizon_server_pool_wanted;
+}
+
+static void horizon_server_pool_start_worker( void )
+{
+    pthread_t thread;
+    int error;
+
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.workers++;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    if (!(error = pthread_create( &thread, NULL, horizon_server_pool_thread, NULL ))) return;
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.workers--;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    WARN( "server pool: no new worker: %s\n", strerror( error ) );
+}
+
+static void horizon_server_pool_append_locked( struct horizon_server_connection *connection )
+{
+    connection->pool_next = NULL;
+    if (horizon_server_pool.tail) horizon_server_pool.tail->pool_next = connection;
+    else horizon_server_pool.head = connection;
+    horizon_server_pool.tail = connection;
+    if (horizon_server_pool.idle) pthread_cond_signal( &horizon_server_pool.cond );
+}
+
+static int horizon_server_pool_ready( void *context )
+{
+    struct horizon_server_connection *connection = context;
+    unsigned int free_workers;
+
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    if (!connection->pool_queued)
+    {
+        connection->pool_queued = 1;
+        horizon_server_pool_append_locked( connection );
+    }
+    free_workers = horizon_server_pool.workers - horizon_server_pool.blocked;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    return !free_workers;
+}
+
+static void horizon_server_pool_blocking_locked( void )
+{
+    unsigned int free_workers;
+
+    horizon_server_pool_blocked = 1;
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    horizon_server_pool.blocked++;
+    free_workers = horizon_server_pool.workers - horizon_server_pool.blocked;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    if (free_workers) return;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    horizon_server_pool_start_worker();
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+}
+
+static int horizon_server_pool_add( struct horizon_server_connection *connection )
+{
+    struct horizon_pipe *pipe;
+    unsigned int workers;
+    int need_worker = 0;
+
+    if (!(pipe = horizon_pipe_from_fd( connection->request_fd ))) return 0;
+    connection->request_pipe = pipe;
+    connection->pooled = 1;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    connection->pool_diag = carafe_diag_track( connection );
+#endif
+    CARAFE_DIAG_EVENT( CARAFE_DIAG_SERVER_START, connection->tid, 0, 0 );
+    pthread_mutex_lock( &horizon_server_pool.mutex );
+    workers = horizon_server_pool.workers;
+    pthread_mutex_unlock( &horizon_server_pool.mutex );
+    while (workers++ < HORIZON_SERVER_POOL_SPARE) horizon_server_pool_start_worker();
+    pthread_mutex_lock( &pipe->mutex );
+    pipe->on_data = horizon_server_pool_ready;
+    pipe->on_data_context = connection;
+    if (pipe->used || !pipe->write_open) need_worker = horizon_server_pool_ready( connection );
+    pthread_mutex_unlock( &pipe->mutex );
+    if (need_worker) horizon_server_pool_start_worker();
+    return 1;
+}
+
+static void *horizon_server_pool_thread( void *param )
+{
+    struct horizon_zombie *zombie;
+
+    (void)param;
+    horizon_server_pool_worker = 1;
+    if (wine_nx_thread_register) wine_nx_thread_register( 's', 0, NULL );
+    svcSetThreadPriority( CUR_THREAD_HANDLE, 0x39 );
+    for (;;)
+    {
+        struct horizon_server_connection *connection;
+        int alive, pending;
+
+        pthread_mutex_lock( &horizon_server_pool.mutex );
+        if (horizon_server_pool.idle >= HORIZON_SERVER_POOL_SPARE &&
+            horizon_server_pool.workers > HORIZON_SERVER_POOL_SPARE)
+        {
+            horizon_server_pool.workers--;
+            pthread_mutex_unlock( &horizon_server_pool.mutex );
+            break;
+        }
+        horizon_server_pool.idle++;
+        while (!horizon_server_pool.head)
+            horizon_cond_wait_quit( &horizon_server_pool.cond, &horizon_server_pool.mutex );
+        horizon_server_pool.idle--;
+        connection = horizon_server_pool.head;
+        horizon_server_pool.head = connection->pool_next;
+        if (!horizon_server_pool.head) horizon_server_pool.tail = NULL;
+        pthread_mutex_unlock( &horizon_server_pool.mutex );
+
+        horizon_server_current = connection;
+        alive = horizon_server_serve_one( connection, connection->pool_diag, &connection->pool_served );
+        horizon_server_current = NULL;
+        if (horizon_server_pool_blocked)
+        {
+            pthread_mutex_lock( &horizon_server_pool.mutex );
+            horizon_server_pool.blocked--;
+            pthread_mutex_unlock( &horizon_server_pool.mutex );
+            horizon_server_pool_blocked = 0;
+        }
+        if (!alive)
+        {
+            horizon_server_finish_connection( connection, connection->pool_diag, connection->pool_served );
+            continue;
+        }
+        pthread_mutex_lock( &horizon_server_pool.mutex );
+        pending = __atomic_load_n( &connection->request_pipe->used, __ATOMIC_ACQUIRE ) ||
+                  !__atomic_load_n( &connection->request_pipe->write_open, __ATOMIC_ACQUIRE );
+        if (pending) horizon_server_pool_append_locked( connection );
+        else connection->pool_queued = 0;
+        pthread_mutex_unlock( &horizon_server_pool.mutex );
+    }
     if (wine_nx_thread_unregister) wine_nx_thread_unregister();
     horizon_zombie_reap( &horizon_server_zombies );
     if ((zombie = malloc( sizeof(*zombie) )))
@@ -17313,12 +19349,12 @@ int horizon_server_connect(void)
 
 void horizon_server_send_fd( int fd )
 {
-    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0 );
+    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0, horizon_fd_client_owner() );
 }
 
 int horizon_server_receive_fd( unsigned int *handle )
 {
-    return horizon_fd_queue_pop( &horizon_server_to_client_fds, handle );
+    return horizon_fd_queue_pop( &horizon_server_to_client_fds, horizon_fd_client_owner(), handle, "server" );
 }
 
 #ifndef HORIZON_NO_LIBNX_EXCEPTION_HANDLER
@@ -17410,7 +19446,7 @@ static BOOL horizon_redirect_user_shared_data( ThreadExceptionDump *ctx )
  * Resume the instruction once the kernel agrees the page is back. An address
  * that keeps faulting is not a window closing, and still parks the thread.
  */
-static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
+static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx, BOOL *gpu )
 {
     static u64 last_address;
     static unsigned int repeats;
@@ -17419,6 +19455,7 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
     MemoryInfo info;
     u32 page_info;
 
+    *gpu = FALSE;
     if (exception_class != 0x24 && exception_class != 0x25) return FALSE;
     if ((fault_status & ~3u) != 0x04) return FALSE;  /* translation fault, any level */
     if (ctx->esr & (1u << 10)) return FALSE;         /* FnV: FAR means nothing */
@@ -17434,9 +19471,19 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
         if (R_FAILED( svcQueryMemory( &info, &page_info, ctx->far.x ) )) return FALSE;
         /* Only the heap: guest memory faults are Wine's to handle. */
         if (info.type != MemType_Heap) return FALSE;
-        if ((info.perm & needed) == needed &&
-            !(info.attr & (MemAttr_IsIpcMapped | MemAttr_IsDeviceMapped)))
+        /* The GPU's buffers are heap mapped for the device as well, and the
+         * CPU writes them all the time: Mesa's command buffers, its uploads.
+         * The refresh takes out a whole block of the page table, neighbours
+         * included, so a command buffer beside a buffer being marked uncached
+         * faults as plain heap does. Handed to the program, that fault stopped
+         * Vampire: the Masquerade - Redemption in nvc0_2d_texture_set, its
+         * thread spinning in the dispatcher at 100% for good. Only pages an
+         * IPC call has mapped are still left to fault. */
+        if ((info.perm & needed) == needed && !(info.attr & MemAttr_IsIpcMapped))
+        {
+            *gpu = (info.attr & MemAttr_IsDeviceMapped) != 0;
             return TRUE;
+        }
         svcSleepThread( 100000ULL );  /* 0.1 ms; the calls that do this are short */
     }
     return FALSE;
@@ -17481,6 +19528,104 @@ extern int wine_nx_swap_fault( uint64_t address, uint32_t esr ) __attribute__((w
 static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr );
 #endif
 
+extern int wine_nx_stop_state( int *code ) __attribute__((weak));
+extern void wine_nx_stop_end( void ) __attribute__((weak));
+extern const void *wine_nx_kernel_enter( const void *frame ) __attribute__((weak));
+extern _Bool carafeErrorNative( unsigned int esr, unsigned long pc ) __attribute__((weak));
+
+static void horizon_native_failure_exit( void )
+{
+    extern void wine_nx_request_quit( const char *why ) __attribute__((weak));
+    extern void wine_nx_quit_point( void ) __attribute__((weak));
+
+    if (wine_nx_request_quit) wine_nx_request_quit( "the runtime hit an error" );
+    if (wine_nx_quit_point) wine_nx_quit_point();
+    for (;;) svcSleepThread( 1000ULL * 1000ULL * 1000ULL );
+}
+
+/* The runtime's own code named in a fault (source/runtime_symbols.c): the
+ * function the fault is in and the one it was to return to, from the symbol
+ * file beside the NRO, or their offsets in the runtime without one. */
+extern int wine_nx_runtime_symbol( uintptr_t address, char *out, size_t size ) __attribute__((weak));
+
+static void horizon_trace_native_where( const ThreadExceptionDump *ctx )
+{
+    char pc[160], lr[160], line[360];
+
+    if (!wine_nx_runtime_symbol) return;
+    wine_nx_runtime_symbol( ctx->pc.x, pc, sizeof(pc) );
+    wine_nx_runtime_symbol( ctx->lr.x, lr, sizeof(lr) );
+    if (!pc[0] && !lr[0]) return;
+    snprintf( line, sizeof(line), "[EXC] in %s, from %s", pc[0] ? pc : "code outside the runtime",
+              lr[0] ? lr : "code outside the runtime" );
+    wine_nx_runtime_trace( line );
+}
+
+/* Whether a frame record at addr can be read: in mapped, readable memory. */
+static BOOL horizon_frame_readable( u64 addr )
+{
+    MemoryInfo info;
+    u32 page_info;
+
+    if (!addr || (addr & 15)) return FALSE;
+    if (R_FAILED( svcQueryMemory( &info, &page_info, addr ) )) return FALSE;
+    return info.type != MemType_Unmapped && (info.perm & Perm_R) && addr + 16 <= info.addr + info.size;
+}
+
+/* The calls that led to a fatal fault, by the frame records x29 chains: the
+ * runtime's functions by name, anything else by address. */
+static void horizon_trace_native_backtrace( const ThreadExceptionDump *ctx )
+{
+    char line[1024], where[160];
+    u64 fp = ctx->fp.x;
+    unsigned int depth;
+    int len = snprintf( line, sizeof(line), "[EXC] native calls:" );
+
+    for (depth = 0; depth < 16 && horizon_frame_readable( fp ); depth++)
+    {
+        const u64 *record = (const u64 *)(ULONG_PTR)fp;
+        u64 next = record[0], ret = record[1];
+
+        if (!ret) break;
+        if (!wine_nx_runtime_symbol || (!wine_nx_runtime_symbol( ret, where, sizeof(where) ) && !where[0]))
+            snprintf( where, sizeof(where), "%#llx", (unsigned long long)ret );
+        len += snprintf( line + len, sizeof(line) - len, " < %s", where );
+        if (len >= (int)sizeof(line) - 1 || next <= fp) break;
+        fp = next;
+    }
+    if (depth) wine_nx_runtime_trace( line );
+}
+
+/* A fault in the runtime's own code handed to the program, Mesa writing a GPU
+ * buffer say, says in the line before it only where in memory: not which
+ * function, what kind of fault, or what the page was then. The first few say
+ * all three, and the calls that led there. */
+static void horizon_trace_native_program_fault( const ThreadExceptionDump *ctx )
+{
+    static unsigned int traced;
+    char where[160], line[360];
+    MemoryInfo info;
+    u32 page_info;
+    int len;
+
+    if (!wine_nx_runtime_symbol) return;
+    /* Only a function of the runtime's: anything else above its base is the
+     * program's, translated code or, in a 32-bit address space, a PE module
+     * the loader put above the runtime (libwow64fex.dll's probes there were
+     * reported as the runtime's own code). */
+    if (!wine_nx_runtime_symbol( ctx->pc.x, where, sizeof(where) )) return;
+    if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 4) return;
+    len = snprintf( line, sizeof(line), "[EXC] the runtime's own code faulted: esr=%#x dfsc=%#x",
+                    (unsigned)ctx->esr, (unsigned)(ctx->esr & 0x3f) );
+    if (R_SUCCEEDED( svcQueryMemory( &info, &page_info, ctx->far.x ) ))
+        snprintf( line + len, sizeof(line) - len, " region=%#llx/%#llx type=%#x attr=%#x perm=%#x ipc=%u device=%u",
+                  (unsigned long long)info.addr, (unsigned long long)info.size, info.type, info.attr, info.perm,
+                  info.ipc_refcount, info.device_refcount );
+    wine_nx_runtime_trace( line );
+    horizon_trace_native_where( ctx );
+    horizon_trace_native_backtrace( ctx );
+}
+
 void __libnx_exception_handler( ThreadExceptionDump *ctx )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -17489,6 +19634,15 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
     char buf[512];
 
 #if defined(__aarch64__)
+    if (&wine_nx_kernel_enter) wine_nx_kernel_enter( NULL );
+    if (&wine_nx_stop_state && &wine_nx_stop_end && (wine_nx_stop_state( NULL ) & HORIZON_STOP_END))
+    {
+        ctx->sp.x = (ctx->sp.x - 0x400) & ~(u64)15;
+        ctx->fp.x = 0;
+        ctx->lr.x = 0;
+        ctx->pc.x = (ULONG_PTR)wine_nx_stop_end;
+        horizon_resume_exception( ctx );
+    }
 #ifdef WINE_NX_SWAP_POC
     if (((const unsigned int *)ctx)[3] == 0xfec0 && horizon_swap_fault( ctx->far.x, ctx->esr ))
         horizon_resume_exception( ctx );
@@ -17515,7 +19669,9 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         }
     }
     if (horizon_commit_lazy_fault( ctx->far.x, ctx->esr )) horizon_resume_exception( ctx );
-    if (horizon_transient_page_fault( ctx ))
+    BOOL transient_gpu;
+
+    if (horizon_transient_page_fault( ctx, &transient_gpu ))
     {
         static unsigned int resumed;
         unsigned int count = __atomic_add_fetch( &resumed, 1, __ATOMIC_RELAXED );
@@ -17524,9 +19680,9 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         if (count <= 8 || !(count & (count - 1)))
         {
             snprintf( buf, sizeof(buf),
-                      "[EXC] transient fault at 0x%llx pc=0x%llx kind=%s; the page is back, resumed (%u)",
+                      "[EXC] transient fault at 0x%llx pc=0x%llx kind=%s; the page is back, resumed (%u)%s",
                       (unsigned long long)ctx->far.x, (unsigned long long)ctx->pc.x,
-                      (ctx->esr & 0x40) ? "write" : "read", count );
+                      (ctx->esr & 0x40) ? "write" : "read", count, transient_gpu ? ", a GPU buffer" : "" );
             wine_nx_runtime_trace( buf );
         }
         horizon_resume_exception( ctx );
@@ -17586,6 +19742,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
         }
         rec.ExceptionCode = status;
         horizon_trace_program_fault( ctx, &rec, data->teb );
+        horizon_trace_native_program_fault( ctx );
         horizon_exception_context( ctx, &context );
         status = call_user_exception_dispatcher( data, &rec, &context );
         snprintf( buf, sizeof(buf),
@@ -17628,6 +19785,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
      * the source of an alias without recording anything a later query shows. */
     alias_source_report( (const void *)(ULONG_PTR)ctx->far.x, buf, sizeof(buf) );
     wine_nx_runtime_trace( buf );
+    horizon_trace_native_where( ctx );
     snprintf( buf, sizeof(buf),
               "[EXC] x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x18=0x%llx",
               (unsigned long long)ctx->cpu_gprs[0].x, (unsigned long long)ctx->cpu_gprs[1].x,
@@ -17687,6 +19845,7 @@ unhandled_exception:
         if (wine_nx_box64_describe_native_pc &&
             wine_nx_box64_describe_native_pc( ctx->pc.x, x, buf, sizeof(buf) ))
             wine_nx_runtime_trace( buf );
+        horizon_trace_native_backtrace( ctx );
         /* ESR.FnV invalidates FAR. Only data aborts enter the guest fault boundary. */
         if ((exception_class == 0x24 || exception_class == 0x25) && !(esr & (1u << 10)) &&
             wine_nx_box64_handle_fault)
@@ -17696,6 +19855,19 @@ unhandled_exception:
             horizon_exception_context( ctx, &context );
             wine_nx_box64_handle_fault( (ULONG_PTR)ctx->far.x, (esr >> 6) & 1, &context );
         }
+#if defined(__aarch64__)
+        if (carafeErrorNative && carafeErrorNative( (unsigned int)esr, ctx->pc.x ))
+        {
+            snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; ending the program for the error screen",
+                      (unsigned)status );
+            wine_nx_runtime_trace( buf );
+            ctx->sp.x = (ctx->sp.x - 0x400) & ~(u64)15;
+            ctx->fp.x = 0;
+            ctx->lr.x = 0;
+            ctx->pc.x = (ULONG_PTR)horizon_native_failure_exit;
+            horizon_resume_exception( ctx );
+        }
+#endif
         snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; parking thread", (unsigned)status );
         wine_nx_runtime_trace( buf );
         /* Park rather than returning: libnx's exception_returnentry would
@@ -17791,6 +19963,62 @@ static BOOL horizon_overlaps_kernel_region( void *addr, size_t size )
             horizon_kernel_regions[i].addr < end)
             return TRUE;
     return FALSE;
+}
+
+/* The heap page at the shared user data's Windows address, when the page itself
+ * had to go elsewhere (virtual.c, relocate_user_shared_data): in a 32-bit
+ * address space the kernel's heap region covers 0x7ffe0000, and what is there
+ * is plain heap, read-write. A program reading 0x7ffe0000 would read whatever
+ * the runtime keeps there. Taken out of the runtime's heap first, so nothing
+ * of the runtime's is or will be there, then made inaccessible: the program's
+ * reads fault and are served from the real page, and its writes are access
+ * violations, as on Windows. The 64 KB granule goes whole, as the heap hands
+ * out no less and Windows maps nothing else in it. Newlib's heap, which serves
+ * the runtime's small allocations, cannot grow past it, so it is taken only
+ * where that leaves newlib's heap 256 MB: the heap region is placed at random,
+ * and some layouts put 0x7ffe0000 just above the runtime's code. There the
+ * program's own reads of it, which are rare (ntdll, kernel32, kernelbase and
+ * win32u go through the pointer), read the heap. */
+extern int wine_nx_native_heap_keep_out_leaving( uintptr_t address, size_t size, size_t small_room )
+    __attribute__((weak));
+static ULONG_PTR horizon_hidden_user_shared_data;
+
+const char *horizon_hide_user_shared_data_address( ULONG_PTR address )
+{
+    const size_t granule = 0x10000, small_room = (size_t)256 * 1024 * 1024;
+    MemoryInfo info;
+    u32 page_info;
+    int kept;
+
+    if (address & (granule - 1)) return "are not handled: the address is not a granule's";
+    if (R_FAILED( svcQueryMemory( &info, &page_info, address ) ))
+        return "are not handled: the kernel would not say what is there";
+    if ((info.type & 0xff) == MemType_Unmapped || !(info.perm & Perm_R))
+        return "fault and are served from there, as nothing there can be read";
+    if ((info.type & 0xff) != MemType_Heap || info.perm != Perm_Rw || info.attr ||
+        info.addr + info.size < address + granule)
+        return "read what is there: it is not plain heap";
+    if (!&wine_nx_native_heap_keep_out_leaving) return "read the heap there: no runtime heap to take it out of";
+    if ((kept = wine_nx_native_heap_keep_out_leaving( address, granule, small_room )) <= 0)
+        return kept == -2 ? "read the heap there: taking it would leave the runtime's small allocations too little"
+             : kept < 0 ? "read the heap there: the runtime's heap already uses it"
+                        : "read the heap there: it is outside the runtime's heap";
+    if (R_FAILED( svcSetMemoryPermission( (void *)address, granule, Perm_None ) ))
+        return "read nothing of the runtime's there, but do not fault: the kernel would not protect it";
+    horizon_hidden_user_shared_data = address;
+    return NULL;
+}
+
+/* At the program's end: the loader starts the next program in this process,
+ * with the heap whole again, and a page left inaccessible in it would fault
+ * in whatever that program put there. */
+void horizon_restore_user_shared_data_address( void )
+{
+    ULONG_PTR address = horizon_hidden_user_shared_data;
+
+    if (!address) return;
+    if (R_SUCCEEDED( svcSetMemoryPermission( (void *)address, 0x10000, Perm_Rw ) ))
+        horizon_hidden_user_shared_data = 0;
 }
 
 void horizon_log_low_address_space( void )
@@ -18939,6 +21167,11 @@ static int map_backing_at( void *addr, size_t size, int prot, int fd, off_t offs
     return ret;
 }
 
+#define HORIZON_ANONYMOUS_BACKING_MIN ((size_t)HORIZON_POOL_PAGE)
+#define HORIZON_ANONYMOUS_BACKING_UNIT ((size_t)64 * 1024)
+
+static int map_anonymous_backings( void *addr, size_t size, int prot, int flags, int map_errno );
+
 /* Replaces the reservation over [start, start + size) with a mapping. A range
  * asked for with PROT_NONE is left unmapped, a hole, unless map_range says to
  * map it inaccessible: memory that is mapped can be committed later with a
@@ -18993,7 +21226,7 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
         list_add_mapping( mapping );
         goto failed;
     }
-    if (map_range && !mapping->file && map_backing_at( start, size, prot, -1, 0, MAP_PRIVATE | MAP_ANON, EINVAL ))
+    if (map_range && !mapping->file && map_anonymous_backings( start, size, prot, MAP_PRIVATE | MAP_ANON, EINVAL ))
     {
         /* Keep the original reservation and tree entry on a failed commit.
          * Releasing them here turns a retry into an unrecoverable hole. */
@@ -19005,9 +21238,14 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
     if (right) { right->swap_managed = mapping->swap_managed; right->swap_excluded = mapping->swap_excluded; }
     if (map_range)
     {
-        struct horizon_mapping *mapped = find_overlap_mapping( start, size );
-        mapped->swap_managed = mapped->backing->swap_managed = mapping->swap_managed;
-        mapped->swap_excluded = mapped->backing->swap_excluded = mapping->swap_excluded;
+        char *cursor = start;
+        while (cursor < end)
+        {
+            struct horizon_mapping *mapped = find_overlap_mapping( cursor, end - cursor );
+            mapped->swap_managed = mapped->backing->swap_managed = mapping->swap_managed;
+            mapped->swap_excluded = mapped->backing->swap_excluded = mapping->swap_excluded;
+            cursor = (char *)mapped->addr + mapped->size;
+        }
     }
 #endif
     if (left) list_add_mapping( left );
@@ -19862,7 +22100,13 @@ static int horizon_section_alias( void *dst, void *src, size_t size )
                        dst, src, (unsigned long)size, rc );
         WARN( "svcMapProcessMemory(%p, %p, %zu) failed %#x.\n", dst, src, size, rc );
         section_failure( "alias", dst, src, size, (int)rc );
-        errno = ENOMEM;
+        if (R_MODULE(rc) == Module_Kernel && R_DESCRIPTION(rc) == KernelError_InvalidMemoryState)
+            errno = EEXIST;
+        else if (R_MODULE(rc) == Module_Kernel &&
+                 (R_DESCRIPTION(rc) == KernelError_ResourceExhausted ||
+                  R_DESCRIPTION(rc) == KernelError_OutOfMemory))
+            errno = ENOMEM;
+        else errno = EINVAL;
         return -1;
     }
     return 0;
@@ -20086,10 +22330,11 @@ static int map_anonymous_backings( void *addr, size_t size, int prot, int flags,
         {
             int saved_errno = errno;
 
-            if (saved_errno == ENOMEM && chunk > HORIZON_POOL_ARENA)
+            if (saved_errno == ENOMEM && chunk > HORIZON_ANONYMOUS_BACKING_MIN)
             {
-                chunk = max( HORIZON_POOL_ARENA,
-                             (chunk / 2) & ~(HORIZON_POOL_PAGE - 1) );
+                size_t granularity = chunk > HORIZON_ANONYMOUS_BACKING_UNIT ?
+                                     HORIZON_ANONYMOUS_BACKING_UNIT : HORIZON_ANONYMOUS_BACKING_MIN;
+                chunk = max( granularity, (chunk / 2) & ~(granularity - 1) );
                 continue;
             }
             if (cursor != addr && unmap_range_locked( addr, cursor - (char *)addr ))
@@ -20577,7 +22822,89 @@ static Result check_thread_local_reservations( u64 *conflict )
 
 extern Result __real_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core );
 
-Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+#define HORIZON_THREAD_WAIT_NS        20000000000ull
+#define HORIZON_THREAD_WAIT_SLOW_NS   100000000ull
+#define HORIZON_THREAD_WAIT_NOTE_NS   5000000000ull
+#define HORIZON_THREAD_WAIT_STEP_NS   2000000ll
+#define HORIZON_THREAD_WAIT_SLOW_STEP 20000000ll
+
+int horizon_pthread_ended( pthread_t thread )
+{
+    return R_SUCCEEDED( svcWaitSynchronizationSingle( *(Handle *)thread, 0 ) );
+}
+
+static unsigned int horizon_zombie_reap_ended( struct horizon_zombie_list *list )
+{
+    struct horizon_zombie **link, *node, *ended = NULL;
+    pthread_t self = pthread_self();
+    unsigned int joined = 0;
+
+    pthread_mutex_lock( &list->lock );
+    for (link = &list->head; (node = *link);)
+    {
+        if (pthread_equal( node->thread, self ) || !horizon_pthread_ended( node->thread ))
+        {
+            link = &node->next;
+            continue;
+        }
+        *link = node->next;
+        node->next = ended;
+        ended = node;
+    }
+    pthread_mutex_unlock( &list->lock );
+    for (; (node = ended); joined++)
+    {
+        ended = node->next;
+        pthread_join( node->thread, NULL );
+        free( node );
+    }
+    if (!joined) return 0;
+    pthread_mutex_lock( &list->lock );
+    list->pending -= joined;
+    list->reaped += joined;
+    pthread_mutex_unlock( &list->lock );
+    return joined;
+}
+
+static unsigned int horizon_reap_ended_threads( void )
+{
+    extern unsigned int horizon_join_ended_thread(void) __attribute__((weak));
+    unsigned int joined = horizon_zombie_reap_ended( &horizon_server_zombies );
+
+    if (&horizon_join_ended_thread) joined += horizon_join_ended_thread();
+    return joined;
+}
+
+static int horizon_threads_at_limit( void )
+{
+    s64 used = 0, limit = 0;
+    u64 resource = 0;
+    Result rc;
+
+    if (R_FAILED( svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 ) ) || !resource) return 0;
+    rc = svcGetResourceLimitCurrentValue( &used, resource, LimitableResource_Threads );
+    if (R_SUCCEEDED(rc)) rc = svcGetResourceLimitLimitValue( &limit, resource, LimitableResource_Threads );
+    svcCloseHandle( resource );
+    return R_SUCCEEDED(rc) && limit > 0 && used >= limit;
+}
+
+static int horizon_thread_may_wait( void )
+{
+    extern volatile int wine_nx_quit_requested __attribute__((weak));
+
+    if (&wine_nx_quit_requested && wine_nx_quit_requested) return 0;
+    return __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) > 0;
+}
+
+static int horizon_tls_give_place( void )
+{
+    extern unsigned int wine_nx_tls_give_place( void ) __attribute__((weak));
+
+    return &wine_nx_tls_give_place && wine_nx_tls_give_place();
+}
+
+static Result horizon_create_thread_once( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority,
+                                          s32 core, int may_wait, unsigned int *tls_retries )
 {
     Result rc = 0;
     unsigned int retries = 0;
@@ -20590,6 +22917,11 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         Handle created;
         Result close_rc;
 
+        if (may_wait && horizon_threads_at_limit())
+        {
+            rc = MAKERESULT( Module_Kernel, KernelError_OutOfResource );
+            break;
+        }
         rc = __real_svcCreateThread( &created, entry, arg, stack, priority, core );
         if (R_FAILED(rc)) break;
         rc = check_thread_local_reservations( &conflict );
@@ -20608,11 +22940,58 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         }
     }
     pthread_mutex_unlock( &mapping_mutex );
+    *tls_retries += retries;
+    return rc;
+}
+
+Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void *stack, s32 priority, s32 core )
+{
+    unsigned long long waited_from = 0, noted = 0, now;
+    unsigned int retries = 0;
+    Result rc;
+
+    for (;;)
+    {
+        int may_wait = horizon_thread_may_wait();
+        char message[96];
+
+        rc = horizon_create_thread_once( handle, entry, arg, stack, priority, core, may_wait, &retries );
+        if (rc != MAKERESULT( Module_Kernel, KernelError_OutOfResource ) || !may_wait) break;
+        if (horizon_reap_ended_threads()) continue;
+        if (horizon_tls_give_place()) continue;
+        now = armTicksToNs( armGetSystemTick() );
+        if (!waited_from) waited_from = noted = now;
+        else if (now - waited_from >= HORIZON_THREAD_WAIT_NS) break;
+        if (now - noted >= HORIZON_THREAD_WAIT_NOTE_NS)
+        {
+            snprintf( message, sizeof(message), "[THREAD] limit reached; still waiting for a place after %llu s",
+                      (now - waited_from) / 1000000000ull );
+            wine_nx_runtime_trace( message );
+            if (noted == waited_from) CARAFE_THREAD_WAITER_REPORT();
+            noted = now;
+        }
+        svcSleepThread( now - waited_from < HORIZON_THREAD_WAIT_SLOW_NS ? HORIZON_THREAD_WAIT_STEP_NS
+                                                                       : HORIZON_THREAD_WAIT_SLOW_STEP );
+    }
+    if (waited_from) CARAFE_THREAD_WAITED( armTicksToNs( armGetSystemTick() ) - waited_from, R_SUCCEEDED(rc) );
+    if (R_SUCCEEDED(rc) && waited_from)
+    {
+        char message[96];
+
+        snprintf( message, sizeof(message), "[THREAD] waited %llu ms for a thread slot (tls_retries=%u)",
+                  (armTicksToNs( armGetSystemTick() ) - waited_from) / 1000000ull, retries );
+        wine_nx_runtime_trace( message );
+    }
     if (R_FAILED(rc))
     {
+        extern void carafeErrorThreadRefused( void ) __attribute__((weak));
         u64 resource = 0;
         s64 used = -1, limit = -1;
         char message[160];
+
+        if (rc == MAKERESULT( Module_Kernel, KernelError_OutOfResource ) &&
+            __atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED ) && carafeErrorThreadRefused)
+            carafeErrorThreadRefused();
 
         if (R_SUCCEEDED(svcGetInfo( &resource, InfoType_ResourceLimit, INVALID_HANDLE, 0 )))
         {
@@ -20623,6 +23002,7 @@ Result __wrap_svcCreateThread( Handle *handle, ThreadFunc entry, void *arg, void
         snprintf( message, sizeof(message), "[THREAD] create failed rc=%#x threads=%lld/%lld tls_retries=%u",
                   rc, (long long)used, (long long)limit, retries );
         wine_nx_runtime_trace( message );
+        CARAFE_THREAD_REFUSED();
     }
     return rc;
 }
@@ -20680,7 +23060,7 @@ static void *horizon_mmap_fixed( void *start, size_t size, int prot, int flags, 
     else
     {
         stage = "map backing";
-        if (anonymous && size > HORIZON_POOL_ARENA)
+        if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
         {
             stage = "map backing chunks";
             if (map_anonymous_backings( start, size, prot, flags, EINVAL )) start = MAP_FAILED;
@@ -20779,7 +23159,7 @@ static void *horizon_mmap_tryfixed( void *start, size_t size, int prot, int flag
         if (add_lazy_mapping_locked( start, size, prot )) ret = MAP_FAILED;
         virtmemUnlock();
     }
-    else if (anonymous && size > HORIZON_POOL_ARENA)
+    else if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
     {
         if (!(transition = reserve_fixed_range( start, size )) ||
             map_anonymous_backings( start, size, prot, flags, EEXIST ))
@@ -20824,7 +23204,7 @@ static void *horizon_mmap_alloc( size_t size, int prot, int flags, int fd, off_t
     {
         ret = add_lazy_mapping_locked( addr, size, prot );
     }
-    else if (anonymous && size > HORIZON_POOL_ARENA)
+    else if (anonymous && size > HORIZON_ANONYMOUS_BACKING_MIN)
     {
         transition = reserve_fixed_range_locked( addr, size );
         ret = transition ? 0 : -1;
@@ -20890,26 +23270,24 @@ static void *horizon_mmap_section( void *start, size_t size, int prot, int flags
         }
     }
 
-    if (state == SECTION_ALIASED && horizon_memfile_map( section, addr, offset, size ))
+    if (!(mapping = alloc_section_range( addr, size, section, offset, prot, SECTION_HOLE, reservation )))
     {
-        const int saved_errno = errno;
-
-        remove_reservation( reservation );
-        errno = saved_errno;
-        goto failed;
-    }
-    if (!(mapping = alloc_section_range( addr, size, section, offset, prot, state, reservation )))
-    {
-        if (state == SECTION_ALIASED)
-        {
-            horizon_memfile_alias( section, addr, offset, size, 0 );
-            horizon_memfile_use( section, offset, size, -1 );
-        }
         remove_reservation( reservation );
         errno = ENOMEM;
         goto failed;
     }
     list_add_mapping( mapping );
+    if (state == SECTION_ALIASED && horizon_memfile_map( section, addr, offset, size ))
+    {
+        const int saved_errno = errno;
+
+        list_remove_mapping( mapping );
+        remove_reservation( reservation );
+        free_section_range( mapping );
+        errno = saved_errno;
+        goto failed;
+    }
+    mapping->section_state = state;
     section_view_maps++;
     pthread_mutex_unlock( &mapping_mutex );
     return addr;
@@ -20917,6 +23295,45 @@ static void *horizon_mmap_section( void *start, size_t size, int prot, int flags
 failed:
     pthread_mutex_unlock( &mapping_mutex );
     return MAP_FAILED;
+}
+
+static pthread_once_t horizon_alias_once = PTHREAD_ONCE_INIT;
+static u64 horizon_alias_start, horizon_alias_end;
+
+static void horizon_alias_init( void )
+{
+    u64 base = 0, size = 0;
+    char message[128];
+
+    if (R_FAILED( svcGetInfo( &base, InfoType_AliasRegionAddress, CUR_PROCESS_HANDLE, 0 ) ) ||
+        R_FAILED( svcGetInfo( &size, InfoType_AliasRegionSize, CUR_PROCESS_HANDLE, 0 ) ) ||
+        !size || base + size <= base)
+        base = size = 0;
+    horizon_alias_start = base;
+    horizon_alias_end = base + size;
+    snprintf( message, sizeof(message), "[HMAP] alias region 0x%llx-0x%llx",
+              (unsigned long long)horizon_alias_start, (unsigned long long)horizon_alias_end );
+    wine_nx_runtime_trace( message );
+}
+
+static BOOL horizon_in_alias_region( const void *start, size_t size )
+{
+    u64 begin = (ULONG_PTR)start;
+    u64 end = size <= ~(u64)0 - begin ? begin + size : ~(u64)0;
+
+    pthread_once( &horizon_alias_once, horizon_alias_init );
+    return horizon_alias_start < horizon_alias_end && begin < horizon_alias_end && end > horizon_alias_start;
+}
+
+static void horizon_report_alias_probe( const void *start, size_t size )
+{
+    static unsigned int reports;
+    char message[128];
+
+    if (__atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) >= 8) return;
+    snprintf( message, sizeof(message), "[HMAP] mapping %p+0x%lx falls in the alias region, refused",
+              start, (unsigned long)size );
+    wine_nx_runtime_trace( message );
 }
 
 void *horizon_mmap( void *start, size_t size, int prot, int flags, int fd, off_t offset )
@@ -20943,6 +23360,16 @@ void *horizon_mmap( void *start, size_t size, int prot, int flags, int fd, off_t
     }
 
     if (flags & MAP_FIXED) return horizon_mmap_fixed( start, size, prot, flags, fd, offset );
+    if (start && horizon_in_alias_region( start, size ))
+    {
+        horizon_report_alias_probe( start, size );
+        if (flags & MAP_FIXED_NOREPLACE)
+        {
+            errno = ENOMEM;
+            return MAP_FAILED;
+        }
+        return horizon_mmap_alloc( size, prot, flags, fd, offset );
+    }
     if (start)
     {
         void *ret = horizon_mmap_tryfixed( start, size, prot, flags, fd, offset );

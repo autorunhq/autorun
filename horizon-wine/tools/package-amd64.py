@@ -114,7 +114,8 @@ if lsfg_revision:
     (stage / 'lsfg').mkdir()
 for source, name in ((wine_source / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (horizon_wine / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
-                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt')):
+                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
+                     (horizon_wine / 'licenses/MPLUS1p-OFL-1.1.txt', 'MPLUS1p-OFL-1.1.txt')):
     stage_file(source, licenses / name)
 
 files = sorted(path for path in stage.rglob('*') if path.is_file() and

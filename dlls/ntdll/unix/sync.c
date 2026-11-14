@@ -222,6 +222,7 @@ static inline int futex_wake_one( const LONG *addr )
 
 #include "horizon_private.h"
 #include "horizon_threads.h"
+#include "horizon_yield_backoff.h"
 
 C_ASSERT( sizeof(LONG) == sizeof(int) );
 
@@ -1187,6 +1188,23 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
 /******************************************************************************
  *              NtSetEvent (NTDLL.@)
  */
+static void notify_window_publication( HANDLE handle, NTSTATUS status )
+{
+#ifdef __SWITCH__
+    extern HANDLE wine_nx_window_picture_event __attribute__((weak));
+    extern int wine_nx_window_picture_pending __attribute__((weak));
+    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
+
+    if (!status && &wine_nx_window_picture_event && &wine_nx_window_picture_pending &&
+        wine_nx_window_picture_event && handle == wine_nx_window_picture_event &&
+        !__atomic_exchange_n( &wine_nx_window_picture_pending, 1, __ATOMIC_ACQ_REL ))
+    {
+        if (wine_nx_runtime_trace)
+            wine_nx_runtime_trace( "[NXSCREEN] foreground primary surface ready" );
+    }
+#endif
+}
+
 NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
 {
     unsigned int ret;
@@ -1194,7 +1212,10 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
     if ((ret = inproc_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+    {
+        notify_window_publication( handle, ret );
         return ret;
+    }
 
     SERVER_START_REQ( event_op )
     {
@@ -1204,6 +1225,7 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
         if (!ret && prev_state) *prev_state = reply->state;
     }
     SERVER_END_REQ;
+    notify_window_publication( handle, ret );
     return ret;
 }
 
@@ -2433,6 +2455,26 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
  */
 #ifdef __SWITCH__
 extern void svcSleepThread( int64_t nano );
+
+/* config/settings.json's yield-backoff, or a program's (runtime.c). */
+extern int wine_nx_yield_backoff __attribute__((weak));
+/* Yields that slept, for the [PROGRESS] line. */
+unsigned int wine_nx_yield_sleeps;
+static __thread struct horizon_yield_backoff yield_backoff;
+
+/* Says once, in the log, that a thread's loop of yields began to sleep. */
+static void yield_backoff_noticed(void)
+{
+    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
+    static int noticed;
+    char line[200];
+
+    if (!&wine_nx_runtime_trace || __atomic_exchange_n( &noticed, 1, __ATOMIC_RELAXED )) return;
+    snprintf( line, sizeof(line), "[CORES] thread %04x yields in a loop (Sleep(0), SwitchToThread or a poll): "
+              "from now on, after 2 ms of quick yields, each sleeps 100 us instead of keeping its core busy",
+              (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) );
+    wine_nx_runtime_trace( line );
+}
 #endif
 
 NTSTATUS WINAPI NtYieldExecution(void)
@@ -2441,8 +2483,20 @@ NTSTATUS WINAPI NtYieldExecution(void)
     /* Sleep(0) and SwitchToThread must give up the core: wined3d waits for its
      * command-stream thread by pausing and sleeping 0, and without a yield that
      * wait spun a whole core while the thread it waited for got less of one.
-     * The Switch build has no HAVE_SCHED_YIELD; libnx's sched_yield is this call. */
-    svcSleepThread( -1 );  /* YieldType_WithCoreMigration */
+     * The Switch build has no HAVE_SCHED_YIELD; libnx's sched_yield is this call.
+     * A yield returns at once when nothing else waits for the core, though, so
+     * a long quick run of them sleeps a little each (horizon_yield_backoff.h). */
+    long long ns = (!&wine_nx_yield_backoff || wine_nx_yield_backoff)
+                   ? horizon_yield_backoff_ns( &yield_backoff, horizon_interrupt_time() ) : 0;
+
+    if (!ns) svcSleepThread( -1 );  /* YieldType_WithCoreMigration */
+    else
+    {
+        yield_backoff_noticed();
+        __atomic_add_fetch( &wine_nx_yield_sleeps, 1, __ATOMIC_RELAXED );
+        svcSleepThread( ns );
+    }
+    yield_backoff.last = horizon_interrupt_time();
     return STATUS_SUCCESS;
 #elif defined(HAVE_SCHED_YIELD)
 #ifdef RUSAGE_THREAD
@@ -2468,6 +2522,8 @@ NTSTATUS WINAPI NtYieldExecution(void)
  * a few sessions: a sleeping thread could wait there forever (OpenTTD's game
  * loop never woke from its first Sleep). NtDelayExecution sleeps the thread. */
 extern void svcSleepThread( int64_t nano );
+extern void wine_nx_stop_point( void ) __attribute__((weak));
+extern void wine_nx_stop_sleep( int64_t nano ) __attribute__((weak));
 #endif
 
 /******************************************************************
@@ -2508,7 +2564,12 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
     if (!timeout || timeout->QuadPart == TIMEOUT_INFINITE)  /* sleep forever */
     {
 #ifdef __SWITCH__
-        for (;;) svcSleepThread( 1000000000LL );
+        for (;;)
+        {
+            if (&wine_nx_stop_sleep) wine_nx_stop_sleep( 1000000000LL );
+            else svcSleepThread( 1000000000LL );
+            if (&wine_nx_stop_point) wine_nx_stop_point();
+        }
 #else
         for (;;) select( 0, NULL, NULL, NULL, NULL );
 #endif
@@ -2539,7 +2600,12 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
             if (diff <= 0) break;
 #ifdef __SWITCH__
             /* diff is in microseconds; wake at least hourly to recheck. */
-            svcSleepThread( (diff < 3600000000LL ? diff : 3600000000LL) * 1000 );
+            {
+                int64_t ns = (diff < 3600000000LL ? diff : 3600000000LL) * 1000;
+                if (&wine_nx_stop_sleep) wine_nx_stop_sleep( ns );
+                else svcSleepThread( ns );
+                if (&wine_nx_stop_point) wine_nx_stop_point();
+            }
 #else
             tv.tv_sec  = diff / 1000000;
             tv.tv_usec = diff % 1000000;
@@ -3625,6 +3691,41 @@ NTSTATUS WINAPI NtAlertMultipleThreadByThreadId( HANDLE *tids, ULONG count, void
 }
 
 
+#ifdef __SWITCH__
+#define CARAFE_ALERT_SLOTS 256
+
+struct carafe_alert_slot
+{
+    unsigned int tid;
+    unsigned int waits;
+    unsigned int alerts;
+    int waiting;
+    const void *address;
+    unsigned long long since;
+};
+
+static struct carafe_alert_slot carafe_alert_slots[CARAFE_ALERT_SLOTS];
+static unsigned int carafe_alert_unknown;
+
+static struct carafe_alert_slot *carafe_alert_slot( unsigned int tid )
+{
+    struct carafe_alert_slot *slot = &carafe_alert_slots[(tid >> 2) % CARAFE_ALERT_SLOTS];
+
+    if (__atomic_load_n( &slot->tid, __ATOMIC_RELAXED ) != tid)
+    {
+        slot->waits = slot->alerts = 0;
+        slot->waiting = 0;
+        __atomic_store_n( &slot->tid, tid, __ATOMIC_RELAXED );
+    }
+    return slot;
+}
+
+static void carafe_alert_wait_end( struct carafe_alert_slot *slot )
+{
+    __atomic_store_n( &slot->waiting, 0, __ATOMIC_RELAXED );
+}
+#endif
+
 /***********************************************************************
  *             NtAlertThreadByThreadId (NTDLL.@)
  */
@@ -3634,6 +3735,10 @@ NTSTATUS WINAPI NtAlertThreadByThreadId( HANDLE tid )
 
     TRACE( "%p\n", tid );
 
+#ifdef __SWITCH__
+    if (!entry) __atomic_add_fetch( &carafe_alert_unknown, 1, __ATOMIC_RELAXED );
+    else __atomic_add_fetch( &carafe_alert_slot( HandleToULong( tid ) )->alerts, 1, __ATOMIC_RELAXED );
+#endif
     if (!entry) return STATUS_INVALID_CID;
 
 #ifdef USE_FUTEX
@@ -3686,6 +3791,83 @@ static LONGLONG update_timeout( ULONGLONG end )
 }
 #endif
 
+#ifdef __SWITCH__
+#define CARAFE_FUTEX_EXIT_MAGIC 0x46555458
+#define CARAFE_FUTEX_LOCK_HELD  -1
+#define CARAFE_ALERT_STOP_END   2
+
+struct carafe_futex_exit
+{
+    ULONG magic;
+    ULONG pointer_size;
+    ULONG64 entry;
+    ULONG64 lock;
+};
+
+extern int wine_nx_stop_state( int *code ) __attribute__((weak));
+
+static __thread const struct carafe_futex_exit *carafe_futex_exit;
+
+static const struct carafe_futex_exit *carafe_futex_exit_of( const void *address )
+{
+    const struct carafe_futex_exit *ending = address;
+
+    if (!ending || !virtual_check_buffer_for_read( ending, sizeof(*ending) )) return NULL;
+    if (ending->magic != CARAFE_FUTEX_EXIT_MAGIC) return NULL;
+    if (ending->pointer_size != sizeof(UINT) && ending->pointer_size != sizeof(ULONG64)) return NULL;
+    return ending;
+}
+
+static BOOL carafe_thread_ending(void)
+{
+    return &wine_nx_stop_state && (wine_nx_stop_state( NULL ) & CARAFE_ALERT_STOP_END);
+}
+
+static ULONG64 carafe_futex_load( ULONG64 address, ULONG size )
+{
+    if (size == sizeof(UINT)) return *(volatile UINT *)(ULONG_PTR)address;
+    return *(volatile ULONG64 *)(ULONG_PTR)address;
+}
+
+static void carafe_futex_store( ULONG64 address, ULONG size, ULONG64 value )
+{
+    if (size == sizeof(UINT)) *(volatile UINT *)(ULONG_PTR)address = (UINT)value;
+    else *(volatile ULONG64 *)(ULONG_PTR)address = value;
+}
+
+static void carafe_futex_wait_left( void )
+{
+    if (!carafe_thread_ending()) carafe_futex_exit = NULL;
+}
+
+void carafe_futex_exit_take_out( void )
+{
+    const struct carafe_futex_exit *ending = carafe_futex_exit;
+    LONG *lock, free_lock = 0;
+    ULONG64 next, prev;
+    ULONG size;
+
+    if (!ending) return;
+    carafe_futex_exit = NULL;
+    lock = (LONG *)(ULONG_PTR)ending->lock;
+    size = ending->pointer_size;
+    while (!__atomic_compare_exchange_n( lock, &free_lock, CARAFE_FUTEX_LOCK_HELD, FALSE,
+                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+    {
+        free_lock = 0;
+        NtYieldExecution();
+    }
+    if (carafe_futex_load( ending->entry + 2 * size, size ))
+    {
+        next = carafe_futex_load( ending->entry, size );
+        prev = carafe_futex_load( ending->entry + size, size );
+        carafe_futex_store( next + size, size, prev );
+        carafe_futex_store( prev, size, next );
+    }
+    __atomic_store_n( lock, 0, __ATOMIC_SEQ_CST );
+}
+#endif
+
 
 /***********************************************************************
  *             NtWaitForAlertByThreadId (NTDLL.@)
@@ -3703,6 +3885,14 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
         LONG *futex = &entry->futex;
         ULONGLONG end;
         int ret;
+#ifdef __SWITCH__
+        struct carafe_alert_slot *slot = carafe_alert_slot( get_thread_data()->tid );
+
+        slot->address = address;
+        slot->since = horizon_interrupt_time();
+        __atomic_add_fetch( &slot->waits, 1, __ATOMIC_RELAXED );
+        __atomic_store_n( &slot->waiting, 1, __ATOMIC_RELAXED );
+#endif
 
         if (timeout)
         {
@@ -3711,6 +3901,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
             else
                 end = get_absolute_timeout( timeout );
         }
+#ifdef __SWITCH__
+        carafe_futex_exit = carafe_futex_exit_of( address );
+#endif
 
         while (!InterlockedExchange( futex, 0 ))
         {
@@ -3726,8 +3919,19 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
             else
                 ret = futex_wait( futex, 0, NULL );
 
-            if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
+            if (ret == -1 && errno == ETIMEDOUT)
+            {
+#ifdef __SWITCH__
+                carafe_alert_wait_end( slot );
+                carafe_futex_wait_left();
+#endif
+                return STATUS_TIMEOUT;
+            }
         }
+#ifdef __SWITCH__
+        carafe_alert_wait_end( slot );
+        carafe_futex_wait_left();
+#endif
         return STATUS_ALERTED;
     }
 #elif defined(HAVE_KQUEUE)
@@ -3778,6 +3982,36 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
     }
 #endif
 }
+
+#ifdef __SWITCH__
+void carafe_alert_dump( void )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    unsigned long long now = horizon_interrupt_time();
+    char line[224];
+    unsigned int i;
+
+    if (!&wine_nx_runtime_trace) return;
+    snprintf( line, sizeof(line), "[CARAFE-DIAG] alerts to unknown thread ids: %u",
+              __atomic_load_n( &carafe_alert_unknown, __ATOMIC_RELAXED ) );
+    wine_nx_runtime_trace( line );
+    for (i = 0; i < CARAFE_ALERT_SLOTS; i++)
+    {
+        const struct carafe_alert_slot *slot = &carafe_alert_slots[i];
+        union tid_alert_entry *entry;
+        unsigned int tid = __atomic_load_n( &slot->tid, __ATOMIC_RELAXED );
+
+        if (!tid || !__atomic_load_n( &slot->waiting, __ATOMIC_RELAXED )) continue;
+        entry = get_tid_alert_entry( ULongToHandle( tid ) );
+        snprintf( line, sizeof(line),
+                  "[CARAFE-DIAG] tid %u waits for an alert at %p for %llu ms: %u alerts and %u waits so far, "
+                  "futex %d",
+                  tid, slot->address, (now - slot->since) / 10000, slot->alerts, slot->waits,
+                  entry ? (int)entry->futex : -1 );
+        wine_nx_runtime_trace( line );
+    }
+}
+#endif
 
 
 #ifdef __SWITCH__

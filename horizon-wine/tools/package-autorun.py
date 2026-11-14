@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import sys
 
+from llvm_mingw import bin_dir as llvm_mingw_bin
+
 horizon_wine = Path(__file__).resolve().parents[1]
 root = horizon_wine.parent
 tools = horizon_wine / 'tools'
@@ -27,7 +29,7 @@ build = horizon_wine / 'build-autorun'
 stage_root = build / 'sd-card'
 stage = stage_root / 'switch/wine'
 marker = re.search(r'nx-wow64-dynarec-(\d+)', (horizon_wine / 'source/runtime.c').read_text()).group(1)
-toolchain = horizon_wine / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
+toolchain = llvm_mingw_bin()
 # The FEX build when there is one, as build-amd64-components.sh names it.
 default_amd64 = next((path for path in (horizon_wine / f'build-switch-amd64/wine-nx-amd64-box64{kind}-mesa-dxvk-vkd3d.zip'
                                         for kind in ('-fex', '')) if path.is_file()),
@@ -36,6 +38,8 @@ parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 parser.add_argument('--amd64', type=Path,
                     default=Path(os.environ.get('WINE_NX_AMD64_PACKAGE', default_amd64)))
 parser.add_argument('--x86', action='store_true', help='ship the x86-only runtime instead of the AMD64 one')
+parser.add_argument('--nxvk', action='store_true',
+                    help='also ship the runtime linked with nxvk, wine-nx-runtime-nxvk.nro (build.sh --nxvk)')
 parser.add_argument('--dlls', type=Path, default=root / 'horizon-dlls/switch/wine',
                     help="the DLL repository's card tree, to check the package against")
 parser.add_argument('--fixes', type=Path, default=root / 'game-fixes/switch/wine/game-fixes/index.json',
@@ -69,7 +73,8 @@ licenses = stage / 'licenses'
 licenses.mkdir()
 for source, name in ((root / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
                      (horizon_wine / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
-                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt')):
+                     (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
+                     (horizon_wine / 'licenses/MPLUS1p-OFL-1.1.txt', 'MPLUS1p-OFL-1.1.txt')):
     shutil.copy2(source, licenses / name)
 
 # --- Autorun's setup programs ------------------------------------------------
@@ -105,6 +110,9 @@ config.mkdir()
   "core-balancing": true,
   "display-devices": true,
   "windows-through-opengl": true,
+  "mode-emulation": true,
+  "yield-backoff": true,
+  "fpslocker": true,
   "vulkan-probe": false,
   "reopen-the-launcher-on-exit": true,
   "dxvk-for-new-games": true,
@@ -203,7 +211,9 @@ config/keys.txt the keys the controller sends. Both are set from the launcher
 (Settings, Defaults, Controls, and a program's own Controls row), so neither
 has to be written by hand.
 
-Logs: switch/wine/logs/autorun_runtime.log holds the last run.
+Logs: switch/wine/logs/autorun_runtime.log holds the last run, and
+autorun_runtime_nxvk.log the last run of the nxvk runtime; a game's own run is
+kept beside them under its name (Game.log, or Game_nxvk.log on nxvk).
 ''')
 
 
@@ -269,6 +279,41 @@ if args.x86:
 else:
     assert args.amd64.is_file(), f'{args.amd64} is missing; run build-amd64-components.sh, or pass --x86'
     print(f'AMD64 runtime build {merge_amd64(args.amd64, stage_root)} merged')
+if args.nxvk:
+    # The same runtime linked with nxvk instead of mesa-switch: a game set to
+    # it (Graphics driver) is started in it (source/runtime.c). nxvk's files
+    # are GPL-2.0-or-later and it is linked statically, so its licenses and its
+    # note on what that means go with it.
+    assert not args.x86, 'the nxvk runtime is an AMD64 one'
+    nxvk_nro = horizon_wine / 'build-switch-amd64-nxvk/wine-nx-runtime.nro'
+    nxvk_pkg = horizon_wine / 'vendor/nxvk/switch/build/pkg'
+    assert nxvk_nro.is_file(), f'{nxvk_nro} is missing; build it with build.sh --nxvk'
+    data = nxvk_nro.read_bytes()
+    assert data[16:20] == b'NRO0', f'{nxvk_nro} is not an NRO'
+    assert b'autorun-graphics-runtime: nxvk\0' in data, f'{nxvk_nro} is not linked with nxvk'
+    assert b'autorun-graphics-runtime: nxvk\0' not in (stage / 'wine-nx-runtime.nro').read_bytes(), \
+        'the card\'s own runtime is the nxvk one'
+    main = (stage / 'wine-nx-runtime.nro').read_bytes()
+    build_name = re.search(rb'nx-amd64-fex-\d+\0', main)
+    assert build_name and build_name.group(0) in data, f'{nxvk_nro} is not the same runtime build as the card\'s'
+    shutil.copy2(nxvk_nro, stage / 'wine-nx-runtime-nxvk.nro')
+    shutil.copytree(nxvk_pkg / 'licenses', licenses / 'nxvk')
+    print('nxvk runtime staged')
+# The runtime's function names beside each NRO, for its own log's faults and
+# stall reports (tools/runtime_symbols.py, source/runtime_symbols.c).
+sys.path.insert(0, str(tools))
+import runtime_symbols  # noqa: E402
+for nro_name, build_dir in (('wine-nx-runtime', 'build-switch-wow64-mesa-switch' if args.x86 else 'build-switch-amd64'),
+                            ('wine-nx-runtime-nxvk', 'build-switch-amd64-nxvk')):
+    elf = horizon_wine / build_dir / 'wine-nx-runtime.elf'
+    nro = horizon_wine / build_dir / 'wine-nx-runtime.nro'
+    if not (stage / f'{nro_name}.nro').is_file():
+        continue
+    # The NRO is made from the ELF; one older than it is another build's.
+    if elf.is_file() and nro.is_file() and elf.stat().st_mtime <= nro.stat().st_mtime + 1:
+        print(f'{nro_name}.sym: {runtime_symbols.write(elf, stage / f"{nro_name}.sym")} functions')
+    else:
+        print(f'{nro_name}.sym: no ELF of this build in {build_dir}; faults will give offsets only')
 subprocess.run([sys.executable, str(tools / 'verify-package.py'), str(stage), '--dlls', str(args.dlls)],
                check=True)
 

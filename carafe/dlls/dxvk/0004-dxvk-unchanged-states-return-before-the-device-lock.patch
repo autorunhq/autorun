@@ -1,0 +1,117 @@
+Carafe: with d3d9.unchangedStateFastPath, a state set to the value it already has returns before the device lock.
+Games that apply D3DX effects send every state of a pass on every draw, most of them unchanged. DXVK dropped those
+only after taking the device lock and a stack frame: 51 ARM64 instructions per call under FEX on the A57. With the
+option, SetRenderState, SetTextureStageState, SetSamplerState and SetTexture compare first and return, 25
+instructions for SetRenderState; a multithreaded device or a recording state block still takes the full path.
+On by default; d3d9.unchangedStateFastPath = False turns it off.
+Zlib, as the files it changes.
+
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -2312,6 +2312,14 @@ namespace dxvk {
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
++    if (likely(uint32_t(State) < RenderStateCount && m_state.renderStates[State] == Value && IsUnchangedFastPath()))
++      return D3D_OK;
++
++    return SetStateRenderState(State, Value);
++  }
++
++
++  HRESULT D3D9DeviceEx::SetStateRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
+     D3D9DeviceLock lock = LockDevice();
+ 
+     // D3D9 only allows reading for values 0 and 7-255 so we don't need to do anything but return OK
+@@ -2805,6 +2813,9 @@ namespace dxvk {
+ 
+     DWORD stateSampler = RemapSamplerState(Stage);
+ 
++    if (likely(m_state.textures[stateSampler] == pTexture && IsUnchangedFastPath()))
++      return D3D_OK;
++
+     return SetStateTexture(stateSampler, pTexture);
+   }
+ 
+@@ -2831,7 +2842,13 @@ namespace dxvk {
+           DWORD                    Stage,
+           D3DTEXTURESTAGESTATETYPE Type,
+           DWORD                    Value) {
+-    return SetStateTextureStageState(Stage, RemapTextureStageStateType(Type), Value);
++    D3D9TextureStageStateTypes dxvkType = RemapTextureStageStateType(Type);
++
++    if (likely(Stage < caps::TextureStageCount && uint32_t(dxvkType) < TextureStageStateCount
++            && m_state.textureStages[Stage][dxvkType] == Value && IsUnchangedFastPath()))
++      return D3D_OK;
++
++    return SetStateTextureStageState(Stage, dxvkType, Value);
+   }
+ 
+ 
+@@ -2866,6 +2883,10 @@ namespace dxvk {
+ 
+     uint32_t stateSampler = RemapSamplerState(Sampler);
+ 
++    if (likely(uint32_t(Type) < SamplerStateCount
++            && m_state.samplerStates[stateSampler][Type] == Value && IsUnchangedFastPath()))
++      return D3D_OK;
++
+     return SetStateSamplerState(stateSampler, Type, Value);
+   }
+ 
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -775,6 +775,8 @@ namespace dxvk {
+      */
+     HRESULT SetStateTexture(DWORD StateSampler, IDirect3DBaseTexture9* pTexture);
+ 
++    HRESULT SetStateRenderState(D3DRENDERSTATETYPE State, DWORD Value);
++
+     /**
+      * @brief Sets the transform for the given sampler
+      *
+@@ -1131,6 +1133,10 @@ namespace dxvk {
+       return m_recorder != nullptr;
+     }
+ 
++    bool IsUnchangedFastPath() const {
++      return m_d3d9Options.unchangedStateFastPath && !m_multithread.enabled() && !ShouldRecord();
++    }
++
+     bool IsD3DCompatibile(D3DCompatibility d3dCompatibility) const {
+       return m_d3dCompatibility.test(d3dCompatibility);
+     }
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -77,6 +77,7 @@ namespace dxvk {
+     this->countLosableResources         = config.getOption<bool>        ("d3d9.countLosableResources",         true);
+     this->reproducibleCommandStream     = config.getOption<bool>        ("d3d9.reproducibleCommandStream",     false);
+     this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
++    this->unchangedStateFastPath        = config.getOption<bool>        ("d3d9.unchangedStateFastPath",        true);
+ 
+     // D3D8 options
+     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -172,6 +172,8 @@ namespace dxvk {
+ 
+     /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
+     bool extraFrontbuffer;
++
++    bool unchangedStateFastPath;
+   };
+ 
+ }
+--- a/src/util/sync/sync_scoped.h
++++ b/src/util/sync/sync_scoped.h
+@@ -65,6 +65,10 @@ namespace dxvk::sync {
+     ScopedDeviceLock(bool enableProtection)
+     : m_enable(enableProtection) { }
+ 
++    bool enabled() const {
++      return m_enable;
++    }
++
+     ScopedDeviceGuard acquire() {
+       if (likely(!m_enable))
+         return ScopedDeviceGuard();

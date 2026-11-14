@@ -1,0 +1,83 @@
+Carafe: the process receives a process-owned event for its graphics component to announce published window content.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -565,6 +565,8 @@ static int wine_nx_screen_reserved;
+ static int wine_nx_vk_surfaces;
+ static int wine_nx_vk_swapchains;
+ int wine_nx_window_picture_shown;
++HANDLE wine_nx_window_picture_event;
++int wine_nx_window_picture_pending;
+ static unsigned int wine_nx_picture_thread;
+ /* Controller and touchscreen state, guarded by wine_nx_pointer_mutex. */
+ static pthread_mutex_t wine_nx_pointer_mutex = PTHREAD_MUTEX_INITIALIZER;
+@@ -797,6 +799,13 @@ void wine_nx_screen_input_waits(unsigned int thread)
+         __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
+ }
+ 
++void wine_nx_window_picture_presented(void)
++{
++    if (__atomic_exchange_n( &wine_nx_window_picture_pending, 0, __ATOMIC_ACQ_REL ) &&
++        !__atomic_exchange_n( &wine_nx_window_picture_shown, 1, __ATOMIC_ACQ_REL ))
++        log_line( "[NXSCREEN] foreground primary surface submitted" );
++}
++
+ void wine_nx_screen_picture_drawn(unsigned int thread, int redrawn)
+ {
+     extern void wine_nx_vk_displace_screen(void) __attribute__((weak));
+@@ -1767,7 +1776,8 @@ static const char runtime_environment[] =
+     "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
+     "windir=C:\\windows\0"
+     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0"
+-    "WINE_NX_GRAPHICS_PATH=\0";
++    "WINE_NX_GRAPHICS_PATH=\0"
++    "WINE_NX_WINDOW_PICTURE_EVENT=\0";
+ 
+ static size_t runtime_fex_environment( const char *target, char *buffer, size_t size )
+ {
+@@ -1854,6 +1864,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
+     char nt_path[640], dll_path[1024], current_dir[512];
+     char cmdline[1024], args_buf[896], args_path[512];
+     char fex_environment[NX_FEX_OPTION_COUNT * 80];
++    char picture_event[64] = "";
+     size_t chars, size, i, fex_environment_size;
+     WCHAR *cursor;
+     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
+@@ -1954,6 +1965,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
+         log_line( "[ARGS] CommandLine='%s'", cmdline_str );
+     }
+ 
++    if (!wine_nx_window_picture_event)
++    {
++        NTSTATUS status = NtCreateEvent( &wine_nx_window_picture_event, EVENT_MODIFY_STATE, NULL,
++                                         NotificationEvent, FALSE );
++        if (status) log_line( "[NXSCREEN] publication event unavailable: %08x", (unsigned int)status );
++    }
++    if (wine_nx_window_picture_event)
++        snprintf( picture_event, sizeof(picture_event), "%lx:%lx", (unsigned long)GetCurrentProcessId(),
++                  (unsigned long)(uintptr_t)wine_nx_window_picture_event );
++
+     chars = strlen( current_dir ) + 1;
+     chars += strlen( dll_path ) + 1;
+     chars += strlen( dos_path ) + 1;
+@@ -1962,6 +1983,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
+     chars += strlen( nt_path ) + 1;
+     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
+     chars += fex_environment_size;
++    chars += strlen( picture_event );
+     size = sizeof(*params) + chars * sizeof(WCHAR);
+ 
+     if (!(params = calloc( 1, size ))) return NULL;
+@@ -2005,6 +2027,11 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
+             for (i = 0; i < 22; i++) *cursor++ = (unsigned char)*value++;
+             value = graphics_path;
+         }
++        if (!strncmp( entry, "WINE_NX_WINDOW_PICTURE_EVENT=", 29 ))
++        {
++            for (i = 0; i < 29; i++) *cursor++ = (unsigned char)*value++;
++            value = picture_event;
++        }
+         do *cursor++ = (unsigned char)*value; while (*value++);
+     }
+     for (i = 0; i < fex_environment_size; i++) *cursor++ = (unsigned char)fex_environment[i];

@@ -23,7 +23,9 @@ static struct launcher_entry launcher_entries[LAUNCHER_MAX_ENTRIES];
 
 static void launcher_load_catalog( const char *runtime_dir, int *count, launcher_machine_fn machine_of )
 {
-    struct launcher_catalog catalog;
+    /* Static: 256 entries of paths and artwork are some 560 KB, more than the
+     * main thread's stack has left by the time the launcher falls back here. */
+    static struct launcher_catalog catalog;
     char path[512];
     int i;
     snprintf( path, sizeof(path), "%s/%s", runtime_dir, LAUNCHER_CATALOG_FILE );

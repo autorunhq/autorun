@@ -1,0 +1,209 @@
+Carafe: with d3d9.managedBufferCopies on top of d3d9.frontEndThread, a lock of a managed buffer no longer waits for
+the queue. The thread that queues keeps a copy of the buffer, made from the buffer's own memory the second time it is
+locked, so buffers filled once while loading are not copied: a lock hands out that copy, a read-only lock costs
+nothing more, and the unlock queues the changed range, which the worker writes into the buffer in order with the
+draws. Any lock of the buffer outside the queue, from another thread or one too large to queue, makes the copy be
+taken again. The effect worker hands such uploads on to the DXVK worker instead of locking the buffer itself. With the
+profiler on, the copies made are counted in the front end line.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_common_buffer.cpp b/src/d3d9/d3d9_common_buffer.cpp
+--- a/src/d3d9/d3d9_common_buffer.cpp
++++ b/src/d3d9/d3d9_common_buffer.cpp
+@@ -34,11 +34,17 @@
+           void** ppbData,
+           DWORD  Flags) {
+     if (D3D9FrontEnd* frontEnd = m_parent->Queuing()) {
+-      if (frontEnd->StagesLock(this, OffsetToLock, SizeToLock, Flags))
++      if (frontEnd->StagesLock(this, OffsetToLock, SizeToLock, Flags)
++       || frontEnd->CopiesLock(this, OffsetToLock, SizeToLock, Flags))
+         return frontEnd->LockStaged(this, OffsetToLock, SizeToLock, ppbData, Flags);
+       frontEnd->NoteWaitingLock(false, m_desc.Pool, m_desc.Usage, Flags, m_frontEndUsed);
+     }
+ 
++    for (auto& staging : m_frontEndStaging) {
++      if (staging.copied)
++        staging.stale.exchange(1u);
++    }
++
+     return m_parent->LockBuffer(
+       this,
+       OffsetToLock,
+diff -ruN a/src/d3d9/d3d9_common_buffer.h b/src/d3d9/d3d9_common_buffer.h
+--- a/src/d3d9/d3d9_common_buffer.h
++++ b/src/d3d9/d3d9_common_buffer.h
+@@ -76,6 +76,9 @@
+     uint32_t             size   = 0;
+     uint32_t             flags  = 0;
+     uint32_t             locks  = 0;
++    bool                 locked = false;
++    bool                 copied = false;
++    std::atomic<uint32_t> stale { 0u };
+     void*                owner  = nullptr;
+     void               (*addRef)(void*)  = nullptr;
+     void               (*release)(void*) = nullptr;
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4493,6 +4493,8 @@
+      || m_d3dCompatibility.test(D3DCompatibility::D3D8) || m_d3dCompatibility.test(D3DCompatibility::D3D9Ex))
+       return;
+     uint32_t self = D3D9FrontEnd::CurrentThread();
++    m_frontEnd.SetManagedCopies(m_d3d9Options.managedBufferCopies);
++    m_effectFrontEnd.SetManagedCopies(m_d3d9Options.managedBufferCopies);
+     if (m_d3d9Options.effectThread && D3D9EffectHooks::InstallQueue()) {
+       m_effectFrontEnd.SetDownstream(&m_frontEnd);
+       m_effectFrontEnd.SetPassMerge(m_d3d9Options.effectPassMerge);
+diff -ruN a/src/d3d9/d3d9_front_end.cpp b/src/d3d9/d3d9_front_end.cpp
+--- a/src/d3d9/d3d9_front_end.cpp
++++ b/src/d3d9/d3d9_front_end.cpp
+@@ -1002,6 +1002,41 @@
+   }
+ 
+ 
++  bool D3D9FrontEnd::CopiesLock(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, DWORD Flags) {
++    if (!m_managedCopies)
++      return false;
++    const D3D9_BUFFER_DESC* desc = pBuffer->Desc();
++    if (desc->Pool != D3DPOOL_MANAGED || desc->Size > CopiedBufferMax || OffsetToLock >= desc->Size)
++      return false;
++    uint32_t size = SizeToLock == 0 ? desc->Size - OffsetToLock : std::min<UINT>(SizeToLock, desc->Size - OffsetToLock);
++    if (!(Flags & D3DLOCK_READONLY) && size > CopiedLockMax)
++      return false;
++    D3D9FrontEndStaging& staging = pBuffer->m_frontEndStaging[m_index];
++    if (staging.stale.exchange(0u) != 0)
++      staging.copied = false;
++    if (!staging.copied) {
++      if (!staging.locked) {
++        staging.locked = true;
++        return false;
++      }
++      void* data = nullptr;
++      if (FAILED(m_device->LockBuffer(pBuffer, 0, 0, &data, D3DLOCK_READONLY)) || data == nullptr)
++        return false;
++      staging.memory.resize(std::max<size_t>(staging.memory.size(), desc->Size));
++      std::memcpy(staging.memory.data(), data, desc->Size);
++      m_device->UnlockBuffer(pBuffer);
++      staging.copied = true;
++      m_statCopies++;
++    }
++    return true;
++  }
++
++
++  void D3D9FrontEnd::ForwardUpload(const void* pRecord, uint32_t Bytes) {
++    std::memcpy(Allocate(D3D9FrontEndOp::BufferUpload, Bytes), pRecord, Bytes);
++  }
++
++
+   HRESULT D3D9FrontEnd::LockStaged(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, void** ppbData,
+       DWORD Flags) {
+     if (unlikely(ppbData == nullptr))
+@@ -1024,6 +1059,8 @@
+       uint32_t end = std::max(staging.offset + staging.size, OffsetToLock + size);
+       staging.offset = std::min<uint32_t>(staging.offset, OffsetToLock);
+       staging.size = end - staging.offset;
++      if (!(Flags & D3DLOCK_READONLY))
++        staging.flags &= ~DWORD(D3DLOCK_READONLY);
+     }
+     staging.locks++;
+ 
+@@ -1043,6 +1080,8 @@
+       return D3D_OK;
+     if (--staging.locks != 0)
+       return D3D_OK;
++    if (staging.flags & D3DLOCK_READONLY)
++      return D3D_OK;
+ 
+     m_statStaged++;
+     staging.addRef(staging.owner);
+@@ -1065,7 +1104,8 @@
+       uint64_t(double(m_statQueued) / frames), ", unchanged states dropped ", uint64_t(double(m_statDropped) / frames),
+       ", buffer locks staged ", uint64_t(double(m_statStaged) / frames), "; in all: drains ", m_statDrains, " (",
+       m_statDrainUs, " us), waits for ring room ", m_statRoomWaits, ", frames waited for the worker ",
+-      m_statFrameWaits));
++      m_statFrameWaits, m_managedCopies ? str::format(", managed buffers copied ", m_statCopies) : std::string()));
++    m_statCopies = 0;
+     std::sort(m_drainSites.begin(), m_drainSites.end(),
+       [] (const auto& a, const auto& b) { return a.second > b.second; });
+     std::string sites;
+@@ -1700,8 +1740,18 @@
+ 
+       case D3D9FrontEndOp::BufferUpload: {
+         auto args = static_cast<const UploadArgs*>(body);
++        if (m_managedCopies && m_downstream != nullptr && m_downstream->Queues()) {
++          m_downstream->ForwardUpload(args, sizeof(UploadArgs) + args->size);
++          break;
++        }
+         void* data = nullptr;
+-        if (SUCCEEDED(args->buffer->Lock(args->offset, args->size, &data, args->flags)) && data != nullptr) {
++        if (m_managedCopies) {
++          if (SUCCEEDED(device->LockBuffer(args->buffer, args->offset, args->size, &data, args->flags))
++           && data != nullptr) {
++            std::memcpy(data, args + 1, args->size);
++            device->UnlockBuffer(args->buffer);
++          }
++        } else if (SUCCEEDED(args->buffer->Lock(args->offset, args->size, &data, args->flags)) && data != nullptr) {
+           std::memcpy(data, args + 1, args->size);
+           args->buffer->Unlock();
+         }
+diff -ruN a/src/d3d9/d3d9_front_end.h b/src/d3d9/d3d9_front_end.h
+--- a/src/d3d9/d3d9_front_end.h
++++ b/src/d3d9/d3d9_front_end.h
+@@ -107,6 +107,8 @@
+     static constexpr uint32_t SpinCount     = 4000;
+     static constexpr uint32_t ReportFrames  = 600;
+     static constexpr uint32_t StagedLockMax = 64u << 10;
++    static constexpr uint32_t CopiedBufferMax = 4u << 20;
++    static constexpr uint32_t CopiedLockMax = 256u << 10;
+ 
+     D3D9FrontEnd(D3D9DeviceEx* pDevice, uint32_t Index);
+ 
+@@ -330,6 +332,14 @@
+ 
+     bool StagesLock(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, DWORD Flags) const;
+ 
++    bool CopiesLock(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, DWORD Flags);
++
++    void SetManagedCopies(bool Enable) {
++      m_managedCopies = Enable;
++    }
++
++    void ForwardUpload(const void* pRecord, uint32_t Bytes);
++
+     HRESULT LockStaged(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, void** ppbData, DWORD Flags);
+ 
+     HRESULT UnlockStaged(D3D9CommonBuffer* pBuffer);
+@@ -404,6 +414,9 @@
+       D3D9PassFootprint footprint;
+     };
+ 
++    bool               m_managedCopies = false;
++    uint64_t           m_statCopies    = 0;
++
+     bool               m_passMerge   = false;
+     bool               m_mayHoldPass = false;
+     D3D9PassFootprint* m_footprint   = nullptr;
+diff -ruN a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -81,6 +81,7 @@
+     this->frontEndThread                = config.getOption<bool>        ("d3d9.frontEndThread",                false);
+     this->effectThread                  = config.getOption<bool>        ("d3d9.effectThread",                  false);
+     this->effectPassMerge               = config.getOption<bool>        ("d3d9.effectPassMerge",               false);
++    this->managedBufferCopies           = config.getOption<bool>        ("d3d9.managedBufferCopies",           false);
+ 
+     // D3D8 options
+     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
+diff -ruN a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -180,6 +180,8 @@
+     bool effectThread;
+ 
+     bool effectPassMerge;
++
++    bool managedBufferCopies;
+   };
+ 
+ }

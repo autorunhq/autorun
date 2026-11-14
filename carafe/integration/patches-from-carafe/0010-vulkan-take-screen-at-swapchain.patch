@@ -1,0 +1,19 @@
+Carafe: the compositor hands the screen over right before the host swapchain is made.
+docs/research/loading-screen/REPORT.md.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/vulkan.c	2026-10-08 03:59:14.887816600 +0000
++++ b/dlls/win32u/vulkan.c	2026-10-08 03:59:59.998186800 +0000
+@@ -3167,6 +3167,12 @@
+         present_modes->pPresentModes = &create_info_host.presentMode;
+     }
+ #endif
++#if defined(__SWITCH__) && defined(WINE_NX_MESA_SWITCH)
++    {
++        extern void wine_nx_vk_take_window(void);
++        wine_nx_vk_take_window();
++    }
++#endif
+     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
+     {
+         free( swapchain );

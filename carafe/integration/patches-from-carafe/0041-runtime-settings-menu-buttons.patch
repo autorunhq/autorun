@@ -1,0 +1,33 @@
+Carafe: the settings menu sees the buttons, and + and - quit only on their own.
+Every poll hands the held buttons to wine_nx_menu_poll (runtime/overlay/carafe_menu.c) when it is there, which
+opens and closes the settings menu on -, +, L and R pressed together. Holding + and - for a second still quits,
+but not while L or R is held, so the menu's combination does not end the game.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -884,6 +884,7 @@
+ 
+ void wine_nx_leave_process( const char *why );
+ void wine_nx_request_quit( const char *why );
++extern void wine_nx_menu_poll( u64 held ) __attribute__((weak));
+ 
+ 
+ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
+@@ -918,6 +919,7 @@
+         HidAnalogStickState left = padGetStickPos( &wine_nx_pad, 0 ), right = padGetStickPos( &wine_nx_pad, 1 );
+         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
+     }
++    if (wine_nx_menu_poll) wine_nx_menu_poll( all_held );
+     {
+         const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
+         unsigned int bits = osk_buttons( held );
+@@ -983,7 +985,7 @@
+     wine_nx_pointer_moved |= moved;
+     {
+         const u64 chord = HidNpadButton_Plus | HidNpadButton_Minus;
+-        if ((all_held & chord) != chord) quit_since = 0;
++        if ((all_held & (chord | HidNpadButton_L | HidNpadButton_R)) != chord) quit_since = 0;
+         else if (!quit_since) quit_since = now;
+         else if (armTicksToNs( now - quit_since ) >= 1000000000ull) leave = 1;
+     }

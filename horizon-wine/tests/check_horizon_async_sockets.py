@@ -48,7 +48,7 @@ defines = '\n'.join(line for line in source.splitlines()
 # The select handler takes a result before anything else, and hands out a
 # system APC before it would wait, but not before a signal-and-wait signals.
 select = definition('horizon_server_handle_select')
-assert select.index('horizon_server_async_result_locked') < select.index('for (int initial')
+assert select.index('horizon_server_async_result_locked') < select.index('for (;;)')
 assert select.index('horizon_server_async_apc_locked') < select.index('HORIZON_SELECT_ALERTABLE')
 assert select.index('horizon_server_signal_object_locked') < select.index('horizon_server_async_apc_locked')
 # Closing a socket cancels what waits on it; the ioctl handler tells what ends at once.
@@ -236,6 +236,7 @@ static unsigned int horizon_server_queue_user_apc_locked( struct horizon_server_
 
 static void horizon_async_finish_locked( struct horizon_async *async, unsigned int status,
                                          unsigned long long total );
+static void horizon_server_device_done_locked( unsigned int handle ) { (void)handle; }
 
 #define calloc test_calloc
 @FUNCTIONS@

@@ -1,0 +1,34 @@
+Carafe: the stall watch reports where the threads stand when a thread creation asks it to.
+A creation that has waited 5 s for a place asks through wine_nx_stall_report_soon (0028) instead of reading
+every thread itself, which kept it from seeing a place come free.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -448,6 +448,13 @@
+     log_line( "[LOG] this run is kept in %s", path );
+ }
+ 
++static int stall_report_asked;
++
++void wine_nx_stall_report_soon( void )
++{
++    __atomic_store_n( &stall_report_asked, 1, __ATOMIC_RELEASE );
++}
++
+ static void stall_watch( void *arg )
+ {
+     extern unsigned int wine_nx_gl_swaps __attribute__((weak));
+@@ -462,7 +469,12 @@
+ 
+         /* Five seconds, in slices, so quitting does not wait for them. */
+         for (i = 0; i < 50 && !__atomic_load_n( (int *)&stall_watch_quit, __ATOMIC_RELAXED ); i++)
++        {
+             svcSleepThread( 100000000LL );
++            if (!__atomic_exchange_n( &stall_report_asked, 0, __ATOMIC_ACQ_REL )) continue;
++            log_line( "[STALL] a thread has waited 5 s for a place; where the threads are standing" );
++            wine_nx_threads_report_stalled();
++        }
+         frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
+                  (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
+                  wine_nx_compositor_frames_fast() +

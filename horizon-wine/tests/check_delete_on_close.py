@@ -9,8 +9,6 @@ import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'dlls/ntdll/unix/horizon.c').read_text()
-a = source.index('static unsigned int horizon_server_close_object_handle(')
-b = source.index('static unsigned int horizon_server_duplicate_object_handle', a)
 
 def function(name):
     start = source.index(name)
@@ -38,6 +36,8 @@ fixture = r'''
 #define HORIZON_SERVER_OBJECT_FILE 1
 #define HORIZON_SERVER_OBJECT_COMPLETION 2
 #define HORIZON_SERVER_OBJECT_SOCK 3
+#define HORIZON_SERVER_OBJECT_NAMED_PIPE 4
+#define HORIZON_SERVER_OBJECT_DEVICE 5
 /* Closing a socket ends what waits on it (check_horizon_async_sockets.py); no socket here. */
 static struct { void *head; } horizon_asyncs;
 static unsigned long long horizon_async_now(void) { return 0; }
@@ -158,6 +158,7 @@ int main(void)
 with tempfile.TemporaryDirectory(prefix='wine-nx-delete-test-') as tmp:
     c = Path(tmp) / 'test.c'
     exe = Path(tmp) / 'test'
-    c.write_text('#include <sys/stat.h>\n' + fixture + helpers + setup + source[a:b] + tests)
+    c.write_text('#include <sys/stat.h>\n' + fixture + helpers + setup +
+                 function('static unsigned int horizon_server_close_object_handle(') + '\n' + tests)
     subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', str(c), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

@@ -23,6 +23,7 @@ void *wine_nx_arm64ec_dispatch_ret;
 
 static uint64_t recorded_args[8], recorded_stack_args[8], recorded_stack_ptr;
 static uint64_t recorded_unix[3];
+static int recorded_syscall_frame_ok, recorded_unix_frame_ok;
 static unsigned int recorded_syscall_id;
 static unsigned int failures;
 
@@ -33,26 +34,42 @@ extern void syscall_return_target(void);
 extern void syscall_dispatch_ret(void);
 extern void clobber_vectors(void);
 
+static int frame_matches_nonvolatile( const uint64_t *frame )
+{
+    return frame[0] == input_nonvolatile[10] &&
+           !memcmp( frame + 2, input_nonvolatile, 4 * sizeof(uint64_t) ) &&
+           !memcmp( frame + 32, input_nonvolatile + 4, 6 * sizeof(uint64_t) ) &&
+           frame[6] == (uint64_t)stale_teb;
+}
+
 uint64_t wine_nx_do_syscall( uint64_t *stack_args,
                              uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
                              uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7,
                              unsigned int syscall_id )
 {
     uint64_t args[8] = { x0, x1, x2, x3, x4, x5, x6, x7 };
+    const uint64_t *frame = stack_args - 52;
 
     recorded_stack_ptr = (uint64_t)stack_args;
     memcpy( recorded_args, args, sizeof(args) );
     memcpy( recorded_stack_args, stack_args, sizeof(recorded_stack_args) );
     recorded_syscall_id = syscall_id;
+    recorded_syscall_frame_ok = frame_matches_nonvolatile( frame ) &&
+                                frame[1] == (uint64_t)&syscall_return_target &&
+                                !memcmp( frame + 40, input_args, sizeof(input_args) );
     clobber_vectors();
     return SYSCALL_RESULT;
 }
 
-int32_t __wine_unix_call_dispatcher_impl( uint64_t handle, unsigned int index, void *args )
+int32_t __wine_unix_call_dispatcher_impl( uint64_t handle, unsigned int index, void *args,
+                                           const uint64_t *frame )
 {
     recorded_unix[0] = handle;
     recorded_unix[1] = index;
     recorded_unix[2] = (uint64_t)args;
+    recorded_unix_frame_ok = frame && frame_matches_nonvolatile( frame ) &&
+                             frame[1] == frame[38] &&
+                             !memcmp( frame + 40, unix_inputs, sizeof(unix_inputs) );
     clobber_vectors();
     return UNIX_STATUS;
 }
@@ -98,6 +115,7 @@ static void clear_results(void)
     memset( observed_state, 0, sizeof(observed_state) );
     syscall_x9_returned = unix_lr_returned = 0;
     dispatch_ret_called = 0;
+    recorded_syscall_frame_ok = recorded_unix_frame_ok = 0;
 }
 
 static void run_syscall(void)
@@ -114,6 +132,7 @@ static void run_syscall(void)
             recorded_syscall_id == input_syscall_id );
     report( "syscall-stack-args", recorded_stack_ptr == saved_host[0] - 128 &&
             !memcmp( recorded_stack_args, input_stack_args, sizeof(input_stack_args) ) );
+    report( "syscall-kernel-frame", recorded_syscall_frame_ok );
     report( "syscall-nonvolatile-gpr", !memcmp( observed_nonvolatile, input_nonvolatile,
                                                  sizeof(input_nonvolatile) ) );
     report( "syscall-q6-q15", !memcmp( observed_vec, input_vec, sizeof(input_vec) ) );
@@ -141,6 +160,7 @@ static void test_unix(void)
     wine_nx_arm64ec_dispatch_ret = NULL;
     invoke_unix_dispatcher();
     report( "unix-call-args", !memcmp( recorded_unix, unix_inputs, sizeof(unix_inputs) ) );
+    report( "unix-kernel-frame", recorded_unix_frame_ok );
     report( "unix-status-lr", observed_state[0] == UNIX_STATUS && unix_lr_returned );
     report( "unix-nonvolatile-gpr", !memcmp( observed_nonvolatile, input_nonvolatile,
                                               sizeof(input_nonvolatile) ) );

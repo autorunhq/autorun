@@ -46,6 +46,11 @@ fixture = r'''
 #define TRUE 1
 #define FALSE 0
 #define TRACE(...) ((void)0)
+/* The server's request counters, which the [SERVER] report prints. */
+static unsigned int carafe_direct_calls;
+#define CARAFE_SERVER_DIRECT() __atomic_add_fetch( &carafe_direct_calls, 1, __ATOMIC_RELAXED )
+#define CARAFE_SERVER_NOW() 0ull
+#define CARAFE_SERVER_COUNT( req, start ) ((void)(req), (void)(start))
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define HORIZON_SERVER_WAIT_SLICE 200000LL
 #define HORIZON_SERVER_POLL_INTERVAL 10000LL
@@ -67,16 +72,33 @@ struct horizon_server_object {
     struct horizon_server_object *wait_port;
     struct horizon_completion_queue completion;
     struct horizon_completion_msg wait_msg;
-    int completion_closed, wait_has_msg;
+    int completion_closed, wait_has_msg, ending;
 };
 struct horizon_server_handle_entry { struct horizon_server_object *object; };
+struct horizon_pipe;
 struct horizon_server_connection {
     int reply_fd;
     unsigned tid, pid;
     struct horizon_server_object *thread;
+    struct horizon_pipe *request_pipe;
     void *direct_reply, *direct_data;
     size_t direct_size;
 };
+static pthread_mutex_t horizon_server_objects_mutex;
+static struct horizon_pipe *fake_client_pipe = (struct horizon_pipe *)0x1234;
+static const struct horizon_pipe *last_fd_owner;
+static const struct horizon_pipe *horizon_fd_client_owner(void) { return fake_client_pipe; }
+static int horizon_server_sync_reply( struct horizon_server_connection *connection,
+                                      const void *reply, size_t reply_size,
+                                      const void *data, size_t data_size );
+static int horizon_server_handle_get_handle_fd( struct horizon_server_connection *c, const unsigned char *m )
+{
+    struct horizon_server_reply_header reply = {0};
+    (void)m;
+    last_fd_owner = c->request_pipe;
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_sync_reply( c, &reply, sizeof(reply), NULL, 0 );
+}
 static struct horizon_server_object objects[8], threads[2];
 static struct horizon_server_handle_entry handles[8];
 static struct horizon_msgqs horizon_msg_queues;
@@ -95,6 +117,10 @@ static int count_cond_signal(pthread_cond_t *cond) {
 #define pthread_cond_signal count_cond_signal
 static int horizon_fast_sync_enabled = 1, pipe_replies;
 typedef uint64_t u64;
+/* The server thread pool: a pool thread that is about to wait says so. */
+static __thread int horizon_server_pool_worker, horizon_server_pool_blocked;
+static unsigned pool_blocking_marks;
+static void horizon_server_pool_blocking_locked(void) { horizon_server_pool_blocked = 1; pool_blocking_marks++; }
 volatile int wine_nx_quit_requested;
 static long long clock_ticks(void) {
     struct timespec ts; assert(!clock_gettime(CLOCK_REALTIME, &ts));
@@ -509,6 +535,9 @@ int main(void) {
     objects[3].type = HORIZON_SERVER_OBJECT_MUTEX;
     objects[4].type = HORIZON_SERVER_OBJECT_SEMAPHORE; objects[4].max = 2;
     struct horizon_query_event_request query = { .header.req = HORIZON_REQ_QUERY_EVENT, .handle = 1 };
+    struct horizon_server_request_header fd_req = { .req = HORIZON_REQ_GET_HANDLE_FD };
+    assert(horizon_server_sync_call(4, &fd_req, NULL, 0, &reply, NULL));
+    assert(last_fd_owner == fake_client_pipe);
     horizon_fast_sync_enabled = 0;
     assert(!horizon_server_sync_call(4, &query, NULL, 0, &reply, NULL));
     horizon_fast_sync_enabled = 1;
@@ -558,6 +587,18 @@ int main(void) {
     long long start = clock_ticks();
     assert(wait_for(4, 1, -(start + 200000), 0) == HORIZON_STATUS_TIMEOUT);
     assert(clock_ticks() - start >= 200000);
+    /* A wait on the calling thread is the client's own; a pool thread that
+     * waits counts as blocked, once for the request it is serving. */
+    assert(!pool_blocking_marks);
+    horizon_server_pool_worker = 1;
+    start = clock_ticks();
+    assert(wait_for(4, 1, -(start + 50000), 0) == HORIZON_STATUS_TIMEOUT);
+    assert(pool_blocking_marks == 1 && horizon_server_pool_blocked);
+    start = clock_ticks();
+    assert(wait_for(4, 1, -(start + 50000), 0) == HORIZON_STATUS_TIMEOUT);
+    assert(pool_blocking_marks == 1);
+    assert(wait_for(4, 1, 0, 0) == HORIZON_STATUS_TIMEOUT);
+    horizon_server_pool_worker = horizon_server_pool_blocked = 0;
     struct horizon_select_request select = { .header = { .req = HORIZON_REQ_SELECT, .reply_size = 64 },
         .timeout = 0, .size = 12 };
     struct { unsigned char apc[HORIZON_APC_RESULT_SIZE]; unsigned op, handles[2]; } multi = {0};
@@ -649,7 +690,7 @@ static struct thread_data thread_data = { .tid = 42 };
 #define NtCurrentTeb() get_thread_data()
 #define HandleToULong(value) (value)
 enum { REQ_select, REQ_event_op, REQ_query_event, REQ_release_mutex, REQ_query_mutex,
-       REQ_release_semaphore, REQ_query_semaphore, REQ_other };
+       REQ_release_semaphore, REQ_query_semaphore, REQ_get_handle_fd, REQ_other };
 union apc_result { uint64_t words[8]; };
 struct request_header { unsigned req, request_size; };
 struct __server_request_info {
@@ -697,15 +738,18 @@ int main(void)
     req.u.req.request_header.request_size = 1;
     assert(!horizon_sync_call(&req) && reads == 1);
     req.u.req.request_header.request_size = 0;
+    req.u.req.request_header.req = REQ_get_handle_fd;
+    assert(horizon_sync_call(&req) && calls == 2);
+    req.u.req.request_header.req = REQ_event_op;
     wine_nx_quit_requested = 1;
     quitting = 1;
     if (!setjmp(quit_jump)) { horizon_sync_call(&req); assert(0); }
-    assert(quit_calls == 1 && reads == 1 && calls == 1);
+    assert(quit_calls == 1 && reads == 2 && calls == 2);
     horizon_fast_sync_enabled = 0;
-    assert(!horizon_sync_call(&req) && quit_calls == 1 && reads == 1);
+    assert(!horizon_sync_call(&req) && quit_calls == 1 && reads == 2);
     horizon_fast_sync_enabled = 1;
     quitting = 0;
-    assert(horizon_sync_call(&req) && quit_calls == 2 && reads == 2);
+    assert(horizon_sync_call(&req) && quit_calls == 2 && reads == 3);
     puts("Horizon direct sync client: teardown before TEB access, cancelled quit, mode and payload bounds passed");
 }
 '''

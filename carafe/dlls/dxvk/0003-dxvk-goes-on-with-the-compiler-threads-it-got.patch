@@ -1,0 +1,35 @@
+Carafe: DXVK goes on with the shader compiler threads it could create.
+The first one waits for a place like any other thread (0001); a further one that cannot be created at once
+ends the list instead of the game.
+Zlib, as the file it changes.
+
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -114,10 +114,23 @@
+         else if (i < lpWorkerCount)
+           priority = DxvkPipelinePriority::Low;
+ 
+-        auto& worker = m_workers.emplace_back([this, priority] {
+-          runWorker(priority);
+-        });
+-        
++        dxvk::thread started;
++
++        try {
++          started = dxvk::thread([this, priority] {
++            runWorker(priority);
++          }, i ? 0u : 120000u);
++        } catch (const std::system_error&) {
++          if (!i)
++            throw;
++
++          Logger::warn(str::format("DXVK: No thread for compiler worker ", i + 1, ", going on with ", i));
++          workerCount = i;
++          break;
++        }
++
++        auto& worker = m_workers.emplace_back(std::move(started));
++
+         worker.set_priority(ThreadPriority::Lowest);
+       }
+ 

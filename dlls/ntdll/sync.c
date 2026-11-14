@@ -835,6 +835,16 @@ struct futex_queue
     LONG lock;
 };
 
+#define FUTEX_EXIT_MAGIC 0x46555458
+
+struct futex_exit
+{
+    ULONG magic;
+    ULONG pointer_size;
+    ULONG64 entry;
+    ULONG64 lock;
+};
+
 static struct futex_queue futex_queues[256];
 
 static struct futex_queue *get_futex_queue( const void *addr )
@@ -880,6 +890,7 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
 {
     struct futex_queue *queue = get_futex_queue( addr );
     struct futex_entry entry;
+    struct futex_exit ending = { FUTEX_EXIT_MAGIC, sizeof(void *), (ULONG_PTR)&entry, (ULONG_PTR)&queue->lock };
     NTSTATUS ret;
 
     TRACE("addr %p cmp %p size %#Ix timeout %s\n", addr, cmp, size, debugstr_timeout( timeout ));
@@ -906,7 +917,7 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
 
     spin_unlock( &queue->lock );
 
-    ret = NtWaitForAlertByThreadId( NULL, timeout );
+    ret = NtWaitForAlertByThreadId( &ending, timeout );
 
     /* We may have already been removed by a call to RtlWakeAddressSingle() or RtlWakeAddressAll(). */
     if (entry.addr)

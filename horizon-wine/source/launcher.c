@@ -14,6 +14,7 @@
  * Icons are read and decoded on a worker thread and shown as they arrive.
  * When SDL cannot start, the text menu of launcher_console.c is shown instead.
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <math.h>
@@ -39,6 +40,7 @@
 #include "launcher_pe.h"
 #include "launcher_input.h"
 #include "launcher_settings.h"
+#include "launcher_shortcut.h"
 #include "launcher_ui.h"
 #include "launcher_forwarder.h"
 #include "launcher_image.h"
@@ -51,11 +53,14 @@
 #include "launcher_graphics.h"
 #include "launcher_dxvk.h"
 #include "launcher_game_settings.h"
+#include "launcher_text_edit.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
 #include "box64_options.h"
 #include "fex_options.h"
+#include "dxvk_options.h"
+#include "fex_build.h"
 #ifdef WINE_NX_SWAP_POC
 #include "launcher_swap.h"
 #include "swap_store.h"
@@ -163,6 +168,7 @@ struct file_entry
 {
     char name[256];
     int is_dir;
+    int shortcut;            /* 1 a .lnk, 2 a .bat or .cmd: chosen for the program it starts */
     int supported;
     unsigned short machine;
 };
@@ -357,6 +363,17 @@ static void runtime_file( const struct launcher *l, const char *name, char *out,
     snprintf( out, size, "%s/%s", l->options->runtime_dir, name );
 }
 
+/* What a Graphics driver choice comes to on this card, after its label: nxvk
+ * missing, or a mesa-switch built without Zink, whose games set to Zink then
+ * run on nxvk, which is Zink on NVK (runtime.c). */
+static const char *launcher_graphics_note( const struct launcher *l, int driver, int nxvk_on_card )
+{
+    if (driver == LAUNCHER_GRAPHICS_NXVK && !nxvk_on_card) return " (not on the card)";
+    if (driver == LAUNCHER_GRAPHICS_ZINK && !l->options->mesa_zink)
+        return nxvk_on_card ? " (not in this build: runs on nxvk)" : " (not in this build: runs on nvc0)";
+    return "";
+}
+
 /* Nonzero when the line reached the card, which the handoff in start_program
  * has to know before it gives the console away. */
 static int write_line( const char *path, const char *text )
@@ -442,7 +459,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     p->settings.fex = p->settings.four_cores = 1;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
@@ -467,7 +484,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
 static int describe_program( struct launcher *l, struct program *p, const char *path )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     if ((size_t)snprintf( p->path, sizeof(p->path), "%s", path ) >= sizeof(p->path)) return 0;
     if (!launcher_dos_path( path, p->dos, sizeof(p->dos) )) return 0;
     if (l->options->machine_of( path, &p->machine )) return 0;
@@ -480,7 +497,7 @@ static void describe_catalog_program( struct launcher *l, struct program *p,
                                       const struct launcher_catalog_entry *entry )
 {
     memset( p, 0, sizeof(*p) );
-    p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.verbose = p->settings.profile = p->settings.framebuffer = p->settings.picture_mode = -1;
     snprintf( p->path, sizeof(p->path), "%s", entry->path );
     launcher_dos_path( p->path, p->dos, sizeof(p->dos) );
     p->catalog_id = entry->id;
@@ -700,6 +717,40 @@ static void save_program_settings( struct launcher *l, struct program *p )
         !launcher_kv_save( &kv, path ))
         ui_toast( &l->ui, "Could not save the program's settings", 2500 );
     load_program_settings( l, p );
+}
+
+static void apply_new_game_renderer( struct launcher *l, struct program *p );
+
+/* A game's Reset to defaults: every setting its menus set, the launcher's and
+ * the in-game menu's, back to its default (launcher_settings_reset), with its
+ * FEX and DXVK options and its Box64 options; its Direct3D renderer is then the
+ * one a game just added gets (DXVK for new games). Its title, whether it is
+ * hidden, the game fix it was asked about, its controls and its launch
+ * arguments stay. */
+static int reset_program_settings( struct launcher *l, struct program *p )
+{
+    struct launcher_kv kv;
+    char path[768], folder[768];
+    unsigned int i;
+    int ready = 1;
+
+    if (launcher_settings_on_usb( p->path ))
+    {
+        runtime_file( l, "program-settings", folder, sizeof(folder) );
+        ready = !mkdir( folder, 0777 ) || errno == EEXIST;
+    }
+    if (!ready || !launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) ||
+        !launcher_kv_load( &kv, path ) || !launcher_settings_reset( &kv ))
+        return 0;
+    for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
+        if (!launcher_kv_set( &kv, nx_fex_options[i].name, NULL )) return 0;
+    for (i = 0; i < dxvk_option_count; i++)
+        if (!launcher_kv_set( &kv, dxvk_options[i].name, NULL )) return 0;
+    if (!launcher_kv_save( &kv, path )) return 0;
+    if (launcher_sibling_path( p->path, ".box64.txt", path, sizeof(path) )) remove( path );
+    load_program_settings( l, p );
+    apply_new_game_renderer( l, p );
+    return 1;
 }
 
 static void apply_new_game_renderer( struct launcher *l, struct program *p )
@@ -1757,14 +1808,19 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
-    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LARGE_ADDRESS, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
+    ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, ROW_RESET_SETTINGS, ROW_OTHER_PROGRAM, ROW_EDIT_FILE, PROGRAM_ROWS
 };
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size );
+/* What a file browser lists besides folders. */
+enum browse_kind { BROWSE_PROGRAMS, BROWSE_IMAGES, BROWSE_TEXT };
+static int file_browser_from( struct launcher *l, const char *folder, enum browse_kind kind, const char *title,
+                              char *target, size_t size );
+static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size );
 static int pick_forwarder_icon( void *opaque, char *target, size_t size );
 static void save_look( struct launcher *l );
 
@@ -1980,8 +2036,33 @@ static int next_state( int state, int direction )
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
 }
 
+/* What a program that asks for a display mode of its own is shown as, in the
+ * four answers the shared setting gives; Settings, Game defaults, owns the one
+ * a program without a choice of its own follows. */
+static const char *const picture_labels[4] = { "Whole", "Edges cropped", "Stretched", "Own size" };
+
+static const char *picture_text( int state, int global, char *buffer, size_t size )
+{
+    if (state >= 0 && state < 4) return picture_labels[state];
+    snprintf( buffer, size, "Global (%s)", picture_labels[global < 0 || global > 3 ? 0 : global] );
+    return buffer;
+}
+
+static int next_picture_state( int state, int direction )
+{
+    static const int order[5] = { -1, 0, 1, 2, 3 };
+    int i;
+
+    for (i = 0; i < 4 && order[i] != state; i++) {}
+    return order[(i + (direction < 0 ? 4 : 1)) % 5];
+}
+
 static int address_space_fits( struct launcher *l, struct program *p )
 {
+    /* Started from a game's 32-bit forwarder, the launcher runs in a 32-bit
+     * address space: a 32-bit game's image is at home there wherever it was
+     * linked, and a 64-bit one has no room. */
+    if (l->options->address_space_bits == 32) return p->machine == 0x014c;
     return l->options->address_space_bits == 39 &&
            (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
 }
@@ -2048,6 +2129,18 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
             (api == 12 && p->settings.dxvk_source == DXVK_SOURCE_SAREK)) return 0;
     }
     if (p->settings.d3d != LAUNCHER_D3D_WINE && !prepare_program_graphics( l, p )) return 0;
+#ifdef WINE_NX_FEX
+    /* A program set to Carafe's FEX build with none on the card gets the
+     * newest release, as one set to a DXVK that is not installed does. The
+     * runtime puts it in system32 when the program starts (fex_build.h). */
+    if (p->machine == 0x014c && p->settings.fex && p->settings.fex_carafe)
+    {
+        char fex[32];
+
+        strcpy( fex, p->settings.fex_version );
+        if (!launcher_graphics_ensure_fex( l->graphics, fex )) return 0;
+    }
+#endif
     p->missing = 0;
     p->launched_order = l->catalog.next_order++;
     save_library( l );
@@ -2223,18 +2316,20 @@ static void box64_options_menu( struct launcher *l, struct program *p )
     }
 }
 
-static int fex_configured_count( const struct launcher_kv *kv, int advanced )
+/* carafe: the program runs on the FEX build with Carafe's patches, the only
+ * one that is given the options marked as its own. */
+static int fex_configured_count( const struct launcher_kv *kv, int advanced, int carafe )
 {
     char value[64];
     int count = 0, i;
 
     for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
-        if (nx_fex_options[i].advanced == advanced &&
+        if (nx_fex_options[i].advanced == advanced && (carafe || !nx_fex_option_carafe( nx_fex_options + i )) &&
             launcher_kv_get( kv, nx_fex_options[i].name, value, sizeof(value) )) count++;
     return count;
 }
 
-static void fex_options_status( const char *path, char *value, size_t size )
+static void fex_options_status( const char *path, int carafe, char *value, size_t size )
 {
     struct launcher_kv kv;
     int count;
@@ -2244,7 +2339,7 @@ static void fex_options_status( const char *path, char *value, size_t size )
         snprintf( value, size, "File too large" );
         return;
     }
-    count = fex_configured_count( &kv, 0 ) + fex_configured_count( &kv, 1 );
+    count = fex_configured_count( &kv, 0, carafe ) + fex_configured_count( &kv, 1, carafe );
     if (count) snprintf( value, size, "%d flag%s set", count, count == 1 ? "" : "s" );
     else snprintf( value, size, "Default" );
 }
@@ -2267,13 +2362,13 @@ static int fex_option_value( const struct launcher_kv *kv, const struct nx_fex_o
 }
 
 static int fex_option_rows( struct ui_row *rows, int *ids, int count,
-                            const struct launcher_kv *kv, int advanced )
+                            const struct launcher_kv *kv, int advanced, int carafe )
 {
     int i;
 
     for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
     {
-        if (nx_fex_options[i].advanced != advanced) continue;
+        if (nx_fex_options[i].advanced != advanced || (!carafe && nx_fex_option_carafe( nx_fex_options + i ))) continue;
         ids[count] = i;
         snprintf( rows[count].label, sizeof(rows[count].label), "%s", nx_fex_options[i].name );
         fex_option_value( kv, nx_fex_options + i, rows[count].value, sizeof(rows[count].value) );
@@ -2293,6 +2388,7 @@ static void fex_options_menu( struct launcher *l, struct program *p )
     struct launcher_kv kv;
     char path[768];
     int count, expanded = 0, i;
+    const int carafe = p->machine == 0x014c && p->settings.fex_carafe;
 
     if (!launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) ||
         !launcher_kv_load( &kv, path ))
@@ -2308,8 +2404,8 @@ static void fex_options_menu( struct launcher *l, struct program *p )
         int current, next, set;
 
         memset( rows, 0, sizeof(rows) );
-        count = fex_option_rows( rows, ids, 0, &kv, 0 );
-        set = fex_configured_count( &kv, 1 );
+        count = fex_option_rows( rows, ids, 0, &kv, 0, carafe );
+        set = fex_configured_count( &kv, 1, carafe );
         ids[count] = -1;
         snprintf( rows[count].label, sizeof(rows[count].label), "Advanced flags" );
         snprintf( rows[count].value, sizeof(rows[count].value), expanded ? "Hide (%d set)" : "Show (%d set)", set );
@@ -2317,7 +2413,7 @@ static void fex_options_menu( struct launcher *l, struct program *p )
         rows[count].kind = UI_ROW_DROPDOWN;
         rows[count].on = expanded;
         count++;
-        if (expanded) count = fex_option_rows( rows, ids, count, &kv, 1 );
+        if (expanded) count = fex_option_rows( rows, ids, count, &kv, 1, carafe );
         action = ui_list_run( &l->ui, &list, "FEX options", p->title, rows, count, 1 );
         if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return;
         i = ids[list.selection];
@@ -2431,6 +2527,13 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                 row->value_tone = tone;
             else count--;
         }
+        ADD_ROW( ROW_OTHER_PROGRAM, SECTION_GENERAL, "Run another program",
+                 "Starts another program from the game's folder, such as its configuration tool, where its "
+                 "resolution and the settings its own menu lacks are, or its setup. It runs with its own "
+                 "settings and stays out of the library." );
+        ADD_ROW( ROW_EDIT_FILE, SECTION_GENERAL, "Edit a text file",
+                 "Opens one of the game's .ini, .cfg or other text files from its folder. A changes a line, or "
+                 "the value of a setting; Y adds and removes lines. Leaving asks whether to save." );
         ADD_ROW( ROW_FAVORITE, SECTION_GENERAL, "Favorite", "Keeps the game in the Favorites filter of the library." );
         row->kind = UI_ROW_SWITCH;
         row->on = p->favorite;
@@ -2462,6 +2565,23 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             row->choices = 2;
             snprintf( row->value, sizeof(row->value), "%s", p->settings.fex ? "FEX" : "Box64" );
         }
+        /* Only the FEX of 32-bit programs has a Carafe build (carafe/dlls). */
+        if (x86 && p->settings.fex)
+        {
+            struct dxvk_version fex = {0};
+
+            if (p->settings.fex_carafe)
+                dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, l->options->runtime_dir, p->machine,
+                                      p->settings.fex_version, &fex );
+            ADD_ROW( ROW_FEX_BUILD, SECTION_EMULATION, "FEX build",
+                     "Autorun is the FEX that comes with the Windows DLLs. Carafe is the same FEX with Carafe's "
+                     "patches, downloaded from this Autorun's releases; FEX options then lists what only it reads." );
+            row->kind = UI_ROW_DROPDOWN;
+            row->download = p->settings.fex_carafe && !fex.installed;
+            if (!p->settings.fex_carafe) snprintf( row->value, sizeof(row->value), "Autorun" );
+            else snprintf( row->value, sizeof(row->value), "Carafe %s",
+                           fex.installed ? fex.version : "Not installed" );
+        }
 #endif
         ADD_ROW( ROW_FOUR_CORES, SECTION_EMULATION, "4-core support",
                  l->options->four_cores_available
@@ -2472,6 +2592,22 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.four_cores;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
+        ADD_ROW( ROW_ORCHESTRATOR, SECTION_EMULATION, "Thread orchestrator",
+                 "Carafe's thread placement. When one core is full it gives the busiest thread a core "
+                 "of its own and spreads the others by their load; otherwise Autorun's balancer places threads." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.orchestrator;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.orchestrator ? "Enabled" : "Disabled" );
+
+#ifndef WINE_NX_SWAP_POC  /* that build takes the lock call for itself (CMakeLists.txt) */
+        ADD_ROW( ROW_LOCK_BOOST, SECTION_EMULATION, "Lock wait boost",
+                 "Carafe's lock waits. A game thread that waits for one of the runtime's locks waits one "
+                 "priority higher, so it runs as soon as the lock is free." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.lock_boost;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.lock_boost ? "Enabled" : "Disabled" );
+#endif
+
         ADD_ROW( ROW_LAZY_FILE_VIEWS, SECTION_EMULATION, "Fast file loading",
                  "Reads only the parts of the game's files it uses. Faster loading for games with large "
                  "data files; turn it off if the game misbehaves." );
@@ -2479,11 +2615,32 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.lazy_file_views;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.lazy_file_views ? "Enabled" : "Disabled" );
 
+        if (p->machine == 0x014c)
+        {
+            ADD_ROW( ROW_LARGE_ADDRESS, SECTION_EMULATION, "Large address aware",
+                     "Lets a 32-bit game use addresses up to 4 GB instead of 2, as the 4 GB patch does, without "
+                     "changing its file. For a game that runs out of memory while the console still has some. "
+                     "It adds addresses, not memory, and some old games misbehave with it." );
+            row->kind = UI_ROW_SWITCH;
+            row->on = p->settings.large_address_aware;
+            snprintf( row->value, sizeof(row->value), "%s", p->settings.large_address_aware ? "Enabled" : "Disabled" );
+        }
+
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
                  "Horizon uses direct synchronization and targeted wakeups. Standard uses server requests." );
         row->kind = UI_ROW_DROPDOWN;
         row->choices = 2;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.fast_sync ? "Horizon" : "Standard" );
+
+        ADD_ROW( ROW_SERVER_POOL, SECTION_EMULATION, "Shared server threads",
+                 p->settings.fast_sync || p->settings.server_pool
+                 ? "Carafe's server thread pool. The game's threads share a few server threads instead of "
+                   "having one each, which leaves more of the console's threads to the game."
+                 : "Needs Synchronization set to Horizon." );
+        row->kind = UI_ROW_SWITCH;
+        row->disabled = !p->settings.fast_sync && !p->settings.server_pool;
+        row->on = p->settings.server_pool;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.server_pool ? "Enabled" : "Disabled" );
 
         ADD_ROW( ROW_VERBOSE, SECTION_DIAGNOSTICS, "Verbose traces",
                  "Writes Wine's traces to autorun_runtime.log, which slows the program down. "
@@ -2505,6 +2662,44 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         snprintf( row->value, sizeof(row->value), "%s",
                   state_text( p->settings.framebuffer, l->options->framebuffer, "Framebuffer", "Compositor",
                               buffer, sizeof(buffer) ) );
+
+        ADD_ROW( ROW_PICTURE, SECTION_GRAPHICS, "Picture of another mode",
+                 "A game that asks for a resolution of its own is shown on the console's 1280x720 screen. "
+                 "Whole keeps all of it, with black bars round it; edges cropped fills the screen and loses "
+                 "the borders; stretched fills it and distorts; own size draws it in the middle, one pixel to "
+                 "one pixel. Global follows the setting in Settings (X on the library). A finger lands on what "
+                 "it sees in every one of them." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  picture_text( p->settings.picture_mode, l->options->picture_mode, buffer, sizeof(buffer) ) );
+
+        ADD_ROW( ROW_MODE_EMULATION, SECTION_GRAPHICS, "Display mode emulation",
+                 "A game that asks for a resolution of its own draws into a hidden picture of that size, which "
+                 "is then copied to the screen. Off lets the game draw to the screen's surface directly, as "
+                 "upstream Autorun does: turn it off for an OpenGL or old Direct3D game that freezes soon "
+                 "after it starts (Vampire: The Masquerade - Redemption)."
+                 " Global follows the setting in Settings (X on the library)." );
+        row->adjustable = 1;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  state_text( p->settings.mode_emulation > 0 ? 1 : p->settings.mode_emulation < 0 ? 0 : -1,
+                              l->options->mode_emulation, "On", "Off", buffer, sizeof(buffer) ) );
+
+        if (l->options->vulkan)
+        {
+            char nxvk[512];
+
+            runtime_file( l, "wine-nx-runtime-nxvk.nro", nxvk, sizeof(nxvk) );
+            ADD_ROW( ROW_GRAPHICS_DRIVER, SECTION_GRAPHICS, "Graphics driver",
+                     "The Mesa that draws the game. mesa-switch (nvc0) is the default and the fastest for "
+                     "OpenGL. mesa-switch (Zink) draws OpenGL through Vulkan instead, for games nvc0 draws "
+                     "wrong; a mesa-switch built without Zink runs such a game on nxvk. nxvk is another Mesa "
+                     "for the Switch, Vulkan and OpenGL (through Zink): the game starts in a second runtime, "
+                     "wine-nx-runtime-nxvk.nro, without frame generation." );
+            row->kind = UI_ROW_DROPDOWN;
+            snprintf( row->value, sizeof(row->value), "%s%s",
+                      launcher_graphics_labels[p->settings.graphics_driver],
+                      launcher_graphics_note( l, p->settings.graphics_driver, file_exists( nxvk ) ) );
+        }
 
         if (l->options->vulkan && (x86 || x64))
         {
@@ -2536,18 +2731,21 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             {
                 ADD_ROW( ROW_DXVK_VERSION, SECTION_GRAPHICS, "DXVK version",
                          p->settings.d3d == LAUNCHER_D3D_DXVK_VKD3D ?
-                         "Choose an Official or GPLAsync release, version 2.1 or newer." :
-                         "Choose an Official, Sarek or GPLAsync release." );
+                         "Choose an Official, GPLAsync or Carafe release, version 2.1 or newer." :
+                         "Choose an Official, Sarek, GPLAsync or Carafe release. Carafe is DXVK with Carafe's "
+                         "patches, downloaded from this Autorun's releases." );
                 row->kind = UI_ROW_DROPDOWN;
                 row->download = !dxvk_ready;
                 snprintf( row->value, sizeof(row->value), "%s %s",
                           p->settings.dxvk_source == DXVK_SOURCE_SAREK ? "Sarek" :
-                          p->settings.dxvk_source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" : "Official",
+                          p->settings.dxvk_source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" :
+                          p->settings.dxvk_source == DXVK_SOURCE_CARAFE ? "Carafe" : "Official",
                           !dxvk_ready ? "Not installed" : dxvk.version[0] ? dxvk.version : "Bundled" );
                 ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "DXVK HUD",
                          "FPS shows only the frame rate. Compact shows the DirectX version, FPS and frame times. "
                          "Full also shows the DXVK version, GPU, video memory and shader compiler activity. "
-                         "The DXVK HUD does not cover VKD3D's D3D12 rendering." );
+                         "The DXVK HUD does not cover VKD3D's D3D12 rendering. A game DXVK does not draw, "
+                         "one drawn through OpenGL, gets Autorun's frame rate counter instead." );
                 row->kind = UI_ROW_DROPDOWN;
                 snprintf( row->value, sizeof(row->value), "%s", launcher_hud_labels[p->settings.dxvk_hud] );
                 row->choices = LAUNCHER_HUD_COUNT;
@@ -2557,6 +2755,16 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                          "Default preserves DXVK's game profile. A local dxvk.conf takes priority." );
                 snprintf( row->value, sizeof(row->value), "Configure" );
                 row->disabled = !dxvk_ready;
+            }
+            else
+            {
+                /* Wine's own Direct3D draws through OpenGL, where DXVK's HUD
+                 * never is: the same setting turns on Autorun's counter. */
+                ADD_ROW( ROW_DXVK_HUD, SECTION_GRAPHICS, "FPS counter",
+                         "Shows the frame rate in the top-left corner, over the game's OpenGL frames." );
+                row->kind = UI_ROW_SWITCH;
+                row->on = p->settings.dxvk_hud != 0;
+                snprintf( row->value, sizeof(row->value), "%s", row->on ? "Enabled" : "Disabled" );
             }
 
             ADD_ROW( ROW_FRAME_LIMIT, SECTION_GRAPHICS, "Frame rate limit",
@@ -2657,7 +2865,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             ADD_ROW( ROW_FEX, SECTION_EMULATION, "FEX options",
                      "Per-game performance and compatibility flags for the FEX translator." );
             if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ))
-                fex_options_status( path, row->value, sizeof(row->value) );
+                fex_options_status( path, x86 && p->settings.fex_carafe, row->value, sizeof(row->value) );
             else snprintf( row->value, sizeof(row->value), "Unavailable" );
         }
 
@@ -2675,6 +2883,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
                      "others found with the file browser can be added." );
             row->destructive = in_library;
         }
+        ADD_ROW( ROW_RESET_SETTINGS, SECTION_GENERAL, "Reset to defaults",
+                 "Puts every setting of this game back to its default: graphics, emulation and logs, and its "
+                 "FEX, DXVK and Box64 options, here and in the in-game menu. Its title, arguments, controls "
+                 "and place in the library stay." );
+        row->destructive = 1;
 #undef ADD_ROW
 
         launcher_game_settings_load( game, l->options->runtime_dir, p->path, p->machine );
@@ -2709,6 +2922,27 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             }
             return start_program( l, p, target, size );
 
+        case ROW_OTHER_PROGRAM:
+        {
+            char picked[512];
+
+            if (action != UI_ACTION_CHOOSE) break;
+            if (!file_browser_from( l, dir, BROWSE_PROGRAMS, "Run another program", picked, sizeof(picked) )) break;
+            launcher_log( "[LAUNCHER] Another program of %s: %s", p->path, picked );
+            if (start_path( l, picked, "Run another program", target, size )) return 1;
+            break;
+        }
+
+        case ROW_EDIT_FILE:
+        {
+            char picked[512];
+
+            if (action != UI_ACTION_CHOOSE) break;
+            if (!file_browser_from( l, dir, BROWSE_TEXT, "Edit a text file", picked, sizeof(picked) )) break;
+            launcher_text_edit( ui, picked, file_name( picked ) );
+            break;
+        }
+
         case ROW_GAME_FIX:
             if (action != UI_ACTION_CHOOSE) break;
             if (launcher_fixes_forget( l->fixes, p->path ))
@@ -2732,7 +2966,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             if (action == UI_ACTION_CHOOSE && p->added && save_library( l ))
             {
                 char key[256] = "", previous[256];
-                struct launcher_forwarder_game game = { p->catalog_id, p->title, p->path, p->square_art };
+                struct launcher_forwarder_game game = { p->catalog_id, p->title, p->path, p->square_art, p->machine };
                 launcher_kv_get( &l->look, "steamgriddb-key", key, sizeof(key) );
                 strcpy( previous, key );
                 launcher_forwarder_run( ui, l->options, &game, key, sizeof(key), pick_forwarder_icon, l );
@@ -2803,6 +3037,45 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             break;
         }
 
+        case ROW_PICTURE:
+            p->settings.picture_mode = action == UI_ACTION_RESET ? -1 :
+                                       next_picture_state( p->settings.picture_mode, action == UI_ACTION_LEFT ? -1 : 1 );
+            save_program_settings( l, p );
+            break;
+
+        case ROW_MODE_EMULATION:
+        {
+            int state = p->settings.mode_emulation > 0 ? 1 : p->settings.mode_emulation < 0 ? 0 : -1;
+
+            state = action == UI_ACTION_RESET ? -1 : next_state( state, action == UI_ACTION_LEFT ? -1 : 1 );
+            p->settings.mode_emulation = state < 0 ? 0 : state ? 1 : -1;
+            save_program_settings( l, p );
+            break;
+        }
+
+        case ROW_GRAPHICS_DRIVER:
+        {
+            struct ui_row items[LAUNCHER_GRAPHICS_COUNT] = {0};
+            char nxvk[512];
+            int selected;
+
+            if (action == UI_ACTION_RESET) selected = LAUNCHER_GRAPHICS_NVC0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                runtime_file( l, "wine-nx-runtime-nxvk.nro", nxvk, sizeof(nxvk) );
+                for (i = 0; i < LAUNCHER_GRAPHICS_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s%s", launcher_graphics_labels[i],
+                              launcher_graphics_note( l, i, file_exists( nxvk ) ) );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_GRAPHICS_COUNT,
+                                                 p->settings.graphics_driver );
+                if (selected < 0) break;
+            }
+            else break;
+            p->settings.graphics_driver = selected;
+            save_program_settings( l, p );
+            break;
+        }
+
         case ROW_D3D9:
         {
             static const char *const names[] = { "Wine", "DXVK", "DXVK + VKD3D" };
@@ -2862,11 +3135,44 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             save_program_settings( l, p );
             break;
         }
+
+        case ROW_FEX_BUILD:
+            if (action == UI_ACTION_RESET)
+            {
+                p->settings.fex_carafe = 0;
+                p->settings.fex_version[0] = 0;
+                save_program_settings( l, p );
+            }
+            else if (action == UI_ACTION_CHOOSE &&
+                     launcher_graphics_select_fex( l->graphics, &list, &p->settings.fex_carafe,
+                                                   p->settings.fex_version ))
+                save_program_settings( l, p );
+            break;
 #endif
         case ROW_FOUR_CORES:
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
             else if (p->settings.four_cores) p->settings.four_cores = 0;
             else if (l->options->four_cores_available) p->settings.four_cores = 1;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_SERVER_POOL:
+            p->settings.server_pool = action == UI_ACTION_RESET ? 0 : !p->settings.server_pool;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_ORCHESTRATOR:
+            p->settings.orchestrator = action == UI_ACTION_RESET ? 0 : !p->settings.orchestrator;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_LOCK_BOOST:
+            p->settings.lock_boost = action == UI_ACTION_RESET ? 0 : !p->settings.lock_boost;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_LARGE_ADDRESS:
+            p->settings.large_address_aware = action == UI_ACTION_RESET ? 0 : !p->settings.large_address_aware;
             save_program_settings( l, p );
             break;
 
@@ -2931,6 +3237,8 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             struct ui_row items[LAUNCHER_FRAME_LIMIT_COUNT] = {0};
 
             if (action == UI_ACTION_RESET) *value = 0;
+            else if (id == ROW_DXVK_HUD && p->settings.d3d == LAUNCHER_D3D_WINE)
+                *value = !*value;  /* the FPS counter's switch */
             else if (action == UI_ACTION_CHOOSE)
             {
                 for (i = 0; i < choices; i++)
@@ -3024,6 +3332,20 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             fex_options_menu( l, p );
             break;
 
+        case ROW_RESET_SETTINGS:
+            if (action != UI_ACTION_CHOOSE ||
+                !ui_confirm( ui, "Reset to defaults",
+                             "Put every setting of this game back to its default? Its title, arguments, "
+                             "controls and place in the library stay.", "Reset" ))
+                break;
+            if (reset_program_settings( l, p )) ui_toast( ui, "The game's settings are back to their defaults", 2500 );
+            else
+            {
+                ui_toast( ui, "Could not save the program's settings", 2500 );
+                load_program_settings( l, p );
+            }
+            break;
+
         case ROW_HIDE:
             if (action == UI_ACTION_RESET) p->settings.hidden = 0;
             else if (action == UI_ACTION_CHOOSE) p->settings.hidden = !p->settings.hidden;
@@ -3081,7 +3403,7 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
 enum settings_row
 {
-    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
+    SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS, SET_PICTURE, SET_MODE_EMULATION,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
     SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
 #ifdef WINE_NX_SWAP_POC
@@ -3284,7 +3606,8 @@ static void settings_menu( struct launcher *l )
             [SET_HIDE_MISSING] = SET_SECTION_LIBRARY,
             [SET_DXVK_ON_ADD] = SET_SECTION_LIBRARY,
             [SET_VERBOSE] = SET_SECTION_DEFAULTS, [SET_PROFILE] = SET_SECTION_DEFAULTS,
-            [SET_WINDOWS] = SET_SECTION_DEFAULTS,
+            [SET_WINDOWS] = SET_SECTION_DEFAULTS, [SET_PICTURE] = SET_SECTION_DEFAULTS,
+            [SET_MODE_EMULATION] = SET_SECTION_DEFAULTS,
             [SET_STEAMGRIDDB] = SET_SECTION_ARTWORK,
             [SET_DOWNLOAD_COVERS] = SET_SECTION_ARTWORK,
             [SET_REOPEN] = SET_SECTION_SYSTEM,
@@ -3335,6 +3658,24 @@ static void settings_menu( struct launcher *l )
                   l->options->framebuffer ? "Framebuffer" : "Compositor" );
         rows[SET_WINDOWS].help = "The framebuffer copies window pixels straight to the screen, "
                                  "for when the OpenGL compositor misbehaves.";
+        snprintf( rows[SET_PICTURE].label, sizeof(rows[0].label), "Picture of another mode" );
+        snprintf( rows[SET_PICTURE].value, sizeof(rows[0].value), "%s",
+                  picture_labels[l->options->picture_mode < 0 || l->options->picture_mode > 3 ?
+                                 0 : l->options->picture_mode] );
+        rows[SET_PICTURE].help = "A game that asks for a resolution of its own is shown on the console's "
+                                 "1280x720 screen. Whole keeps all of it, with black bars round it; edges "
+                                 "cropped fills the screen and loses the borders; stretched fills it and "
+                                 "distorts; own size draws it in the middle, one pixel to one pixel, as a "
+                                 "window stands on a desk. A finger lands on what it sees in every one.";
+        snprintf( rows[SET_MODE_EMULATION].label, sizeof(rows[0].label), "Display mode emulation" );
+        snprintf( rows[SET_MODE_EMULATION].value, sizeof(rows[0].value), "%s", on_off[!!l->options->mode_emulation] );
+        rows[SET_MODE_EMULATION].kind = UI_ROW_SWITCH;
+        rows[SET_MODE_EMULATION].on = !!l->options->mode_emulation;
+        rows[SET_MODE_EMULATION].help = "A game that asks for a resolution of its own draws into a hidden picture of that size, which "
+                 "is then copied to the screen. Off lets the game draw to the screen's surface directly, as "
+                 "upstream Autorun does: turn it off for an OpenGL or old Direct3D game that freezes soon "
+                 "after it starts (Vampire: The Masquerade - Redemption)."
+                 " For every program without its own setting.";
         launcher_input_rows( rows + SET_INPUT, l->options->runtime_dir, NULL, l->options->swkbd_auto );
         for (i = SET_INPUT; i <= SET_INPUT_END; i++) rows[i].group = SET_SECTION_CONTROLS;
 
@@ -3427,6 +3768,10 @@ static void settings_menu( struct launcher *l )
         case SET_VERBOSE: l->options->verbose = !l->options->verbose; break;
         case SET_PROFILE: l->options->profile = !l->options->profile; break;
         case SET_WINDOWS: l->options->framebuffer = !l->options->framebuffer; break;
+        case SET_MODE_EMULATION: l->options->mode_emulation = !l->options->mode_emulation; break;
+        case SET_PICTURE:
+            l->options->picture_mode = (l->options->picture_mode + (action == UI_ACTION_LEFT ? 3 : 1)) % 4;
+            break;
         case SET_DXVK_ON_ADD: l->options->dxvk_on_add = !l->options->dxvk_on_add; break;
         case SET_REOPEN: l->options->reopen_launcher = !l->options->reopen_launcher; break;
         case SET_DLLS:
@@ -3561,7 +3906,7 @@ static int compare_files( const void *a, const void *b )
     return strcasecmp( x->name, y->name );
 }
 
-static int read_dir( struct launcher *l, const char *dir, int *count, int images )
+static int read_dir( struct launcher *l, const char *dir, int *count, enum browse_kind kind )
 {
     struct dirent *entry;
     DIR *handle;
@@ -3584,11 +3929,18 @@ static int read_dir( struct launcher *l, const char *dir, int *count, int images
         if (!file->is_dir)
         {
             const char *extension = strrchr( entry->d_name, '.' );
-            if (images ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
-                                        strcasecmp( extension, ".jpeg" ))) : !launcher_is_exe( entry->d_name )) continue;
+            if (kind == BROWSE_IMAGES ? (!extension || (strcasecmp( extension, ".png" ) && strcasecmp( extension, ".jpg" ) &&
+                                                       strcasecmp( extension, ".jpeg" ))) :
+                kind == BROWSE_TEXT ? !launcher_text_edit_offers( entry->d_name )
+                                    : (!launcher_is_exe( entry->d_name ) && !launcher_is_shortcut( entry->d_name ) &&
+                                       !launcher_is_batch( entry->d_name ))) continue;
         }
         snprintf( file->name, sizeof(file->name), "%s", entry->d_name );
-        file->supported = images || file->is_dir || !l->options->machine_of( path, &file->machine );
+        file->shortcut = kind != BROWSE_PROGRAMS || file->is_dir ? 0 : launcher_is_shortcut( entry->d_name ) ? 1 :
+                         launcher_is_batch( entry->d_name ) ? 2 : 0;
+        file->machine = 0;
+        file->supported = kind != BROWSE_PROGRAMS || file->is_dir || file->shortcut ||
+                          !l->options->machine_of( path, &file->machine );
         (*count)++;
     }
     closedir( handle );
@@ -3703,16 +4055,68 @@ static int file_browser_storage( struct launcher *l, char *dir, size_t size, con
     }
 }
 
-static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, int images )
+/* A shortcut or a batch file chosen in the browser stands for the program it
+ * starts (launcher_shortcut.h): target gets that program's path, and
+ * picked_args the arguments the file gives it. */
+static char picked_args[LAUNCHER_SHORTCUT_TEXT];
+
+static int follow_shortcut( struct launcher *l, const char *dir, const char *path, int kind, char *target, size_t size )
+{
+    static char data[65536];
+    struct launcher_shortcut shortcut;
+    char message[900];
+    size_t len = 0;
+    FILE *file;
+    int parsed;
+
+    if ((file = fopen( path, "rb" )))
+    {
+        len = fread( data, 1, sizeof(data) - 1, file );
+        fclose( file );
+    }
+    data[len] = 0;
+    parsed = kind == 1 ? launcher_lnk_parse( data, len, &shortcut ) : launcher_bat_parse( data, &shortcut );
+    if (!parsed)
+    {
+        launcher_log( "[LAUNCHER] %s: no program read from it (%u bytes)", path, (unsigned int)len );
+        ui_message( &l->ui, kind == 1 ? "Shortcut" : "Batch file",
+                    kind == 1 ? "This shortcut does not name a program."
+                              : "No line of this batch file starts a program that Autorun can find by name." );
+        return 0;
+    }
+    if (!launcher_shortcut_resolve( dir, &shortcut, file_exists, target, size ))
+    {
+        launcher_log( "[LAUNCHER] %s: target %s (relative %s, folder %s) is not on the card", path,
+                      shortcut.target, shortcut.relative, shortcut.workdir );
+        snprintf( message, sizeof(message), "The program it starts was not found:\n\n%.300s\n\n"
+                  "It is looked for in this folder and the three above it. Keep the %s with the game's files.",
+                  shortcut.target[0] ? shortcut.target : shortcut.relative,
+                  kind == 1 ? "shortcut" : "batch file" );
+        ui_message( &l->ui, kind == 1 ? "Shortcut" : "Batch file", message );
+        return 0;
+    }
+    snprintf( picked_args, sizeof(picked_args), "%s", shortcut.args );
+    launcher_log( "[LAUNCHER] %s starts %s, arguments: %s", path, target, picked_args[0] ? picked_args : "none" );
+    return 1;
+}
+
+/* The file browser. With start it opens in that folder rather than asking for
+ * the storage first, and B there, or at the top of the storage, closes it. */
+static int file_browser_pick_kind( struct launcher *l, char *target, size_t size, enum browse_kind kind,
+                                   const char *start, const char *title )
 {
     struct ui *ui = &l->ui;
     char dir[512], came_from[256] = "", dos[512], path[512];
+    const int images = kind == BROWSE_IMAGES;
+
+    picked_args[0] = 0;
 
     for (;;)
     {
         int choose_storage = 0;
 
-        if (!file_browser_storage( l, dir, sizeof(dir), images ? "Choose icon" : "Add Game" ))
+        if (start) snprintf( dir, sizeof(dir), "%s", start );
+        else if (!file_browser_storage( l, dir, sizeof(dir), title ))
         {
             save_look( l );
             return 0;
@@ -3723,9 +4127,10 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
             struct ui_list list = {0};
             int count, has_up, readable, rows, i, reload = 0;
 
-            while (!(readable = read_dir( l, dir, &count, images )) && !is_root( dir )) parent_dir( dir );
+            while (!(readable = read_dir( l, dir, &count, kind )) && !is_root( dir )) parent_dir( dir );
             if (!readable)
             {
+                if (start) return 0;
                 choose_storage = 1;
                 continue;
             }
@@ -3758,13 +4163,25 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                     snprintf( row->value, sizeof(row->value), "Cannot run here" );
                     row->disabled = 1;
                 }
+                else if (files[i].shortcut)
+                    snprintf( row->value, sizeof(row->value), "%s", files[i].shortcut == 1 ? "Shortcut" : "Batch file" );
+                else if (kind == BROWSE_TEXT)
+                {
+                    const char *extension = strrchr( files[i].name, '.' ) + 1;
+                    size_t k;
+
+                    for (k = 0; extension[k] && k < 12; k++) row->value[k] = toupper( (unsigned char)extension[k] );
+                    snprintf( row->value + k, sizeof(row->value) - k, " file" );
+                }
                 else snprintf( row->value, sizeof(row->value), "%s", images ? "Image" : launcher_machine_name( files[i].machine ) );
                 if (came_from[0] && !strcasecmp( files[i].name, came_from )) list.selection = rows;
             }
             if (!rows)
             {
                 memset( file_rows, 0, sizeof(file_rows[0]) );
-                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s", images ? "No folders or images here" : "No folders or programs here" );
+                snprintf( file_rows[0].label, sizeof(file_rows[0].label), "%s",
+                          images ? "No folders or images here" : kind == BROWSE_TEXT ? "No folders or text files here"
+                                                                                     : "No folders, programs or shortcuts here" );
                 file_rows[0].disabled = 1;
                 rows = 1;
             }
@@ -3774,14 +4191,17 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
 
             while (!reload)
             {
-                enum ui_action action = ui_list_run( ui, &list, images ? "Choose icon" : "Files", dos, file_rows, rows, 0 );
+                enum ui_action action = ui_list_run( ui, &list, start ? title : images ? "Choose icon" : "Files", dos,
+                                                     file_rows, rows, 0 );
                 int index = list.selection - has_up;
 
                 if (action == UI_ACTION_QUIT) return 0;
+                if (action == UI_ACTION_BACK && start && !strcmp( dir, start )) return 0;
                 if (action == UI_ACTION_BACK || (action == UI_ACTION_CHOOSE && index < 0))
                 {
                     if (!has_up)
                     {
+                        if (start) return 0;
                         choose_storage = 1;
                         break;
                     }
@@ -3794,11 +4214,18 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
                 if (index < 0 || index >= count) continue;
                 join_path( path, sizeof(path), dir, files[index].name );
                 launcher_log( "[LAUNCHER] Browser chose %s (%s)", path,
-                              files[index].is_dir ? "folder" : images ? "image" : "program" );
+                              files[index].is_dir ? "folder" : images ? "image" : kind == BROWSE_TEXT ? "text file" :
+                              files[index].shortcut == 1 ? "shortcut" : files[index].shortcut ? "batch file" : "program" );
                 if (files[index].is_dir)
                 {
                     snprintf( dir, sizeof(dir), "%s", path );
                     reload = 1;
+                }
+                else if (files[index].shortcut)
+                {
+                    if (!follow_shortcut( l, dir, path, files[index].shortcut, target, size )) continue;
+                    save_look( l );
+                    return 1;
                 }
                 else
                 {
@@ -3813,7 +4240,21 @@ static int file_browser_pick_kind( struct launcher *l, char *target, size_t size
 
 static int file_browser_pick( struct launcher *l, char *target, size_t size )
 {
-    return file_browser_pick_kind( l, target, size, 0 );
+    return file_browser_pick_kind( l, target, size, BROWSE_PROGRAMS, NULL, "Add Game" );
+}
+
+/* A browser that opens in a game's folder, for what goes with the game, and
+ * leaves the folder the library's browser opens in as it was. */
+static int file_browser_from( struct launcher *l, const char *folder, enum browse_kind kind, const char *title,
+                              char *target, size_t size )
+{
+    char previous[sizeof(l->browse_dir)];
+    int result;
+
+    strcpy( previous, l->browse_dir );
+    result = file_browser_pick_kind( l, target, size, kind, folder, title );
+    strcpy( l->browse_dir, previous );
+    return result;
 }
 
 static int pick_forwarder_icon( void *opaque, char *target, size_t size )
@@ -3822,7 +4263,7 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
     char previous[sizeof(l->browse_dir)];
     int result;
     strcpy( previous, l->browse_dir );
-    result = file_browser_pick_kind( l, target, size, 1 );
+    result = file_browser_pick_kind( l, target, size, BROWSE_IMAGES, NULL, "Choose icon" );
     strcpy( l->browse_dir, previous );
     save_look( l );
     return result;
@@ -3831,30 +4272,38 @@ static int pick_forwarder_icon( void *opaque, char *target, size_t size )
 /* A program started from the file browser and left out of the library: a
  * setup, a patch, a tool. It runs with the settings a new game would have,
  * or its own if it already has a file of them. */
-static int run_once( struct launcher *l, char *target, size_t size )
+static int start_path( struct launcher *l, const char *path, const char *title, char *target, size_t size )
 {
     struct program program;
-    char path[512];
     int index;
 
-    if (!file_browser_pick( l, path, sizeof(path) )) return 0;
-    launcher_log( "[LAUNCHER] Run once: %s", path );
     if ((index = find_program( l, path )) >= 0) return start_program( l, &l->programs[index], target, size );
     if (!describe_program( l, &program, path ))
     {
-        ui_message( &l->ui, "Run a program once", "Autorun cannot run this executable." );
+        ui_message( &l->ui, title, "Autorun cannot run this executable." );
         return 0;
     }
     return start_program( l, &program, target, size );
 }
 
+static int run_once( struct launcher *l, char *target, size_t size )
+{
+    char path[512];
+
+    if (!file_browser_pick( l, path, sizeof(path) )) return 0;
+    launcher_log( "[LAUNCHER] Run once: %s", path );
+    return start_path( l, path, "Run a program once", target, size );
+}
+
 static int add_game( struct launcher *l )
 {
     struct program program;
-    char path[512], message[800];
+    char path[512], message[1400], args[LAUNCHER_SHORTCUT_TEXT], args_path[512];
     int index;
 
     if (!file_browser_pick( l, path, sizeof(path) )) return -1;
+    /* A shortcut's or a batch file's arguments, kept before another menu picks a file. */
+    snprintf( args, sizeof(args), "%s", picked_args );
     launcher_log( "[LAUNCHER] Add Game selected %s", path );
     if ((index = find_program( l, path )) >= 0)
     {
@@ -3872,8 +4321,12 @@ static int add_game( struct launcher *l )
         char name[128];
         int answer;
 
-        snprintf( message, sizeof(message), "%s\n\n%s\n\nAdd this game to your library?",
-                  program.title, program.dos );
+        if (args[0])
+            snprintf( message, sizeof(message), "%s\n\n%s\n\nArguments: %.300s\n\nAdd this game to your library?",
+                      program.title, program.dos, args );
+        else
+            snprintf( message, sizeof(message), "%s\n\n%s\n\nAdd this game to your library?",
+                      program.title, program.dos );
         answer = ui_ask( &l->ui, "Review Game", message, hints, 3 );
         if (answer == UI_A) break;
         if (answer != UI_X)
@@ -3909,6 +4362,13 @@ static int add_game( struct launcher *l )
         return -1;
     }
     apply_new_game_renderer( l, &l->programs[index] );
+    /* Its arguments go where the Arguments row keeps them, unless it has some already. */
+    if (args[0] && launcher_args_path( path, args_path, sizeof(args_path) ) && !file_exists( args_path ) &&
+        write_line( args_path, args ))
+    {
+        load_program_settings( l, &l->programs[index] );
+        launcher_log( "[LAUNCHER] Arguments of %s: %s", path, args );
+    }
     launcher_log( "[LAUNCHER] Added %s to the library", path );
     ui_toast( &l->ui, launcher_fixes_pending( l->fixes, path ) ?
               "Game added. It has a fix, offered when it starts" : "Game added to the library", 2500 );
@@ -4417,6 +4877,21 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
     if (!autorun_install_finish( options->runtime_dir ))
         ui_toast( &l->ui, "The update recovery files could not be cleared.", 5000 );
     l->update = launcher_update_create( &l->ui, options->runtime_dir, options->schedule_restart );
+    /* A program on Carafe's FEX build left that build in system32, where the
+     * Windows DLLs check that starts next would take it for a file to replace:
+     * the DLL repository's goes back first, and the next such program puts its
+     * own there again. */
+    switch (wine_nx_fex_build_select( options->runtime_dir, NULL, NULL ))
+    {
+    case FEX_BUILD_NO_STOCK:
+        launcher_log( "[LAUNCHER] system32 holds Carafe's FEX build and no copy of the stock one is kept; "
+                      "Settings > System > Windows DLLs brings it back" );
+        break;
+    case FEX_BUILD_IO:
+        launcher_log( "[LAUNCHER] the stock FEX could not be put back in system32" );
+        break;
+    default: break;
+    }
     l->dlls = launcher_dlls_create( &l->ui, options->runtime_dir );
     l->fixes = launcher_fixes_create( &l->ui, options->runtime_dir );
     l->graphics = launcher_graphics_create( &l->ui, options->runtime_dir );

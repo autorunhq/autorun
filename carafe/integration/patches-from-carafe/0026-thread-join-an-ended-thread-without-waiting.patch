@@ -1,0 +1,71 @@
+Carafe: a thread that ended last can be joined by a thread creation waiting for a place.
+horizon_join_ended_thread joins it only once it has ended, so the caller never waits; exit_thread hands
+the last ended thread over under a lock, so the two never join the same one.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1597,6 +1597,20 @@
+ 
+ /* The thread that ended last, waiting to be joined by the next one to end. */
+ static void *prev_data;
++#ifdef __SWITCH__
++static pthread_mutex_t prev_data_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static struct thread_data *horizon_swap_prev_data( struct thread_data *next )
++{
++    struct thread_data *data;
++
++    pthread_mutex_lock( &prev_data_mutex );
++    data = prev_data;
++    prev_data = next;
++    pthread_mutex_unlock( &prev_data_mutex );
++    return data;
++}
++#endif
+ 
+ /***********************************************************************
+  *           exit_thread
+@@ -1609,7 +1623,11 @@
+ 
+     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
+ 
++#ifdef __SWITCH__
++    if ((data = horizon_swap_prev_data( get_thread_data() )))
++#else
+     if ((data = InterlockedExchangePointer( &prev_data, get_thread_data() )))
++#endif
+     {
+         if (data->pthread_id)
+         {
+@@ -1639,12 +1657,29 @@
+  */
+ unsigned int horizon_join_last_exited_thread(void)
+ {
+-    struct thread_data *data = InterlockedExchangePointer( &prev_data, NULL );
++    struct thread_data *data = horizon_swap_prev_data( NULL );
+ 
+     if (!data || !data->pthread_id) return 0;
+     pthread_join( data->pthread_id, NULL );
+     virtual_free_thread_data( data );
+     __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
++    return 1;
++}
++
++unsigned int horizon_join_ended_thread(void)
++{
++    extern int horizon_pthread_ended( pthread_t thread );
++    struct thread_data *data;
++
++    pthread_mutex_lock( &prev_data_mutex );
++    data = prev_data;
++    if (data && data->pthread_id && horizon_pthread_ended( data->pthread_id )) prev_data = NULL;
++    else data = NULL;
++    pthread_mutex_unlock( &prev_data_mutex );
++    if (!data) return 0;
++    pthread_join( data->pthread_id, NULL );
++    virtual_free_thread_data( data );
++    __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
+     return 1;
+ }
+ #endif

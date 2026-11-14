@@ -1,0 +1,48 @@
+Carafe: setting the process's picture-publication event reports published window content through the existing notification.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1187,6 +1187,23 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
+ /******************************************************************************
+  *              NtSetEvent (NTDLL.@)
+  */
++static void notify_window_publication( HANDLE handle, NTSTATUS status )
++{
++#ifdef __SWITCH__
++    extern HANDLE wine_nx_window_picture_event __attribute__((weak));
++    extern int wine_nx_window_picture_pending __attribute__((weak));
++    extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
++
++    if (!status && &wine_nx_window_picture_event && &wine_nx_window_picture_pending &&
++        wine_nx_window_picture_event && handle == wine_nx_window_picture_event &&
++        !__atomic_exchange_n( &wine_nx_window_picture_pending, 1, __ATOMIC_ACQ_REL ))
++    {
++        if (wine_nx_runtime_trace)
++            wine_nx_runtime_trace( "[NXSCREEN] foreground primary surface ready" );
++    }
++#endif
++}
++
+ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+ {
+     unsigned int ret;
+@@ -1194,7 +1211,10 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
+ 
+     if ((ret = inproc_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
++    {
++        notify_window_publication( handle, ret );
+         return ret;
++    }
+ 
+     SERVER_START_REQ( event_op )
+     {
+@@ -1204,6 +1224,7 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+         if (!ret && prev_state) *prev_state = reply->state;
+     }
+     SERVER_END_REQ;
++    notify_window_publication( handle, ret );
+     return ret;
+ }
+ 

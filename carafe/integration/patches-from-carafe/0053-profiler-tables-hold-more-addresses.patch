@@ -1,0 +1,27 @@
+Carafe: the profiler's tables hold 4096 addresses instead of 512, and a key can start its search anywhere in them.
+A racing game spread its translated code over more 32-byte addresses than a table could hold, and a quarter of the
+main thread's samples went to "unbucketed" instead of to a module. The start bucket came from the top 9 bits of the
+hash, so a bigger table alone left all but its first 512 buckets to probing. Only thread_profile.c keeps tables.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.h
++++ b/horizon-wine/source/thread_profile.h
+@@ -250,7 +250,8 @@
+     return ((uint64_t)svc << 40) | (caller & 0xffffffffffull);
+ }
+ 
+-#define NX_PROF_BUCKETS 512  /* a power of two */
++#define NX_PROF_BUCKET_BITS 12
++#define NX_PROF_BUCKETS (1u << NX_PROF_BUCKET_BITS)  /* a power of two */
+ #define NX_PROF_PROBES  64
+ 
+ struct nx_prof_bucket
+@@ -267,7 +268,7 @@
+ 
+ static inline void nx_prof_add( struct nx_prof_table *table, uint64_t key )
+ {
+-    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> 55), i;
++    unsigned int start = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> (64 - NX_PROF_BUCKET_BITS)), i;
+ 
+     for (i = 0; i < NX_PROF_PROBES; i++)
+     {

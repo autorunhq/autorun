@@ -1,0 +1,87 @@
+Carafe: an emulated OpenGL window is presented where its window is on the console's screen, scaled to the size
+the emulated mode gives it, and the rest of the screen is black. A scaled picture is drawn as a texture: a
+scaled glBlitFramebuffer to the window came out upside down.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/opengl.c
++++ b/dlls/win32u/opengl.c
+@@ -873,6 +873,18 @@
+     if (surface->target) opengl_drawable_release( surface->target );
+ }
+ 
++#ifdef __SWITCH__
++static BOOL client_surface_screen_rect( struct client_surface *client, RECT *rect )
++{
++    struct ratio dpi = get_dpi_for_window( client->hwnd );
++
++    if (!get_client_rect( client->hwnd, rect, dpi )) return FALSE;
++    map_window_points( client->hwnd, 0, (POINT *)rect, 2, dpi );
++    *rect = map_rect_virt_to_raw( *rect, dpi );
++    return rect->right > rect->left && rect->bottom > rect->top;
++}
++#endif
++
+ static void blit_framebuffer_surface( struct opengl_drawable *drawable )
+ {
+     static pthread_once_t once = PTHREAD_ONCE_INIT;
+@@ -880,6 +892,13 @@
+     const struct opengl_funcs *funcs = &display_funcs;
+     SIZE src = drawable->virtual_size, dst = drawable->monitor_size;
+     float ramp_data[GAMMA_RAMP_SIZE * 4];
++    POINT origin = {0, 0};
++    BOOL blit;
++#ifdef __SWITCH__
++    struct opengl_drawable *target = framebuffer_from_opengl_drawable( drawable )->target;
++    EGLint screen_width = 0, screen_height = 0;
++    RECT screen_rect;
++#endif
+ 
+     TRACE( "%s src %s dst %s fbo %u\n", debugstr_opengl_drawable( drawable ), wine_dbgstr_point( (POINT *)&src ),
+            wine_dbgstr_point( (POINT *)&dst ), drawable->read_fbo );
+@@ -887,12 +906,35 @@
+     funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, drawable->read_fbo );
+     funcs->p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+     funcs->p_glDrawBuffer( GL_BACK );
++#ifdef __SWITCH__
++    if (drawable->client && target && target->surface &&
++        funcs->p_eglQuerySurface( display_egl.display, target->surface, EGL_WIDTH, &screen_width ) &&
++        funcs->p_eglQuerySurface( display_egl.display, target->surface, EGL_HEIGHT, &screen_height ) &&
++        client_surface_screen_rect( drawable->client, &screen_rect ))
++    {
++        dst.cx = screen_rect.right - screen_rect.left;
++        dst.cy = screen_rect.bottom - screen_rect.top;
++        origin.x = screen_rect.left;
++        origin.y = screen_height - screen_rect.bottom;
++        if (origin.x || origin.y || dst.cx != screen_width || dst.cy != screen_height)
++        {
++            funcs->p_glDisable( GL_SCISSOR_TEST );
++            funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
++            funcs->p_glClear( GL_COLOR_BUFFER_BIT );
++        }
++    }
++#endif
+     if (drawable->srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+ 
+-    if (drawable->read_fbo == drawable->draw_fbo && use_default_gamma_ramp())
++    blit = drawable->read_fbo == drawable->draw_fbo && use_default_gamma_ramp();
++#ifdef __SWITCH__
++    if (dst.cx != src.cx || dst.cy != src.cy) blit = FALSE;
++#endif
++    if (blit)
+     {
+         funcs->p_glReadBuffer( GL_COLOR_ATTACHMENT0 );
+-        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, 0, 0, dst.cx, dst.cy, GL_COLOR_BUFFER_BIT, GL_LINEAR );
++        funcs->p_glBlitFramebuffer( 0, 0, src.cx, src.cy, origin.x, origin.y, origin.x + dst.cx, origin.y + dst.cy,
++                                    GL_COLOR_BUFFER_BIT, GL_LINEAR );
+     }
+     else
+     {
+@@ -916,7 +958,7 @@
+         funcs->p_glWaitSync( gamma_sync, 0, GL_TIMEOUT_IGNORED );
+         pthread_mutex_unlock( &gamma_lock );
+ 
+-        funcs->p_glViewport( 0, 0, dst.cx, dst.cy );
++        funcs->p_glViewport( origin.x, origin.y, dst.cx, dst.cy );
+ 
+         /* macOS OpenGL requires a VAO for glDrawArrays */
+         funcs->p_glGenVertexArrays( 1, &vao );

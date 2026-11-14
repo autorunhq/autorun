@@ -1,0 +1,219 @@
+Carafe: the Horizon server keeps low-level keyboard and mouse hooks (WH_KEYBOARD_LL, WH_MOUSE_LL). They are global,
+run in the thread that set them, and every key, mouse move, button and wheel turn from the controller also goes to
+that thread as a low-level hook message, without waiting for the hook's answer, which is taken and dropped. A thread
+that has ended gets none, and one that does not read its messages keeps at most 64. The mouse hook is told the
+movement from where the cursor is when the hook takes the message, so DirectInput 7 and older, which reads the mouse
+and keyboard through these hooks, sees the movement. Journal and win event hooks are still refused.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -6734,8 +6734,12 @@
+ #define HORIZON_WH_MINHOOK (-1)
+ #define HORIZON_WH_JOURNALPLAYBACK 1
+ #define HORIZON_WH_CALLWNDPROCRET 12
++#define HORIZON_WH_KEYBOARD_LL 13
++#define HORIZON_WH_MOUSE_LL 14
+ #define HORIZON_WH_WINEVENT 15
+ #define HORIZON_HOOK_KINDS 17
++#define HORIZON_MSG_HOOK_LL 9
++#define HORIZON_HOOK_LL_PENDING_MAX 64
+ 
+ struct horizon_set_hook_request
+ {
+@@ -6865,6 +6869,76 @@
+     return NULL;
+ }
+ 
++static int horizon_window_hook_low_level( int id )
++{
++    return id == HORIZON_WH_KEYBOARD_LL || id == HORIZON_WH_MOUSE_LL;
++}
++
++static unsigned int horizon_window_hook_runner_locked( const struct horizon_window_hook *hook, unsigned int tid )
++{
++    if (!horizon_window_hook_low_level( hook->index + HORIZON_WH_MINHOOK ) || hook->owner == tid) return 0;
++    return hook->owner;
++}
++
++static unsigned int horizon_server_hook_ll_pending_locked( const struct horizon_msgq *queue )
++{
++    const struct horizon_msgq_sent *sent;
++    unsigned int count = 0;
++
++    for (sent = queue->sent; sent; sent = sent->next)
++        if (sent->type == HORIZON_MSG_HOOK_LL) count++;
++    return count;
++}
++
++static void horizon_server_queue_hook_ll_locked( int id, unsigned int msg, unsigned long long lparam, int x, int y,
++                                                 unsigned int time, unsigned long long info, unsigned int flags )
++{
++    struct horizon_hardware_msg_data *data;
++    struct horizon_server_object *thread;
++    struct horizon_msgq_result *result;
++    struct horizon_window_hook *hook;
++    struct horizon_msgq_sent *sent;
++    struct horizon_msgq *queue;
++
++    if (!(hook = horizon_window_hook_from_locked( horizon_window_hooks, id - HORIZON_WH_MINHOOK, 0, 1 ))) return;
++    for (thread = horizon_server_threads; thread; thread = thread->thread_next)
++        if (thread->thread.tid == hook->owner && !thread->thread.terminated) break;
++    if (!thread || !(queue = horizon_server_queue_locked( hook->owner ))) return;
++    if (horizon_server_hook_ll_pending_locked( queue ) >= HORIZON_HOOK_LL_PENDING_MAX) return;
++
++    sent = calloc( 1, sizeof(*sent) );
++    data = calloc( 1, sizeof(*data) );
++    result = calloc( 1, sizeof(*result) );
++    if (!sent || !data || !result)
++    {
++        free( sent );
++        free( data );
++        free( result );
++        return;
++    }
++    data->info = info;
++    data->size = sizeof(*data);
++    data->flags = flags;
++    data->source.device = id == HORIZON_WH_KEYBOARD_LL ? HORIZON_IMDT_KEYBOARD : HORIZON_IMDT_MOUSE;
++    data->source.origin = HORIZON_IMO_HARDWARE;
++    sent->type = HORIZON_MSG_HOOK_LL;
++    sent->msg = id;
++    sent->wparam = msg;
++    sent->lparam = lparam;
++    sent->x = x;
++    sent->y = y;
++    sent->time = time;
++    sent->data = (unsigned char *)data;
++    sent->data_size = sizeof(*data);
++    sent->result = result;
++    result->msg = sent;
++    result->receiver = queue;
++    *queue->sent_tail = sent;
++    queue->sent_tail = &sent->next;
++    horizon_msgq_touch( queue, HORIZON_MSGQ_QS_SENDMESSAGE );
++    horizon_server_refresh_queue_locked( queue, horizon_server_timer_clock() );
++}
++
+ static void horizon_server_publish_hooks_locked( struct horizon_msgq *queue )
+ {
+     struct horizon_obj_locator locator = { queue->shm_id, queue->shm_offset };
+@@ -6968,9 +7042,11 @@
+     if (!request->proc || request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT ||
+         (request->pid && request->pid != connection->pid))
+         reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+-    else if (request->id > HORIZON_WH_CALLWNDPROCRET ||
++    else if ((request->id > HORIZON_WH_CALLWNDPROCRET && !horizon_window_hook_low_level( request->id )) ||
+              (request->id >= 0 && request->id <= HORIZON_WH_JOURNALPLAYBACK))
+         reply.header.error = HORIZON_STATUS_NOT_IMPLEMENTED;
++    else if (horizon_window_hook_low_level( request->id ) && request->tid)
++        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+     else if (!(hook = calloc( 1, sizeof(*hook) )) || (data_size && !(hook->module = malloc( data_size ))))
+         reply.header.error = HORIZON_STATUS_NO_MEMORY;
+     if (!reply.header.error)
+@@ -7058,6 +7134,7 @@
+         reply.handle = hook->handle;
+         reply.unicode = hook->unicode;
+         reply.proc = hook->proc;
++        if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
+         reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
+                                                                      module, sizeof(module) );
+         horizon_window_hook_chains[hook->index]++;
+@@ -7113,6 +7190,7 @@
+         reply.id = hook->index + HORIZON_WH_MINHOOK;
+         reply.unicode = hook->unicode;
+         reply.proc = hook->proc;
++        if ((reply.tid = horizon_window_hook_runner_locked( hook, connection->tid ))) reply.pid = connection->pid;
+         reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
+                                                                      module, sizeof(module) );
+     }
+@@ -9720,6 +9798,47 @@
+     { HORIZON_MOUSEEVENTF_RIGHTUP,   HORIZON_WM_RBUTTONUP,   HORIZON_MK_RBUTTON, HORIZON_VK_RBUTTON, 0 },
+ };
+ 
++#define HORIZON_WM_MBUTTONDOWN 0x0207
++#define HORIZON_WM_MBUTTONUP 0x0208
++#define HORIZON_WM_MOUSEWHEEL 0x020a
++#define HORIZON_WM_XBUTTONDOWN 0x020b
++#define HORIZON_WM_XBUTTONUP 0x020c
++#define HORIZON_WM_MOUSEHWHEEL 0x020e
++
++static void horizon_server_queue_mouse_hook_ll_locked( unsigned int flags, unsigned int data, int dx, int dy,
++                                                       unsigned int time, unsigned long long info )
++{
++    static const unsigned int messages[] =
++    {
++        HORIZON_WM_MOUSEMOVE, HORIZON_WM_LBUTTONDOWN, HORIZON_WM_LBUTTONUP, HORIZON_WM_RBUTTONDOWN,
++        HORIZON_WM_RBUTTONUP, HORIZON_WM_MBUTTONDOWN, HORIZON_WM_MBUTTONUP, HORIZON_WM_XBUTTONDOWN,
++        HORIZON_WM_XBUTTONUP, 0, 0, HORIZON_WM_MOUSEWHEEL, HORIZON_WM_MOUSEHWHEEL,
++    };
++    unsigned long long mouse_data = data << 16;
++    unsigned int i;
++
++    if (!horizon_window_hook_from_locked( horizon_window_hooks, HORIZON_WH_MOUSE_LL - HORIZON_WH_MINHOOK, 0, 1 ))
++        return;
++    for (i = 0; i < sizeof(messages) / sizeof(messages[0]); i++)
++    {
++        if (!messages[i] || !(flags & (1u << i))) continue;
++        horizon_server_queue_hook_ll_locked( HORIZON_WH_MOUSE_LL, messages[i], mouse_data, i ? 0 : dx, i ? 0 : dy,
++                                             time, info, 0 );
++    }
++}
++
++static void horizon_server_queue_key_hook_ll_locked( const struct horizon_hw_keyboard_input *kbd,
++                                                     const struct horizon_key_event *event, unsigned int time )
++{
++    unsigned int vkey = kbd->vkey & 0xff;
++
++    if (vkey == HORIZON_KBD_VK_MENU || vkey == HORIZON_KBD_VK_CONTROL || vkey == HORIZON_KBD_VK_SHIFT)
++        vkey = event->vkey;
++    horizon_server_queue_hook_ll_locked( HORIZON_WH_KEYBOARD_LL, event->message,
++                                         (unsigned long long)(kbd->scan & 0xff) << 16 | vkey, 0, 0, time, kbd->info,
++                                         event->data_flags );
++}
++
+ /* A controller key (wine_nx_send_keys, dlls/win32u/winnx_drv.c), as
+  * server/queue.c queues it: WM_INPUT for a raw keyboard registration, which is
+  * how DirectInput 8 reads keys, and the key message for the focus window unless
+@@ -9749,6 +9868,7 @@
+         time = kbd->time ? kbd->time : horizon_server_input_time();
+         horizon_keyboard_event( desktop->keystate, &horizon_alt_pressed, kbd->vkey, kbd->scan, kbd->flags,
+                                 (unsigned int)kbd->info, &event );
++        horizon_server_queue_key_hook_ll_locked( kbd, &event, time );
+         if (request->win) focus = horizon_server_find_window_locked( request->win );
+         if (!focus && input && input->focus) focus = horizon_server_find_window_locked( input->focus );
+         if (!focus && input && input->active) focus = horizon_server_find_window_locked( input->active );
+@@ -9900,6 +10020,7 @@
+         if (target) target_handle = target->handle;
+         horizon_server_log_mouse_target_locked( target, x, y, input ? input->capture : 0 );
+         if (target) input = horizon_server_input_shared_locked( target->tid );
++        horizon_server_queue_mouse_hook_ll_locked( flags, mouse->data, dx, dy, time, mouse->info );
+ 
+         if (raw_device)
+         {
+@@ -11468,6 +11589,17 @@
+     return horizon_server_write_status( connection->reply_fd, status );
+ }
+ 
++static void horizon_server_hook_ll_point_locked( struct horizon_get_message_reply *reply )
++{
++    struct horizon_obj_locator locator;
++    struct horizon_desktop_shm *desktop;
++
++    if (reply->type != HORIZON_MSG_HOOK_LL || reply->msg != HORIZON_WH_MOUSE_LL) return;
++    if (!(desktop = horizon_server_desktop_shared_locked( &locator ))) return;
++    reply->x += desktop->cursor.x;
++    reply->y += desktop->cursor.y;
++}
++
+ static int horizon_server_posted_window_is_descendant( void *ctx, unsigned int child, unsigned int ancestor )
+ {
+     (void)ctx;
+@@ -11516,6 +11648,7 @@
+         reply.y = queue->sent->y;
+         reply.time = queue->sent->time;
+         reply.total = queue->sent->data_size;
++        horizon_server_hook_ll_point_locked( &reply );
+         if (queue->sent->data_size > request->header.reply_size)
+             reply.header.error = HORIZON_STATUS_BUFFER_OVERFLOW;
+         else

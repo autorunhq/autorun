@@ -1,0 +1,16 @@
+Carafe: d3d9.effectThread, the switch for the game's linked effect library on a thread of its own in Carafe's DXVK
+build, is one more key the runtime copies from the program settings into dxvk.conf.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/dxvk_options.c
++++ b/horizon-wine/source/dxvk_options.c
+@@ -434,6 +434,9 @@
+     OPTION( "d3d9.frontEndThread",
+             "Carafe's DXVK build: the Direct3D 9 front end runs on a thread of its own.",
+             boolean, 30101, 0, 0, 0, 1, 0, "False" ),
++    OPTION( "d3d9.effectThread",
++            "Carafe's DXVK build: the game's linked effect library runs on a thread of its own.",
++            boolean, 30101, 0, 0, 0, 1, 0, "False" ),
+ };
+ #undef OPTION
+ 

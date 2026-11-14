@@ -1,0 +1,27 @@
+Carafe: freeing or flushing memory that holds no translated code does not take the code invalidation lock.
+FEX decodes guest code only from XIntervals, and drops a range's code when the range stops being executable.
+A range that meets no XIntervals has nothing to invalidate. A thread's stack freed as it ends no longer
+waits for every block being compiled and holds up every new one.
+MIT, as the file it changes.
+
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -218,8 +218,17 @@
+ 
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = std::max(Size, (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK);
++  const auto AlignedEnd = AlignedSize > std::numeric_limits<uint64_t>::max() - AlignedBase ? std::numeric_limits<uint64_t>::max()
++                                                                                           : AlignedBase + AlignedSize;
+ 
+-  InvalidateIntervalInternal(AlignedBase, AlignedSize);
++  const bool MayHoldCode = [&]() {
++    std::shared_lock Lock(IntervalsLock);
++    return XIntervals.Intersect({AlignedBase, AlignedEnd});
++  }();
++
++  if (MayHoldCode) {
++    InvalidateIntervalInternal(AlignedBase, AlignedSize);
++  }
+ 
+   if (Free) {
+     std::unique_lock Lock(IntervalsLock);

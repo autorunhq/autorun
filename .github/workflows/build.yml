@@ -1,0 +1,340 @@
+name: build
+
+# The card archive Autorun ships (horizon-wine/build-autorun/autorun-NNN.zip),
+# built the way build.sh builds it: in the switch-dev image named in
+# horizon-wine/switch-dev.txt. Beside it, the floating keyboard's host test,
+# which needs SDL2 and no toolchain at all, so it says at once whether the
+# keyboard still does what it should, the one of the Carafe DLLs, which
+# downloads them from this repository's releases the way a card does, and the
+# one of the media parser, which plays files through the runtime's own code
+# and FFmpeg configured as the runtime's.
+#
+# Run it from the Actions tab, or push to a branch. The build is Linux only:
+# build.sh has no toolchain download for other machines, and this is where the
+# card archive is made. Notes:
+# - The first run downloads llvm-mingw and builds the boot payloads
+#   (Atmosphere and Horizon-OC) once, unless the toolchain cache has them.
+# - Wine's PE tree is kept between runs, so a run rebuilds only what a commit
+#   moved rather than twelve minutes of the same objects.
+# - The Windows DLLs are not built here: a card downloads them from the DLL
+#   repository, and the package is checked against its manifest.
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+      - main
+  workflow_dispatch:
+    inputs:
+      x86:
+        description: 'Build the x86-only runtime (Box64, no FEX) instead of the AMD64 one'
+        type: boolean
+        default: false
+
+# One build per commit: the same commit pushed to several branches at once (an
+# arena branch and main kept in step) starts a run for each push, and the
+# later run cancels the earlier, so it is built once, by the last push. A
+# commit pushed to one branch builds as before.
+concurrency:
+  group: build-${{ github.sha }}-${{ github.event.inputs.x86 || 'amd64' }}
+  cancel-in-progress: true
+
+jobs:
+  keyboard:
+    name: floating keyboard (host test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SDL2, libpng and a font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev libpng-dev fonts-dejavu-core
+
+      - name: Address space and forwarder names (host test)
+        # What the launcher will let start, and the title ids the two
+        # forwarders are filed under, without a toolchain: the 32-bit one is
+        # outside the Atmosphere low-window patch's scope by construction.
+        run: python3 horizon-wine/tests/check_low_window_routing.py
+
+      - name: Build the keyboard and run its test
+        # Its pictures go up with the run: the keyboard at 720p and 1080p, and
+        # the controls panel that - and A put over the program.
+        # The test keeps its picture and its labels for the life of the
+        # process, as it does under the console's font; there is nothing to
+        # free, so LeakSanitizer has nothing to say about it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cc -std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -I horizon-wine/source $(sdl2-config --cflags) \
+            horizon-wine/tests/osk.c horizon-wine/source/osk.c \
+            $(sdl2-config --libs) -lSDL2_ttf -lpng -lm -o "$RUNNER_TEMP/osk"
+          mkdir -p "$RUNNER_TEMP/shots"
+          "$RUNNER_TEMP/osk" /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$RUNNER_TEMP/shots"
+
+      - name: What it looks like
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyboard-pictures-${{ github.sha }}
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: error
+          retention-days: 14
+
+  carafe:
+    name: Carafe DLLs (host test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: curl, zstd and zlib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libzstd-dev zlib1g-dev
+
+      - name: Settings, options and installed versions
+        # What the Carafe builds added to: a program's settings file, the DXVK
+        # and FEX options and which version on the card a program gets.
+        run: |
+          flags="-std=gnu11 -Wall -Wextra -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          cd horizon-wine
+          cc $flags -I source tests/launcher_settings.c -o "$RUNNER_TEMP/launcher_settings"
+          cc $flags -I source tests/launcher_shortcut.c -o "$RUNNER_TEMP/launcher_shortcut"
+          cc $flags tests/fex_options.c -o "$RUNNER_TEMP/fex_options"
+          cc $flags tests/dxvk_options.c source/dxvk_options.c -o "$RUNNER_TEMP/dxvk_options"
+          cc $flags -I tests/graphics-shims tests/dxvk_releases.c -lcurl -lzstd -lz -o "$RUNNER_TEMP/dxvk_releases"
+          cd "$RUNNER_TEMP"
+          for test in launcher_settings launcher_shortcut fex_options dxvk_options dxvk_releases; do
+            ./$test || { echo "::error::horizon-wine/tests/$test.c failed"; exit 1; }
+          done
+
+      - name: Reports, thread waits and the orchestrator
+        # Carafe's diagnostics (PORTING.md, stages 2 and 3): what the [WAITS]
+        # and [FEX] lines say, what a thread creation at the limit counts, the
+        # fd queue's report, and the profiler's parts that need no kernel.
+        run: |
+          flags="-std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          cd horizon-wine
+          cc $flags -I tests/carafe-shims -I source tests/carafe_reports.c -o "$RUNNER_TEMP/carafe_reports"
+          cc $flags -I source tests/thread_profile.c -o "$RUNNER_TEMP/thread_profile"
+          "$RUNNER_TEMP/carafe_reports"
+          "$RUNNER_TEMP/thread_profile"
+          # Stage 4: what the orchestrator decides (Carafe's own test), that it
+          # does nothing behind its switch, and how the two settings reach it.
+          cc -std=c11 -O2 -Wall -Wextra -Werror -I source tests/orchestrator.c source/orchestrator_policy.c \
+             -o "$RUNNER_TEMP/orchestrator"
+          cc $flags -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c \
+             source/orchestrator_policy.c -o "$RUNNER_TEMP/orchestrator_switch"
+          cc -std=c11 -O2 -Wall -Wextra -Werror -I source tools/orchestrator_replay.c source/orchestrator_policy.c \
+             -o "$RUNNER_TEMP/orchestrator_replay"
+          "$RUNNER_TEMP/orchestrator"
+          "$RUNNER_TEMP/orchestrator_switch"
+          # Stage 6: the server's shared threads, run with real threads under
+          # the address and thread sanitizers (check_server_pool). The last two
+          # run the server's suspend, resume and terminate handlers and the
+          # runtime's thread placement, which stages 2, 4 and 6 changed.
+          for check in check_thread_creation_wait check_horizon_thread_tls check_horizon_fd_owner \
+                       check_shader_affinity check_futex_exit check_orchestrator_setting check_server_pool \
+                       check_horizon_suspend check_core_affinity check_yield_backoff check_fps_counter \
+                       check_fpslocker check_wine_mono \
+                       check_own_size_windows check_text_edit; do
+            python3 tests/$check.py > "$RUNNER_TEMP/$check.log" 2>&1 || {
+              echo "::error::horizon-wine/tests/$check.py failed: $(grep -m 4 -E 'error|Assertion|Error|never true|data race|failed' "$RUNNER_TEMP/$check.log" | tr '\n' ' ' | cut -c1-900)"
+              exit 1
+            }
+            tail -n 1 "$RUNNER_TEMP/$check.log"
+          done
+
+      - name: The settings menu in fifteen languages
+        # Stage 7: the menu's catalog carries Carafe's texts for the settings
+        # both menus have. The menu's own reader shows it under each console
+        # language and the result is held against Carafe's texts; then the
+        # texts in this tree are made again from Carafe's commit they name.
+        run: |
+          python3 horizon-wine/tests/check_menu_languages.py
+          # The rows for Carafe's builds: what the menu shows for each DXVK
+          # and FEX build, against the launcher's and the runtime's own rules.
+          python3 horizon-wine/tests/check_menu_builds.py
+          commit=$(python3 -c "import json; print(json.load(open('horizon-wine/tools/carafe-menu-texts.json'))['commit'])")
+          git init -q "$RUNNER_TEMP/carafe-source"
+          git -C "$RUNNER_TEMP/carafe-source" fetch -q --depth 1 https://github.com/carafe-nx/carafe.git "$commit"
+          git -C "$RUNNER_TEMP/carafe-source" checkout -q FETCH_HEAD
+          python3 carafe/integration/tools/menu_texts.py "$RUNNER_TEMP/carafe-source" --check
+
+      - name: The patch ledger's numbers
+        # carafe/integration/PORTING.md says, for each of Carafe's patches, how
+        # much of it this tree holds. A commit that moves those lines measures
+        # them again (carafe/integration/tools/refresh_table.py).
+        run: python3 carafe/integration/tools/refresh_table.py --check
+
+      - name: Release list, archives and system32, made here
+        # What the launcher does with the Carafe builds of DXVK and FEX
+        # (carafe/dlls), on a release list and archives the test makes itself.
+        run: python3 horizon-wine/tests/check_carafe_dlls.py
+
+      - name: The releases a card would download today
+        # The same code against this repository's real releases: listed,
+        # downloaded, checked against GitHub's digest, unpacked and installed.
+        # What it took is in the run's annotations.
+        run: python3 horizon-wine/tests/check_carafe_dlls.py --live
+
+  media:
+    name: media parser and decoder (host test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: FFmpeg's source
+        # The revision the runtime builds, into horizon-wine/vendor/ffmpeg.
+        run: sh horizon-wine/tools/bootstrap-wma.sh
+
+      - name: FFmpeg and widl for this machine
+        # Two builds of FFmpeg and one of widl, kept until the revision, the
+        # configure lines or the script that builds them change. The script
+        # checks that itself, so an old cache costs a rebuild and no more.
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/wine-nx-media-host/ship
+            /tmp/wine-nx-media-host/ship.key
+            /tmp/wine-nx-media-host/tool
+            /tmp/wine-nx-media-host/tool.key
+            /tmp/wine-nx-media-host/widl-build/widl
+            /tmp/wine-nx-media-host/widl.key
+          key: media-host-${{ runner.os }}-${{ hashFiles('horizon-wine/cmake/Media.cmake', 'horizon-wine/tests/media_host.py', 'horizon-wine/tools/bootstrap-wma.sh') }}
+
+      - name: Files played through the parser
+        # Stage 1 of PORTING.md: source/media_unix.c, built against FFmpeg
+        # with the configure lines of cmake/Media.cmake, plays files FFmpeg
+        # wrote, and every picture, sample and packet is held against what
+        # FFmpeg decodes of the same file.
+        run: |
+          python3 horizon-wine/tests/media_host.py --widl
+          python3 horizon-wine/tests/media_host.py || {
+            tail -n 40 /tmp/wine-nx-media-host/ship.log /tmp/wine-nx-media-host/tool.log
+            exit 1
+          }
+          python3 horizon-wine/tests/check_media_parser.py > "$RUNNER_TEMP/check_media_parser.log" 2>&1 || {
+            echo "::error::horizon-wine/tests/check_media_parser.py failed: $(head -c 900 "$RUNNER_TEMP/check_media_parser.log" | tr '\n' ' ')"
+            cat "$RUNNER_TEMP/check_media_parser.log"
+            exit 1
+          }
+          cat "$RUNNER_TEMP/check_media_parser.log"
+
+      - name: Sound played through the decoder
+        # The other half of source/media_unix.c, behind Media Foundation's
+        # AAC and H.264 decoders: AAC that FFmpeg wrote comes out sample for
+        # sample at its times, packets that are not AAC cost what they held,
+        # and a stream that changes its channels or rate plays on.
+        run: |
+          python3 horizon-wine/tests/check_media_decoder.py > "$RUNNER_TEMP/check_media_decoder.log" 2>&1 || {
+            echo "::error::horizon-wine/tests/check_media_decoder.py failed: $(head -c 900 "$RUNNER_TEMP/check_media_decoder.log" | tr '\n' ' ')"
+            cat "$RUNNER_TEMP/check_media_decoder.log"
+            exit 1
+          }
+          cat "$RUNNER_TEMP/check_media_decoder.log"
+
+  runtime:
+    name: card archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    # One build at a time per branch, and a push waits for the one running
+    # rather than killing it: an hour of compiling is worth keeping.
+    concurrency:
+      group: runtime-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Toolchains and boot payloads
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/toolchains
+          key: toolchains-${{ hashFiles('horizon-wine/switch-dev.txt') }}
+
+      - name: Wine's PE tree
+        # Most of the build's time is here, and most of it does not change
+        # between commits: the key is the commit, so nothing ever hits exactly,
+        # and the newest tree is restored, which ninja then brings up to date.
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/build-wine-amd64-pe
+          key: wine-pe-${{ github.sha }}
+          restore-keys: wine-pe-
+
+      - name: nxvk's package
+        # The second runtime's Mesa (build-nxvk.sh): NVK and Zink from nxvk,
+        # built in nxvk's own toolchain image, which takes the better part of
+        # an hour; kept until the pinned commit or the script changes.
+        if: ${{ inputs.x86 != true }}
+        uses: actions/cache@v4
+        with:
+          path: horizon-wine/vendor/nxvk/switch/build/pkg
+          key: nxvk-pkg-${{ hashFiles('horizon-wine/build-nxvk.sh') }}
+
+      - name: Build
+        env:
+          X86: ${{ inputs.x86 }}
+        run: |
+          if [ "$X86" = "true" ]; then
+            sh build.sh --x86 --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
+          else
+            sh build.sh --nxvk --jobs "$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+            exit "${PIPESTATUS[0]}"
+          fi
+
+      - name: What went wrong
+        # The job's own log lives on a host this sandbox cannot reach; an
+        # annotation can be read from the API, so the failing lines go there.
+        if: failure()
+        run: |
+          test -f "$RUNNER_TEMP/build.log" || exit 0
+          grep -i -m 12 "error:\|Error 1\|undefined reference" "$RUNNER_TEMP/build.log" | cut -c1-400 | while IFS= read -r line; do
+            printf '::error::%s\n' "$line"
+          done
+          exit 0
+
+      - name: Hand the tree back to the runner
+        # The switch-dev container writes as root, so what it wrote is not the
+        # runner's until it is given back: the steps after this one read and
+        # write that tree, and the PE cache saves it as the runner.
+        run: sudo chown -R "$(id -u):$(id -g)" horizon-wine/toolchains horizon-wine/build-* horizon-wine/vendor || true
+
+      - name: What was built
+        run: |
+          ls -l horizon-wine/build-autorun/
+          sha256sum horizon-wine/build-autorun/autorun-*.zip
+
+      - name: Upload the card archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-card-${{ github.sha }}
+          path: horizon-wine/build-autorun/autorun-*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the runtime's symbols
+        # The NRO on the card has no symbols, so a [STALL] line's runtime
+        # addresses (Mesa's among them) can only be named from the ELF it was
+        # made from, of this same build.
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorun-runtime-elf-${{ github.sha }}
+          path: |
+            horizon-wine/build-switch-*/wine-nx-runtime.elf
+            horizon-wine/build-switch-*/wine-nx-runtime
+          if-no-files-found: warn
+          retention-days: 14

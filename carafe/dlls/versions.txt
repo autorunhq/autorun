@@ -1,0 +1,5 @@
+# The versions the Carafe builds are published under. Raise the number after the
+# dash whenever the patches, the pins or the build change: a card sees a new
+# release only under a new version.
+fex=2609-1
+dxvk=3.1.1-1

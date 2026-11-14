@@ -109,6 +109,7 @@ static NTSTATUS (WINAPI *pBTCpuGetContext)(HANDLE,HANDLE,void *,void *);
 static BOOLEAN  (WINAPI *pBTCpuIsProcessorFeaturePresent)(UINT);
 static void     (WINAPI *pBTCpuProcessInit)(void);
 static NTSTATUS (WINAPI *pBTCpuSetContext)(HANDLE,HANDLE,void *,void *);
+static NTSTATUS (WINAPI *pBTCpuSuspendLocalThread)(HANDLE,ULONG *);
 static void     (WINAPI *pBTCpuThreadInit)(void);
 static void *   (WINAPI *p__wine_get_unix_opcode)(void);
 static void *   (WINAPI *pKiRaiseUserExceptionDispatcher)(void);
@@ -734,6 +735,23 @@ NTSTATUS WINAPI wow64_NtFindAtom( UINT *args )
 }
 
 
+static BOOL is_local_thread( HANDLE handle )
+{
+    THREAD_BASIC_INFORMATION info;
+
+    if (handle == GetCurrentThread()) return TRUE;
+    if (NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL )) return FALSE;
+    return info.ClientId.UniqueProcess == NtCurrentTeb()->ClientId.UniqueProcess;
+}
+
+
+NTSTATUS wow64_suspend_thread( HANDLE handle, ULONG *count )
+{
+    if (pBTCpuSuspendLocalThread && is_local_thread( handle )) return pBTCpuSuspendLocalThread( handle, count );
+    return NtSuspendThread( handle, count );
+}
+
+
 /**********************************************************************
  *           wow64_NtGetContextThread
  */
@@ -1034,6 +1052,7 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     GET_PTR( BTCpuResetToConsistentState );
     GET_PTR( BTCpuSetContext );
     GET_PTR( BTCpuSimulate );
+    GET_PTR( BTCpuSuspendLocalThread );
     GET_PTR( BTCpuFlushInstructionCache2 );
     GET_PTR( BTCpuFlushInstructionCacheHeavy );
     GET_PTR( BTCpuNotifyMapViewOfSection );

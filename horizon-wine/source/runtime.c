@@ -10,6 +10,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/iosupport.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,6 +40,7 @@
 #include "games/left4dead.h"
 #include "games/ff7remake.h"
 #include "fex_options.h"
+#include "fex_build.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
 #include "config_json.h"
@@ -47,10 +49,12 @@
 #include "osk.h"
 #include "std_stream_lines.h"
 #include "thread_profile.h"
+#include "saltynx.h"
 #include "dxvk_releases.h"
 #include "horizon_dlls.h"
 #include "horizon_dll_features.h"
 #include "game_fixes.h"
+#include "runtime_symbols.h"
 #ifdef WINE_NX_SWAP_POC
 #include "swap_file.h"
 #include "horizon_swap.h"
@@ -75,6 +79,10 @@ C_ASSERT( FIELD_OFFSET( TEB, TlsSlots[WOW64_TLS_CPURESERVED] ) == NX_PROF_TEB_CP
 C_ASSERT( sizeof(WOW64_CPURESERVED) == NX_PROF_CPU_CONTEXT && TYPE_ALIGNMENT( I386_CONTEXT ) <= NX_PROF_CPU_CONTEXT );
 C_ASSERT( FIELD_OFFSET( I386_CONTEXT, Ebp ) == NX_PROF_I386_EBP );
 C_ASSERT( FIELD_OFFSET( I386_CONTEXT, Esp ) == NX_PROF_I386_ESP );
+C_ASSERT( FIELD_OFFSET( WOW64_CPURESERVED, Machine ) == NX_PROF_CPU_MACHINE );
+C_ASSERT( IMAGE_FILE_MACHINE_I386 == NX_PROF_MACHINE_I386 );
+C_ASSERT( FIELD_OFFSET( TEB, TlsSlots[WOW64_TLS_MAX_NUMBER - 3] ) == NX_PROF_TEB_FEX_THREAD );
+C_ASSERT( FIELD_OFFSET( TEB, TlsSlots[WOW64_TLS_MAX_NUMBER - 2] ) == NX_PROF_TEB_FEX_CONTROL );
 
 u32 __nx_applet_type = AppletType_Application;
 size_t __nx_heap_size = 256 * 1024 * 1024;
@@ -112,6 +120,10 @@ u32 __nx_exception_ignoredebug = 1;
 #else
 #define WINE_NX_RUNTIME_BUILD "nx-wow64-console-11"
 #endif
+/* The commit the build says it was made from (CMakeLists.txt, from build.sh). */
+#ifndef WINE_NX_BUILD_ID
+#define WINE_NX_BUILD_ID ""
+#endif
 #define MAX_RUNTIME_MODULES 64
 #define MAX_IMPORT_DEPTH 16
 
@@ -129,9 +141,29 @@ extern NTSTATUS wine_nx_loader_last_open_status(void);
 extern const char *wine_nx_loader_last_export_diag(void);
 extern int wine_nx_sd_cache_install(void);
 extern int wine_nx_lazy_file_views;  /* dlls/ntdll/unix/horizon.c */
+extern int wine_nx_large_address_aware;  /* dlls/ntdll/unix/virtual.c */
 extern void wine_nx_sd_cache_flush(void);
 #ifdef WINE_NX_USB_STORAGE
 extern int wine_nx_usb_list( struct wine_nx_launcher_usb_volume *volumes, int max );
+#endif
+
+/* Which Mesa this runtime is linked with: mesa-switch, the card's own, or
+ * nxvk, a second runtime a program can be set to (runtime_switch_graphics_runtime). */
+#ifdef WINE_NX_NXVK
+static const int runtime_is_nxvk = 1;
+extern const char wine_nx_graphics_runtime[];  /* source/nxvk_entry.c */
+#else
+static const int runtime_is_nxvk = 0;
+#endif
+
+/* The runtime's own log, which each start writes afresh. The nxvk runtime's is
+ * a file of its own: the card's runtime starts after it for the launcher, and
+ * would otherwise write over the run that went wrong on nxvk before anyone
+ * could read it off the card. */
+#ifdef WINE_NX_NXVK
+#define RUNTIME_LOG RUNTIME_LOGS "/autorun_runtime_nxvk.log"
+#else
+#define RUNTIME_LOG RUNTIME_LOGS "/autorun_runtime.log"
 #endif
 
 static FILE *log_file;
@@ -281,15 +313,36 @@ static Thread stall_watch_thread;
 static int log_flusher_quit;
 static pthread_t log_flusher_thread;
 static int runtime_profile;
+static volatile int wine_nx_overlay_poll_armed;
+
+extern void carafeLoadingTick( void ) __attribute__((weak));
+extern void carafeSettingsTick( void ) __attribute__((weak));
+extern _Bool carafeMenuVisible( void ) __attribute__((weak));
+extern void carafeErrorMissingDll( const char *name ) __attribute__((weak));
+extern _Bool carafeErrorRelaunch( const char *own_nro, unsigned int exit_code ) __attribute__((weak));
+extern _Bool carafeErrorRestart( unsigned int exit_code ) __attribute__((weak));
+static void wine_nx_runtime_overlay_poll( void );
 
 static void *log_flusher( void *arg )
 {
     unsigned int ticks = 0;
+    u64 last_200ms = armGetSystemTick();
 
     (void)arg;
     while (!__atomic_load_n( &log_flusher_quit, __ATOMIC_RELAXED ))
     {
-        svcSleepThread( 200000000LL );
+        u64 now;
+        s64 sleep_ns = 100000000LL;
+
+        if (__atomic_load_n( &wine_nx_overlay_poll_armed, __ATOMIC_ACQUIRE ) && wine_nx_osk_visible())
+            sleep_ns = 33000000LL;
+        svcSleepThread( sleep_ns );
+        wine_nx_runtime_overlay_poll();
+        if (carafeLoadingTick) carafeLoadingTick();
+        if (carafeSettingsTick) carafeSettingsTick();
+        now = armGetSystemTick();
+        if (armTicksToNs( now - last_200ms ) < 200000000ULL) continue;
+        last_200ms = now;
         runtime_tick_std_streams();
         if (++ticks % 25 == 0)
         {
@@ -432,10 +485,11 @@ static void open_game_log( const char *target )
     }
     name[i] = 0;
     if ((len = strlen( name )) > 4 && !strcasecmp( name + len - 4, ".exe" )) name[len - 4] = 0;
-    /* Beside the runtime's own log, named after the program and the diagnostics
-     * the run had on, so a verbose or profiled run does not replace the plain
-     * one it is being compared with: Sims2EP9.log, Sims2EP9_verbose_profiler.log. */
-    snprintf( path, sizeof(path), "%s/%s%s%s.log", RUNTIME_LOGS, name,
+    /* Beside the runtime's own log, named after the program, the Mesa and the
+     * diagnostics the run had on, so a run on nxvk, verbose or profiled does not
+     * replace the plain one it is being compared with: Sims2EP9.log,
+     * Sims2EP9_nxvk.log, Sims2EP9_verbose_profiler.log. */
+    snprintf( path, sizeof(path), "%s/%s%s%s%s.log", RUNTIME_LOGS, name, runtime_is_nxvk ? "_nxvk" : "",
               wine_nx_runtime_verbose ? "_verbose" : "", runtime_profile ? "_profiler" : "" );
 
     pthread_mutex_lock( &log_mutex );
@@ -443,7 +497,7 @@ static void open_game_log( const char *target )
     if ((game_log_file = fopen( path, "w" )))
     {
         /* What was said before this point, so the file stands on its own. */
-        if ((sofar = fopen( RUNTIME_LOGS "/autorun_runtime.log", "r" )))
+        if ((sofar = fopen( RUNTIME_LOG, "r" )))
         {
             char chunk[4096];
             size_t got;
@@ -455,6 +509,13 @@ static void open_game_log( const char *target )
     }
     pthread_mutex_unlock( &log_mutex );
     log_line( "[LOG] this run is kept in %s", path );
+}
+
+static int stall_report_asked;
+
+void wine_nx_stall_report_soon( void )
+{
+    __atomic_store_n( &stall_report_asked, 1, __ATOMIC_RELEASE );
 }
 
 static void stall_watch( void *arg )
@@ -471,7 +532,12 @@ static void stall_watch( void *arg )
 
         /* Five seconds, in slices, so quitting does not wait for them. */
         for (i = 0; i < 50 && !__atomic_load_n( (int *)&stall_watch_quit, __ATOMIC_RELAXED ); i++)
+        {
             svcSleepThread( 100000000LL );
+            if (!__atomic_exchange_n( &stall_report_asked, 0, __ATOMIC_ACQ_REL )) continue;
+            log_line( "[STALL] a thread has waited 5 s for a place; where the threads are standing" );
+            wine_nx_threads_report_stalled();
+        }
         frames = __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
                  (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
                  wine_nx_compositor_frames_fast() +
@@ -496,6 +562,119 @@ void wine_nx_runtime_trace( const char *msg )
     log_line( "%s", msg );
 }
 
+void wine_nx_runtime_log_flush( void )
+{
+    pthread_mutex_lock( &log_mutex );
+    if (log_file) fflush( log_file );
+    if (game_log_file) fflush( game_log_file );
+    pthread_mutex_unlock( &log_mutex );
+    wine_nx_sd_cache_flush();
+}
+
+/* The runtime's native stderr, which nothing reads on the Switch: Mesa's
+ * nouveau prints its errors there (NOUVEAU_ERR is an fprintf to stderr), and
+ * so do others. Every thread has a stream of its own, but they all write
+ * through the device stderr is, which this takes over once the console has
+ * set it (consoleExit leaves it): into the log as [NATIVE-STDERR] lines, the
+ * first 512 and from then on every time their number doubles. */
+static Mutex native_stderr_mutex;
+static char native_stderr_line[512];
+static size_t native_stderr_len;
+static unsigned int native_stderr_lines;
+
+static ssize_t native_stderr_write( struct _reent *r, void *fd, const char *ptr, size_t len )
+{
+    size_t done = 0;
+
+    (void)r;
+    (void)fd;
+    while (done < len)
+    {
+        char line[sizeof(native_stderr_line)];
+        unsigned int n = 0;
+
+        line[0] = 0;
+        mutexLock( &native_stderr_mutex );
+        for (; done < len; done++)
+        {
+            char c = ptr[done];
+
+            if (c == '\n' || native_stderr_len >= sizeof(native_stderr_line) - 1)
+            {
+                memcpy( line, native_stderr_line, native_stderr_len );
+                line[native_stderr_len] = 0;
+                native_stderr_len = 0;
+                n = ++native_stderr_lines;
+                if (c == '\n') done++;
+                break;
+            }
+            if (c != '\r') native_stderr_line[native_stderr_len++] = c;
+        }
+        mutexUnlock( &native_stderr_mutex );
+        /* Outside the lock: the log takes its own. */
+        if (line[0] && (n <= 512 || !(n & (n - 1)))) log_line( "[NATIVE-STDERR] %s", line );
+    }
+    return len;
+}
+
+static const devoptab_t native_stderr_device = { .name = "stderr", .write_r = native_stderr_write };
+
+static void runtime_native_stderr_hook( void )
+{
+    devoptab_list[STD_ERR] = &native_stderr_device;
+}
+
+void wine_nx_runtime_open_error_log( void )
+{
+    pthread_mutex_lock( &log_mutex );
+    if (!log_file)
+    {
+        mkdir( "sdmc:/switch", 0777 );
+        mkdir( RUNTIME_DIR, 0777 );
+        mkdir( RUNTIME_LOGS, 0777 );
+        if ((log_file = fopen( RUNTIME_LOG, "a" )))
+            setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
+    }
+    pthread_mutex_unlock( &log_mutex );
+}
+
+const char *wine_nx_console_locale( void )
+{
+    static const char *cached;
+    u64 code = 0;
+    SetLanguage lang = SetLanguage_ENUS;
+
+    if (cached) return cached;
+    cached = "en-US";
+    if (R_FAILED( setInitialize() )) return cached;
+    if (R_SUCCEEDED( setGetSystemLanguage( &code ) ) && R_SUCCEEDED( setMakeLanguage( code, &lang ) ))
+    {
+        switch (lang)
+        {
+        case SetLanguage_JA: cached = "ja-JP"; break;
+        case SetLanguage_FR: cached = "fr-FR"; break;
+        case SetLanguage_DE: cached = "de-DE"; break;
+        case SetLanguage_IT: cached = "it-IT"; break;
+        case SetLanguage_ES: cached = "es-ES"; break;
+        case SetLanguage_ZHCN:
+        case SetLanguage_ZHHANS: cached = "zh-CN"; break;
+        case SetLanguage_KO: cached = "ko-KR"; break;
+        case SetLanguage_NL: cached = "nl-NL"; break;
+        case SetLanguage_PT: cached = "pt-PT"; break;
+        case SetLanguage_RU: cached = "ru-RU"; break;
+        case SetLanguage_ZHTW:
+        case SetLanguage_ZHHANT: cached = "zh-TW"; break;
+        case SetLanguage_ENGB: cached = "en-GB"; break;
+        case SetLanguage_FRCA: cached = "fr-CA"; break;
+        case SetLanguage_ES419: cached = "es-MX"; break;
+        case SetLanguage_PTBR: cached = "pt-BR"; break;
+        default: break;
+        }
+    }
+    setExit();
+    return cached;
+}
+
 /* Per-operation traces (system calls, server requests, fonts, window painting)
  * are formatted and written to the SD card as they happen, which slows the
  * whole program down. Their call sites check this first; it is set from
@@ -504,7 +683,29 @@ int wine_nx_runtime_verbose;
 static enum launcher_d3d_renderer runtime_d3d;
 static enum dxvk_source runtime_dxvk_source;
 static int runtime_fex;
+/* The program asked for the FEX build with Carafe's patches, of this version
+ * or the newest on the card; and whether it is the one in system32. */
+static int runtime_fex_carafe;
+static char runtime_fex_version[32];
+static int runtime_fex_carafe_active;
 static int runtime_four_cores;
+/* Carafe's reports and its orchestrator run on the log's thread, which starts
+ * before the launcher: they ask here, and hear "not yet" (-1) until the
+ * settings of the program that is about to start have been read. */
+static int runtime_program_settings_read, runtime_orchestrator;
+extern int carafe_lock_boost_enabled __attribute__((weak));  /* carafe_lock_boost.c */
+
+int wine_nx_program_profiling( void )
+{
+    if (!__atomic_load_n( &runtime_program_settings_read, __ATOMIC_ACQUIRE )) return -1;
+    return runtime_profile != 0;
+}
+
+int wine_nx_program_orchestrating( void )
+{
+    if (!__atomic_load_n( &runtime_program_settings_read, __ATOMIC_ACQUIRE )) return -1;
+    return runtime_orchestrator != 0;
+}
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
 static char runtime_dxvk_version[32];
@@ -522,6 +723,68 @@ extern int wine_nx_nouveau_skip_clean __attribute__((weak));
  * forced virtual screen, in case that walk of the registry misbehaves. */
 int wine_nx_display_devices = 1;
 
+/* How a program that asked for a display mode of its own fills the console's
+ * screen. Read by win32u's mapping (source_virt_to_raw_ratios in
+ * dlls/win32u/sysparams.c), which is at once what the screen shows and where a
+ * finger's points land: 0 the whole picture with black bars round it, 1 the
+ * picture filling the screen with its edges cropped, 2 stretched to it, 3 at
+ * its own size in the middle. The launcher's "Picture of another mode" setting
+ * owns it; picture-mode: "whole", "edges", "stretched" or "own-size" in
+ * config/settings.json says the same. */
+int wine_nx_picture_mode = 0;
+
+/* Whether a display mode a program asks for is emulated by win32u: its OpenGL
+ * then draws into a framebuffer object of the mode's size, which an internal
+ * context of win32u's, sharing the program's objects, blits to the window at
+ * every swap (dlls/win32u/opengl.c, framebuffer_surface). Upstream Autorun has
+ * this off on the Switch; this fork has it on, for the picture modes. On
+ * mesa-switch's nvc0 the two contexts share textures and one pushbuffer, and
+ * Vampire: The Masquerade - Redemption, which asks for 640x480, latches
+ * "corrupt or oversized bufctx list" here and not upstream. mode-emulation in
+ * config/settings.json, or mode-emulation=0 in a program's settings file,
+ * turns it off: the program's OpenGL then draws to the window's surface itself,
+ * as upstream's does. Read by sysparams_init. */
+int wine_nx_emulate_modeset = 1;
+
+/* Whether a thread's long quick run of yields (Sleep(0), SwitchToThread, a
+ * wait that timed out, a message poll that found nothing) sleeps a little each
+ * instead of keeping its core busy (dlls/ntdll/unix/horizon_yield_backoff.h,
+ * read by NtYieldExecution). yield-backoff in config/settings.json, or
+ * yield-backoff=0 in a program's settings file, turns it off. */
+int wine_nx_yield_backoff = 1;
+
+/* Whether the frame rate is drawn over the program's OpenGL frames
+ * (dlls/win32u/winnx_opengl.c, winnx_fps.h): its DXVK HUD setting is on, and
+ * DXVK's own HUD never sees a game drawn through OpenGL, Wine's Direct3D
+ * among them. For the Wine renderer the launcher calls it FPS counter. */
+int wine_nx_fps_counter;
+
+/* Whether a program's frame rate goes to FPSLocker and FPSLocker's target and
+ * display sync come back (saltynx.c, fpslocker.h). fpslocker in
+ * config/settings.json, or fpslocker=0 in a program's settings file, turns it
+ * off. */
+int wine_nx_fpslocker = 1;
+
+/* The DXVK payload a program runs with has a ddraw.dll of its own (DXVK-Sarek's
+ * D3D7 over D3D9): that one passes DirectDraw on to Wine's, whose wined3d then
+ * makes an OpenGL surface for the window before DXVK asks for its Vulkan
+ * surface. The screen has one NWindow, the OpenGL surface took it and
+ * "[NXVK] screen busy; Vulkan surface refused" ended Vampire: The Masquerade -
+ * Redemption at CreateDevice. With this set, and once the program has started
+ * Vulkan, OpenGL surfaces are made offscreen (winnx_opengl.c). */
+int wine_nx_dxvk_wraps_ddraw;
+
+static const char *picture_mode_text( int mode )
+{
+    switch (mode)
+    {
+    case 1: return "fills the screen, edges cropped";
+    case 2: return "stretched to the screen";
+    case 3: return "its own size, in the middle";
+    default: return "whole, with black bars";
+    }
+}
+
 /* Whether the win32u Switch driver opens the on-screen keyboard by itself
  * when an edit-like control gets keyboard focus (dlls/win32u/winnx_drv.c).
  * keyboard-on-text-focus: false in config/settings.json turns that off (an
@@ -529,7 +792,22 @@ int wine_nx_display_devices = 1;
  * programs to open it themselves through NtUserShowSoftwareKeyboard. */
 int wine_nx_swkbd_auto_enabled = 1;
 struct input_profile wine_nx_input_profile;
+static pthread_mutex_t wine_nx_input_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 uint64_t wine_nx_input_swallowed;
+
+void wine_nx_input_profile_get( struct input_profile *out )
+{
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    *out = wine_nx_input_profile;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+}
+
+void wine_nx_input_profile_set( const struct input_profile *in )
+{
+    pthread_mutex_lock( &wine_nx_input_profile_mutex );
+    wine_nx_input_profile = *in;
+    pthread_mutex_unlock( &wine_nx_input_profile_mutex );
+}
 
 /***********************************************************************
  * Framebuffer platform hooks used by the win32u Switch display driver
@@ -545,6 +823,13 @@ static struct pointer_cursor wine_nx_cursor =
 static int wine_nx_cursor_moved;
 static int wine_nx_cursor_visible = 1;  /* 0 while the program hides the mouse cursor */
 static int wine_nx_gl_window;  /* an OpenGL window surface owns the screen's NWindow */
+static int wine_nx_screen_reserved;
+static int wine_nx_vk_surfaces;
+static int wine_nx_vk_swapchains;
+int wine_nx_window_picture_shown;
+HANDLE wine_nx_window_picture_event;
+int wine_nx_window_picture_pending;
+static unsigned int wine_nx_picture_thread;
 /* Controller and touchscreen state, guarded by wine_nx_pointer_mutex. */
 static pthread_mutex_t wine_nx_pointer_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct pointer_cursor wine_nx_pointer =
@@ -701,8 +986,113 @@ void *wine_nx_gl_acquire_window(void)
     pthread_mutex_unlock( &wine_nx_fb_mutex );
     if (window && compositor) wine_nx_compositor_suspend();
     if (window) nwindowSetDimensions( window, WINE_NX_FB_W, WINE_NX_FB_H );
+    if (window) appletNotifyRunning( NULL );
     log_line( "[NXGL] %s", window ? "screen handed to an OpenGL surface" : "screen busy; OpenGL surface refused" );
     return window;
+}
+
+void *wine_nx_vk_reserve_window(void)
+{
+    NWindow *window = NULL;
+    int surfaces = 0;
+
+    if (!wine_nx_compositor_enabled()) return wine_nx_gl_acquire_window();
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (!wine_nx_gl_window && !wine_nx_fb_lock_depth)
+    {
+        window = nwindowGetDefault();
+        wine_nx_gl_window = 1;
+        wine_nx_screen_reserved = 1;
+        surfaces = wine_nx_vk_surfaces = 1;
+    }
+    else if (wine_nx_vk_surfaces && !wine_nx_fb_lock_depth)
+    {
+        window = nwindowGetDefault();
+        surfaces = ++wine_nx_vk_surfaces;
+    }
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (surfaces > 1)
+        log_line( "[NXVK] screen shared with the Vulkan surface before it; %d surfaces hold it", surfaces );
+    else
+        log_line( "[NXVK] %s", window ? "screen reserved for a Vulkan surface; the compositor keeps it until a swapchain"
+                                      : "screen busy; Vulkan surface refused" );
+    return window;
+}
+
+void wine_nx_vk_take_window(void)
+{
+    int take;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    take = wine_nx_screen_reserved;
+    wine_nx_screen_reserved = 0;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (!take) return;
+    wine_nx_compositor_suspend();
+    nwindowSetDimensions( nwindowGetDefault(), WINE_NX_FB_W, WINE_NX_FB_H );
+    appletNotifyRunning( NULL );
+    log_line( "[NXVK] screen handed to the Vulkan swapchain" );
+}
+
+void wine_nx_vk_swapchain_made(void)
+{
+    __atomic_add_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
+}
+
+void wine_nx_vk_swapchain_gone(void)
+{
+    __atomic_sub_fetch( &wine_nx_vk_swapchains, 1, __ATOMIC_ACQ_REL );
+}
+
+int wine_nx_screen_wants_pictures(void)
+{
+    extern int wine_nx_watch_window_pictures(void) __attribute__((weak));
+
+    if (wine_nx_watch_window_pictures && !__atomic_load_n( &wine_nx_window_picture_shown, __ATOMIC_ACQUIRE ) &&
+        wine_nx_watch_window_pictures())
+        return 1;
+    return __atomic_load_n( &wine_nx_vk_surfaces, __ATOMIC_ACQUIRE ) &&
+           !__atomic_load_n( &wine_nx_screen_reserved, __ATOMIC_ACQUIRE );
+}
+
+void wine_nx_screen_input_waits(unsigned int thread)
+{
+    if (thread && __atomic_load_n( &wine_nx_picture_thread, __ATOMIC_ACQUIRE ) == thread)
+        __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
+}
+
+void wine_nx_window_picture_presented(void)
+{
+    if (__atomic_exchange_n( &wine_nx_window_picture_pending, 0, __ATOMIC_ACQ_REL ) &&
+        !__atomic_exchange_n( &wine_nx_window_picture_shown, 1, __ATOMIC_ACQ_REL ))
+        log_line( "[NXSCREEN] foreground primary surface submitted" );
+}
+
+void wine_nx_screen_picture_drawn(unsigned int thread, int redrawn)
+{
+    extern void wine_nx_vk_displace_screen(void) __attribute__((weak));
+    int give, shown;
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give && wine_nx_vk_displace_screen) wine_nx_vk_displace_screen();
+
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    give = wine_nx_vk_surfaces && wine_nx_gl_window && !wine_nx_screen_reserved &&
+           !__atomic_load_n( &wine_nx_vk_swapchains, __ATOMIC_ACQUIRE );
+    if (give) wine_nx_screen_reserved = 1;
+    shown = !wine_nx_gl_window || wine_nx_screen_reserved;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (give)
+    {
+        wine_nx_compositor_resume();
+        log_line( "[NXVK] a window was drawn with GDI and no swapchain shows the screen; the compositor shows the "
+                  "windows until the next swapchain" );
+    }
+    if (!shown) return;
+    if (redrawn) __atomic_store_n( &wine_nx_window_picture_shown, 1, __ATOMIC_RELEASE );
+    else __atomic_store_n( &wine_nx_picture_thread, thread, __ATOMIC_RELEASE );
 }
 
 /* The OpenGL surface is destroyed; the framebuffer or the compositor may take
@@ -710,10 +1100,22 @@ void *wine_nx_gl_acquire_window(void)
 void wine_nx_gl_release_window(void)
 {
     int compositor = wine_nx_compositor_running();
+    int surfaces;
 
     pthread_mutex_lock( &wine_nx_fb_mutex );
-    wine_nx_gl_window = 0;
+    surfaces = wine_nx_vk_surfaces > 1 ? --wine_nx_vk_surfaces : 0;
+    if (!surfaces)
+    {
+        wine_nx_vk_surfaces = 0;
+        wine_nx_gl_window = 0;
+        wine_nx_screen_reserved = 0;
+    }
     pthread_mutex_unlock( &wine_nx_fb_mutex );
+    if (surfaces)
+    {
+        log_line( "[NXVK] a Vulkan surface let go of the screen; %d still hold it", surfaces );
+        return;
+    }
     log_line( "[NXGL] screen returned to the %s", compositor ? "compositor" : "framebuffer" );
     if (compositor) wine_nx_compositor_resume();
 }
@@ -786,6 +1188,21 @@ void wine_nx_cursor_show( int visible )
     wine_nx_compositor_cursor( x, y, visible );
 }
 
+int wine_nx_cursor_state( int *x, int *y, int *visible )
+{
+    pthread_mutex_lock( &wine_nx_fb_mutex );
+    if (x) *x = (int)wine_nx_cursor.x;
+    if (y) *y = (int)wine_nx_cursor.y;
+    if (visible) *visible = wine_nx_cursor_visible;
+    pthread_mutex_unlock( &wine_nx_fb_mutex );
+    return 1;
+}
+
+void wine_nx_cursor_bitmap( uint32_t *rgba )
+{
+    if (rgba) pointer_cursor_rgba( rgba );
+}
+
 /* The floating keyboard (osk.c) draws its labels with the console's own font,
  * which stays mapped for as long as the service is open. */
 int wine_nx_osk_font( const void **data, size_t *size )
@@ -826,6 +1243,192 @@ static unsigned int osk_buttons( u64 held )
  * take the A that clicked the field for a key. */
 static unsigned int osk_last_held;
 
+/* The controls panel (osk.c): what the controller sends, over the program,
+ * which - and A together put up and take down. Its rows are what the profile
+ * in effect says -- the program's controller in the controller mode, the keys
+ * and mouse actions in the keyboard mode -- so a game whose mapping was
+ * remapped says what it now sends. */
+static int controls_open;
+static u64 controls_before;
+
+/* The tasks panel: what the program is running, over it. Another view of the
+ * keyboard's surface, like the controls panel, and worked the same way -- the
+ * program gets no controller while it is up. Its rows come from the same walk
+ * of the thread registry as the [THREADS] line (thread_profile.c), with the
+ * memory and the frames beside them, and they are built again every second it
+ * is up: a task manager that showed what was there when it opened would be a
+ * picture of the past. */
+#define TASKS_ROWS 24
+
+static int tasks_open;
+static u64 tasks_built, tasks_before;
+static char tasks_title[96];
+static struct wine_nx_osk_map_row tasks_rows[TASKS_ROWS];
+static char tasks_names[TASKS_ROWS][40], tasks_values[TASKS_ROWS][44];
+static struct wine_nx_osk_map_row controls_rows[INPUT_SOURCE_COUNT];
+static char controls_names[INPUT_SOURCE_COUNT][28], controls_values[INPUT_SOURCE_COUNT][48];
+
+static void controls_panel_build( const char **title, int *count )
+{
+    struct input_profile profile;
+    int controller, n = 0;
+    unsigned int i;
+
+    wine_nx_input_profile_get( &profile );
+    controller = profile.mode == INPUT_CONTROLLER;
+    for (i = 0; i < INPUT_SOURCE_COUNT && n < INPUT_SOURCE_COUNT; i++)
+    {
+        const struct input_binding *binding = controller ? &profile.pad[i] : &profile.keys[i];
+
+        if (!binding->count) continue;   /* what the profile leaves alone sends nothing */
+        snprintf( controls_names[n], sizeof(controls_names[0]), "%s", input_sources[i].label );
+        input_binding_label( binding, controller, controls_values[n], sizeof(controls_values[0]) );
+        controls_rows[n].name = controls_names[n];
+        controls_rows[n].value = controls_values[n];
+        n++;
+    }
+    *title = controller ? "Controls: the controller, as the program sees it"
+                        : "Controls: the keyboard and mouse it gets";
+    *count = n;
+}
+
+static void tasks_panel( int show );
+
+static void controls_panel( int show )
+{
+    const char *title;
+    int count = 0;
+
+    if (show)
+    {
+        /* One panel at a time: they are two views of one surface. */
+        if (tasks_open) tasks_panel( 0 );
+        controls_panel_build( &title, &count );
+    }
+    wine_nx_osk_map_show( show, show ? title : NULL, controls_rows, count );
+    controls_open = show;
+    log_line( "[CONTROLS] panel %s, %d rows", show ? "shown" : "hidden", count );
+}
+
+/* Wine Mono, which a .NET program (a game's configurator, often) needs, where
+ * mscoree looks for it: C:\windows\mono\mono-2.0, then the data directory's
+ * mono/wine-mono-<version> (WINE_MONO_VERSION, dlls/mscoree/mscoree_private.h).
+ * Only the 32-bit build is asked for: 32-bit programs are most of them. */
+#define RUNTIME_WINE_MONO_VERSION "11.3.0"
+
+static void log_wine_mono( void )
+{
+    static const char *const places[] =
+    {
+        RUNTIME_DIR "/drive_c/windows/mono/mono-2.0",
+        RUNTIME_DIR "/share/wine/mono/wine-mono-" RUNTIME_WINE_MONO_VERSION,
+    };
+    char path[256];
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(places); i++)
+    {
+        snprintf( path, sizeof(path), "%s/bin/libmono-2.0-x86.dll", places[i] );
+        if (access( path, F_OK )) continue;
+        log_line( "[MONO] Wine Mono found at %s: .NET programs can start", places[i] );
+        return;
+    }
+    log_line( "[MONO] no Wine Mono on the card (%s/bin or %s/bin): a .NET program will not start",
+              places[1], places[0] );
+}
+
+/* Frames shown, however the program draws: the framebuffer's, OpenGL's swaps,
+ * the compositor's and Vulkan's presents. The Tasks panel's rate, and the one
+ * FPSLocker is given (saltynx.c). */
+unsigned int wine_nx_frames_shown( void )
+{
+    extern unsigned int wine_nx_gl_swaps __attribute__((weak));
+    extern unsigned int wine_nx_vk_presents __attribute__((weak));
+
+    return __atomic_load_n( &wine_nx_fb_frames, __ATOMIC_RELAXED ) +
+           (&wine_nx_gl_swaps ? __atomic_load_n( &wine_nx_gl_swaps, __ATOMIC_RELAXED ) : 0) +
+           wine_nx_compositor_frames_fast() +
+           (&wine_nx_vk_presents ? __atomic_load_n( &wine_nx_vk_presents, __ATOMIC_RELAXED ) : 0);
+}
+
+static void tasks_panel_build( const char **title, int *count )
+{
+    static struct wine_nx_task tasks[TASKS_ROWS];
+    static u64 last_build;
+    static unsigned int last_frames, last_mb;
+    extern unsigned long long wine_nx_sd_bytes __attribute__((weak));
+    extern unsigned int wine_nx_sd_cache_mb( void );
+    extern char *fake_heap_start, *fake_heap_end;
+    u64 now = armGetSystemTick();
+    struct mallinfo heap = mallinfo();
+    unsigned long long heap_size = (unsigned long long)(fake_heap_end - fake_heap_start);
+    unsigned long long heap_free = heap.fordblks + (heap_size > heap.arena ? heap_size - heap.arena : 0);
+    unsigned int frames = wine_nx_frames_shown();
+    unsigned int card = &wine_nx_sd_bytes ? (unsigned int)( __atomic_load_n( &wine_nx_sd_bytes, __ATOMIC_RELAXED ) >> 20 ) : 0;
+    unsigned int fps = 0, read = 0, total = 0, n, i;
+
+    if (last_build && now != last_build)
+    {
+        unsigned long long ns = armTicksToNs( now - last_build );
+
+        fps = (unsigned int)((unsigned long long)(frames - last_frames) * 1000000000ull / ns);
+        read = (unsigned int)((unsigned long long)(card - last_mb) * 1000000000ull / ns);
+    }
+    last_build = now;
+    last_frames = frames;
+    last_mb = card;
+
+    n = wine_nx_tasks_snapshot( tasks, TASKS_ROWS, &total );
+    snprintf( tasks_title, sizeof(tasks_title), "Tasks: %u threads, %u.%u cores, %u fps",
+              n, total / 1000, total % 1000 / 10, fps );
+    for (i = 0; i < n; i++)
+    {
+        snprintf( tasks_names[i], sizeof(tasks_names[0]), "%u %s", tasks[i].tid,
+                  tasks[i].name[0] ? tasks[i].name : (tasks[i].kind == 's' ? "server" : "thread") );
+        snprintf( tasks_values[i], sizeof(tasks_values[0]), "%u.%u%% on core %d",
+                  tasks[i].permille / 10, tasks[i].permille % 10, tasks[i].core );
+        tasks_rows[i].name = tasks_names[i];
+        tasks_rows[i].value = tasks_values[i];
+    }
+    /* The three that are not threads, where they fit. */
+    {
+        static const char *const extra[] = { "Memory", "Card", "Heap" };
+        char values[3][44];
+
+        snprintf( values[0], sizeof(values[0]), "%llu MB used, %llu MB free",
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20 );
+        snprintf( values[1], sizeof(values[1]), "%u MB/s, cache %u MB", read, wine_nx_sd_cache_mb() );
+        snprintf( values[2], sizeof(values[2]), "%llu MB arena", (unsigned long long)heap.arena >> 20 );
+        for (i = 0; i < 3 && n + i < TASKS_ROWS; i++)
+        {
+            snprintf( tasks_names[n + i], sizeof(tasks_names[0]), "%s", extra[i] );
+            snprintf( tasks_values[n + i], sizeof(tasks_values[0]), "%s", values[i] );
+            tasks_rows[n + i].name = tasks_names[n + i];
+            tasks_rows[n + i].value = tasks_values[n + i];
+        }
+        n += i;
+    }
+    *title = tasks_title;
+    *count = n;
+}
+
+static void tasks_panel( int show )
+{
+    const char *title = NULL;
+    int count = 0;
+
+    if (show)
+    {
+        if (controls_open) controls_panel( 0 );
+        tasks_panel_build( &title, &count );
+        tasks_built = armGetSystemTick();
+    }
+    wine_nx_osk_tasks_show( show, title, tasks_rows, count );
+    tasks_open = show;
+    if (show) log_line( "[TASKS] panel shown, %d rows", count );
+    else log_line( "[TASKS] panel hidden" );
+}
+
 uint64_t wine_nx_osk_clock( void )
 {
     return armTicksToNs( armGetSystemTick() );
@@ -834,10 +1437,16 @@ uint64_t wine_nx_osk_clock( void )
 void wine_nx_keyboard_open( void )
 {
     if (!wine_nx_osk_visible()) log_line( "[OSK] opened by the program" );
+    if (controls_open) controls_panel( 0 );
+    if (tasks_open) tasks_panel( 0 );
     wine_nx_osk_show( 1, __atomic_load_n( &osk_last_held, __ATOMIC_RELAXED ) );
 }
 
-#define WINE_NX_POINTER_LEFT  0x1
+/* The buttons the display driver reads from the pointer: 0x1 left, 0x2 right,
+ * 0x4 middle, as dlls/win32u/winnx_drv.c has them. */
+#define WINE_NX_POINTER_LEFT   0x1
+#define WINE_NX_POINTER_RIGHT  0x2
+#define WINE_NX_POINTER_MIDDLE 0x4
 
 static struct input_key_edges runtime_key_edges;
 static uint64_t runtime_keys_delivered[INPUT_KEY_WORDS];
@@ -845,6 +1454,10 @@ static int runtime_wheel[2];
 
 void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
+extern int wine_nx_watch_window_pictures( void ) __attribute__((weak));
+extern void carafeHidPoll( void ) __attribute__((weak));
+extern void wine_nx_menu_poll( u64 held ) __attribute__((weak));
+extern void carafeSettingsTick( void ) __attribute__((weak));
 
 
 int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
@@ -852,10 +1465,12 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     HidTouchScreenState touch = {0};
     struct input_pad raw = {0};
     struct input_output output = {0};
-    const struct input_profile *profile = &wine_nx_input_profile;
+    struct input_profile profile;
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
+    int controls_were_open = 0, tasks_were_open = 0, finger_down = 0;
     static int osk_combo;
+    static int touch_press;          /* a finger is pressing, across frames */
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
 
@@ -863,15 +1478,17 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     if (!wine_nx_pointer_ready)
     {
         hidInitializeTouchScreen();
+        /* A mouse in the dock points too; it says so when it is plugged in. */
+        hidInitializeMouse();
         padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
         padInitializeDefault( &wine_nx_pad );
-        wine_nx_pointer_tick = armGetSystemTick();
-        wine_nx_pointer_ready = 1;
+        __atomic_store_n( &wine_nx_pointer_tick, armGetSystemTick(), __ATOMIC_RELAXED );
+        __atomic_store_n( &wine_nx_pointer_ready, 1, __ATOMIC_RELEASE );
     }
     padUpdate( &wine_nx_pad );
     now = armGetSystemTick();
     elapsed = armTicksToNs( now - wine_nx_pointer_tick );
-    wine_nx_pointer_tick = now;
+    __atomic_store_n( &wine_nx_pointer_tick, now, __ATOMIC_RELAXED );
     all_held = padIsConnected( &wine_nx_pad ) ? padGetButtons( &wine_nx_pad ) : 0;
     held = all_held;
     if (padIsConnected( &wine_nx_pad ))
@@ -879,23 +1496,130 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         HidAnalogStickState left = padGetStickPos( &wine_nx_pad, 0 ), right = padGetStickPos( &wine_nx_pad, 1 );
         raw = (struct input_pad){ held, { left.x, left.y, right.x, right.y } };
     }
+    if (wine_nx_menu_poll) wine_nx_menu_poll( all_held );
     {
-        const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
+        /* - and A together: the controls panel up, and the same again down. */
+        const u64 with_a = HidNpadButton_Minus | HidNpadButton_A;
+        u64 controls = (held & with_a) == with_a ? with_a : 0;
+        static u64 controls_since;
+        static int controls_fired;
+
+        controls_were_open = controls_open;
+        if (!controls)
+        {
+            controls_since = 0;
+            controls_fired = 0;
+        }
+        else
+        {
+            if (!controls_since)
+            {
+                controls_since = now;
+                log_line( "[CONTROLS] - and A down, pad %llx", (unsigned long long)held );
+            }
+            if (!controls_fired && !wine_nx_osk_visible() &&
+                ((controls_before & controls) != controls ||
+                 armTicksToNs( now - controls_since ) >= 200000000ull))
+            {
+                controls_fired = 1;
+                controls_panel( !controls_open );
+            }
+        }
+        if (controls_open && wine_nx_osk_visible()) controls_panel( 0 );
+        controls_were_open |= controls_open;
+        controls_before = held;
+    }
+    {
+        /* - and Y together: the tasks panel up, and the same again down, on
+         * the same terms as the controls panel. While it is up its rows are
+         * built again every second, so it shows the program as it is. */
+        const u64 with_y = HidNpadButton_Minus | HidNpadButton_Y;
+        u64 tasks = (held & with_y) == with_y ? with_y : 0;
+        static u64 tasks_since;
+        static int tasks_fired;
+
+        tasks_were_open = tasks_open;
+        if (!tasks)
+        {
+            tasks_since = 0;
+            tasks_fired = 0;
+        }
+        else
+        {
+            if (!tasks_since)
+            {
+                tasks_since = now;
+                log_line( "[TASKS] - and Y down" );
+            }
+            if (!tasks_fired && !wine_nx_osk_visible() &&
+                ((tasks_before & tasks) != tasks ||
+                 armTicksToNs( now - tasks_since ) >= 200000000ull))
+            {
+                tasks_fired = 1;
+                tasks_panel( !tasks_open );
+            }
+        }
+        if (tasks_open && wine_nx_osk_visible()) tasks_panel( 0 );
+        tasks_were_open |= tasks_open;
+        tasks_before = held;
+        if (tasks_open && armTicksToNs( now - tasks_built ) >= 1000000000ull)
+        {
+            const char *title;
+            int count;
+
+            tasks_panel_build( &title, &count );
+            wine_nx_osk_tasks_show( 1, title, tasks_rows, count );
+            tasks_built = now;
+        }
+    }
+    {
+        /* The keyboard opens and closes from a combination, from the program,
+         * and from its own Close key: the log says which happened, and when. */
+        static int osk_was_visible;
+        int up = wine_nx_osk_visible();
+
+        if (up != osk_was_visible)
+        {
+            osk_was_visible = up;
+            log_line( "[OSK] %s", up ? "up" : "down" );
+        }
+    }
+    /* One look at the screen for the whole poll: the keyboard, the fingers that
+     * scroll and the finger that presses all read the same sample, and the mouse
+     * in the dock can see whether a finger is on the glass. */
+    finger_down = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+    {
+        const u64 osk = HidNpadButton_Minus | HidNpadButton_B;
         unsigned int bits = osk_buttons( held );
         if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible())
+        {
+            if (controls_open) controls_panel( 0 );
+            if (tasks_open) tasks_panel( 0 );
             wine_nx_osk_show( 1, bits );
+        }
         osk_combo = (held & osk) == osk;
         __atomic_store_n( &osk_last_held, bits, __ATOMIC_RELAXED );
         if (wine_nx_osk_visible())
         {
-            int touching = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
-            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], touching,
-                                             touching ? (int)touch.touches[0].x : 0,
-                                             touching ? (int)touch.touches[0].y : 0, armTicksToNs( now ) );
+            /* Every finger, not only the first: the keyboard holds a key per
+             * finger, so Shift can be held while another types. */
+            struct wine_nx_osk_point fingers[WINE_NX_OSK_FINGERS];
+            int count = 0, i, touching = finger_down;
+
+            for (i = 0; touching && i < (int)touch.count && count < WINE_NX_OSK_FINGERS; i++)
+            {
+                fingers[count].x = (int)touch.touches[i].x;
+                fingers[count].y = (int)touch.touches[i].y;
+                count++;
+            }
+            on_keyboard = wine_nx_osk_input( bits, raw.axis[0], raw.axis[1], fingers, count, armTicksToNs( now ) );
             keyboard = 1;
             swallowed = held;
         }
         else swallowed &= held;
+        /* And the panel has the controller while it is up, so reading it does
+         * not click or type under it -- nor does taking it down. */
+        if ((controls_were_open || tasks_were_open) && !wine_nx_osk_visible()) swallowed = held;
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
@@ -906,27 +1630,165 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             wine_nx_compositor_redraw();
         }
     }
-    emulate = !keyboard && profile->mode == INPUT_KEYBOARD_MOUSE;
+    /* Said once: the profile in force decides whether the stick may move the
+     * cursor at all, and a finger is the one pointer that should always
+     * work. */
+    wine_nx_input_profile_get( &profile );
+    {
+        static int profile_told;
 
-    if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+        if (!profile_told)
+        {
+            profile_told = 1;
+            log_line( "[POINTER] input mode %d, mouse speed %d, deadzone %d/%d",
+                      profile.mode, profile.mouse_speed, profile.deadzone[0], profile.deadzone[1] );
+        }
+    }
+    emulate = !keyboard && !controls_open && !tasks_open && profile.mode == INPUT_KEYBOARD_MOUSE;
+
+    /* A mouse plugged into the dock reports relative deltas and wheel turns so
+     * mouse-look games (SetCursorPos / ClipCursor) keep turning freely; a
+     * finger on the glass wins over it. */
+    {
+        static int mouse_was_connected;
+        static u64 last_mouse_sample;
+        HidMouseState states[17];
+        size_t count = hidGetMouseStates( states, ARRAY_SIZE(states) );
+
+        if (count && (states[0].attributes & HidMouseAttribute_IsConnected))
+        {
+            if (!mouse_was_connected)
+            {
+                log_line( "[NXINPUT] physical mouse connected" );
+                last_mouse_sample = states[0].sampling_number;
+                if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
+                {
+                    int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+                    int placed_now;
+
+                    pointer_cursor_place( &wine_nx_pointer, states[0].x, states[0].y );
+                    placed_now = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
+                    moved |= placed_now;
+                    wine_nx_pointer_placed |= placed_now;
+                }
+            }
+            else
+            {
+                int dx = 0, dy = 0, wheel_x = 0, wheel_y = 0;
+
+                for (size_t i = count; i > 0; i--)
+                {
+                    const HidMouseState *s = &states[i - 1];
+                    if (!(s->attributes & HidMouseAttribute_IsConnected) ||
+                        s->sampling_number <= last_mouse_sample)
+                        continue;
+                    dx += (int)s->delta_x;
+                    dy += (int)s->delta_y;
+                    wheel_y += (int)s->wheel_delta_y;
+                    wheel_x += (int)s->wheel_delta_x;
+                }
+                last_mouse_sample = states[0].sampling_number;
+                if (!on_keyboard && !controls_open && !tasks_open)
+                {
+                    if (!finger_down && (dx || dy))
+                        moved |= pointer_cursor_move_delta( &wine_nx_pointer, dx, dy ) || dx || dy;
+                    if (wheel_y)
+                        runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + wheel_y * 120 ) );
+                    if (wheel_x)
+                        runtime_wheel[1] = max( -7680, min( 7680, runtime_wheel[1] + wheel_x * 120 ) );
+                }
+            }
+            mouse_was_connected = 1;
+            if (!on_keyboard && !controls_open && !tasks_open && !finger_down)
+            {
+                if (states[0].buttons & HidMouseButton_Left) output.buttons |= WINE_NX_POINTER_LEFT;
+                if (states[0].buttons & HidMouseButton_Right) output.buttons |= WINE_NX_POINTER_RIGHT;
+                if (states[0].buttons & HidMouseButton_Middle) output.buttons |= WINE_NX_POINTER_MIDDLE;
+            }
+        }
+        else mouse_was_connected = 0;
+    }
+
+    /* Two fingers scroll the picture under them instead of pressing: a notch of
+     * the wheel every 40 pixels they travel. */
+    {
+        static int scrolling, scroll_y, scroll_left;
+        int two = 0, y = 0;
+
+        if (!on_keyboard && !controls_open && !tasks_open && touch.count >= 2)
+        {
+            two = 1;
+            y = ((int)touch.touches[0].y + (int)touch.touches[1].y) / 2;
+        }
+        if (two && !touch_press)
+        {
+            if (!scrolling)
+            {
+                log_line( "[TOUCH] two fingers scroll" );
+                scrolling = 1;
+                scroll_left = 0;
+            }
+            else scroll_left += y - scroll_y;
+            scroll_y = y;
+            while (scroll_left >= 40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] + 120 ) );
+                scroll_left -= 40;
+            }
+            while (scroll_left <= -40)
+            {
+                runtime_wheel[0] = max( -7680, min( 7680, runtime_wheel[0] - 120 ) );
+                scroll_left += 40;
+            }
+        }
+        else scrolling = 0;
+    }
+
+    if (!on_keyboard && !controls_open && !tasks_open &&
+        touch.count > 0 && (touch.count == 1 || touch_press))
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
+
+        finger_down = 1;
         pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
-        wine_nx_pointer_placed |= moved;
+        wine_nx_pointer_placed |= moved || !touch_press;
         output.buttons |= WINE_NX_POINTER_LEFT;
+        {
+            static u64 finger_told;
+
+            if (!finger_told || armTicksToNs( now - finger_told ) >= 1000000000ull)
+            {
+                finger_told = now;
+                log_line( "[TOUCH] finger %d,%d, pointer %d,%d", (int)touch.touches[0].x,
+                          (int)touch.touches[0].y, (int)wine_nx_pointer.x, (int)wine_nx_pointer.y );
+            }
+        }
     }
+    else if (finger_down && (on_keyboard || controls_open || tasks_open))
+    {
+        static u64 gated_told;
+
+        if (!gated_told || armTicksToNs( now - gated_told ) >= 1000000000ull)
+        {
+            gated_told = now;
+            log_line( "[TOUCH] finger %d,%d taken by the %s", (int)touch.touches[0].x, (int)touch.touches[0].y,
+                      on_keyboard ? "keyboard" : controls_open ? "controls panel" : "task list" );
+        }
+    }
+    touch_press = !on_keyboard && !controls_open && !tasks_open &&
+                  touch.count > 0 && (touch.count == 1 || touch_press);
     if (emulate)
     {
         struct input_output mapped;
-        input_map_keys( profile, &raw, &mapped );
+        input_map_keys( &profile, &raw, &mapped );
         memcpy( output.keys, mapped.keys, sizeof(output.keys) );
         output.buttons |= mapped.buttons;
         output.wheels = mapped.wheels;
         output.mouse_x = mapped.mouse_x;
         output.mouse_y = mapped.mouse_y;
         /* The profile's mouse-speed scales the built-in cursor speed. */
-        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile->mouse_speed / 100.0;
+        wine_nx_pointer.speed = POINTER_CURSOR_SPEED * profile.mouse_speed / 100.0;
         moved |= pointer_cursor_step( &wine_nx_pointer, output.mouse_x, output.mouse_y, elapsed );
     }
     input_key_edges_update( &runtime_key_edges, output.keys );
@@ -946,14 +1808,32 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     wine_nx_pointer_moved |= moved;
     {
         const u64 chord = HidNpadButton_Plus | HidNpadButton_Minus;
-        if ((all_held & chord) != chord) quit_since = 0;
+        if ((all_held & (chord | HidNpadButton_L | HidNpadButton_R)) != chord) quit_since = 0;
         else if (!quit_since) quit_since = now;
         else if (armTicksToNs( now - quit_since ) >= 1000000000ull) leave = 1;
     }
     pthread_mutex_unlock( &wine_nx_pointer_mutex );
+    if (carafeSettingsTick) carafeSettingsTick();
+    if (carafeHidPoll) carafeHidPoll();
     if (leave) wine_nx_request_quit( "+ and - held" );
     wine_nx_cursor_move( *x, *y );
     return moved;
+}
+
+static void wine_nx_runtime_overlay_poll( void )
+{
+    int x, y;
+    unsigned int buttons;
+    u64 min_age_ns;
+
+    if (!__atomic_load_n( &wine_nx_overlay_poll_armed, __ATOMIC_ACQUIRE )) return;
+    min_age_ns = wine_nx_osk_visible() ? 33000000ULL : 150000000ULL;
+    if (__atomic_load_n( &wine_nx_pointer_ready, __ATOMIC_ACQUIRE ))
+    {
+        u64 last_tick = __atomic_load_n( &wine_nx_pointer_tick, __ATOMIC_RELAXED );
+        if (armTicksToNs( armGetSystemTick() - last_tick ) < min_age_ns) return;
+    }
+    wine_nx_pointer_poll( &x, &y, &buttons );
 }
 
 void wine_nx_input_take( struct input_snapshot *out )
@@ -1038,8 +1918,16 @@ static int call_pe_entry_point( void *entry )
 
 static void park_forever(void)
 {
+    extern volatile int wine_nx_quit_requested;
+    void wine_nx_quit_point( void );
+
     log_line( "[EXIT] parked after runtime handoff; close from HOME" );
-    for (;;) svcSleepThread( 1000000000LL );
+    appletNotifyRunning( NULL );
+    for (;;)
+    {
+        if (wine_nx_quit_requested) wine_nx_quit_point();
+        svcSleepThread( 50000000LL );
+    }
 }
 
 static void trim_line( char *line )
@@ -1179,6 +2067,7 @@ static void runtime_report_interpreter(void)
         extern unsigned int wine_nx_gl_explicit_flushes __attribute__((weak));
         extern int wine_nx_gl_pinned_memory __attribute__((weak));
         extern unsigned int wine_nx_syscall_counts[] __attribute__((weak));
+        extern unsigned int wine_nx_yield_sleeps __attribute__((weak));  /* NtYieldExecution */
         static unsigned int calls, last_reads = ~0u, last_frames = ~0u;
         static unsigned int last_usb_reads = ~0u, last_usb_hits = ~0u;
         static u64 start;
@@ -1194,7 +2083,7 @@ static void runtime_report_interpreter(void)
         unsigned long long read_ms = &wine_nx_file_read_100ns
                                      ? __atomic_load_n( &wine_nx_file_read_100ns, __ATOMIC_RELAXED ) / 10000 : 0;
         unsigned int syscalls = &wine_nx_syscalls ? __atomic_load_n( &wine_nx_syscalls, __ATOMIC_RELAXED ) : 0;
-        char native[384] = "", gl[512] = "", audio[32] = "", systop[64] = "", usb[128] = "";
+        char native[384] = "", gl[512] = "", audio[32] = "", systop[64] = "", usb[128] = "", yields[32] = "";
 
         if (!start) start = now;
         if (++calls % 2) return;
@@ -1236,6 +2125,11 @@ static void runtime_report_interpreter(void)
                 len += snprintf( systop + len, sizeof(systop) - len, "%s%x:%u", k ? "," : "", best_id[k], best_n[k] );
             if (!best_n[0]) systop[0] = 0;
         }
+        /* Yields that slept instead (horizon_yield_backoff.h): a program waiting in
+         * a loop of Sleep(0) or SwitchToThread, since the start. */
+        if (&wine_nx_yield_sleeps && wine_nx_yield_sleeps)
+            snprintf( yields, sizeof(yields), " yield_sleeps=%u",
+                      __atomic_load_n( &wine_nx_yield_sleeps, __ATOMIC_RELAXED ) );
 #ifdef WINE_NX_BOX64_DYNAREC
         {
             extern unsigned long long wine_nx_box64_native_entries;
@@ -1342,7 +2236,7 @@ static void runtime_report_interpreter(void)
         log_line( "[PROGRESS] %llus reads=%u read_ms=%llu read_mb=%llu sd_reads=%u sd_ms=%llu sd_mb=%llu "
                   "sd_writes=%u sd_write_ms=%llu writes_held=%u sd_stats=%u stat_hits=%u flushes=%u/%u/%u/%u/%u "
                   "cache_hits=%u cache_mb=%u syscalls=%u "
-                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s%s",
+                  "frames=%u heap_used_mb=%llu heap_free_mb=%llu%s%s%s%s%s%s",
                   (unsigned long long)(armTicksToNs( now - start ) / 1000000000ull), reads, read_ms,
                   &wine_nx_file_read_bytes
                       ? __atomic_load_n( &wine_nx_file_read_bytes, __ATOMIC_RELAXED ) >> 20 : 0,
@@ -1357,7 +2251,7 @@ static void runtime_report_interpreter(void)
                   wine_nx_sd_flush_jump, wine_nx_sd_flush_path, wine_nx_sd_flush_end,
                   wine_nx_sd_flush_close, wine_nx_sd_flush_timer,
                   __atomic_load_n( &wine_nx_sd_hits, __ATOMIC_RELAXED ), wine_nx_sd_cache_mb(), syscalls, frames,
-                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, native, gl, audio, usb );
+                  (unsigned long long)heap.uordblks >> 20, heap_free >> 20, systop, yields, native, gl, audio, usb );
         {
             extern void wine_nx_thread_report( void );
             extern void horizon_memory_pool_stats( char *buffer, size_t size );
@@ -1472,6 +2366,48 @@ static int run_next_pop( char *target, size_t size )
     return target[0] != 0;
 }
 
+/* The other runtime on the card: the one linked with nxvk, or from that one,
+ * the card's own. */
+#define RUNTIME_NRO_MESA_SWITCH RUNTIME_DIR "/wine-nx-runtime.nro"
+#define RUNTIME_NRO_NXVK RUNTIME_DIR "/wine-nx-runtime-nxvk.nro"
+/* What return_to_launcher starts for a program queued in run-next.txt, when
+ * it is not this runtime again. */
+static char runtime_next_nro[512];
+
+
+/* Queues target for the runtime linked with the Mesa it wants, when that is
+ * not this one, and says whether it did: the caller then goes back the way a
+ * finished program does, and that runtime starts it. A card without the other
+ * runtime runs the program here, and the log says so. */
+static int runtime_switch_graphics_runtime( const char *target, int wants_nxvk )
+{
+    const char *other = wants_nxvk ? RUNTIME_NRO_NXVK : RUNTIME_NRO_MESA_SWITCH;
+
+    if (wants_nxvk == runtime_is_nxvk) return 0;
+    if (access( other, F_OK ))
+    {
+        log_line( "[GRAPHICS] the program is set to %s, but %s is not on the card; it runs on %s",
+                  wants_nxvk ? "nxvk" : "mesa-switch", other, runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    if (!envHasNextLoad())
+    {
+        log_line( "[GRAPHICS] the loader cannot start %s; the program runs on %s",
+                  other, runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    if (!run_next_push( target ))
+    {
+        log_line( "[GRAPHICS] could not write run-next.txt; the program runs on %s",
+                  runtime_is_nxvk ? "nxvk" : "mesa-switch" );
+        return 0;
+    }
+    snprintf( runtime_next_nro, sizeof(runtime_next_nro), "%s", other );
+    log_line( "[GRAPHICS] the program is set to %s: starting %s for it",
+              wants_nxvk ? "nxvk" : "mesa-switch", other );
+    return 1;
+}
+
 static int read_bool_file( const char *path )
 {
     char line[32];
@@ -1513,6 +2449,50 @@ static int config_bool( const char *key, int fallback, const char *was, int flip
     wine_nx_config_set_bool( &runtime_config, key, fallback );
     return fallback;
 }
+
+#ifdef WINE_NX_MESA_SWITCH
+/* Whether this runtime's Mesa has Zink. mesa-switch's has it only when its SDK
+ * was built with it (egl_switch.c, HAVE_SWITCH_ZINK); the switch-dev image's is
+ * not, and its EGL then refuses a display set to Zink: a game set to it drew
+ * nothing at all. Its EGL refers to zink_create_screen when it has Zink, which
+ * brings it into the link; a weak reference alone does not. nxvk always has. */
+static int runtime_mesa_has_zink( void )
+{
+#ifdef WINE_NX_NXVK
+    return 1;
+#else
+    extern void zink_create_screen( void ) __attribute__((weak));
+
+    return &zink_create_screen != NULL;
+#endif
+}
+
+/* NVK compresses the images a program draws into, each in an allocation of its
+ * own, padded to the GPU's big page and holding compression tags, of which the
+ * GPU has only so many. Zink makes an image of that kind for every texture: in
+ * Doom 3 on nxvk about 2000 were held when allocations began to fail, 35,000
+ * "zink: couldn't allocate memory" in mesa-nxvk.log and textures drawn from
+ * garbage. Without compression NVK no longer asks for an allocation of their
+ * own, and Zink puts small textures together as it does its buffers. For what
+ * the nxvk runtime draws, and for Zink on mesa-switch's NVK; nvk-compression in
+ * settings.json turns it back on. */
+static void runtime_nvk_compression( const char *what )
+{
+    const char *debug = getenv( "NVK_DEBUG" );
+    char value[256];
+
+    if (config_bool( "nvk-compression", 0, "nvk-compression.txt", 0 ))
+    {
+        log_line( "[INIT] NVK image compression on for %s (nvk-compression in settings.json)", what );
+        return;
+    }
+    if (debug && strstr( debug, "no_compression" )) return;
+    snprintf( value, sizeof(value), "%s%sno_compression", debug && debug[0] ? debug : "",
+              debug && debug[0] ? "," : "" );
+    setenv( "NVK_DEBUG", value, 1 );
+    log_line( "[INIT] NVK image compression off for %s: NVK_DEBUG=%s", what, value );
+}
+#endif
 
 
 static unsigned int close_handle_object( HANDLE handle )
@@ -1680,8 +2660,12 @@ static const char runtime_environment[] =
     "USERPROFILE=C:\\users\\steamuser\0"
     "VKD3D_SHADER_CACHE_PATH=C:\\users\\steamuser\\AppData\\Local\\Autorun\0"
     "windir=C:\\windows\0"
+    /* Wine's data directory, the card's share/wine (WINE_NX_RUNTIME_DOS_ROOT):
+     * mscoree looks for Wine Mono in its mono/wine-mono-<version>. */
+    "WINEDATADIR=\\??\\Z:\\switch\\wine\\share\\wine\0"
     "WINE_D3D_CONFIG=cs_spin_count=64,explicit_buffer_flush=1\0"
-    "WINE_NX_GRAPHICS_PATH=\0";
+    "WINE_NX_GRAPHICS_PATH=\0"
+    "WINE_NX_WINDOW_PICTURE_EVENT=\0";
 
 static size_t runtime_fex_environment( const char *target, char *buffer, size_t size )
 {
@@ -1718,14 +2702,27 @@ static size_t runtime_fex_environment( const char *target, char *buffer, size_t 
         const char *value = nx_fex_option_default( option );
         int length;
 
+        if (nx_fex_option_carafe( option ) && !runtime_fex_carafe_active) continue;
         if (launcher_kv_get( &kv, option->name, configured, sizeof(configured) ) &&
             nx_fex_option_choice( option, configured ) >= 0) value = configured;
+        if (option->id == NX_FEX_GDB_SYMBOLS && runtime_profile) value = "1";
         length = snprintf( buffer + used, size - used, "%s=%s", option->name, value );
         if (length < 0 || (size_t)length + 1 > size - used) return 0;
         used += length + 1;
         if (option->id == NX_FEX_TSO) tso = option->values[nx_fex_option_choice( option, value )];
         else if (option->id == NX_FEX_MULTIBLOCK) multiblock = option->values[nx_fex_option_choice( option, value )];
         else if (option->id == NX_FEX_MAXINST) maxinst = option->values[nx_fex_option_choice( option, value )];
+    }
+    if (runtime_profile)
+    {
+        static const char stats[] = "CARAFE_D3D9_STATS=1", counters[] = "FEX_PROFILESTATS=1";
+
+        if (sizeof(stats) > size - used) return 0;
+        memcpy( buffer + used, stats, sizeof(stats) );
+        used += sizeof(stats);
+        if (sizeof(counters) > size - used) return 0;
+        memcpy( buffer + used, counters, sizeof(counters) );
+        used += sizeof(counters);
     }
     log_line( "[FEX] TSO=%s multiblock=%s maxinst=%s", tso, multiblock, maxinst );
     return used;
@@ -1874,6 +2871,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     char nt_path[640], dll_path[1024], current_dir[512];
     char cmdline[1024], args_buf[896], args_path[512];
     char fex_environment[NX_FEX_OPTION_COUNT * 80];
+    char picture_event[64] = "";
     size_t chars, size, i, fex_environment_size;
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
@@ -1914,6 +2912,17 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
                                          dxvk_dir, sizeof(dxvk_dir) ))
     {
         snprintf( graphics_path, sizeof(graphics_path), "%sC:\\%s;", vkd3d_path, dxvk_dir );
+        {
+            char wrapper[256];
+            size_t at;
+
+            snprintf( wrapper, sizeof(wrapper), RUNTIME_DIR "/drive_c/%s/ddraw.dll", dxvk_dir );
+            for (at = 0; wrapper[at]; at++) if (wrapper[at] == '\\') wrapper[at] = '/';
+            wine_nx_dxvk_wraps_ddraw = !access( wrapper, F_OK );
+            if (wine_nx_dxvk_wraps_ddraw)
+                log_line( "[DXVK] the payload has its own ddraw.dll: Wine's DirectDraw draws offscreen and leaves "
+                          "the screen to Vulkan" );
+        }
         if (dxvk.version[0])
             log_line( "[DXVK] %s payload C:\\%s (version %s); application-local DLLs take priority",
                       main_image_info.Machine == IMAGE_FILE_MACHINE_AMD64 ? "AMD64" : "x86", dxvk_dir, dxvk.version );
@@ -1937,13 +2946,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     {
         char input_path[768];
         struct launcher_kv kv;
+        struct input_profile profile = {0};
+        int swkbd_auto = __atomic_load_n( &wine_nx_swkbd_auto_enabled, __ATOMIC_RELAXED );
         int loaded = target[1] == ':' ?
-            input_profile_global( RUNTIME_DIR, wine_nx_swkbd_auto_enabled, &wine_nx_input_profile,
+            input_profile_global( RUNTIME_DIR, swkbd_auto, &profile,
                                   &kv, input_path, sizeof(input_path) ) :
-            input_profile_program( RUNTIME_DIR, target, wine_nx_swkbd_auto_enabled,
-                                   &wine_nx_input_profile, &kv, input_path, sizeof(input_path) );
+            input_profile_program( RUNTIME_DIR, target, swkbd_auto,
+                                   &profile, &kv, input_path, sizeof(input_path) );
+        wine_nx_input_profile_set( &profile );
         if (!loaded) log_line( "[INPUT] could not read controller settings" );
-        wine_nx_swkbd_auto_enabled = wine_nx_input_profile.keyboard_auto;
+        __atomic_store_n( &wine_nx_swkbd_auto_enabled, profile.keyboard_auto, __ATOMIC_RELEASE );
     }
     /* Its own Box64 options, read when its first x86 code runs: SPEED2.box64.txt. */
     {
@@ -1978,6 +2990,16 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     if (left4dead && !left4dead_append_arguments( cmdline, sizeof(cmdline) )) return NULL;
     if (api) log_line( "[ARGS] final CommandLine='%s'", cmdline );
 
+    if (!wine_nx_window_picture_event)
+    {
+        NTSTATUS ev_status = NtCreateEvent( &wine_nx_window_picture_event, EVENT_MODIFY_STATE, NULL,
+                                            NotificationEvent, FALSE );
+        if (ev_status) log_line( "[NXSCREEN] publication event unavailable: %08x", (unsigned int)ev_status );
+    }
+    if (wine_nx_window_picture_event)
+        snprintf( picture_event, sizeof(picture_event), "%lx:%lx", (unsigned long)GetCurrentProcessId(),
+                  (unsigned long)(uintptr_t)wine_nx_window_picture_event );
+
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;
     chars += strlen( dos_path ) + 1;
@@ -1986,6 +3008,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
     chars += fex_environment_size;
+    chars += strlen( picture_event );
     if (left4dead) chars += sizeof(LEFT4DEAD_ENVIRONMENT) - 1;
     size = sizeof(*params) + chars * sizeof(WCHAR);
 
@@ -2029,6 +3052,11 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         {
             for (i = 0; i < 22; i++) *cursor++ = (unsigned char)*value++;
             value = graphics_path;
+        }
+        if (!strncmp( entry, "WINE_NX_WINDOW_PICTURE_EVENT=", 29 ))
+        {
+            for (i = 0; i < 29; i++) *cursor++ = (unsigned char)*value++;
+            value = picture_event;
         }
         do *cursor++ = (unsigned char)*value; while (*value++);
     }
@@ -2928,6 +3956,50 @@ static void note_loader_lent_memory( void )
     }
 }
 
+/* Of what the loader had lent out, what is inside this program's heap: not the
+ * loader's own NRO, which lies below the heap, but pages a program before this
+ * one left lent, the stack of a thread it left running (the nxvk runtime's USB
+ * drives' watcher, 144 KB). They are taken out of the heap before anything is
+ * given out (native_heap.c), and named once the log is open. */
+#define LEFT_LENT_MAX 8
+static struct { u64 addr, size; int kept; } left_lent[LEFT_LENT_MAX];
+static int left_lent_count;
+
+static void keep_out_left_lent_memory( void )
+{
+    extern char *fake_heap_start, *fake_heap_end;
+    extern int wine_nx_native_heap_keep_out( uintptr_t address, size_t size );  /* native_heap.c */
+    int i;
+
+    for (i = 0; i < loader_lent_count && left_lent_count < LEFT_LENT_MAX; i++)
+    {
+        u64 addr = loader_lent[i].addr, size = loader_lent[i].size;
+
+        if (addr + size <= (uintptr_t)fake_heap_start || addr >= (uintptr_t)fake_heap_end) continue;
+        left_lent[left_lent_count].addr = addr;
+        left_lent[left_lent_count].size = size;
+        left_lent[left_lent_count].kept = wine_nx_native_heap_keep_out( addr, size );
+        left_lent_count++;
+    }
+}
+
+static void log_left_lent_memory( void )
+{
+    int i;
+
+    for (i = 0; i < left_lent_count; i++)
+        log_line( "[MAP] start-up: %010llx-%010llx, %llu KB of this heap, left lent by the program before "
+                  "(a thread it left running?): %s", (unsigned long long)left_lent[i].addr,
+                  (unsigned long long)(left_lent[i].addr + left_lent[i].size),
+                  (unsigned long long)(left_lent[i].size / 1024),
+                  left_lent[i].kept > 0 ? "kept out of the heap" :
+                  left_lent[i].kept < 0 ? "the heap had already given it out, and may fault there" :
+                  "not where the heap gives out blocks" );
+    if (left_lent_count)
+        log_line( "[MAP] start-up: what the program before left may still be running; if anything fails, "
+                  "close Autorun from the HOME menu and start it again" );
+}
+
 /* The whole address space, to compare what this program leaves behind with what
  * it was given: the loader undoes its own mappings when the program returns,
  * and refuses when a region is not in the state it expects. */
@@ -3205,7 +4277,25 @@ static int leave_cleanly( void )
 {
     int left = memory_left_behind( 0 ), after;
 
-    wine_nx_sd_cache_flush();
+    wine_nx_saltynx_stop();
+    wine_nx_runtime_log_flush();
+#ifdef WINE_NX_USB_STORAGE
+    /* The USB drives' watcher is a thread, and a thread outlives the program
+     * that leaves it running (usb_storage.c). The nxvk runtime handed over to
+     * the card's own this way with it still running: the card's runtime found
+     * USB taken, and its first large block, laid over the thread's stack,
+     * faulted as the launcher came up. */
+    {
+        extern int wine_nx_usb_stop(void);
+
+        if (wine_nx_usb_stop())
+        {
+            after = memory_left_behind( 0 );
+            log_line( "[EXIT] USB drives' watcher ended: %d regions lent, was %d", after, left );
+            left = after;
+        }
+    }
+#endif
     /* Services opened for the whole run hold heap pages of their own: the
      * sockets take a transfer memory at start-up and nothing ever gave it back.
      * Close them and say what each one returns, so the one that matters shows. */
@@ -3363,7 +4453,25 @@ static Thread tls_threads[TLS_PLACEHOLDERS_MAX];
 static unsigned long long tls_page[TLS_PLACEHOLDERS_MAX];
 static unsigned char tls_keep[TLS_PLACEHOLDERS_MAX];
 static unsigned int tls_count;
-static UEvent tls_trimmed, tls_released;
+static s32 tls_trimmed;
+static s32 tls_wake[TLS_PLACEHOLDERS_MAX];
+static unsigned char tls_given[TLS_PLACEHOLDERS_MAX];
+static unsigned char tls_closed[TLS_PLACEHOLDERS_MAX];
+static Mutex tls_give_mutex;
+
+#define TLS_GIVE_WAIT_NS 50000000LL
+
+static void tls_wait_word( s32 *word )
+{
+    while (!__atomic_load_n( word, __ATOMIC_ACQUIRE ))
+        svcWaitForAddress( word, ArbitrationType_WaitIfEqual, 0, -1 );
+}
+
+static void tls_wake_word( s32 *word )
+{
+    __atomic_store_n( word, 1, __ATOMIC_RELEASE );
+    svcSignalToAddress( word, SignalType_Signal, 0, -1 );
+}
 
 static void tls_placeholder( void *arg )
 {
@@ -3371,9 +4479,43 @@ static void tls_placeholder( void *arg )
 
     __atomic_store_n( &tls_page[index], (unsigned long long)(uintptr_t)armGetTls() & ~0xfffull,
                       __ATOMIC_RELEASE );
-    waitSingle( waiterForUEvent( &tls_trimmed ), UINT64_MAX );
+    tls_wait_word( &tls_trimmed );
     if (!__atomic_load_n( &tls_keep[index], __ATOMIC_ACQUIRE )) return;
-    waitSingle( waiterForUEvent( &tls_released ), UINT64_MAX );
+    tls_wait_word( &tls_wake[index] );
+}
+
+static int tls_close_if_ended( unsigned int index, s64 timeout )
+{
+    if (R_FAILED( waitSingleHandle( tls_threads[index].handle, timeout ) )) return 0;
+    threadClose( &tls_threads[index] );
+    tls_closed[index] = 1;
+    return 1;
+}
+
+unsigned int wine_nx_tls_give_place( void )
+{
+    unsigned int i, j, left = 0, freed = 0;
+
+    mutexLock( &tls_give_mutex );
+    for (i = 0; i < tls_count && !freed; i++)
+        if (tls_keep[i] && tls_given[i] && !tls_closed[i]) freed = tls_close_if_ended( i, 0 );
+    for (i = 0; i < tls_count && !freed; i++)
+    {
+        if (!tls_keep[i] || tls_given[i]) continue;
+        __atomic_store_n( &tls_given[i], 1, __ATOMIC_RELEASE );
+        tls_wake_word( &tls_wake[i] );
+        freed = tls_close_if_ended( i, TLS_GIVE_WAIT_NS );
+        if (!freed) log_line( "[TLS] page holder %u has not ended yet; its place comes later", i );
+        break;
+    }
+    if (freed)
+    {
+        for (j = 0; j < tls_count; j++)
+            if (tls_keep[j] && !tls_closed[j]) left++;
+        log_line( "[TLS] a page holder gave its place to a new thread; %u holders left", left );
+    }
+    mutexUnlock( &tls_give_mutex );
+    return freed;
 }
 
 static void hold_thread_local_pages( void )
@@ -3382,8 +4524,6 @@ static void hold_thread_local_pages( void )
     unsigned int i, j, kept = 0, found = 0, dropped;
     Result rc = 0;
 
-    ueventCreate( &tls_trimmed, false );
-    ueventCreate( &tls_released, false );
     for (i = 0; i < TLS_PLACEHOLDERS_MAX; i++)
     {
         /* 0x3b, the lowest priority an application may give a thread on cores
@@ -3410,7 +4550,7 @@ static void hold_thread_local_pages( void )
             kept++;
         }
     }
-    ueventSignal( &tls_trimmed );
+    tls_wake_word( &tls_trimmed );
     for (i = 0; i < tls_count; i++)
     {
         if (tls_keep[i]) continue;
@@ -3430,14 +4570,18 @@ static void release_thread_local_pages( void )
     unsigned int i;
 
     if (!tls_count) return;
-    ueventSignal( &tls_released );
+    for (i = 0; i < tls_count; i++)
+        if (tls_keep[i]) tls_wake_word( &tls_wake[i] );
+    mutexLock( &tls_give_mutex );
     for (i = 0; i < tls_count; i++)
     {
-        if (!tls_keep[i]) continue;
+        if (!tls_keep[i] || tls_closed[i]) continue;
+        tls_closed[i] = 1;
         threadWaitForExit( &tls_threads[i] );
         threadClose( &tls_threads[i] );
     }
     tls_count = 0;
+    mutexUnlock( &tls_give_mutex );
 }
 
 /* Autorun's components setup (tools/autorun_setup.c): what wineboot registers
@@ -3451,6 +4595,7 @@ static void release_thread_local_pages( void )
 static int runtime_components_run;
 /* The program this runtime started, for game_fixes_finish when it ends. */
 static char runtime_program[512];
+static int runtime_forwarded_launch;
 
 /* The exit code the program gave NtTerminateProcess (dlls/ntdll/unix/process.c);
  * ~0 while it has not ended by itself. */
@@ -3487,6 +4632,7 @@ static int return_to_launcher( void )
 {
     int i, still_lent = 0;
 
+    __atomic_store_n( &wine_nx_overlay_poll_armed, 0, __ATOMIC_RELEASE );
     /* Only reached with the program's threads already gone. Both of these wait
      * for the thread they end: a thread of the runtime's own has no quit point
      * to stop at, and while it runs it holds the heap pages of its stack. */
@@ -3496,11 +4642,14 @@ static int return_to_launcher( void )
 
         if (&wine_nx_input_thread_stop) wine_nx_input_thread_stop();
     }
+    /* FPSLocker's bridge, a thread of the runtime's too; it puts the panel
+     * back to 60 Hz if display sync moved it (saltynx.c). */
+    wine_nx_saltynx_stop();
     wine_nx_compositor_stop();
     wine_nx_profile_stop();
 #ifdef WINE_NX_USB_STORAGE
     {
-        extern void wine_nx_usb_stop(void);
+        extern int wine_nx_usb_stop(void);
         wine_nx_usb_stop();
     }
 #endif
@@ -3579,6 +4728,12 @@ static int return_to_launcher( void )
         log_line( "[FEX] code memory retained at exit: %zu bytes", retained );
     }
 #endif
+    {
+        /* Mesa's messages from the program's run (source/graphics_selftest.c). */
+        extern void wine_nx_mesa_log_copy( const char *why ) __attribute__((weak));
+
+        if (&wine_nx_mesa_log_copy) wine_nx_mesa_log_copy( NULL );
+    }
     socketExit();
     stop_log_flusher();
 #ifdef WINE_NX_SWAP_POC
@@ -3601,6 +4756,15 @@ static int return_to_launcher( void )
             horizon_release_code_mappings( &released, &failed );
             log_line( "[QUIT] %u code mappings given back, %u refused", released, failed );
         }
+    }
+    {
+        /* dlls/ntdll/unix/horizon.c: in a 32-bit address space the heap page
+         * at 0x7ffe0000 was made inaccessible for the program, which read its
+         * shared user data there. The next program the loader starts in this
+         * process gets the heap whole again. */
+        extern void horizon_restore_user_shared_data_address( void ) __attribute__((weak));
+
+        if (&horizon_restore_user_shared_data_address) horizon_restore_user_shared_data_address();
     }
     /* Name whatever is left: at this point there should be nothing but the
      * pages the loader itself lent out before this program started. */
@@ -3652,16 +4816,68 @@ static int return_to_launcher( void )
             game_fixes_finish( RUNTIME_DIR, runtime_program, wine_nx_program_exit_code, line, sizeof(line) ))
             log_line( "%s", line );
     }
-    /* A program waiting in run-next.txt (after the components setup) is started
-     * by the runtime started again, whether or not the launcher would be. */
-    if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
-        envHasNextLoad() && own_nro[0] && R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+    /* The other graphics runtime, for the program it was queued for. */
+    if (!still_lent && runtime_next_nro[0] && !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK ) &&
+        envHasNextLoad() && R_SUCCEEDED( envSetNextLoad( runtime_next_nro, runtime_next_nro ) ))
     {
-        log_step( "starting this program again for the launcher" );
+        log_step( "starting the other graphics runtime for the program" );
         return 0;
     }
+    {
+        extern _Bool carafeRestartRequested( void ) __attribute__((weak));
+
+        if (!runtime_components_run && carafeRestartRequested && carafeRestartRequested())
+        {
+            if (!still_lent && envHasNextLoad() && own_nro[0] && runtime_program[0])
+            {
+                if (run_next_push( runtime_program ))
+                {
+                    if (R_SUCCEEDED( envSetNextLoad( own_nro, own_nro ) ))
+                    {
+                        log_step( "starting the game again with the new settings" );
+                        return 0;
+                    }
+                    {
+                        char discarded[512];
+                        run_next_pop( discarded, sizeof(discarded) );
+                    }
+                }
+            }
+            if (carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "closing this program; the application starts again with the new settings" );
+                return 0;
+            }
+            if (runtime_program[0]) run_next_push( runtime_program );
+        }
+    }
+    if (!still_lent && !runtime_components_run && own_nro[0] && carafeErrorRelaunch &&
+        carafeErrorRelaunch( own_nro, wine_nx_program_exit_code ))
+        return 0;
+    /* A program waiting in run-next.txt (after the components setup) is started
+     * by the runtime started again, whether or not the launcher would be. The
+     * nxvk runtime has no launcher, so it starts the card's runtime, which has
+     * one and starts what is queued on whichever runtime it is set to. Starting
+     * itself instead only to hand over ran the graphics test and opened USB for
+     * nothing, and the hand-over left the USB thread running. */
+    {
+        const char *next = own_nro;
+
+        if (runtime_is_nxvk && !access( RUNTIME_NRO_MESA_SWITCH, F_OK )) next = RUNTIME_NRO_MESA_SWITCH;
+        if (!still_lent && (runtime_reopen_launcher || !access( WINE_NX_RUNTIME_ROOT "/run-next.txt", F_OK )) &&
+            envHasNextLoad() && next[0] && R_SUCCEEDED( envSetNextLoad( next, next ) ))
+        {
+            log_step( next == own_nro ? "starting this program again for the launcher"
+                                      : "starting the card's runtime for the launcher" );
+            return 0;
+        }
+    }
     __nx_applet_exit_mode = 1;
-    log_step( "closing this program; the console goes back to the menu" );
+    if (!runtime_components_run && carafeErrorRestart && carafeErrorRestart( wine_nx_program_exit_code ))
+        log_step( "closing this program; the application starts again with the error screen" );
+    else
+        log_step( "closing this program; the console goes back to the menu" );
     return 0;
 }
 
@@ -3726,37 +4942,40 @@ static unsigned int launcher_install_forwarder( const char **step )
 static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
 {
     bool installed = false;
-    Result rc;
+    unsigned int rc;
     *step = "reading " AUTORUN_NRO;
     if (access( AUTORUN_NRO, R_OK )) return MAKERESULT( Module_Libnx, LibnxError_NotFound );
-    *step = "checking the Autorun forwarder";
-    if (R_FAILED( rc = nsInitialize() )) return rc;
-    rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
-    nsExit();
-    if (R_FAILED( rc )) return rc;
-    if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    /* A game's 39-bit forwarder starts Autorun's application, which has to be
+     * there; a 32-bit one carries a loader of its own and starts the NRO. */
+    if (request->address_space == WINE_NX_FORWARDER_39_BIT)
+    {
+        *step = "checking the Autorun forwarder";
+        if (R_FAILED( rc = nsInitialize() )) return rc;
+        rc = nsIsAnyApplicationEntityInstalled( AUTORUN_TITLE_ID, &installed );
+        nsExit();
+        if (R_FAILED( rc )) return rc;
+        if (!installed && (rc = launcher_install_forwarder( step ))) return rc;
+    }
     wine_nx_forwarder_report = log_line_plain;
-    return wine_nx_forwarder_install( request, step );
+    rc = wine_nx_forwarder_install( request, step );
+    log_line( "[LAUNCHER] game %u's %s forwarder %016llx: rc=0x%x%s%s", request->game_id,
+              request->address_space == WINE_NX_FORWARDER_39_BIT ? "39-bit" : "32-bit (no alias)",
+              wine_nx_forwarder_game_title_id( request->game_id, request->address_space ), rc,
+              rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
+    return rc;
 }
 
-static int runtime_forwarded_game( char *target, size_t size )
+/* The library's game with this id: its path in target and 1, or -1 when the
+ * library has none (or its path does not fit). */
+static int runtime_library_game( unsigned int id, char *target, size_t size )
 {
-    struct autorun_game_launch launch = {0};
     struct launcher_catalog *catalog;
-    AppletStorage storage;
-    s64 bytes = 0;
-    Result rc;
     int found = 0, i;
 
-    if (R_FAILED( appletPopLaunchParameter( &storage, AppletLaunchParameterKind_UserChannel ) )) return 0;
-    rc = appletStorageGetSize( &storage, &bytes );
-    if (R_SUCCEEDED( rc ) && bytes == sizeof(launch)) rc = appletStorageRead( &storage, 0, &launch, sizeof(launch) );
-    appletStorageClose( &storage );
-    if (R_FAILED( rc ) || !autorun_game_launch_valid( &launch, bytes )) return -1;
-    if (!(catalog = malloc( sizeof(*catalog) ))) return -1;
+    if (!id || !(catalog = malloc( sizeof(*catalog) ))) return -1;
     if (launcher_catalog_load( catalog, RUNTIME_DIR "/" LAUNCHER_CATALOG_FILE ) == LAUNCHER_CATALOG_OK)
         for (i = 0; i < catalog->count; i++)
-            if (catalog->entries[i].id == launch.game_id)
+            if (catalog->entries[i].id == id)
             {
                 if (strlen( catalog->entries[i].path ) < size)
                 {
@@ -3767,6 +4986,42 @@ static int runtime_forwarded_game( char *target, size_t size )
             }
     free( catalog );
     return found ? 1 : -1;
+}
+
+/* A game handed over by its 39-bit forwarder, which starts Autorun's
+ * application with the game's id as its launch parameter: 0 when there is
+ * none, otherwise as runtime_library_game. */
+static int runtime_forwarded_game( char *target, size_t size )
+{
+    struct autorun_game_launch launch = {0};
+    AppletStorage storage;
+    s64 bytes = 0;
+    Result rc;
+
+    if (R_FAILED( appletPopLaunchParameter( &storage, AppletLaunchParameterKind_UserChannel ) )) return 0;
+    rc = appletStorageGetSize( &storage, &bytes );
+    if (R_SUCCEEDED( rc ) && bytes == sizeof(launch)) rc = appletStorageRead( &storage, 0, &launch, sizeof(launch) );
+    appletStorageClose( &storage );
+    if (R_FAILED( rc ) || !autorun_game_launch_valid( &launch, bytes )) return -1;
+    return runtime_library_game( launch.game_id, target, size );
+}
+
+/* A game named on the command line by its 32-bit forwarder, whose loader
+ * starts this NRO with --library-game=ID (forwarder.c): 0 when the command
+ * line names none, otherwise as runtime_library_game. */
+static int runtime_command_line_game( int argc, char **argv, char *target, size_t size )
+{
+    const size_t prefix = sizeof(WINE_NX_FORWARDER_GAME_ARG) - 1;
+    unsigned long id;
+    char *end;
+
+    if (argc < 2 || !argv[1] || strncmp( argv[1], WINE_NX_FORWARDER_GAME_ARG, prefix )) return 0;
+    errno = 0;
+    id = strtoul( argv[1] + prefix, &end, 10 );
+    if (errno || end == argv[1] + prefix || *end || !id || id > 0xffffffffUL) return -1;
+    log_line( "[FORWARDER] library game %lu from the command line, in a %d-bit address space",
+              id, runtime_address_space_bits() );
+    return runtime_library_game( id, target, size );
 }
 
 static unsigned long long runtime_title_id( void )
@@ -3815,6 +5070,9 @@ int main( int argc, char **argv )
     /* Before the console, whose framebuffer is lent to the graphics driver:
      * what is lent now is the loader's, and everything after it is ours. */
     note_loader_lent_memory();
+    /* And before the console's buffers come out of the heap's top, where a
+     * thread's stack left by the program before was. */
+    keep_out_left_lent_memory();
     consoleInit( NULL );
     /* One empty frame, so the screen is this program's and blank from the start
      * rather than whatever was on it before. */
@@ -3850,7 +5108,8 @@ int main( int argc, char **argv )
     mkdir( WINE_USER_DIR "/Saved Games", 0777 );
     mkdir( WINE_USER_DIR "/Videos", 0777 );
     mkdir( RUNTIME_LOGS, 0777 );
-    log_file = fopen( RUNTIME_LOGS "/autorun_runtime.log", "w" );
+    log_file = fopen( RUNTIME_LOG, "w" );
+    runtime_native_stderr_hook();  /* after consoleInit, which sets stderr's device */
     if (log_file)
     {
         setvbuf( log_file, log_file_buffer, _IOFBF, sizeof(log_file_buffer) );
@@ -3865,8 +5124,36 @@ int main( int argc, char **argv )
     /* First, before anything else: which build this is and which file it was
      * started from. Without it a log from an older NRO on the card reads just
      * like one from the new one. */
-    log_line( "[BUILD] %s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD, own_nro,
+    log_line( "[BUILD] %s%s%s from %s (address space %d bits)", WINE_NX_RUNTIME_BUILD,
+              WINE_NX_BUILD_ID[0] ? " made from " : "", WINE_NX_BUILD_ID, own_nro,
               runtime_address_space_bits() );
+#ifdef WINE_NX_NXVK
+    log_line( "[GRAPHICS] this runtime is linked with nxvk (%s)", wine_nx_graphics_runtime );
+#else
+    log_line( "[GRAPHICS] this runtime is linked with mesa-switch" );
+#endif
+    {
+        /* The runtime's function names for faults and stall reports, from the
+         * file the packager writes beside the NRO (tools/runtime_symbols.py). */
+        char symbols[520];
+        MemoryInfo info;
+        u32 page_info;
+        size_t length = strlen( own_nro );
+        int named = 0;
+
+        if (length > 4 && !strcasecmp( own_nro + length - 4, ".nro" ) && length < sizeof(symbols))
+        {
+            memcpy( symbols, own_nro, length - 4 );
+            strcpy( symbols + length - 4, ".sym" );
+            if (R_SUCCEEDED( svcQueryMemory( &info, &page_info, (u64)(uintptr_t)&return_to_launcher ) ))
+                named = wine_nx_runtime_symbols_open( symbols, (uintptr_t)info.addr );
+            if (named)
+                log_line( "[SYMBOLS] %d functions named from %s, code at %#lx", named, symbols,
+                          (unsigned long)info.addr );
+            else
+                log_line( "[SYMBOLS] none: %s is not on the card; faults give offsets in the runtime", symbols );
+        }
+    }
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
     {
@@ -3874,6 +5161,7 @@ int main( int argc, char **argv )
         if (recovered < 0)
         {
             wine_nx_console_quiet = 0;
+            appletNotifyRunning( NULL );
             PadState pad;
             log_line( "[UPDATE] Recovery failed. Restore switch/wine/updates/previous.nro before starting a game. Press + to close." );
             padConfigureInput( 1, HidNpadStyleSet_NpadStandard );
@@ -3901,6 +5189,7 @@ int main( int argc, char **argv )
     /* The launcher can access SteamGridDB before a game is selected. */
     log_memory_map( "start-up" );
     log_line( "[MAP] start-up: %d regions the loader already had lent", loader_lent_count );
+    log_left_lent_memory();
     wine_nx_runtime_network_init();
     log_lent_memory( "the network" );
 
@@ -3932,6 +5221,20 @@ int main( int argc, char **argv )
     runtime_profile = config_bool( "profiler", 0, "profile.txt", 0 );
     if (!config_bool( "display-devices", 1, "no-display-devices.txt", 1 )) wine_nx_display_devices = 0;
     log_line( "[INIT] display devices %s", wine_nx_display_devices ? "registered" : "off" );
+    {
+        char picture[16] = "";
+
+        if (wine_nx_config_string_value( &runtime_config, "picture-mode", picture, sizeof(picture) ))
+        {
+            if (!strcmp( picture, "edges" )) wine_nx_picture_mode = 1;
+            else if (!strcmp( picture, "stretched" )) wine_nx_picture_mode = 2;
+            else if (!strcmp( picture, "own-size" )) wine_nx_picture_mode = 3;
+        }
+        log_line( "[INIT] a picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
+    }
+    wine_nx_emulate_modeset = config_bool( "mode-emulation", 1, "mode-emulation.txt", 0 );
+    wine_nx_yield_backoff = config_bool( "yield-backoff", 1, "yield-backoff.txt", 0 );
+    wine_nx_fpslocker = config_bool( "fpslocker", 1, "fpslocker.txt", 0 );
     if (!config_bool( "windows-through-opengl", 1, "framebuffer.txt", 1 )) wine_nx_compositor_mode = 0;
     log_line( "[INIT] windows shown by %s",
               wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
@@ -3947,16 +5250,34 @@ int main( int argc, char **argv )
     /* This runtime links mesa-switch (switch-dev image); vulkan-probe.txt
      * reports what its NVK offers, for Vulkan and DXVK (vulkan_probe.c). */
     {
-        int vulkan_probe = config_bool( "vulkan-probe", 0, "vulkan-probe.txt", 0 );
+        /* The nxvk runtime tries Vulkan and OpenGL step by step every time:
+         * it is new, and a black screen says nothing of where it stopped. */
+        int vulkan_probe = config_bool( "vulkan-probe", runtime_is_nxvk, "vulkan-probe.txt", 0 );
+        int graphics_test = config_bool( "graphics-selftest", runtime_is_nxvk, "graphics-selftest.txt", 0 );
 
+#ifdef WINE_NX_NXVK
+        log_line( "[INIT] Mesa from nxvk: OpenGL through Zink, Vulkan through NVK; Mesa's own log in %s; "
+                  "Vulkan probe %s", getenv( "MESA_LOG_FILE" ) ? getenv( "MESA_LOG_FILE" ) : "none",
+                  vulkan_probe ? "on" : "off" );
+        /* Before anything here makes a Vulkan instance, which reads it. */
+        runtime_nvk_compression( "OpenGL through Zink and Vulkan" );
+#else
         log_line( "[INIT] Mesa from mesa-switch: OpenGL through nvc0, Vulkan through NVK; Vulkan probe %s",
                   vulkan_probe ? "on" : "off" );
+#endif
         if (vulkan_probe)
         {
             extern void wine_nx_vulkan_probe( void );
 
             wine_nx_vulkan_probe();
             log_lent_memory( "the Vulkan probe" );
+        }
+        if (graphics_test)
+        {
+            extern int wine_nx_graphics_selftest( void );
+
+            wine_nx_graphics_selftest();
+            log_lent_memory( "the graphics test" );
         }
     }
 #endif
@@ -3972,11 +5293,25 @@ int main( int argc, char **argv )
      * find them through game_settings_find. */
     game_fixes_install_profiles( RUNTIME_DIR );
     forwarded_game = runtime_forwarded_game( target, sizeof(target) );
+    if (!forwarded_game) forwarded_game = runtime_command_line_game( argc, argv, target, sizeof(target) );
     if (forwarded_game < 0) launch_error = "This shortcut no longer matches a game in the library. Create it again from the game's Library settings.";
     else if (forwarded_game > 0 && access( target, R_OK ))
     {
         launch_error = "The shortcut's game is unavailable. Connect its USB drive or use Locate executable in the game's Library settings.";
         forwarded_game = -1;
+    }
+    if (forwarded_game > 0)
+    {
+        char queued[512];
+        FILE *rn = fopen( RUN_NEXT, "r" );
+        if (rn)
+        {
+            size_t got = fread( queued, 1, sizeof(queued) - 1, rn );
+            fclose( rn );
+            queued[got] = 0;
+            queued[strcspn( queued, "\r\n" )] = 0;
+            if (!strcmp( queued, target )) run_next_pop( queued, sizeof(queued) );
+        }
     }
     if (!forwarded_game && run_next_pop( target, sizeof(target) ))
     {
@@ -4036,6 +5371,7 @@ int main( int argc, char **argv )
         const char *name;
 
         autorun = 1;
+        runtime_forwarded_launch = forwarded_game > 0;
         if (!resumed_program && !forwarded_game) snprintf( target, sizeof(target), "%s", argv[1] );
         name = strrchr( target, '/' );
         log_line( "[TARGET] starting %s", name ? name + 1 : target );
@@ -4063,14 +5399,53 @@ int main( int argc, char **argv )
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,
 #ifdef WINE_NX_MESA_SWITCH
             .vulkan = 1,
+            .mesa_zink = runtime_mesa_has_zink(),
 #endif
             .verbose = wine_nx_runtime_verbose,
             .profile = runtime_profile,
             .framebuffer = !wine_nx_compositor_mode,
             .swkbd_auto = wine_nx_swkbd_auto_enabled,
+            .picture_mode = wine_nx_picture_mode,
+            .mode_emulation = wine_nx_emulate_modeset,
         };
         int chosen;
 
+#ifdef WINE_NX_NXVK
+        /* The nxvk runtime runs the programs set to it and nothing else: the
+         * launcher is the card's own runtime's, which a program chosen there
+         * comes back here from (runtime_switch_graphics_runtime). Started on
+         * its own, from the album, a shortcut to this NRO or the error screen,
+         * it hands over, with everything it opened closed first: what it leaves
+         * goes on in this process into the card's runtime, as the USB drives'
+         * watcher did, whose stack the card's runtime then faulted on. */
+        if (envHasNextLoad() && !access( RUNTIME_NRO_MESA_SWITCH, F_OK ))
+        {
+            int mine = 0;
+
+            log_line( "[GRAPHICS] the nxvk runtime has no launcher of its own; handing over to %s",
+                      RUNTIME_NRO_MESA_SWITCH );
+            consoleExit( NULL );
+            wine_nx_console_active = 0;
+            /* The graphics test and the Vulkan probe opened the driver. */
+            release_lent_memory();
+            clear_heap_attributes();
+            leave_cleanly();
+            memory_left_behind_ex( 1, &mine );
+            /* Pages of this program still lent would be a hole in the card's
+             * runtime's heap: Autorun closes instead, and starts afresh. */
+            if (mine)
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "pages of this program are still lent out; closing Autorun instead of handing over" );
+            }
+            else if (R_FAILED( envSetNextLoad( RUNTIME_NRO_MESA_SWITCH, RUNTIME_NRO_MESA_SWITCH ) ))
+            {
+                __nx_applet_exit_mode = 1;
+                log_step( "the loader would not start the card's runtime; closing Autorun" );
+            }
+            return 0;
+        }
+#endif
         /* Without a program on the command line, let the user choose one;
          * target.txt only preselects the last choice. The launcher draws with
          * SDL, so the console gives up the screen until it returns. */
@@ -4084,6 +5459,7 @@ int main( int argc, char **argv )
         log_lent_memory( "the settings" );
         log_line( "[LAUNCHER] bringing the screen up: the launcher" );
         wine_nx_runtime_network_fast( 1 );
+        appletNotifyRunning( NULL );
         chosen = wine_nx_launcher_run( &options, target, sizeof(target) );
         wine_nx_runtime_network_fast( 0 );
         log_lent_memory( "the launcher" );
@@ -4103,12 +5479,20 @@ int main( int argc, char **argv )
         wine_nx_config_set_bool( &runtime_config, "verbose-log", options.verbose );
         wine_nx_config_set_bool( &runtime_config, "profiler", options.profile );
         wine_nx_config_set_bool( &runtime_config, "windows-through-opengl", !options.framebuffer );
+        wine_nx_emulate_modeset = !!options.mode_emulation;
+        wine_nx_config_set_bool( &runtime_config, "mode-emulation", wine_nx_emulate_modeset );
         wine_nx_config_set_bool( &runtime_config, "reopen-the-launcher-on-exit", options.reopen_launcher );
         runtime_reopen_launcher = options.reopen_launcher;
         wine_nx_config_set_bool( &runtime_config, "dxvk-for-new-games", options.dxvk_on_add );
         runtime_dxvk_on_add = options.dxvk_on_add;
         wine_nx_config_set_bool( &runtime_config, "keyboard-on-text-focus", options.swkbd_auto );
         wine_nx_swkbd_auto_enabled = options.swkbd_auto;
+        wine_nx_picture_mode = options.picture_mode < 0 || options.picture_mode > 3 ? 0 : options.picture_mode;
+        log_line( "[INIT] the picture of another mode: %s", picture_mode_text( wine_nx_picture_mode ) );
+        wine_nx_config_set( &runtime_config, "picture-mode",
+                            wine_nx_picture_mode == 1 ? "\"edges\"" :
+                            wine_nx_picture_mode == 2 ? "\"stretched\"" :
+                            wine_nx_picture_mode == 3 ? "\"own-size\"" : "\"whole\"" );
         wine_nx_config_save( &runtime_config, CONFIG_FILE );
         if (!chosen)
         {
@@ -4133,6 +5517,15 @@ int main( int argc, char **argv )
 
     run_components_first( target, sizeof(target) );
     snprintf( runtime_program, sizeof(runtime_program), "%s", target );
+    if (!runtime_components_run)
+    {
+        extern void carafeAutorunSetProgram( const char *target, const char *own_nro,
+                                             _Bool forwarded, _Bool reopen_launcher ) __attribute__((weak));
+
+        if (carafeAutorunSetProgram)
+            carafeAutorunSetProgram( target, own_nro, runtime_forwarded_launch != 0,
+                                     runtime_reopen_launcher != 0 );
+    }
 
     /* From here a thread may be asked to end; this one comes back here. */
     if (setjmp( quit_jump )) return return_to_launcher();
@@ -4147,13 +5540,19 @@ int main( int argc, char **argv )
         runtime_d3d = LAUNCHER_D3D_DXVK;
         runtime_dxvk_source = DXVK_SOURCE_OFFICIAL;
         runtime_dxvk_hud = 0;
+        wine_nx_fps_counter = 0;
+        runtime_fex_carafe = runtime_fex_carafe_active = 0;
+        runtime_fex_version[0] = 0;
 #ifdef WINE_NX_FEX
         runtime_fex = 1;
 #else
         runtime_fex = 0;
 #endif
         runtime_four_cores = 1;
+        runtime_orchestrator = 0;
+        if (&carafe_lock_boost_enabled) __atomic_store_n( &carafe_lock_boost_enabled, 0, __ATOMIC_RELAXED );
         horizon_fast_sync_enabled = 0;
+        horizon_server_pool_wanted = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
         wine_nx_upscaling_configure( 0, 0.4f );
@@ -4164,24 +5563,88 @@ int main( int argc, char **argv )
         runtime_vkd3d_version[0] = 0;
         runtime_dxvk_version[0] = 0;
         wine_nx_lazy_file_views = 0;
+        wine_nx_large_address_aware = 0;
         if (target[1] != ':' &&
             launcher_program_settings_path( RUNTIME_DIR, target, settings_path, sizeof(settings_path) ) &&
             launcher_kv_load( &kv, settings_path ))
         {
             launcher_settings_read( &kv, &settings );
             horizon_fast_sync_enabled = settings.fast_sync;
+            horizon_server_pool_wanted = settings.server_pool;
             wine_nx_lazy_file_views = settings.lazy_file_views;
+            wine_nx_large_address_aware = settings.large_address_aware;
+            if (settings.mode_emulation) wine_nx_emulate_modeset = settings.mode_emulation > 0;
+            {
+                int fpslocker = launcher_setting_state( &kv, "fpslocker" );
+                int backoff = launcher_setting_state( &kv, "yield-backoff" );
+
+                if (backoff >= 0) wine_nx_yield_backoff = backoff;
+                if (fpslocker >= 0) wine_nx_fpslocker = fpslocker;
+            }
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
+            runtime_fex_carafe = settings.fex_carafe;
+            memcpy( runtime_fex_version, settings.fex_version, sizeof(runtime_fex_version) );
 #endif
             runtime_four_cores = settings.four_cores;
+            runtime_orchestrator = settings.orchestrator;
+            if (&carafe_lock_boost_enabled)
+                __atomic_store_n( &carafe_lock_boost_enabled, settings.lock_boost, __ATOMIC_RELAXED );
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
+            if (settings.picture_mode >= 0)
+            {
+                wine_nx_picture_mode = settings.picture_mode;
+                log_line( "[INIT] the program's own picture: %s", picture_mode_text( wine_nx_picture_mode ) );
+            }
 #ifdef WINE_NX_MESA_SWITCH
+            /* Which Mesa draws the program (settings.graphics_driver). Two
+             * Mesas cannot be linked into one program, so nxvk's is another
+             * runtime on the card: a program set to the other one than this
+             * build has is queued in run-next.txt and that runtime is started
+             * for it, which leaves the launcher out and starts it at once. */
+            {
+                /* Zink is nxvk's wherever this runtime's Mesa has none: nxvk
+                 * is Zink on NVK. The nxvk runtime keeps a program set to Zink,
+                 * so the two never pass one back and forth. */
+                int zink = settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK;
+                int wants_nxvk = settings.graphics_driver == LAUNCHER_GRAPHICS_NXVK ||
+                                 (zink && (runtime_is_nxvk || !runtime_mesa_has_zink()));
+
+                if (zink && wants_nxvk && !runtime_is_nxvk)
+                    log_line( "[GRAPHICS] the program is set to Zink, which this runtime's mesa-switch was built "
+                              "without; nxvk is Zink on NVK" );
+                if (!runtime_components_run && runtime_switch_graphics_runtime( target, wants_nxvk ))
+                {
+                    runtime_program[0] = 0;  /* it has not run: nothing of it to finish */
+                    return return_to_launcher();
+                }
+            }
+#ifndef WINE_NX_NXVK
+            /* mesa-switch's EGL takes Zink on NVK instead of nvc0 from this
+             * variable when the screen's display is set up, so the compositor
+             * and the program's own OpenGL both take it. A Mesa built without
+             * Zink refuses the display and nothing is drawn at all, so without
+             * it, and without nxvk on the card, the program has nvc0. */
+            if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK && runtime_mesa_has_zink())
+            {
+                setenv( "MESA_SWITCH_GL_DRIVER", "zink", 1 );
+                log_line( "[NXGL] OpenGL through Zink on NVK, from the program's settings" );
+                runtime_nvk_compression( "OpenGL through Zink" );
+            }
+            else
+            {
+                if (settings.graphics_driver == LAUNCHER_GRAPHICS_ZINK)
+                    log_line( "[NXGL] the program is set to Zink, which neither this runtime's mesa-switch nor "
+                              "the card has; OpenGL through nvc0" );
+                unsetenv( "MESA_SWITCH_GL_DRIVER" );
+            }
+#endif
             runtime_d3d = settings.d3d;
             runtime_dxvk_source = settings.dxvk_source;
             runtime_dxvk_hud = settings.dxvk_hud;
+            wine_nx_fps_counter = settings.dxvk_hud != 0;
             wine_nx_graphics_configure( launcher_frame_limits[settings.frame_limit], settings.vsync );
             wine_nx_upscaling_configure( settings.upscaling, launcher_sharpness_values[settings.upscaling_sharpness] );
 #ifdef WINE_NX_LSFG
@@ -4267,20 +5730,45 @@ int main( int argc, char **argv )
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
     runtime_boost_thread_limit();
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
+    log_line( "[SYNC] server threads: %s",
+              !horizon_server_pool_wanted ? "one for each of the program's threads"
+              : horizon_fast_sync_enabled ? "shared (server-pool)"
+              : "one for each of the program's threads; sharing them needs Horizon synchronization" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
                                       : "no sdmc device; reads are not cached" );
     if (wine_nx_lazy_file_views)
         log_line( "[INIT] views of files read on demand (lazy-file-views): only the parts a program touches come from the card" );
+    if (wine_nx_large_address_aware)
+        log_line( "[INIT] large address aware (large-address-aware): a 32-bit program gets addresses up to 4 GB" );
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );
     log_line( "[INIT] profiler %s (profile.txt)", runtime_profile ? "on" : "off" );
+    log_line( "[INIT] thread orchestrator %s, lock wait boost %s", runtime_orchestrator ? "on" : "off",
+              &carafe_lock_boost_enabled && carafe_lock_boost_enabled ? "on" : "off" );
+    __atomic_store_n( &runtime_program_settings_read, 1, __ATOMIC_RELEASE );
     log_line( "[INIT] windows shown by %s", wine_nx_compositor_mode ? "the OpenGL compositor" : "the framebuffer" );
+    log_line( "[INIT] display mode emulation %s (mode-emulation)%s", wine_nx_emulate_modeset ? "on" : "off",
+              wine_nx_emulate_modeset ? "" : ": a program's OpenGL draws to the window's surface itself" );
+    if (wine_nx_fps_counter)
+        log_line( "[INIT] frame rate counter on (DXVK HUD %s): drawn over a game's OpenGL frames, DXVK's "
+                  "HUD over its Vulkan ones", launcher_hud_labels[runtime_dxvk_hud] );
+    log_wine_mono();
+    log_line( "[INIT] FPSLocker %s (fpslocker)%s", wine_nx_fpslocker ? "on" : "off",
+              wine_nx_fpslocker ? ": the frame rate goes to it, its target and display sync come back" : "" );
+    log_line( "[INIT] yield backoff %s (yield-backoff)%s", wine_nx_yield_backoff ? "on" : "off",
+              wine_nx_yield_backoff ? ": after 2 ms of quick Sleep(0) or SwitchToThread, each sleeps 100 us" : "" );
     log_line( "[TARGET] %s", target );
+    if (wine_nx_fpslocker && !runtime_components_run) wine_nx_saltynx_start();
 
     status = runtime_target_machine( target, &target_machine );
     if (status || (status = horizon_set_process_machine( target_machine )))
     {
         log_line( "[FAIL] target machine status=%08x", status );
+        if (autorun)
+        {
+            wine_nx_program_exit_code = status ? (unsigned int)status : 0xC000007Bu;
+            return return_to_launcher();
+        }
         park_forever();
     }
     main_image_info.Machine = target_machine;
@@ -4291,10 +5779,62 @@ int main( int argc, char **argv )
                                  WINE_SYSTEM_DIR "/libarm64ecfex.dll" :
                                  WINE_SYSTEM_DIR "/libwow64fex.dll";
 
+        /* wow64.dll loads its CPU module by name from system32, so the build
+         * this program is set to has to be the file there before it starts.
+         * Carafe's build is for 32-bit programs; a 64-bit one gets the stock
+         * file back, which is what a 32-bit program it starts will load. */
+        {
+            struct dxvk_version fex = {0};
+            char carafe[896] = "";
+            int changed = 0;
+
+            if (runtime_fex_carafe && target_machine == IMAGE_FILE_MACHINE_I386)
+            {
+                dxvk_resolve_version( DXVK_BACKEND_FEX_CARAFE, RUNTIME_DIR, target_machine, runtime_fex_version, &fex );
+                if (!fex.installed ||
+                    !dxvk_release_path( DXVK_BACKEND_FEX_CARAFE, RUNTIME_DIR, target_machine, fex.version,
+                                        carafe, sizeof(carafe) - sizeof("/libwow64fex.dll") ))
+                {
+                    log_line( "[FEX] Carafe build %s is not installed; using the stock FEX",
+                              runtime_fex_version[0] ? runtime_fex_version : "(newest)" );
+                    carafe[0] = 0;
+                }
+                else strcat( carafe, "/libwow64fex.dll" );
+            }
+            switch (wine_nx_fex_build_select( RUNTIME_DIR, carafe[0] ? carafe : NULL, &changed ))
+            {
+            case FEX_BUILD_CARAFE:
+                runtime_fex_carafe_active = 1;
+                log_line( "[FEX] Carafe build %s%s", fex.version, changed ? " put in system32" : "" );
+                break;
+            case FEX_BUILD_STOCK:
+                if (changed) log_line( "[FEX] stock build put back in system32" );
+                break;
+            case FEX_BUILD_NO_CARAFE:
+                log_line( "[FEX] Carafe build %s cannot be read; system32's FEX is used as it is", fex.version );
+                break;
+            case FEX_BUILD_NO_STOCK:
+                /* The options that are Carafe's stay off: which Carafe build
+                 * this is was not this program's choice. */
+                log_line( "[FEX] no copy of the stock FEX is kept; a Carafe build stays in system32. "
+                          "Settings > System > Windows DLLs brings the stock one back" );
+                break;
+            case FEX_BUILD_IO:
+                log_line( "[FEX] the FEX build in system32 could not be changed; it is used as it is" );
+                break;
+            }
+        }
         if ((target_machine != IMAGE_FILE_MACHINE_AMD64 && target_machine != IMAGE_FILE_MACHINE_I386) ||
             access( cpu_module, R_OK ))
         {
             log_line( "[FAIL] FEX CPU module missing or unsupported target: %04x (%s)", target_machine, cpu_module );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = 0xC0000135u;
+                if (carafeErrorMissingDll)
+                    carafeErrorMissingDll( target_machine == IMAGE_FILE_MACHINE_AMD64
+                                           ? "libarm64ecfex.dll" : "libwow64fex.dll" );
+            }
             return return_to_launcher();
         }
         if (wine_nx_fex_exception_attach())
@@ -4309,7 +5849,7 @@ int main( int argc, char **argv )
 #endif
     }
     log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
-                         runtime_fex ? "FEX-2609" : "Box64" );
+                         !runtime_fex ? "Box64" : runtime_fex_carafe_active ? "FEX-2609 (Carafe)" : "FEX-2609" );
 #ifdef WINE_NX_AMD64
     if (target_machine == IMAGE_FILE_MACHINE_AMD64)
     {
@@ -4369,6 +5909,11 @@ int main( int argc, char **argv )
     if (status || !runtime_describe_image( module, view_size, &entry ))
     {
         log_line( "[FAIL] map target status=%08x", status );
+        if (autorun)
+        {
+            wine_nx_program_exit_code = status ? (unsigned int)status : 0xC0000135u;
+            return return_to_launcher();
+        }
         park_forever();
     }
     main_module = module;
@@ -4432,6 +5977,11 @@ int main( int argc, char **argv )
         if (status)
         {
             log_line( "[FAIL] init_process_done status=%08x", status );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = (unsigned int)status;
+                return return_to_launcher();
+            }
             park_forever();
         }
     }
@@ -4441,10 +5991,24 @@ int main( int argc, char **argv )
     if (!low_window_available) hold_thread_local_pages();
     else log_line( "[TLS] kernel TLS stays above 4 GiB; placeholder threads not needed" );
     {
+        extern void carafeErrorResetStartTick( void ) __attribute__((weak));
+        extern void carafeLoadingStart( void ) __attribute__((weak));
+
+        if (!runtime_components_run && carafeErrorResetStartTick) carafeErrorResetStartTick();
+        if (wine_nx_compositor_mode && !runtime_components_run && carafeLoadingStart) carafeLoadingStart();
+    }
+    __atomic_store_n( &wine_nx_overlay_poll_armed, 1, __ATOMIC_RELEASE );
+    if (!wine_nx_compositor_enabled() || !wine_nx_watch_window_pictures) appletNotifyRunning( NULL );
+    {
         params = runtime_create_process_params( target, &main_nt_name, dos_path, sizeof(dos_path) );
         if (!params)
         {
             log_line( "[FAIL] process parameter allocation" );
+            if (autorun)
+            {
+                wine_nx_program_exit_code = 0xC0000017u;
+                return return_to_launcher();
+            }
             park_forever();
         }
         runtime_init_peb_process( teb, module, params );
@@ -4465,6 +6029,14 @@ int main( int argc, char **argv )
                 svcSetThreadPriority( CUR_THREAD_HANDLE, 0x3b );
                 wine_nx_thread_register( 'w', HandleToULong( teb->ClientId.UniqueThread ), teb );
                 wine_nx_start_arm64ec_thread( (PRTL_THREAD_START_ROUTINE)entry, teb->Peb, suspend, teb );
+                park_forever();
+            }
+            if (autorun)
+            {
+                wine_nx_program_exit_code = status ? (unsigned int)status : 0xC0000142u;
+                if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                    carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+                return return_to_launcher();
             }
             park_forever();
         }
@@ -4474,6 +6046,13 @@ int main( int argc, char **argv )
         {
             status = runtime_start_wow64( module, entry, params, &main_nt_name, autorun );
             log_line( "[WOW64] startup status=%08x", status );
+            if (status && autorun)
+            {
+                wine_nx_program_exit_code = (unsigned int)status;
+                if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                    carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+                return return_to_launcher();
+            }
             park_forever();
         }
 #endif
@@ -4516,6 +6095,11 @@ int main( int argc, char **argv )
             wine_nx_console_quiet = 0;
             log_line( "[BLOCK] run-entry.txt enabled, but loader status import=%08x attach=%08x",
                       ldr_status, attach_status );
+            wine_nx_program_exit_code = ldr_status ? (unsigned int)ldr_status :
+                                        attach_status ? (unsigned int)attach_status : 0xC0000135u;
+            if (carafeErrorMissingDll && wine_nx_loader_last_import_dll()[0])
+                carafeErrorMissingDll( wine_nx_loader_last_import_dll() );
+            return return_to_launcher();
         }
     }
 

@@ -26,7 +26,6 @@ def table_size(name):
 
 checks = [
     ('wine_nx_ws2_32_wow64_unix_funcs', 'dlls/ws2_32/ws2_32_private.h', 'ws_unix_funcs', 'ws_unix_funcs_count'),
-    ('wine_nx_crypt32_wow64_unix_funcs', 'dlls/crypt32/crypt32_private.h', 'unix_funcs', 'unix_funcs_count'),
 ]
 for table, header, enum, last in checks:
     count = enum_count(header, enum, last)
@@ -34,6 +33,18 @@ for table, header, enum, last in checks:
     assert size == count, f'{table} has {size} entries, {header} defines {count}'
     name = table.replace('_funcs', '_count')
     assert f'const unsigned int {name} = ARRAY_SIZE({table});' in stubs, f'{name} must be the size of {table}'
+
+# crypt32's tables are its own (crypt32_roots.c): they are sized by their
+# entries and held against the DLL's enum where they are compiled.
+crypt32 = (root / 'horizon-wine/source/crypt32_roots.c').read_text()
+crypt32_count = enum_count('dlls/crypt32/crypt32_private.h', 'unix_funcs', 'unix_funcs_count')
+for table in ('wine_nx_crypt32_unix_funcs', 'wine_nx_crypt32_wow64_unix_funcs'):
+    body = re.search(r'const unixlib_entry_t %s\[\] =\n\{(.*?)\};' % table, crypt32, re.S).group(1)
+    size = len([entry for entry in body.replace('\n', ' ').split(',') if entry.strip()])
+    assert size == crypt32_count, f'{table} has {size} entries, crypt32_private.h defines {crypt32_count}'
+    assert f'C_ASSERT(ARRAY_SIZE({table}) == unix_funcs_count);' in crypt32, f'{table} must cover the crypt32 enum'
+assert 'const unsigned int wine_nx_crypt32_wow64_unix_count = ARRAY_SIZE(wine_nx_crypt32_wow64_unix_funcs);' in crypt32, \
+    'the crypt32 call count must be the size of its table'
 
 # opengl32 and winenxaudio.drv have their real unix tables linked in, so their
 # bound has to come from the DLL's own enum rather than a length written here.
@@ -93,6 +104,18 @@ const unixlib_entry_t wine_nx_opengl32_wow64_unix_funcs[3] = { gl_call, gl_call,
 const unixlib_entry_t wine_nx_audio_wow64_unix_funcs[2] = { audio_call, audio_call };
 const unixlib_entry_t wine_nx_crypt32_wow64_unix_funcs[2] = { crypt_call, crypt_call };
 const unixlib_entry_t wine_nx_xinput_wow64_unix_funcs[2] = { xinput_call, xinput_call };
+/* The other tables of the list, which the calls below do not reach. */
+static NTSTATUS other_call( void *args ) { last = 7; return 0; }
+const unixlib_entry_t wine_nx_dnsapi_wow64_unix_funcs[1] = { other_call };
+const unixlib_entry_t wine_nx_wma_unix_funcs[1] = { other_call };
+const unixlib_entry_t wine_nx_winedmo_wow64_unix_funcs[1] = { other_call };
+const unixlib_entry_t wine_nx_media_wow64_unix_funcs[1] = { other_call };
+const unixlib_entry_t wine_nx_secur32_wow64_unix_funcs[2] = { other_call, other_call };
+const unsigned int wine_nx_dnsapi_wow64_unix_count = 1;
+const unsigned int wine_nx_wma_unix_count = 1;
+const unsigned int wine_nx_winedmo_unix_count = 1;
+const unsigned int wine_nx_media_unix_count = 1;
+const unsigned int wine_nx_secur32_wow64_unix_count = 2;
 const unsigned int wine_nx_ws2_32_wow64_unix_count = 5;
 const unsigned int wine_nx_opengl32_wow64_unix_count = 3;
 const unsigned int wine_nx_audio_wow64_unix_count = 2;
@@ -127,6 +150,9 @@ int main(void)
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_crypt32_wow64_unix_funcs), 2, 0 ) == STATUS_INVALID_PARAMETER );
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_xinput_wow64_unix_funcs), 1, 0 ) == 0 && last == 6 );
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_xinput_wow64_unix_funcs), 2, 0 ) == STATUS_INVALID_PARAMETER );
+    CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_secur32_wow64_unix_funcs), 1, 0 ) == 0 && last == 7 );
+    CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_secur32_wow64_unix_funcs), 2, 0 ) == STATUS_INVALID_PARAMETER );
+    CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_dnsapi_wow64_unix_funcs), 1, 0 ) == STATUS_INVALID_PARAMETER );
     last = 0;  /* the refused calls below must reach no table at all */
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_opengl32_wow64_unix_funcs), 3, 0 ) == STATUS_INVALID_PARAMETER );
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_ws2_32_wow64_unix_funcs), 5, 0 ) == STATUS_INVALID_PARAMETER );
@@ -142,7 +168,7 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Werror', '-Wno-unused-parameter', '-fsanitize=address,undefined',
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
-print('PASS: the ws2_32 (%d) and crypt32 (%d) stub tables match their DLL enums, audio and XInput '
+print('PASS: the ws2_32 (%d) and crypt32 (%d) tables match their DLL enums, audio and XInput '
       'count their native and WoW64 tables; the x86 unix call gate reaches ntdll and every static table '
       'within its size, times opengl32 calls and refuses other handles'
-      % (table_size(checks[0][0]), table_size(checks[1][0])))
+      % (table_size(checks[0][0]), crypt32_count))
