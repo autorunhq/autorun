@@ -163,17 +163,17 @@ jobs:
           for check in check_arm64ec_box64_unix check_arm64ec_fpcsr check_autorun_runtime_update \
                        check_callback_lifetime check_caret check_config_json check_continue_context \
                        check_delete_on_close check_desktop_ancestry check_directshow_reg \
-                       check_display_expose_cursor check_dsound_resample check_exception_restore \
-                       check_fex_jit_bridge check_fex_memory check_fex_smc check_free_space \
-                       check_gl_surfaces check_graphics_driver check_horizon_address_space_limit \
-                       check_horizon_async check_horizon_async_sockets check_horizon_byte_pipes \
-                       check_horizon_fast_sync check_horizon_fragmented_memory check_horizon_mappings \
-                       check_horizon_native_view check_horizon_pipe_descriptors check_horizon_pipe_reads \
-                       check_horizon_queue_wakes check_horizon_sockaddr check_horizon_thread_fds \
-                       check_horizon_thread_handles check_horizon_topology check_kernel_context \
-                       check_kernel_hold check_key_names check_mouse_filter check_native_heap \
-                       check_native_stack check_pe_release check_pointer_events check_popup_restore \
-                       check_positioned_io check_prince_resolution check_qpc_base \
+                       check_display_expose_cursor check_download_hosts check_dsound_resample \
+                       check_exception_restore check_fex_jit_bridge check_fex_memory check_fex_smc \
+                       check_free_space check_gl_surfaces check_graphics_driver \
+                       check_horizon_address_space_limit check_horizon_async check_horizon_async_sockets \
+                       check_horizon_byte_pipes check_horizon_fast_sync check_horizon_fragmented_memory \
+                       check_horizon_mappings check_horizon_native_view check_horizon_pipe_descriptors \
+                       check_horizon_pipe_reads check_horizon_queue_wakes check_horizon_sockaddr \
+                       check_horizon_thread_fds check_horizon_thread_handles check_horizon_topology \
+                       check_kernel_context check_kernel_hold check_key_names check_mouse_filter \
+                       check_native_heap check_native_stack check_pe_release check_pointer_events \
+                       check_popup_restore check_positioned_io check_prince_resolution check_qpc_base \
                        check_quartz_empty_categories check_raw_mouse check_render_overhead \
                        check_resource_forks check_runtime_symbols check_select_wait check_setup_boot \
                        check_static_unix_libs check_swap_game check_swap_native check_swap_threads \
