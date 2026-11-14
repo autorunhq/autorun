@@ -416,6 +416,15 @@ changes, and fails if the pinned text moves.
   jumps to 0x745f6c69, the letters "il_t"). **Old OpenGL extension list** in
   the game's settings (`gl-old-extensions=1`) shows the program the short list
   such a driver had; `[NXGL] old extension list` in the log says how many.
+- An OpenGL game held back by its one busy thread (Doom 3 on nxvk: 98% of a
+  core at 30 FPS, two cores idle) can hand its OpenGL calls to Mesa's
+  glthread: **OpenGL thread** in the game's settings (`gl-thread=1`), nxvk's
+  runtime only. nxvk's Switch EGL did not start glthread at all, and Mesa's
+  own default leaves it off below four CPUs: `nxvk-patches/0001` starts it
+  when the runtime sets `mesa_glthread=true` and has it finish before a
+  swap, a make-current and a context's or surface's end, as Mesa's DRI
+  frontend does. `[INIT] OpenGL thread on` and a `Mesa queue gl` line in the
+  log say it runs. A game that reads back from the GPU often can be slower.
 - A 32-bit program whose image is not large address aware is given addresses
   below 2 GiB only. **Large address aware** in the game's settings
   (`large-address-aware=1`) gives it those up to 4 GiB without patching the

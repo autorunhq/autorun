@@ -758,6 +758,16 @@ int wine_nx_emulate_modeset = 1;
  * game whose buffer the full list overruns. */
 int wine_nx_gl_old_extensions;
 
+/* gl-thread=1 in a program's settings: Mesa's glthread takes the program's
+ * OpenGL calls on a thread of its own, so the work of the driver's front end
+ * (state, validation, Zink's command recording) leaves the program's thread.
+ * An OpenGL game held back by its one busy thread (Doom 3: 98% of a core at
+ * 30 FPS while two cores idle) gains what that work took; Mesa's developers
+ * measured 35% in Half-Life 2 when they turned it on for Zink. Mesa's own
+ * default leaves it off with fewer than four CPUs, and nxvk's Switch EGL did
+ * not start it at all (nxvk-patches/0001). nxvk's runtime only. */
+static int runtime_gl_thread;
+
 /* Whether a thread's long quick run of yields (Sleep(0), SwitchToThread, a
  * wait that timed out, a message poll that found nothing) sleeps a little each
  * instead of keeping its core busy (dlls/ntdll/unix/horizon_yield_backoff.h,
@@ -5580,6 +5590,7 @@ int main( int argc, char **argv )
         wine_nx_lazy_file_views = 0;
         wine_nx_large_address_aware = 0;
         wine_nx_gl_old_extensions = 0;
+        runtime_gl_thread = 0;
         if (target[1] != ':' &&
             launcher_program_settings_path( RUNTIME_DIR, target, settings_path, sizeof(settings_path) ) &&
             launcher_kv_load( &kv, settings_path ))
@@ -5590,6 +5601,7 @@ int main( int argc, char **argv )
             wine_nx_lazy_file_views = settings.lazy_file_views;
             wine_nx_large_address_aware = settings.large_address_aware;
             wine_nx_gl_old_extensions = settings.gl_old_extensions;
+            runtime_gl_thread = settings.gl_thread;
             if (settings.mode_emulation) wine_nx_emulate_modeset = settings.mode_emulation > 0;
             {
                 int fpslocker = launcher_setting_state( &kv, "fpslocker" );
@@ -5758,6 +5770,17 @@ int main( int argc, char **argv )
         log_line( "[INIT] views of files read on demand (lazy-file-views): only the parts a program touches come from the card" );
     if (wine_nx_gl_old_extensions)
         log_line( "[INIT] old OpenGL extension list (gl-old-extensions): a program is shown the extensions an old driver had" );
+    if (runtime_gl_thread)
+    {
+#ifdef WINE_NX_NXVK
+        /* Read when the program makes an OpenGL context (egl_horizon.c). */
+        setenv( "mesa_glthread", "true", 1 );
+        log_line( "[INIT] OpenGL thread on (gl-thread): Mesa's glthread runs the program's OpenGL calls; "
+                  "its thread is the Mesa queue gl" );
+#else
+        log_line( "[INIT] OpenGL thread (gl-thread) is nxvk's: this runtime leaves it as Mesa has it" );
+#endif
+    }
     if (wine_nx_large_address_aware)
         log_line( "[INIT] large address aware (large-address-aware): a 32-bit program gets addresses up to 4 GB" );
     log_line( "[INIT] verbose traces %s (verbose.txt)", wine_nx_runtime_verbose ? "on" : "off" );

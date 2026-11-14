@@ -1808,7 +1808,7 @@ static void draw_home( struct launcher *l )
 enum program_row
 {
     ROW_START, ROW_FAVORITE, ROW_ARTWORK, ROW_FORWARDER, ROW_LOCATE, ROW_TITLE, ROW_ARGS, ROW_VERBOSE, ROW_PROFILE,
-    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GL_OLD_EXTENSIONS, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
+    ROW_WINDOWS, ROW_PICTURE, ROW_MODE_EMULATION, ROW_GL_OLD_EXTENSIONS, ROW_GL_THREAD, ROW_GRAPHICS_DRIVER, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_SERVER_POOL, ROW_CPU, ROW_FEX_BUILD, ROW_FOUR_CORES, ROW_LARGE_ADDRESS, ROW_ORCHESTRATOR, ROW_LOCK_BOOST, ROW_LAZY_FILE_VIEWS,
@@ -2693,6 +2693,15 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.gl_old_extensions;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.gl_old_extensions ? "Enabled" : "Disabled" );
 
+        ADD_ROW( ROW_GL_THREAD, SECTION_GRAPHICS, "OpenGL thread",
+                 "Runs an OpenGL game's graphics calls on a thread of their own, on a core the game leaves "
+                 "idle, so its own thread has more time for the game. For an OpenGL game that keeps one core "
+                 "busy below 60 FPS (Doom 3). With the nxvk graphics driver only. A game that reads back from "
+                 "the GPU often can be slower with it: turn it off again if so." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.gl_thread;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.gl_thread ? "Enabled" : "Disabled" );
+
         if (l->options->vulkan)
         {
             char nxvk[512];
@@ -3182,6 +3191,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 
         case ROW_GL_OLD_EXTENSIONS:
             p->settings.gl_old_extensions = action == UI_ACTION_RESET ? 0 : !p->settings.gl_old_extensions;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_GL_THREAD:
+            p->settings.gl_thread = action == UI_ACTION_RESET ? 0 : !p->settings.gl_thread;
             save_program_settings( l, p );
             break;
 

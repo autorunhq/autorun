@@ -5,7 +5,8 @@
 #
 #   sh horizon-wine/build-nxvk.sh
 #
-# Clones the pinned commit into vendor/nxvk, builds nxvk's own toolchain image
+# Clones the pinned commit into vendor/nxvk, applies nxvk-patches/*.patch,
+# builds nxvk's own toolchain image
 # (devkitA64, LLVM 15 and a Rust nightly: NAK is Rust) and runs nxvk's
 # `make gl` in it, which stages lib/libnvk.a, libnvk_support.a and
 # libnvk_gl.a in vendor/nxvk/switch/build/pkg. A package already there for the
@@ -21,8 +22,16 @@ commit=c3abea1efde44027b7e3e20b48eb55beeecd5ab4
 src="$hw/vendor/nxvk"
 pkg="$src/switch/build/pkg"
 image="autorun-nxvk:$commit"
+# Autorun's changes to nxvk, applied in name order on the pinned commit:
+# 0001 starts Mesa's glthread when the runtime sets mesa_glthread (the program's
+# OpenGL thread setting). The package is kept for this commit and these patches.
+stamp="$commit"
+for patch in "$hw"/nxvk-patches/*.patch; do
+    [ -f "$patch" ] || continue
+    stamp="$stamp $(basename "$patch"):$(cksum < "$patch" | cut -d' ' -f1)"
+done
 
-if [ -f "$pkg/lib/libnvk_gl.a" ] && [ "$(cat "$pkg/commit" 2>/dev/null)" = "$commit" ]; then
+if [ -f "$pkg/lib/libnvk_gl.a" ] && [ "$(cat "$pkg/commit" 2>/dev/null)" = "$stamp" ]; then
     echo "nxvk $commit: package already built in $pkg"
     exit 0
 fi
@@ -35,8 +44,13 @@ if [ ! -d "$src/.git" ]; then
 fi
 if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" != "$commit" ]; then
     git -C "$src" fetch -q --depth 1 origin "$commit"
-    git -C "$src" checkout -q --force "$commit"
 fi
+# From the commit's own files each time, so a patch is never applied twice.
+git -C "$src" checkout -q --force "$commit"
+for patch in "$hw"/nxvk-patches/*.patch; do
+    [ -f "$patch" ] || continue
+    git -C "$src" apply "$patch"
+done
 
 docker build -q -t "$image" "$src/switch/docker" >/dev/null
 # CONTAINER= runs nxvk's recipes in this container rather than starting one
@@ -46,7 +60,7 @@ docker run --rm -v "$src:/work" -w /work "$image" \
 for lib in nvk nvk_support nvk_gl; do
     [ -f "$pkg/lib/lib$lib.a" ] || { echo "nxvk did not stage lib$lib.a" >&2; exit 1; }
 done
-echo "$commit" > "$pkg/commit"
+echo "$stamp" > "$pkg/commit"
 # The licenses go beside the runtime on the card (tools/package-autorun.py).
 rm -rf "$pkg/licenses"
 cp -R "$src/licenses" "$pkg/licenses"
