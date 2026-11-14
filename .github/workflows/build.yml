@@ -348,6 +348,20 @@ jobs:
           }
           cat "$RUNNER_TEMP/check_media_decoder.log"
 
+      - name: The audio driver
+        # check-audio.sh: the registry server's wire and the audout backend's
+        # playback, mixing and formats. The COM headers it needs are made here
+        # with the widl above; the runtime's build takes them from Wine's PE
+        # build.
+        run: |
+          widl="$(python3 horizon-wine/tests/media_host.py --widl)"
+          mkdir -p "$RUNNER_TEMP/pe/include"
+          for name in audioclient mmdeviceapi msxml oaidl objidl objidlbase ocidl oleidl propidl propsys \
+                      servprov shtypes structuredquerycondition unknwn urlmon wtypes wtypesbase; do
+            "$widl" -o "$RUNNER_TEMP/pe/include/$name.h" -m64 --nostdinc -Iinclude -D__WINESRC__ "include/$name.idl"
+          done
+          WINE_NX_PE_BUILD_DIR="$RUNNER_TEMP/pe" sh horizon-wine/check-audio.sh
+
   runtime:
     name: card archive
     runs-on: ubuntu-24.04

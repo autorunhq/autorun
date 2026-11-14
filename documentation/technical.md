@@ -366,8 +366,9 @@ CI (`.github/workflows/build.yml`) runs `check-runtime-console.sh`,
 `check-wow64-box64-*.sh` and every `check_*.py` that needs neither an ARM64
 host, the submodules, `vendor/` nor FFmpeg (the job runtime (host checks)), and `check-launcher-host.sh` with only
 the game fixes submodule, where a bare 32-bit image made by the script stands
-in for the DLL repository's Notepad (launcher (host test)); the media and
-Carafe jobs run theirs. The DLL and game fix scripts need both submodules and
+in for the DLL repository's Notepad (launcher (host test)); the media job runs
+its own and `check-audio.sh`, with COM headers its widl makes, and the Carafe
+job its own. The DLL and game fix scripts need both submodules and
 are run by hand, on macOS or Linux.
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by
