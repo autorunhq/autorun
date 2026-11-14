@@ -361,11 +361,13 @@ python3 horizon-wine/tests/check_menu_builds.py   # which rows the settings menu
 (cd horizon-wine && cc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -I tests/orchestrator-shims -I source tests/orchestrator_switch.c source/orchestrator.c source/orchestrator_policy.c -o /tmp/orchestrator_switch && /tmp/orchestrator_switch)   # the orchestrator behind its switch: off it leaves everything to the balancer
 ```
 
-CI (`.github/workflows/build.yml`, the job runtime (host checks)) runs
-`check-runtime-console.sh` and every `check_*.py` that needs neither an ARM64
-host, the submodules, `vendor/` nor FFmpeg; the media and Carafe jobs run
-theirs. The launcher, DLL and game fix scripts above need the submodules
-and are run by hand, on macOS or Linux.
+CI (`.github/workflows/build.yml`) runs `check-runtime-console.sh` and every
+`check_*.py` that needs neither an ARM64 host, the submodules, `vendor/` nor
+FFmpeg (the job runtime (host checks)), and `check-launcher-host.sh` with only
+the game fixes submodule, where a bare 32-bit image made by the script stands
+in for the DLL repository's Notepad (launcher (host test)); the media and
+Carafe jobs run theirs. The DLL and game fix scripts need both submodules and
+are run by hand, on macOS or Linux.
 
 Box64 is pinned in `horizon-wine/vendor/box64` (fetched by
 `tools/bootstrap-box64-core.sh`) and never edited:
