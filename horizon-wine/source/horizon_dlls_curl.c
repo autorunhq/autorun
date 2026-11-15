@@ -114,6 +114,8 @@ static int allowed( const char *url )
 {
     return !strncmp( url, HORIZON_DLLS_RAW, sizeof(HORIZON_DLLS_RAW) - 1 ) ||
            !strncmp( url, HORIZON_DLLS_RELEASE, sizeof(HORIZON_DLLS_RELEASE) - 1 ) ||
+           !strncmp( url, HORIZON_DLLS_FORK_RAW, sizeof(HORIZON_DLLS_FORK_RAW) - 1 ) ||
+           !strncmp( url, HORIZON_DLLS_FORK_RELEASE, sizeof(HORIZON_DLLS_FORK_RELEASE) - 1 ) ||
            !strncmp( url, GAME_FIXES_RAW, sizeof(GAME_FIXES_RAW) - 1 );
 }
 

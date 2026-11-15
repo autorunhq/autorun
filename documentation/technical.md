@@ -185,7 +185,13 @@ repository's manifest when it starts, and Settings > System > Windows DLLs
 downloads what is new or changed (`source/launcher_dlls.c`, over
 `source/horizon_dlls.c`): each file into a `.part` beside where it goes, checked
 against the manifest's size and SHA-256, then put in place. Starting a game on
-a card without them offers them first. The card keeps the manifest it
+a card without them offers them first. **Source** in that screen chooses which
+repository the card follows: Autorun's, or the fork of it named in
+`source/horizon_dlls.h` (`HORIZON_DLLS_FORK_OWNER`), for DLLs built from a
+fork's own source. The choice is one word in `horizon-dlls/source.txt`; changing
+it only reads the other manifest, and Update then replaces the files whose size
+or SHA-256 differ, either way round. A manifest may name files in either
+repository. The card keeps the manifest it
 installed from in `horizon-dlls/manifest.json`, and `horizon-dlls/classes.reg`,
 the COM classes its DLLs serve, which the registry loads before `system.reg`. A
 file the runtime cannot run (a feature it does not report,

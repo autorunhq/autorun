@@ -426,7 +426,26 @@ int main( int argc, char **argv )
     rejects( "{\"schema\":2,\"flavor\":\"arm64x\",\"files\":[{\"name\":\"x.dll\",\"path\":\"drive_c/windows/system32\","
              "\"size\":1,\"sha256\":\"" "0000000000000000000000000000000000000000000000000000000000000000" "\","
              "\"url\":\"https://example.com/switch/wine/drive_c/windows/system32/x.dll\"}]}" );
+    rejects( "{\"schema\":2,\"flavor\":\"arm64x\",\"files\":[{\"name\":\"x.dll\",\"path\":\"drive_c/windows/system32\","
+             "\"size\":1,\"sha256\":\"" "0000000000000000000000000000000000000000000000000000000000000000" "\","
+             "\"url\":\"https://raw.githubusercontent.com/someone-else/autorun-horizon-dlls/main/switch/wine/"
+             "drive_c/windows/system32/x.dll\"}]}" );
     printf( "refused: a path out of the known folders, a name with a path, a URL from elsewhere\n" );
+
+    /* The fork's files are the repository's as much as its own (Windows DLLs > Source). */
+    {
+        static const char fork[] =
+            "{\"schema\":2,\"flavor\":\"arm64x\",\"files\":["
+            "{\"name\":\"x.dll\",\"path\":\"drive_c/windows/system32\",\"size\":1,\"sha256\":\""
+            "0000000000000000000000000000000000000000000000000000000000000000" "\",\"url\":\"" HORIZON_DLLS_FORK_RAW
+            "main/switch/wine/drive_c/windows/system32/x.dll\"}]}";
+        struct horizon_dll_manifest m;
+
+        CHECK( horizon_dlls_parse( fork, strlen( fork ), features, feature_count, &m ) == HORIZON_DLLS_OK );
+        CHECK( m.count == 1 && !strcmp( m.files[0].name, "x.dll" ) );
+        horizon_dlls_free( &m );
+    }
+    printf( "fork: a manifest may name files in " HORIZON_DLLS_FORK_OWNER "'s fork\n" );
 
     /* A folder a later Autorun knows: that file is left out, not the manifest. */
     {

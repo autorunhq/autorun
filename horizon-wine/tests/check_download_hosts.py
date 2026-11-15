@@ -35,6 +35,9 @@ int main( void )
     assert( allowed( HORIZON_DLLS_MANIFEST_URL ) );
     assert( allowed( HORIZON_DLLS_BUNDLE_URL ) );
     assert( allowed( GAME_FIXES_INDEX_URL ) );
+    /* The fork Windows DLLs > Source can follow instead. */
+    assert( allowed( HORIZON_DLLS_FORK_MANIFEST_URL ) );
+    assert( allowed( HORIZON_DLLS_FORK_BUNDLE_URL ) );
     /* A fix's file, as game_fixes_download names it. */
     snprintf( url, sizeof(url), GAME_FIXES_RAW "%s/%s", "halo", "halo.reg" );
     assert( allowed( url ) );
