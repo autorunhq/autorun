@@ -444,6 +444,40 @@ jobs:
           ls -l horizon-wine/build-autorun/
           sha256sum horizon-wine/build-autorun/autorun-*.zip
 
+      - name: opengl32.dll of this source, for 32-bit programs
+        # The Windows DLLs come from the DLL repository, which is not built
+        # here, so a change to dlls/opengl32 (the object tables without a lock,
+        # 8924c90) does not reach a card with this archive. This builds that
+        # one module from this commit, to be copied over
+        # drive_c/windows/syswow64/opengl32.dll by hand and tried. A failure
+        # here does not fail the build of the card archive.
+        if: ${{ inputs.x86 != true }}
+        continue-on-error: true
+        run: |
+          llvm="$(ls -d "$PWD"/horizon-wine/toolchains/llvm-mingw-*/ | head -n 1)"
+          export PATH="${llvm}bin:$PATH"
+          make -C horizon-wine/build-wine-amd64-pe -j"$(nproc)" dlls/opengl32/i386-windows/opengl32.dll \
+            > "$RUNNER_TEMP/opengl32.log" 2>&1 || {
+              { grep -i -m 8 "error\|No rule\|not found" "$RUNNER_TEMP/opengl32.log"; tail -n 4 "$RUNNER_TEMP/opengl32.log"; } |
+                cut -c1-400 | while IFS= read -r line; do printf '::warning::opengl32: %s\n' "$line"; done
+              exit 1
+            }
+          mkdir -p "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64"
+          cp horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll \
+             "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
+          ls -l "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
+          echo "::notice::opengl32.dll (i386) built: $(sha256sum < horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll | cut -c1-16), $(stat -c %s horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll) bytes"
+
+      - name: Upload that opengl32.dll
+        if: ${{ inputs.x86 != true }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: opengl32-i386-${{ github.sha }}
+          path: ${{ runner.temp }}/opengl32
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Upload the card archive
         uses: actions/upload-artifact@v4
         with:
