@@ -290,8 +290,76 @@ static void test_speed_scales_the_stick(void)
     assert( fabs( c.x - a.x ) < 0.01 );
 }
 
+/* Paints the runs into a screen the way a copy of each one would, and checks
+ * that the result is pointer_cursor_paint's arrow cut to that screen. */
+static void check_spans_match_paint( int left, int top )
+{
+    enum { W = 64, H = 40 };
+    static uint32_t from_spans[W * H], from_paint[W * H];
+    struct pointer_cursor_span spans[POINTER_CURSOR_MAX_SPANS];
+    struct pointer_cursor c = { .width = W, .height = H };
+    int count, i, k;
+
+    memset( from_spans, 0, sizeof(from_spans) );
+    memset( from_paint, 0, sizeof(from_paint) );
+    count = pointer_cursor_spans( left, top, W, H, spans );
+    assert( count <= POINTER_CURSOR_MAX_SPANS );
+    for (i = 0; i < count; i++)
+    {
+        assert( spans[i].x >= 0 && spans[i].width > 0 && spans[i].x + spans[i].width <= W );
+        assert( spans[i].y >= 0 && spans[i].y < H && spans[i].y == top + spans[i].row );
+        for (k = 0; k < spans[i].width; k++)
+        {
+            char shape = pointer_cursor_shape[spans[i].row][spans[i].column + k];
+
+            assert( shape != '.' );
+            from_spans[spans[i].y * W + spans[i].x + k] = pointer_cursor_color( shape );
+        }
+    }
+    /* pointer_cursor_paint keeps the tip on screen; place it directly to
+     * cover the arrow hanging off the left or top edge too. */
+    c.x = left > 0 ? left : 0;
+    c.y = top > 0 ? top : 0;
+    if (left >= 0 && top >= 0)
+    {
+        pointer_cursor_paint( &c, from_paint, W, 1 );
+        assert( !memcmp( from_spans, from_paint, sizeof(from_spans) ) );
+    }
+    else
+    {
+        int j;
+
+        for (j = 0; j < POINTER_CURSOR_H; j++)
+            for (i = 0; i < POINTER_CURSOR_W; i++)
+            {
+                int x = left + i, y = top + j;
+
+                if (pointer_cursor_shape[j][i] == '.' || x < 0 || y < 0 || x >= W || y >= H) continue;
+                from_paint[y * W + x] = pointer_cursor_color( pointer_cursor_shape[j][i] );
+            }
+        assert( !memcmp( from_spans, from_paint, sizeof(from_spans) ) );
+    }
+}
+
+static void test_spans_are_the_arrow(void)
+{
+    struct pointer_cursor_span spans[POINTER_CURSOR_MAX_SPANS];
+
+    check_spans_match_paint( 10, 10 );
+    /* Cut at the right and bottom edges, and hanging off the left and top. */
+    check_spans_match_paint( 58, 30 );
+    check_spans_match_paint( -4, 5 );
+    check_spans_match_paint( 5, -7 );
+    /* Rows with a gap ("BWB..BWWB...") give two runs. */
+    assert( pointer_cursor_spans( 10, 10, 64, 40, spans ) > POINTER_CURSOR_H );
+    /* Nothing of it on screen. */
+    assert( !pointer_cursor_spans( 64, 10, 64, 40, spans ) );
+    assert( !pointer_cursor_spans( 10, 40, 64, 40, spans ) );
+}
+
 int main(void)
 {
+    test_spans_are_the_arrow();
     test_buttons_between_takes();
     test_dead_zone_ignores_drift();
     test_full_tilt_speed_and_axes();
@@ -304,6 +372,7 @@ int main(void)
     test_held_cursor_still_moves();
     test_speed_scales_the_stick();
     puts( "pointer cursor: buttons between takes, dead zone, speed curve, time scaling, edges, sprite "
-          "restore, motion kept across warps, a held cursor still moving and the speed scale passed" );
+          "restore, motion kept across warps, a held cursor still moving, the speed scale and the "
+          "arrow's runs passed" );
     return 0;
 }

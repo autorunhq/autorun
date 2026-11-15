@@ -140,6 +140,49 @@ static const char pointer_cursor_shape[POINTER_CURSOR_H][POINTER_CURSOR_W + 1] =
     ".......BB...",
 };
 
+/* Black and white read the same as RGBA and as BGRA. */
+static inline uint32_t pointer_cursor_color( char shape )
+{
+    return shape == 'W' ? 0xffffffffu : 0xff000000u;
+}
+
+/* At most two runs of the arrow's pixels share a row ("BWB..BWWB..."). */
+#define POINTER_CURSOR_MAX_SPANS (POINTER_CURSOR_H * 2)
+
+/* A run of the arrow's own pixels in one row of the shape, and where it goes. */
+struct pointer_cursor_span
+{
+    int row, column;   /* the run's first pixel in pointer_cursor_shape */
+    int x, y, width;   /* its place on a screen */
+};
+
+/* The runs of the arrow with its tip at left, top, cut to a screen of width by
+ * height, for a copy that has to leave the pixels around the arrow as they
+ * are. Returns how many runs there are, at most POINTER_CURSOR_MAX_SPANS. */
+static inline int pointer_cursor_spans( int left, int top, int width, int height,
+                                        struct pointer_cursor_span *spans )
+{
+    int count = 0, i, j;
+
+    for (j = 0; j < POINTER_CURSOR_H; j++)
+    {
+        if (top + j < 0 || top + j >= height) continue;
+        for (i = 0; i < POINTER_CURSOR_W; i++)
+        {
+            int start = i, x0, x1;
+
+            if (pointer_cursor_shape[j][i] == '.') continue;
+            while (i < POINTER_CURSOR_W && pointer_cursor_shape[j][i] != '.') i++;
+            x0 = left + start > 0 ? left + start : 0;
+            x1 = left + i < width ? left + i : width;
+            if (x1 <= x0) continue;
+            spans[count++] = (struct pointer_cursor_span){ .row = j, .column = x0 - left, .x = x0,
+                                                           .y = top + j, .width = x1 - x0 };
+        }
+    }
+    return count;
+}
+
 /* Draw the arrow into RGBA8888 pixels (draw != 0), saving what it covers, or
  * put the saved pixels back. The position must not change in between. */
 static inline void pointer_cursor_paint( struct pointer_cursor *c, uint32_t *bits, int stride, int draw )
@@ -159,7 +202,7 @@ static inline void pointer_cursor_paint( struct pointer_cursor *c, uint32_t *bit
             else
             {
                 *saved = *pixel;
-                *pixel = shape == 'W' ? 0xffffffffu : 0xff000000u;
+                *pixel = pointer_cursor_color( shape );
             }
         }
     }

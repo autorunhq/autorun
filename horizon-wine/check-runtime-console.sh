@@ -86,6 +86,7 @@ python3 "$root/horizon-wine/tests/check_afd_layouts.py"
 python3 "$root/horizon-wine/tests/check_wow64_buffer_flush.py"
 python3 "$root/horizon-wine/tests/check_dxvk_payload.py"
 python3 "$root/horizon-wine/tests/check_vulkan_wow64_mapping.py"
+python3 "$root/horizon-wine/tests/check_vulkan_cursor.py"
 python3 "$root/horizon-wine/tests/check_d3dkmt_resources.py"
 python3 "$root/horizon-wine/tests/check_package_amd64.py"
 if [ -f "$root/horizon-wine/vendor/dxvk/src/dxvk/dxvk_device_info.cpp" ]; then
