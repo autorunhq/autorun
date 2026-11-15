@@ -367,6 +367,9 @@ jobs:
   runtime:
     name: card archive
     runs-on: ubuntu-24.04
+    # For the opengl32.dll drop below, a push to a ref of this repository.
+    permissions:
+      contents: write
     timeout-minutes: 350
     # One build at a time per branch, and a push waits for the one running
     # rather than killing it: an hour of compiling is worth keeping.
