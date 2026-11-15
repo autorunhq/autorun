@@ -19,6 +19,7 @@ set to it are not touched by anything here.
 | `2609-3` | `2609-2` and `0001`: FEX-2611's `preserve_all` for the helpers translated code calls (upstream `c76fccf25`, `ef006bdb1`). x87 maths at full precision (FEX options, x87 reduced precision off) is called without saving every register around each call. Nothing changes for a game on reduced precision. |
 | `2609-4` | `2609-3` and `0002`: the C runtime's `_ftol` (Visual C++ 6) and `_ftol2` (Visual C++ 2002/2003), which every `(int)` cast of a float calls, are one conversion instead of some thirty instructions, with x87 reduced precision on. Doom 3 spent about a fifth of its translated time there while loading a map; in play it was under 1%. |
 | `2609-5` | `2609-4` and `0003`: a disk cache of translated code of its own for each experimental build. With FEX options, disk cache on, `2609-4` ran the code `2609-3` had stored, so its change was never translated; its release was removed. |
+| `2609-6` | `2609-5` and `0004`: a 32-bit `DIV`/`IDIV` whose `EDX` is only the extension of `EAX` (nearly all of them) divides 32 bits instead of joining the two into 64, a shorter sequence and a shorter divide on the A57. From `berlint-hub/FEX` (`arena/799d045b-fex`). `2609-2`'s release was removed to keep three. |
 
 A game with **FEX options, disk cache** on keeps translated code on the card.
 The cache does not know which FEX filled it, so from `2609-5` on the version is
