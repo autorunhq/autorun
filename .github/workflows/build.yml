@@ -453,6 +453,8 @@ jobs:
         # here does not fail the build of the card archive.
         if: ${{ inputs.x86 != true }}
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           llvm="$(ls -d "$PWD"/horizon-wine/toolchains/llvm-mingw-*/ | head -n 1)"
           export PATH="${llvm}bin:$PATH"
@@ -463,10 +465,25 @@ jobs:
               exit 1
             }
           mkdir -p "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64"
-          cp horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll \
-             "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
-          ls -l "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
-          echo "::notice::opengl32.dll (i386) built: $(sha256sum < horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll | cut -c1-16), $(stat -c %s horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll) bytes"
+          out="$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
+          # Without its debug information, as the DLL repository holds its files
+          # (horizon-dlls/tools/build-dlls.py, stripped).
+          llvm-strip --strip-debug -o "$out" horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll
+          ls -l "$out"
+          echo "::notice::opengl32.dll (i386) built: $(sha256sum < "$out" | cut -c1-64), $(stat -c %s "$out") bytes"
+          # The same file under a ref of its own (not a branch), with the
+          # runtime features it needs, for putting it in a fork of the DLL
+          # repository from where an artifact cannot be downloaded.
+          drop="$RUNNER_TEMP/opengl32-drop"
+          mkdir -p "$drop" && cp "$out" "$drop/opengl32.dll"
+          python3 horizon-wine/tools/runtime_features.py | grep -i opengl32 > "$drop/features.txt"
+          echo "$GITHUB_SHA" > "$drop/commit.txt"
+          git -C "$drop" init -q
+          git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid add -A
+          git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid commit -qm "opengl32.dll (i386) of $GITHUB_SHA"
+          git -C "$drop" push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}" HEAD:refs/dll-drop/opengl32-i386 \
+            && echo "::notice::opengl32.dll pushed to refs/dll-drop/opengl32-i386" \
+            || echo "::warning::opengl32.dll could not be pushed to refs/dll-drop/opengl32-i386"
 
       - name: Upload that opengl32.dll
         if: ${{ inputs.x86 != true }}
