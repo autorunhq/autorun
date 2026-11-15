@@ -287,6 +287,17 @@ static void check_descriptor(void)
     assert( S_ISREG( st.st_mode ) && st.st_size == (off_t)(4 * P) );
     horizon_memfile_unref( file );
 
+    /* A copy of a file ends where the file did, inside its last page. */
+    assert( (file = horizon_memfile_alloc( 2 * P, 0, &test_ops )) );
+    file->length = P + 5;
+    assert( horizon_memfile_pread( file, (char *)tail, sizeof(tail), P ) == 5 );
+    assert( !horizon_memfile_pread( file, (char *)tail, sizeof(tail), P + 5 ) );
+    assert( horizon_memfile_seek( file, 0, SEEK_END ) == (off_t)(P + 5) );
+    assert( !horizon_memfile_read( file, (char *)tail, sizeof(tail) ) );
+    horizon_memfile_stat( file, &st );
+    assert( st.st_size == (off_t)(P + 5) );
+    horizon_memfile_unref( file );
+
     errno = 0;
     assert( !horizon_memfile_alloc( 0, 0, &test_ops ) && errno == EINVAL );
     assert( !horizon_memfile_alloc( P + 1, 0, &test_ops ) );

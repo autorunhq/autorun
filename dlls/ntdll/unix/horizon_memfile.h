@@ -78,6 +78,7 @@ struct horizon_memfile
     const struct horizon_memfile_ops *ops;
     unsigned char *data;       /* the kernel locks the pages that are anchored */
     size_t size;               /* whole pages */
+    size_t length;             /* where reads end: size, or a copied file's own size */
     off_t pos;                 /* shared by the descriptors duplicated from one */
     unsigned int refs;         /* its descriptor, views the server records, view ranges */
     struct horizon_memfile_anchor *anchors;
@@ -134,6 +135,7 @@ static inline struct horizon_memfile *horizon_memfile_alloc( unsigned long long 
     pthread_mutex_init( &file->mutex, NULL );
     file->ops = ops;
     file->size = size;
+    file->length = size;
     file->refs = 1;
     return file;
 }
@@ -394,8 +396,8 @@ static inline ssize_t horizon_memfile_pread_locked( struct horizon_memfile *file
     size_t count;
 
     if (offset < 0) return -EINVAL;
-    if ((unsigned long long)offset >= file->size) return 0;
-    count = file->size - offset;
+    if ((unsigned long long)offset >= file->length) return 0;
+    count = file->length - offset;
     if (count > len) count = len;
     horizon_memfile_copy_locked( file, offset, ptr, count, 0 );
     return count;
@@ -466,7 +468,7 @@ static inline off_t horizon_memfile_seek( struct horizon_memfile *file, off_t of
     {
     case SEEK_SET: base = 0; break;
     case SEEK_CUR: base = file->pos; break;
-    case SEEK_END: base = file->size; break;
+    case SEEK_END: base = file->length; break;
     default:
         pthread_mutex_unlock( &file->mutex );
         return -EINVAL;
@@ -492,7 +494,7 @@ static inline void horizon_memfile_stat( struct horizon_memfile *file, struct st
     memset( st, 0, sizeof(*st) );
     st->st_mode = S_IFREG | 0600;
     st->st_nlink = 1;
-    st->st_size = file->size;
+    st->st_size = file->length;
 }
 
 /* wineserver's find_committed_range for a view of the section's bytes
