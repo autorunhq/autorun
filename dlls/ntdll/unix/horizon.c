@@ -11217,6 +11217,67 @@ static void horizon_report_missing_file( const char *path, unsigned int status,
     wine_nx_runtime_trace( message );
 }
 
+#define HORIZON_FILE_COPY_MAX_SIZE (64ull << 20)
+
+/* The SD card will not open a file again while one of the program's handles
+ * writes it, where Windows lets another handle read it if the sharing modes
+ * allow: The Sims opens each of its characters to write and then again to
+ * read. That reader gets a descriptor on a copy of the file as it is now, or
+ * -1 when no handle of the program writes it or the copy fails.
+ * ponytail: the copy does not see later writes through the other handle, and
+ * files over HORIZON_FILE_COPY_MAX_SIZE stay refused; give each handle its own
+ * position on the writer's descriptor if a game reads what it writes that way. */
+static int horizon_open_file_copy( const char *path )
+{
+    const struct horizon_server_handle_entry *other;
+    struct horizon_memfile *copy;
+    unsigned long long copied = 0;
+    int writer_fd = -1, fd = -1;
+    struct stat st;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    for (other = horizon_server_handles; other && writer_fd == -1; other = other->next)
+    {
+        const struct horizon_server_object *object = other->object;
+
+        if (object->type == HORIZON_SERVER_OBJECT_FILE && !object->file_is_dir && object->file_fd != -1 &&
+            (object->file_access & 0x0006) && object->file_name && horizon_unix_path_equal( object->file_name, path ))
+            writer_fd = object->file_fd;
+    }
+    if (writer_fd != -1 && !fstat( writer_fd, &st ) && (unsigned long long)st.st_size <= HORIZON_FILE_COPY_MAX_SIZE &&
+        (fd = horizon_memfile_create( (st.st_size / HORIZON_MEMFILE_PAGE_SIZE + 1) * HORIZON_MEMFILE_PAGE_SIZE, 0 )) != -1)
+    {
+        copy = horizon_memfile_from_fd( fd );
+        while (copied < (unsigned long long)st.st_size)
+        {
+            ssize_t ret = pread( writer_fd, copy->data + copied, st.st_size - copied, copied );
+
+            if (ret <= 0) break;
+            copied += ret;
+        }
+        if (copied == (unsigned long long)st.st_size)
+        {
+            static LONG reported;
+            char message[448];
+
+            copy->length = st.st_size;
+            if (__atomic_add_fetch( &reported, 1, __ATOMIC_RELAXED ) <= 64)
+            {
+                snprintf( message, sizeof(message), "[FS] %s is open for writing; this handle reads a copy of %llu bytes",
+                          path, copied );
+                wine_nx_runtime_trace( message );
+            }
+        }
+        else
+        {
+            close( fd );
+            fd = -1;
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return fd;
+}
+
 static int horizon_server_handle_create_file( struct horizon_server_connection *connection,
                                               const unsigned char *message,
                                               const unsigned char *data, unsigned int data_size )
@@ -11299,6 +11360,7 @@ static int horizon_server_handle_create_file( struct horizon_server_connection *
         if (fd == -1)
         {
             int open_errno = errno;
+            unsigned int open_result = fsdevGetLastResult();
             DIR *dir;
 
             open_error = open_errno;
@@ -11313,10 +11375,18 @@ static int horizon_server_handle_create_file( struct horizon_server_connection *
                     if (!(stored_name = strdup( filename ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
                 }
             }
-            /* The SD card refuses to open a file for writing while it is
-             * open (FS result 0xe02, EIO in libnx), where Windows might share. */
-            else if (open_errno == EIO && fsdevGetLastResult() == 0xe02)
-                reply.header.error = HORIZON_STATUS_SHARING_VIOLATION;
+            /* The SD card refuses to open a file again while it is open for
+             * writing (FS result 0xe02, EIO in libnx), where Windows might share.
+             * The result is taken before opendir() above replaces it. */
+            else if (open_errno == EIO && open_result == 0xe02)
+            {
+                if ((flags & O_ACCMODE) == O_RDONLY && !(flags & O_TRUNC) &&
+                    (fd = horizon_open_file_copy( filename )) != -1)
+                {
+                    if (!(stored_name = strdup( filename ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+                }
+                else reply.header.error = HORIZON_STATUS_SHARING_VIOLATION;
+            }
             else reply.header.error = horizon_server_errno_status( open_errno );
         }
         else if (!(stored_name = strdup( filename ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
