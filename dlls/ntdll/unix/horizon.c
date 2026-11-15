@@ -11614,7 +11614,13 @@ static int horizon_server_handle_get_handle_fd( struct horizon_server_connection
     else
     {
         reply.type = HORIZON_FD_TYPE_FILE;
-        reply.cacheable = 0;
+        /* The client's cached copy shares this fd's position (libsysbase's dup) and
+         * keeps the file open, and Horizon cannot rename or delete an open file.
+         * So only a handle that can neither write nor delete is cached. The Sims
+         * seeks in its .far archives over two million times while it loads, and
+         * each seek without the cache is a round trip to this thread. */
+        reply.cacheable = !(entry->object->file_access & 0x00010006u) && /* DELETE, WRITE_DATA, APPEND_DATA */
+                          !(entry->object->file_options & 0x00001000u);  /* FILE_DELETE_ON_CLOSE */
         reply.access = entry->object->file_access;
         reply.options = entry->object->file_options;
         horizon_server_queue_fd( entry->object->file_fd, request->handle );
