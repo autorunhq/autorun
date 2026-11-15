@@ -481,9 +481,14 @@ jobs:
           git -C "$drop" init -q
           git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid add -A
           git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid commit -qm "opengl32.dll (i386) of $GITHUB_SHA"
-          git -C "$drop" push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}" HEAD:refs/dll-drop/opengl32-i386 \
-            && echo "::notice::opengl32.dll pushed to refs/dll-drop/opengl32-i386" \
-            || echo "::warning::opengl32.dll could not be pushed to refs/dll-drop/opengl32-i386"
+          # A ref of its own if GitHub takes one there, a tag if not.
+          for ref in refs/dll-drop/opengl32-i386 refs/tags/dll-drop-opengl32-i386; do
+            if git -C "$drop" push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$ref" \
+                 > "$RUNNER_TEMP/drop.log" 2>&1; then
+              echo "::notice::opengl32.dll pushed to $ref"; break
+            fi
+            echo "::warning::opengl32.dll not pushed to $ref: $(tr '\n' ' ' < "$RUNNER_TEMP/drop.log" | sed "s/${GH_TOKEN}/***/g" | cut -c1-300)"
+          done
 
       - name: Upload that opengl32.dll
         if: ${{ inputs.x86 != true }}
