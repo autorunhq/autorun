@@ -3370,6 +3370,8 @@ struct horizon_server_object
     unsigned int dir_enum_index;
     int dir_queried;                /* a directory query has run on this handle */
     char *dir_mask;
+    char **dir_names;               /* the listing this scan reads, without "." and ".." */
+    unsigned int dir_count;
     int sock_nonblocking;
     unsigned int sock_rcvtimeo, sock_sndtimeo;
     int sock_bound;                 /* bind() succeeded; Windows fails a second bind */
@@ -5018,6 +5020,13 @@ static int horizon_server_handle_unlock_file( struct horizon_server_connection *
     return horizon_server_write_status( connection->reply_fd, status );
 }
 
+static void horizon_server_free_dir_names( struct horizon_server_object *object )
+{
+    while (object->dir_count) free( object->dir_names[--object->dir_count] );
+    free( object->dir_names );
+    object->dir_names = NULL;
+}
+
 static void horizon_server_free_object( struct horizon_server_object *object )
 {
     if (!object) return;
@@ -5055,6 +5064,7 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     free( object->file_name );
     free( object->mapping_version );
     free( object->dir_mask );
+    horizon_server_free_dir_names( object );
     free( object->name );
     free( object );
 }
@@ -11715,6 +11725,46 @@ static void horizon_report_resource_fork( const char *dir, const char *name )
     wine_nx_runtime_trace( message );
 }
 
+/* A scan reads the directory once, as Wine's dir_data does, and each query
+ * takes the next name from this copy. Reading the directory again from its
+ * start for every name made a listing cost the square of its size: The Sims
+ * lists folders of over a thousand skins, and the card answered each read. */
+static unsigned int horizon_server_read_dir_names( struct horizon_server_object *object )
+{
+    unsigned int status = HORIZON_STATUS_SUCCESS, capacity = 0;
+    struct dirent *de;
+    DIR *dir;
+
+    horizon_server_free_dir_names( object );
+    if (!(dir = opendir( object->file_name ))) return horizon_server_errno_status( errno );
+    while (!status && (de = readdir( dir )))
+    {
+        if (!strcmp( de->d_name, "." ) || !strcmp( de->d_name, ".." )) continue;
+        if (horizon_dir_entry_is_resource_fork( object->file_name, de->d_name ))
+        {
+            horizon_report_resource_fork( object->file_name, de->d_name );
+            continue;
+        }
+        if (object->dir_count == capacity)
+        {
+            char **names = realloc( object->dir_names, (capacity ? capacity * 2 : 64) * sizeof(*names) );
+
+            if (!names)
+            {
+                status = HORIZON_STATUS_NO_MEMORY;
+                break;
+            }
+            object->dir_names = names;
+            capacity = capacity ? capacity * 2 : 64;
+        }
+        if (!(object->dir_names[object->dir_count] = strdup( de->d_name ))) status = HORIZON_STATUS_NO_MEMORY;
+        else object->dir_count++;
+    }
+    closedir( dir );
+    if (status) horizon_server_free_dir_names( object );
+    return status;
+}
+
 static int horizon_server_handle_query_directory_file( struct horizon_server_connection *connection,
                                                        const unsigned char *message,
                                                        const unsigned char *data, unsigned int data_size )
@@ -11731,7 +11781,6 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
     char trace_mask[128] = "<all>";
     unsigned int trace_index = 0;
     char *new_mask = NULL;
-    DIR *dir = NULL;
     unsigned int raw_index = 0;
     int mask_changed = 0;
     int ret;
@@ -11768,37 +11817,25 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
             new_mask = NULL;
         }
 
-        if (!(dir = opendir( object->file_name ))) reply.header.error = horizon_server_errno_status( errno );
+        if (request->restart_scan || !object->dir_names)
+            reply.header.error = horizon_server_read_dir_names( object );
+        raw_index = object->dir_enum_index;
     }
 
     while (!reply.header.error)
     {
-        const char *name = NULL;
-        struct dirent *de = NULL;
+        const char *name;
 
         if (raw_index == 0) name = ".";
         else if (raw_index == 1) name = "..";
+        else if (raw_index - 2 < object->dir_count) name = object->dir_names[raw_index - 2];
         else
         {
-            while ((de = readdir( dir )))
-            {
-                if (!strcmp( de->d_name, "." ) || !strcmp( de->d_name, ".." )) continue;
-                if (horizon_dir_entry_is_resource_fork( object->file_name, de->d_name ))
-                {
-                    horizon_report_resource_fork( object->file_name, de->d_name );
-                    continue;
-                }
-                name = de->d_name;
-                break;
-            }
-            if (!name)
-            {
-                reply.header.error = horizon_dir_scan_end_status( !object->dir_queried );
-                break;
-            }
+            reply.header.error = horizon_dir_scan_end_status( !object->dir_queried );
+            break;
         }
 
-        if (raw_index++ < object->dir_enum_index) continue;
+        raw_index++;
         if (!horizon_server_wildcard_match( object->dir_mask, name )) continue;
 
         name_len = horizon_server_utf16_name_len( name );
@@ -11831,7 +11868,6 @@ static int horizon_server_handle_query_directory_file( struct horizon_server_con
         trace_index = object->dir_enum_index;
         if (object->dir_mask) snprintf( trace_mask, sizeof(trace_mask), "%s", object->dir_mask );
     }
-    if (dir) closedir( dir );
     pthread_mutex_unlock( &horizon_server_objects_mutex );
     horizon_trace( "[HZDIR] query handle=%08x restart=%u mask=%s name=%s idx=%u err=%08x\n",
                    request->handle, request->restart_scan, trace_mask, trace_name,

@@ -29,25 +29,59 @@ def function(source, name):
         end += 1
     return source[start:end]
 
-# The listing the server hands out is the one that skips a fork, and it skips it
-# before the entry is counted, so a scan that stops and resumes stays in step.
+# The server hands out names from the listing a scan reads once, the one that
+# skips a fork, so a scan that stops and resumes stays in step.
 handler = function(horizon, 'static int horizon_server_handle_query_directory_file')
-skip = handler.index('horizon_dir_entry_is_resource_fork( object->file_name, de->d_name )')
-assert handler.index('if (!strcmp( de->d_name, "." )') < skip < handler.index('raw_index++')
-assert 'horizon_report_resource_fork' in handler
+assert 'horizon_server_read_dir_names( object )' in handler
+assert 'readdir' not in handler
 
 fixture = r'''
 #include <assert.h>
+#include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
+#define HORIZON_STATUS_SUCCESS 0
+#define HORIZON_STATUS_NO_MEMORY 0xc0000017u
+static unsigned int horizon_server_errno_status( int error ) { return 0xc0000000u | error; }
+static void wine_nx_runtime_trace( const char *msg ) { (void)msg; }
+struct horizon_server_object { char *file_name; char **dir_names; unsigned int dir_count; };
+
 @BODY@
+
+static int listed( const struct horizon_server_object *object, const char *name )
+{
+    unsigned int i;
+
+    for (i = 0; i < object->dir_count; i++) if (!strcmp( object->dir_names[i], name )) return 1;
+    return 0;
+}
 
 int main( int argc, char **argv )
 {
     const char *dir = argv[1];
+    struct horizon_server_object object = { (char *)dir };
+    unsigned int round;
+
+    /* The listing a scan reads: the files, a fork without its file, and no
+     * "." or "..", which the query adds itself. Reading it again for a new
+     * scan replaces it. */
+    for (round = 0; round < 2; round++)
+    {
+        assert( !horizon_server_read_dir_names( &object ) );
+        assert( object.dir_count == 5 );
+        assert( listed( &object, "CONTROLS.DLL" ) && listed( &object, "keyboard.txt" ) );
+        assert( listed( &object, "._orphan.dll" ) && listed( &object, ".hidden" ) && listed( &object, "._" ) );
+        assert( !listed( &object, "._CONTROLS.DLL" ) && !listed( &object, "." ) );
+    }
+    horizon_server_free_dir_names( &object );
+    assert( !object.dir_count && !object.dir_names );
+
+    object.file_name = "/nonexistent-horizon-dir";
+    assert( horizon_server_read_dir_names( &object ) == (0xc0000000u | ENOENT) );
 
     /* The files the card really holds. */
     assert( !horizon_dir_entry_is_resource_fork( dir, "CONTROLS.DLL" ) );
@@ -77,6 +111,9 @@ int main( int argc, char **argv )
 body = '\n\n'.join([
     function(access, 'static inline char *horizon_dir_entry_path'),
     function(horizon, 'static int horizon_dir_entry_is_resource_fork'),
+    function(horizon, 'static void horizon_report_resource_fork'),
+    function(horizon, 'static void horizon_server_free_dir_names'),
+    function(horizon, 'static unsigned int horizon_server_read_dir_names'),
 ])
 
 with tempfile.TemporaryDirectory() as tmp:
