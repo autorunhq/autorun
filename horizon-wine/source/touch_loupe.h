@@ -89,6 +89,7 @@ struct touch_loupe
     int start_x, start_y;  /* where the finger went down */
     int x, y;              /* where it was last */
     uint64_t since;        /* when it went down, in nanoseconds */
+    unsigned int finger;   /* the id of the finger that is followed */
 };
 
 struct touch_loupe_output
@@ -97,6 +98,37 @@ struct touch_loupe_output
     int left;      /* whether the left button is down */
     int loupe;     /* whether the magnifier is up */
 };
+
+/* The finger to follow out of the fingers that are down (ids, xs and ys, count of
+ * them): the first one while no touch is going on, then that finger and no
+ * other, so that a second finger going down or up changes nothing. Returns
+ * whether the followed finger is down, and where. */
+static inline int touch_loupe_track( struct touch_loupe *t, const unsigned int *ids, const int *xs,
+                                     const int *ys, int count, int *x, int *y )
+{
+    int i;
+
+    if (t->phase == TOUCH_LOUPE_IDLE && count > 0) t->finger = ids[0];
+    for (i = 0; i < count; i++)
+    {
+        if (ids[i] != t->finger) continue;
+        *x = xs[i];
+        *y = ys[i];
+        return 1;
+    }
+    return 0;
+}
+
+/* The touch of a program that has no magnifier, or has it switched off: a press
+ * for as long as a finger is down. A touch that the magnifier was following when
+ * it was switched off (was_following) is left alone until the finger lifts, so
+ * that the switch does not make a click nobody chose. ignore is the caller's. */
+static inline int touch_loupe_plain( int *ignore, int was_following, int down )
+{
+    if (was_following) *ignore = 1;
+    if (!down) *ignore = 0;
+    return down && !*ignore;
+}
 
 /* One look at the screen: whether a finger is down, and where, and for how many
  * nanoseconds it waits before it shows the magnifier. Returns zero

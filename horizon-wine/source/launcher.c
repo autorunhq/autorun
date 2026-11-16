@@ -455,7 +455,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
     p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
-    p->settings.fex = p->settings.four_cores = p->settings.touch_magnifier = 1;
+    p->settings.fex = p->settings.four_cores = 1;
     p->settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
     p->settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
@@ -2661,7 +2661,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
 
         ADD_ROW( ROW_TOUCH_MAGNIFIER, SECTION_CONTROLS, "Touch magnifier",
                  "Hold a finger still on the touchscreen to see the screen around it enlarged above the finger, "
-                 "and release to click where the crosshair is. ZL + ZR + right stick click switches it during play." );
+                 "and release to click where the crosshair is." );
         row->kind = UI_ROW_SWITCH;
         row->on = p->settings.touch_magnifier;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.touch_magnifier ? "Enabled" : "Disabled" );
@@ -2915,7 +2915,7 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             break;
 
         case ROW_TOUCH_MAGNIFIER:
-            p->settings.touch_magnifier = action == UI_ACTION_RESET ? 1 : !p->settings.touch_magnifier;
+            p->settings.touch_magnifier = action == UI_ACTION_RESET ? 0 : !p->settings.touch_magnifier;
             save_program_settings( l, p );
             break;
 

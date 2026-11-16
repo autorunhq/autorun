@@ -94,6 +94,9 @@ static struct swapchain *swapchain_from_handle(VkSwapchainKHR handle)
 static uint32_t line_pixels[2 * TOUCH_LOUPE_DST_W];
 static int ops[IMAGES][MAX_OPS], op_count[IMAGES];
 static VkImageLayout final_layout[IMAGES];
+struct barrier_seen { VkImage image; VkImageLayout old_layout, new_layout; VkAccessFlags src, dst; };
+static struct barrier_seen barriers_seen[IMAGES][MAX_OPS];
+static int barrier_seen_count[IMAGES];
 static VkImageBlit blitted[IMAGES];
 static VkImageCopy copied[IMAGES];
 static VkBufferImageCopy lines[IMAGES][NX_LOUPE_MAX_REGIONS];
@@ -174,7 +177,8 @@ static void VKAPI_PTR destroy_fence(VkDevice d, VkFence f, const VkAllocationCal
 static VkResult VKAPI_PTR wait_fences(VkDevice d, uint32_t n, const VkFence *f, VkBool32 all, uint64_t timeout)
 { (void)d; (void)f; (void)all; assert(n == 1 && timeout == NX_LOUPE_FENCE_WAIT_NS); return wait_result; }
 static VkResult VKAPI_PTR reset_fences(VkDevice d, uint32_t n, const VkFence *f) { (void)d; (void)f; assert(n == 1); return VK_SUCCESS; }
-static VkResult VKAPI_PTR reset_command(VkCommandBuffer c, VkCommandBufferResetFlags f) { (void)f; op_count[slot(c)] = 0; return VK_SUCCESS; }
+static VkResult VKAPI_PTR reset_command(VkCommandBuffer c, VkCommandBufferResetFlags f)
+{ (void)f; op_count[slot(c)] = 0; barrier_seen_count[slot(c)] = 0; return VK_SUCCESS; }
 static VkResult VKAPI_PTR begin_command(VkCommandBuffer c, const VkCommandBufferBeginInfo *b)
 { (void)c; (void)b; return VK_SUCCESS; }
 static VkResult VKAPI_PTR end_command(VkCommandBuffer c) { (void)c; return VK_SUCCESS; }
@@ -186,6 +190,12 @@ static void VKAPI_PTR barrier(VkCommandBuffer c, VkPipelineStageFlags s, VkPipel
     assert(bc == 0 && ic >= 1 && ic <= 2);
     add(c, OP_BARRIER);
     final_layout[slot(c)] = i[0].newLayout;
+    for (uint32_t k = 0; k < ic; k++)
+    {
+        struct barrier_seen *seen = &barriers_seen[slot(c)][barrier_seen_count[slot(c)]++];
+        seen->image = i[k].image; seen->old_layout = i[k].oldLayout; seen->new_layout = i[k].newLayout;
+        seen->src = i[k].srcAccessMask; seen->dst = i[k].dstAccessMask;
+    }
 }
 static void VKAPI_PTR blit(VkCommandBuffer c, VkImage si, VkImageLayout sl, VkImage di, VkImageLayout dl,
                            uint32_t n, const VkImageBlit *r, VkFilter f)
@@ -255,9 +265,36 @@ static int present(VkPresentInfoKHR *info, const VkSemaphore *app_wait)
     return submits - before;
 }
 
+static void check_barriers(int image)
+{
+    const VkImage target = H(VkImage, 0x100 + image), own = H(VkImage, 0x800);
+    const struct barrier_seen *b = barriers_seen[image];
+
+    assert(barrier_seen_count[image] == 6);  /* two, two, one and one, over four calls */
+    /* the screen's image to be read, the enlarged image to be written */
+    assert(b[0].image == target && b[0].old_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+           b[0].new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && b[0].dst == VK_ACCESS_TRANSFER_READ_BIT);
+    assert(b[1].image == own && b[1].old_layout == VK_IMAGE_LAYOUT_UNDEFINED &&
+           b[1].new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && b[1].dst == VK_ACCESS_TRANSFER_WRITE_BIT);
+    /* after the blit: the screen's image to be written, the enlarged image to be read */
+    assert(b[2].image == target && b[2].old_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+           b[2].new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && b[2].src == VK_ACCESS_TRANSFER_READ_BIT &&
+           b[2].dst == VK_ACCESS_TRANSFER_WRITE_BIT);
+    assert(b[3].image == own && b[3].old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+           b[3].new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && b[3].src == VK_ACCESS_TRANSFER_WRITE_BIT &&
+           b[3].dst == VK_ACCESS_TRANSFER_READ_BIT);
+    /* the border lies on the copy's pixels: a write after a write on the same image and layout */
+    assert(b[4].image == target && b[4].old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+           b[4].new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && b[4].src == VK_ACCESS_TRANSFER_WRITE_BIT &&
+           b[4].dst == VK_ACCESS_TRANSFER_WRITE_BIT);
+    /* and back to the present */
+    assert(b[5].image == target && b[5].old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+           b[5].new_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && b[5].src == VK_ACCESS_TRANSFER_WRITE_BIT);
+}
+
 static void check_regions(int image, const struct touch_loupe_rect *r, uint32_t expected)
 {
-    uint32_t i;
+    uint32_t i, j;
 
     assert(line_count[image] == expected);
     for (i = 0; i < line_count[image]; i++)
@@ -270,6 +307,15 @@ static void check_regions(int image, const struct touch_loupe_rect *r, uint32_t 
         assert(l->bufferRowLength == l->imageExtent.width);
         assert(l->bufferOffset == (i < 4 ? 0 : TOUCH_LOUPE_DST_W * 4));  /* the border's line, then the crosshair's */
         assert(l->bufferRowLength * l->imageExtent.height <= TOUCH_LOUPE_DST_W);  /* it fits in the line */
+        for (j = i + 1; j < line_count[image]; j++)  /* the regions of one copy must not overlap */
+        {
+            const VkBufferImageCopy *m = &lines[image][j];
+
+            assert(l->imageOffset.x + (int)l->imageExtent.width <= m->imageOffset.x ||
+                   m->imageOffset.x + (int)m->imageExtent.width <= l->imageOffset.x ||
+                   l->imageOffset.y + (int)l->imageExtent.height <= m->imageOffset.y ||
+                   m->imageOffset.y + (int)m->imageExtent.height <= l->imageOffset.y);
+        }
     }
 }
 
@@ -316,6 +362,7 @@ int main(void)
     assert(copied[1].extent.width == (uint32_t)r.dst_w && copied[1].extent.height == (uint32_t)r.dst_h);
     assert(r.dst_y + r.dst_h <= finger_y - TOUCH_LOUPE_GAP + 1);  /* above the finger */
     check_regions(1, &r, 8);  /* the border's four sides and the crosshair's four arms */
+    check_barriers(1);
     assert(last_wait == app_wait);
     assert(info.waitSemaphoreCount == 1 && info.pWaitSemaphores[0] == last_submit.pSignalSemaphores[0]);
 

@@ -413,7 +413,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = !launcher_kv_get( kv, "cpu", value, sizeof(value) ) || strcasecmp( value, "box64" );
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
-    settings->touch_magnifier = launcher_setting_state( kv, "touch-magnifier" ) != 0;
+    settings->touch_magnifier = launcher_setting_state( kv, "touch-magnifier" ) == 1;
     settings->touch_magnifier_delay = launcher_kv_get_int( kv, "touch-magnifier-delay", TOUCH_LOUPE_DELAY_DEFAULT_MS );
     if (settings->touch_magnifier_delay < TOUCH_LOUPE_DELAY_MIN_MS ||
         settings->touch_magnifier_delay > TOUCH_LOUPE_DELAY_MAX_MS)
@@ -511,7 +511,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
-           launcher_kv_set( kv, "touch-magnifier", settings->touch_magnifier ? NULL : "0" ) &&
+           launcher_kv_set( kv, "touch-magnifier", settings->touch_magnifier ? "1" : NULL ) &&
            launcher_kv_set( kv, "touch-magnifier-delay",
                             settings->touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS ? NULL : delay ) &&
            launcher_kv_set( kv, "touch-magnifier-zoom",

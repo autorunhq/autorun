@@ -58,6 +58,7 @@ static pthread_mutex_t present_lock = PTHREAD_MUTEX_INITIALIZER;
 #include "../../horizon-wine/source/osk.h"
 #include "../../horizon-wine/source/touch_loupe.h"
 extern int wine_nx_loupe_state( int *x, int *y, int *width, int *height, int *zoom );
+extern void wine_nx_loupe_drawable_add( int delta );
 #endif
 
 /* The Upscaling setting a scaled swapchain is made with: 0 bilinear, 1 FSR 1.0
@@ -3162,6 +3163,7 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
         {
             create_info_host.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             swapchain->nx_loupe_usable = TRUE;
+            wine_nx_loupe_drawable_add( 1 );
         }
     }
 #endif
@@ -3261,6 +3263,7 @@ void win32u_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR client
     }
 
 #ifdef __SWITCH__
+    if (swapchain->nx_loupe_usable) wine_nx_loupe_drawable_add( -1 );
     if (swapchain->nx_osk || swapchain->nx_loupe)
     {
         device->p_vkDeviceWaitIdle( device->host.device );
@@ -3979,10 +3982,9 @@ static void nx_osk_present( struct vulkan_queue *queue, VkPresentInfoKHR *presen
  * says it is up, the part of the image around the finger is enlarged into an
  * image of its own and copied back above the finger, with a border and a
  * crosshair on the finger's place, both made of regions of a buffer of two lines
- * of pixels. It runs after the view zoom, so the finger's place is a place on the
- * screen as it is shown, and before the keyboard and the arrow. The finger moves
- * between presents, so an image's command buffer is recorded again for each
- * present, after its fence says the last one is done. */
+ * of pixels. It runs before the keyboard. The finger moves between presents, so
+ * an image's command buffer is recorded again for each present, after its fence
+ * says the last one is done. */
 #define NX_LOUPE_FENCE_WAIT_NS 100000000ull
 #define NX_LOUPE_BORDER_COLOR 0xffffffffu  /* both are the same with red and blue swapped */
 #define NX_LOUPE_CROSS_COLOR  0xffff00ffu
@@ -4176,15 +4178,16 @@ failed:
     return FALSE;
 }
 
-/* One rectangle of a line of the buffer (0 the border's, 1 the crosshair's),
- * cut to the magnifier; none when nothing is left of it. */
-static int nx_loupe_region( VkBufferImageCopy *out, const struct touch_loupe_rect *r, int line,
+/* One rectangle of a line of the buffer (0 the border's, 1 the crosshair's), cut
+ * to the magnifier less inset pixels all round; none when nothing is left of it. */
+static int nx_loupe_region( VkBufferImageCopy *out, const struct touch_loupe_rect *r, int line, int inset,
                             int x, int y, int width, int height )
 {
-    int x1 = min( x + width, r->dst_x + r->dst_w ), y1 = min( y + height, r->dst_y + r->dst_h );
+    int left = r->dst_x + inset, top = r->dst_y + inset;
+    int x1 = min( x + width, r->dst_x + r->dst_w - inset ), y1 = min( y + height, r->dst_y + r->dst_h - inset );
 
-    x = max( x, r->dst_x );
-    y = max( y, r->dst_y );
+    x = max( x, left );
+    y = max( y, top );
     if (x >= x1 || y >= y1) return 0;
     memset( out, 0, sizeof(*out) );
     out->bufferOffset = (VkDeviceSize)line * TOUCH_LOUPE_DST_W * 4;
@@ -4200,21 +4203,23 @@ static int nx_loupe_region( VkBufferImageCopy *out, const struct touch_loupe_rec
 }
 
 /* The border and the crosshair: four arms around the finger's place, with a gap
- * in the middle so that the place itself stays in view. */
+ * in the middle so that the place itself stays in view. The regions of one
+ * vkCmdCopyBufferToImage must not overlap, so the border's sides do not share
+ * their corners and the arms stay inside the border. */
 static int nx_loupe_regions( VkBufferImageCopy *out, const struct touch_loupe_rect *r )
 {
     int cx = r->cross_x + r->zoom / 2, cy = r->cross_y + r->zoom / 2;
     const int gap = NX_LOUPE_CROSS_GAP, arm = NX_LOUPE_CROSS_ARM, w = NX_LOUPE_CROSS_WIDTH;
     int n = 0;
 
-    n += nx_loupe_region( out + n, r, 0, r->dst_x, r->dst_y, r->dst_w, 1 );
-    n += nx_loupe_region( out + n, r, 0, r->dst_x, r->dst_y + r->dst_h - 1, r->dst_w, 1 );
-    n += nx_loupe_region( out + n, r, 0, r->dst_x, r->dst_y, 1, r->dst_h );
-    n += nx_loupe_region( out + n, r, 0, r->dst_x + r->dst_w - 1, r->dst_y, 1, r->dst_h );
-    n += nx_loupe_region( out + n, r, 1, cx - gap - arm, cy - w / 2, arm, w );
-    n += nx_loupe_region( out + n, r, 1, cx + gap, cy - w / 2, arm, w );
-    n += nx_loupe_region( out + n, r, 1, cx - w / 2, cy - gap - arm, w, arm );
-    n += nx_loupe_region( out + n, r, 1, cx - w / 2, cy + gap, w, arm );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y, r->dst_w, 1 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y + r->dst_h - 1, r->dst_w, 1 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y + 1, 1, r->dst_h - 2 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x + r->dst_w - 1, r->dst_y + 1, 1, r->dst_h - 2 );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - gap - arm, cy - w / 2, arm, w );
+    n += nx_loupe_region( out + n, r, 1, 1, cx + gap, cy - w / 2, arm, w );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - w / 2, cy - gap - arm, w, arm );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - w / 2, cy + gap, w, arm );
     return n;
 }
 

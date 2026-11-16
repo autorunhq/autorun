@@ -84,22 +84,22 @@ static void test_settings( const char *dir )
     assert( settings.four_cores );
     load_text( &kv, "" );
     launcher_settings_read( &kv, &settings );
-    assert( settings.touch_magnifier && settings.touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS );
+    assert( !settings.touch_magnifier && settings.touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS );  /* off by default */
     assert( settings.touch_magnifier_zoom == TOUCH_LOUPE_ZOOM_DEFAULT );
     assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "touch-magnifier" ) );  /* defaults leave no line */
-    load_text( &kv, "touch-magnifier=0\ntouch-magnifier-delay=750\ntouch-magnifier-zoom=2\n" );
+    load_text( &kv, "touch-magnifier=1\ntouch-magnifier-delay=750\ntouch-magnifier-zoom=2\n" );
     launcher_settings_read( &kv, &settings );
-    assert( !settings.touch_magnifier && settings.touch_magnifier_delay == 750 && settings.touch_magnifier_zoom == 2 );
-    assert( launcher_settings_write( &kv, &settings ) );
+    assert( settings.touch_magnifier && settings.touch_magnifier_delay == 750 && settings.touch_magnifier_zoom == 2 );
+    assert( launcher_settings_write( &kv, &settings ) && strstr( kv.text, "touch-magnifier=1" ) );
     launcher_settings_read( &kv, &back );
-    assert( !back.touch_magnifier && back.touch_magnifier_delay == 750 && back.touch_magnifier_zoom == 2 );
-    settings.touch_magnifier = 1;
+    assert( back.touch_magnifier && back.touch_magnifier_delay == 750 && back.touch_magnifier_zoom == 2 );
+    settings.touch_magnifier = 0;
     settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
     settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "touch-magnifier" ) );
     load_text( &kv, "touch-magnifier=unknown\ntouch-magnifier-delay=5\n" );  /* unknown and out of range: the defaults */
     launcher_settings_read( &kv, &settings );
-    assert( settings.touch_magnifier && settings.touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS );
+    assert( !settings.touch_magnifier && settings.touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS );
     load_text( &kv, "touch-magnifier-delay=99999\ntouch-magnifier-zoom=9\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS );
@@ -244,7 +244,7 @@ static void test_settings( const char *dir )
     snprintf( path, sizeof(path), "%s/game.wine-nx.txt", dir );
     load_text( &kv, "# written by hand\n" );
     memset( &settings, 0, sizeof(settings) );
-    settings.fex = settings.four_cores = settings.touch_magnifier = 1;
+    settings.fex = settings.four_cores = 1;
     settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
     settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
@@ -264,7 +264,7 @@ static void test_settings( const char *dir )
 
     /* Back to the global settings: only the comment stays; without it the file goes. */
     memset( &settings, 0, sizeof(settings) );
-    settings.fex = settings.four_cores = settings.touch_magnifier = 1;
+    settings.fex = settings.four_cores = 1;
     settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
     settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     settings.d3d = LAUNCHER_D3D_DXVK;

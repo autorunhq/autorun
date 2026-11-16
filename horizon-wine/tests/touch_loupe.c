@@ -145,6 +145,48 @@ static void test_the_delay_is_the_one_given(void)
     assert( touch_loupe_step( &t, 1, 100, 200, 200 * MS, 200 * MS, &o ) && o.loupe );
 }
 
+static void test_the_first_finger_is_the_one_followed(void)
+{
+    struct touch_loupe t = {0};
+    const unsigned int ids[2] = { 7, 9 };
+    const int xs[2] = { 100, 600 }, ys[2] = { 100, 400 };
+    int x, y;
+
+    assert( touch_loupe_track( &t, ids, xs, ys, 1, &x, &y ) && x == 100 && y == 100 );
+    t.phase = TOUCH_LOUPE_WAIT;  /* a touch is going on */
+    assert( touch_loupe_track( &t, ids, xs, ys, 2, &x, &y ) && x == 100 && y == 100 );  /* a second finger changes nothing */
+    assert( !touch_loupe_track( &t, ids + 1, xs + 1, ys + 1, 1, &x, &y ) );  /* the first one lifted: not down */
+    assert( !touch_loupe_track( &t, ids, xs, ys, 0, &x, &y ) );
+    t.phase = TOUCH_LOUPE_IDLE;  /* a new touch takes the first finger that is down */
+    assert( touch_loupe_track( &t, ids + 1, xs + 1, ys + 1, 1, &x, &y ) && x == 600 && y == 400 && t.finger == 9 );
+}
+
+static void test_the_second_finger_does_not_turn_a_wait_into_a_drag(void)
+{
+    struct touch_loupe t = {0};
+    struct touch_loupe_output o;
+    const unsigned int ids[2] = { 7, 9 };
+    const int xs[2] = { 100, 600 }, ys[2] = { 100, 400 };
+    int x = 0, y = 0, down;
+
+    down = touch_loupe_track( &t, ids, xs, ys, 1, &x, &y );
+    touch_loupe_step( &t, down, x, y, 0, DELAY, &o );
+    down = touch_loupe_track( &t, ids + 1, xs + 1, ys + 1, 1, &x, &y );  /* the first finger lifted, the second is down */
+    assert( !down );
+    assert( touch_loupe_step( &t, down, x, y, 30 * MS, DELAY, &o ) && o.left && o.x == 100 && o.y == 100 );  /* a tap */
+}
+
+static void test_plain_touch_leaves_a_touch_alone_that_the_magnifier_had(void)
+{
+    int ignore = 0;
+
+    assert( touch_loupe_plain( &ignore, 0, 1 ) && touch_loupe_plain( &ignore, 0, 1 ) );  /* a press while down */
+    assert( !touch_loupe_plain( &ignore, 0, 0 ) );
+    assert( !touch_loupe_plain( &ignore, 1, 1 ) && !touch_loupe_plain( &ignore, 0, 1 ) );  /* switched off mid-touch */
+    assert( !touch_loupe_plain( &ignore, 0, 0 ) );  /* lifted */
+    assert( touch_loupe_plain( &ignore, 0, 1 ) );  /* the next touch presses */
+}
+
 static void test_a_new_touch_after_each_kind_starts_again(void)
 {
     struct touch_loupe t = {0};
@@ -170,7 +212,10 @@ int main(void)
     test_a_move_of_exactly_the_slop_is_not_a_drag();
     test_waiting_shows_the_magnifier_and_the_release_clicks_where_the_finger_is();
     test_the_delay_is_the_one_given();
+    test_the_first_finger_is_the_one_followed();
+    test_the_second_finger_does_not_turn_a_wait_into_a_drag();
+    test_plain_touch_leaves_a_touch_alone_that_the_magnifier_had();
     test_a_new_touch_after_each_kind_starts_again();
-    puts( "touch loupe: layout, zooms, corners, small screens, taps, drags, the wait for the magnifier, its delay and new touches passed" );
+    puts( "touch loupe: layout, zooms, corners, small screens, taps, drags, the wait for the magnifier, its delay, the followed finger, the plain touch and new touches passed" );
     return 0;
 }

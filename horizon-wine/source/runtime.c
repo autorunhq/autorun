@@ -558,10 +558,10 @@ static struct pointer_buttons wine_nx_pointer_buttons;
 static int wine_nx_pointer_moved;
 /* A touch points at a place, and the place is what Wine is given. */
 static int wine_nx_pointer_placed;
-/* The finger's magnifier (touch_loupe.h): whether it may come up, and, while it
- * is up, where the finger is. A program's setting starts it; ZL + ZR + the right
- * stick click switches it during play. */
-static int wine_nx_loupe_allowed_state = 1;
+/* The finger's magnifier (touch_loupe.h): whether it may come up (a program's
+ * setting), and, while it is up, where the finger is. */
+static int wine_nx_loupe_allowed_state;  /* off until a program's setting turns it on */
+static int wine_nx_loupe_drawable_count;
 static int wine_nx_loupe_delay_ms = TOUCH_LOUPE_DELAY_DEFAULT_MS;
 static int wine_nx_loupe_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
 static int wine_nx_loupe_shown, wine_nx_loupe_x, wine_nx_loupe_y;
@@ -855,6 +855,14 @@ void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
 
 
+/* A swapchain that the magnifier can be drawn on exists (+1) or is gone (-1),
+ * told by dlls/win32u/vulkan.c. Without one the touch stays as it was: a
+ * magnifier that cannot be seen would only take the press away. */
+void wine_nx_loupe_drawable_add( int delta )
+{
+    __atomic_add_fetch( &wine_nx_loupe_drawable_count, delta, __ATOMIC_RELAXED );
+}
+
 /* Whether the magnifier is up, and the finger's place on the screen, for
  * dlls/win32u/vulkan.c to draw it. */
 int wine_nx_loupe_state( int *x, int *y, int *width, int *height, int *zoom )
@@ -881,8 +889,9 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     u64 now, held, all_held, elapsed;
     int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate, touching = 0, touch_left = 1;
     int touch_x = 0, touch_y = 0;
-    static int osk_combo, loupe_combo;
+    static int osk_combo;
     static struct touch_loupe loupe_touch;
+    static int loupe_ignore;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
 
@@ -908,7 +917,6 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     {
         const u64 osk = HidNpadButton_Minus | HidNpadButton_StickR;
-        const u64 loupe = HidNpadButton_ZL | HidNpadButton_ZR | HidNpadButton_StickR;
         unsigned int bits = osk_buttons( held );
         if ((held & osk) == osk && !osk_combo && !wine_nx_osk_visible())
             wine_nx_osk_show( 1, bits );
@@ -924,13 +932,6 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
             swallowed = held;
         }
         else swallowed &= held;
-        if ((held & loupe) == loupe && !loupe_combo)
-        {
-            wine_nx_loupe_allowed_state = !wine_nx_loupe_allowed_state;
-            log_line( "[LOUPE] touch magnifier %s", wine_nx_loupe_allowed_state ? "on" : "off" );
-        }
-        loupe_combo = (held & loupe) == loupe;
-        if (loupe_combo) swallowed |= loupe;
         __atomic_store_n( &wine_nx_input_swallowed, swallowed, __ATOMIC_RELAXED );
         raw.buttons = held & ~swallowed;
         static unsigned int drawn_generation;
@@ -945,13 +946,22 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
 
     /* A touch is at touch_x, touch_y, with the left button down unless the
      * magnifier is still waiting for a decision (touch_loupe.h). */
-    if (!on_keyboard && wine_nx_loupe_allowed_state)
+    if (!on_keyboard && wine_nx_loupe_allowed_state && __atomic_load_n( &wine_nx_loupe_drawable_count, __ATOMIC_RELAXED ) > 0)
     {
         struct touch_loupe_output pressed = {0};
-        int down = hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+        unsigned int ids[16];
+        int xs[16], ys[16], i, finger_x = 0, finger_y = 0, down;
+        int count = hidGetTouchScreenStates( &touch, 1 ) ? (int)touch.count : 0;
 
-        touching = touch_loupe_step( &loupe_touch, down, down ? (int)touch.touches[0].x : 0,
-                                     down ? (int)touch.touches[0].y : 0, armTicksToNs( now ),
+        if (count > 16) count = 16;
+        for (i = 0; i < count; i++)
+        {
+            ids[i] = touch.touches[i].finger_id;
+            xs[i] = touch.touches[i].x;
+            ys[i] = touch.touches[i].y;
+        }
+        down = touch_loupe_track( &loupe_touch, ids, xs, ys, count, &finger_x, &finger_y );
+        touching = touch_loupe_step( &loupe_touch, down, finger_x, finger_y, armTicksToNs( now ),
                                      (uint64_t)wine_nx_loupe_delay_ms * 1000000ull, &pressed );
         touch_x = pressed.x;
         touch_y = pressed.y;
@@ -962,11 +972,13 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     else
     {
+        int down = !on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+
+        touching = touch_loupe_plain( &loupe_ignore, loupe_touch.phase != TOUCH_LOUPE_IDLE, down );
         loupe_touch.phase = TOUCH_LOUPE_IDLE;
         wine_nx_loupe_shown = 0;
-        if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+        if (touching)
         {
-            touching = 1;
             touch_x = touch.touches[0].x;
             touch_y = touch.touches[0].y;
         }
@@ -4217,7 +4229,7 @@ int main( int argc, char **argv )
         runtime_fex = 0;
 #endif
         runtime_four_cores = 1;
-        wine_nx_loupe_allowed_state = 1;
+        wine_nx_loupe_allowed_state = 0;
         wine_nx_loupe_delay_ms = TOUCH_LOUPE_DELAY_DEFAULT_MS;
         wine_nx_loupe_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
         horizon_fast_sync_enabled = 0;
