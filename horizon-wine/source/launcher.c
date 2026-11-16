@@ -434,6 +434,18 @@ static int folder_title( const char *path, char *out, size_t size )
     return 1;
 }
 
+/* The entry of the list that a delay in the file stands for: the one it equals,
+ * or else the nearest. */
+static int touch_magnifier_delay_index( int delay )
+{
+    int i, best = 0;
+
+    for (i = 1; i < LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT; i++)
+        if (abs( launcher_touch_magnifier_delays[i] - delay ) < abs( launcher_touch_magnifier_delays[best] - delay ))
+            best = i;
+    return best;
+}
+
 static void load_program_settings( struct launcher *l, struct program *p )
 {
     char path[768];
@@ -443,7 +455,9 @@ static void load_program_settings( struct launcher *l, struct program *p )
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
     p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
-    p->settings.fex = p->settings.four_cores = 1;
+    p->settings.fex = p->settings.four_cores = p->settings.touch_magnifier = 1;
+    p->settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
+    p->settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
     {
@@ -1760,7 +1774,7 @@ enum program_row
     ROW_WINDOWS, ROW_D3D9, ROW_VKD3D_VERSION, ROW_DXVK_VERSION, ROW_DXVK_OPTIONS, ROW_DXVK_HUD, ROW_FRAME_LIMIT, ROW_VSYNC,
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
-    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS,
+    ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES, ROW_LAZY_FILE_VIEWS, ROW_TOUCH_MAGNIFIER, ROW_TOUCH_MAGNIFIER_DELAY, ROW_TOUCH_MAGNIFIER_ZOOM,
     ROW_HIDE, ROW_LIBRARY, ROW_GAME_FIX, PROGRAM_ROWS
 };
 
@@ -2645,6 +2659,31 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             }
         }
 
+        ADD_ROW( ROW_TOUCH_MAGNIFIER, SECTION_CONTROLS, "Touch magnifier",
+                 "Hold a finger still on the touchscreen to see the screen around it enlarged above the finger, "
+                 "and release to click where the crosshair is. ZL + ZR + right stick click switches it during play." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.touch_magnifier;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.touch_magnifier ? "Enabled" : "Disabled" );
+
+        ADD_ROW( ROW_TOUCH_MAGNIFIER_DELAY, SECTION_CONTROLS, "Magnifier delay",
+                 "How long a finger has to stay still on the touchscreen before the magnifier comes up. "
+                 "A shorter delay is quicker; a longer one leaves more room for taps and drags." );
+        row->kind = UI_ROW_DROPDOWN;
+        row->disabled = !p->settings.touch_magnifier;
+        row->choices = LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  launcher_touch_magnifier_delay_labels[touch_magnifier_delay_index( p->settings.touch_magnifier_delay )] );
+
+        ADD_ROW( ROW_TOUCH_MAGNIFIER_ZOOM, SECTION_CONTROLS, "Magnifier zoom",
+                 "How many times the magnifier enlarges the screen. A higher zoom shows less of the screen "
+                 "around the finger." );
+        row->kind = UI_ROW_DROPDOWN;
+        row->disabled = !p->settings.touch_magnifier;
+        row->choices = LAUNCHER_TOUCH_MAGNIFIER_ZOOM_COUNT;
+        snprintf( row->value, sizeof(row->value), "%s",
+                  launcher_touch_magnifier_zoom_labels[p->settings.touch_magnifier_zoom - TOUCH_LOUPE_ZOOM_MIN] );
+
         if ((x86 || x64) && !p->settings.fex)
         {
             ADD_ROW( ROW_BOX64, SECTION_EMULATION, "Box64 options",
@@ -2874,6 +2913,53 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             p->settings.lazy_file_views = action == UI_ACTION_RESET ? 0 : !p->settings.lazy_file_views;
             save_program_settings( l, p );
             break;
+
+        case ROW_TOUCH_MAGNIFIER:
+            p->settings.touch_magnifier = action == UI_ACTION_RESET ? 1 : !p->settings.touch_magnifier;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_TOUCH_MAGNIFIER_DELAY:
+        {
+            struct ui_row items[LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT] = {0};
+
+            if (action == UI_ACTION_RESET) p->settings.touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                int selected;
+
+                for (i = 0; i < LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s", launcher_touch_magnifier_delay_labels[i] );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT,
+                                                 touch_magnifier_delay_index( p->settings.touch_magnifier_delay ) );
+                if (selected < 0) break;
+                p->settings.touch_magnifier_delay = launcher_touch_magnifier_delays[selected];
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+        }
+
+        case ROW_TOUCH_MAGNIFIER_ZOOM:
+        {
+            struct ui_row items[LAUNCHER_TOUCH_MAGNIFIER_ZOOM_COUNT] = {0};
+
+            if (action == UI_ACTION_RESET) p->settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                int selected;
+
+                for (i = 0; i < LAUNCHER_TOUCH_MAGNIFIER_ZOOM_COUNT; i++)
+                    snprintf( items[i].label, sizeof(items[i].label), "%s", launcher_touch_magnifier_zoom_labels[i] );
+                selected = ui_settings_dropdown( ui, &list, items, LAUNCHER_TOUCH_MAGNIFIER_ZOOM_COUNT,
+                                                 p->settings.touch_magnifier_zoom - TOUCH_LOUPE_ZOOM_MIN );
+                if (selected < 0) break;
+                p->settings.touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_MIN + selected;
+            }
+            else break;
+            save_program_settings( l, p );
+            break;
+        }
 
         case ROW_SYNC:
         {

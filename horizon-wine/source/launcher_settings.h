@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include "dxvk_releases.h"
+#include "touch_loupe.h"
 
 #define LAUNCHER_KV_MAX 8192
 
@@ -187,6 +188,9 @@ struct launcher_settings
     int fast_sync;
     int fex;
     int four_cores;
+    int touch_magnifier;  /* a finger held on the touchscreen shows the screen around it enlarged */
+    int touch_magnifier_delay;  /* milliseconds the finger stays still before it does */
+    int touch_magnifier_zoom;   /* how many times it is enlarged */
     int lazy_file_views;  /* views of files read from the card on demand */
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     enum launcher_d3d_renderer d3d;
@@ -223,6 +227,11 @@ static const char *const launcher_lsfg_flow_labels[] = { "12.5%", "25%", "50%" }
 static const char *const launcher_lsfg_flow_values[] = { "0.125", "0.25", "0.5" };
 static const char *const launcher_upscaling_labels[] = { "Off (Bilinear)", "FSR 1.0", "Integer" };
 static const char *const launcher_upscaling_values[] = { "off", "fsr", "integer" };
+static const int launcher_touch_magnifier_delays[] = { 200, 250, TOUCH_LOUPE_DELAY_DEFAULT_MS, 500, 750, 1000 };
+static const char *const launcher_touch_magnifier_delay_labels[] =
+    { "0.2 s", "0.25 s", "0.35 s", "0.5 s", "0.75 s", "1 s" };
+enum { LAUNCHER_TOUCH_MAGNIFIER_DELAY_COUNT = 6, LAUNCHER_TOUCH_MAGNIFIER_ZOOM_COUNT = 3 };
+static const char *const launcher_touch_magnifier_zoom_labels[] = { "2x", "3x", "4x" };  /* from TOUCH_LOUPE_ZOOM_MIN */
 static const char *const launcher_sharpness_labels[] = { "0%", "20%", "40%", "60%", "80%", "100%" };
 static const float launcher_sharpness_values[] = { 0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
 
@@ -404,6 +413,14 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     settings->fast_sync = launcher_kv_get( kv, "sync", value, sizeof(value) ) && !strcasecmp( value, "horizon" );
     settings->fex = !launcher_kv_get( kv, "cpu", value, sizeof(value) ) || strcasecmp( value, "box64" );
     settings->four_cores = launcher_setting_state( kv, "four-cores" ) != 0;
+    settings->touch_magnifier = launcher_setting_state( kv, "touch-magnifier" ) != 0;
+    settings->touch_magnifier_delay = launcher_kv_get_int( kv, "touch-magnifier-delay", TOUCH_LOUPE_DELAY_DEFAULT_MS );
+    if (settings->touch_magnifier_delay < TOUCH_LOUPE_DELAY_MIN_MS ||
+        settings->touch_magnifier_delay > TOUCH_LOUPE_DELAY_MAX_MS)
+        settings->touch_magnifier_delay = TOUCH_LOUPE_DELAY_DEFAULT_MS;
+    settings->touch_magnifier_zoom = launcher_kv_get_int( kv, "touch-magnifier-zoom", TOUCH_LOUPE_ZOOM_DEFAULT );
+    if (settings->touch_magnifier_zoom < TOUCH_LOUPE_ZOOM_MIN || settings->touch_magnifier_zoom > TOUCH_LOUPE_ZOOM_MAX)
+        settings->touch_magnifier_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
     settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
@@ -473,14 +490,20 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
 static inline int launcher_settings_write( struct launcher_kv *kv, const struct launcher_settings *settings )
 {
     static const char *states[] = { NULL, "0", "1" };
+    char delay[16], zoom[16];
 
     if (settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
         settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
         settings->lsfg_flow < 0 || settings->lsfg_flow >= 3 ||
+        settings->touch_magnifier_delay < TOUCH_LOUPE_DELAY_MIN_MS ||
+        settings->touch_magnifier_delay > TOUCH_LOUPE_DELAY_MAX_MS ||
+        settings->touch_magnifier_zoom < TOUCH_LOUPE_ZOOM_MIN || settings->touch_magnifier_zoom > TOUCH_LOUPE_ZOOM_MAX ||
         settings->upscaling < 0 || settings->upscaling >= LAUNCHER_UPSCALING_COUNT ||
         settings->upscaling_sharpness < 0 || settings->upscaling_sharpness >= LAUNCHER_SHARPNESS_COUNT) return 0;
+    snprintf( delay, sizeof(delay), "%d", settings->touch_magnifier_delay );
+    snprintf( zoom, sizeof(zoom), "%d", settings->touch_magnifier_zoom );
     return launcher_kv_set( kv, "title", settings->title[0] ? settings->title : NULL ) &&
            launcher_kv_set( kv, "hidden", settings->hidden ? "1" : NULL ) &&
            launcher_kv_set( kv, "verbose", states[settings->verbose + 1] ) &&
@@ -488,6 +511,11 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "sync", settings->fast_sync ? "horizon" : NULL ) &&
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
+           launcher_kv_set( kv, "touch-magnifier", settings->touch_magnifier ? NULL : "0" ) &&
+           launcher_kv_set( kv, "touch-magnifier-delay",
+                            settings->touch_magnifier_delay == TOUCH_LOUPE_DELAY_DEFAULT_MS ? NULL : delay ) &&
+           launcher_kv_set( kv, "touch-magnifier-zoom",
+                            settings->touch_magnifier_zoom == TOUCH_LOUPE_ZOOM_DEFAULT ? NULL : zoom ) &&
            launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
