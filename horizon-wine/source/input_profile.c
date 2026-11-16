@@ -136,6 +136,9 @@ void input_profile_apply( struct input_profile *p, const struct launcher_kv *kv 
         snprintf( name, sizeof(name), "key.%s", input_sources[i].name );
         if (launcher_kv_get( kv, name, value, sizeof(value) ) && input_binding_parse( &p->keys[i], value, 0 ) &&
             i >= 16 && i < 20) p->left_inherit &= ~(1u << (i - 16));
+        snprintf( name, sizeof(name), "repeat.%s", input_sources[i].name );
+        if (setting( kv, name, !!(p->repeat & (1u << i)), 0, 1 )) p->repeat |= 1u << i;
+        else p->repeat &= ~(1u << i);
     }
     for (unsigned int i = 0; i < 4; i++) if (p->left_inherit & (1u << i)) p->keys[16 + i] = p->keys[12 + i];
     p->mode = setting( kv, "input-mode", p->mode, INPUT_CONTROLLER, INPUT_KEYBOARD_MOUSE );
@@ -198,6 +201,14 @@ int input_binding_save( struct launcher_kv *kv, int source, int controller, cons
         for (unsigned int i = 0; i < binding->count; i++)
             len += snprintf( value + len, sizeof(value) - len, "%s0x%x", i ? "+" : "", binding->code[i] );
     return launcher_kv_set( kv, key, binding ? value : NULL );
+}
+
+int input_repeat_save( struct launcher_kv *kv, int source, int repeat )
+{
+    char key[64];
+    if (source < 0 || source >= INPUT_SOURCE_COUNT) return 0;
+    snprintf( key, sizeof(key), "repeat.%s", input_sources[source].name );
+    return launcher_kv_set( kv, key, repeat < 0 ? NULL : repeat ? "1" : "0" );
 }
 
 void input_binding_label( const struct input_binding *binding, int controller, char *out, size_t size )
@@ -283,7 +294,12 @@ void input_map_keys( const struct input_profile *profile, const struct input_pad
                 continue;
             }
             if (strength <= 12000) continue;
-            if (code && code < 256) output->keys[code / 64] |= 1ull << (code % 64);
+            if (code && code < 256)
+            {
+                output->keys[code / 64] |= 1ull << (code % 64);
+                if ((profile->repeat & (1u << i)) && !input_key_modifier( code ))
+                    output->repeat[code / 64] |= 1ull << (code % 64);
+            }
             else if (code >= INPUT_MOUSE_LEFT && code < INPUT_WHEEL_UP) output->buttons |= 1u << (code - INPUT_MOUSE_LEFT);
             else if (code >= INPUT_WHEEL_UP && code < INPUT_MOUSE_UP) output->wheels |= 1u << (code - INPUT_WHEEL_UP);
         }
@@ -314,6 +330,26 @@ void input_key_edges_take( struct input_key_edges *edges, struct input_key_edges
 int input_key_modifier( unsigned int code )
 {
     return (code >= 0x10 && code <= 0x12) || (code >= 0xa0 && code <= 0xa5) || code == 0x5b || code == 0x5c;
+}
+
+/* Windows repeats a held key; nothing does it here, so a game that scrolls on
+ * WM_KEYDOWN moved once per stick push. Only keys of a source with its repeat
+ * flag repeat: a repeated hotkey such as F1 or P would toggle again. */
+unsigned int input_key_repeats( const uint64_t held[INPUT_KEY_WORDS], const uint64_t repeat[INPUT_KEY_WORDS],
+                                uint64_t now_ns, uint64_t due[INPUT_KEY_WORDS * 64],
+                                struct input_key_event events[INPUT_KEY_EVENT_MAX], unsigned int count )
+{
+    for (unsigned int code = 1; code < INPUT_KEY_WORDS * 64; code++)
+    {
+        if (!(held[code / 64] & repeat[code / 64] & (1ull << (code % 64)))) due[code] = 0;
+        else if (!due[code]) due[code] = now_ns + INPUT_KEY_REPEAT_DELAY_NS;
+        else if (now_ns >= due[code] && count < INPUT_KEY_EVENT_MAX)
+        {
+            due[code] = now_ns + INPUT_KEY_REPEAT_INTERVAL_NS;
+            events[count++] = (struct input_key_event){ code, 1 };
+        }
+    }
+    return count;
 }
 
 unsigned int input_key_events( const struct input_key_edges *edges, uint64_t delivered[INPUT_KEY_WORDS],

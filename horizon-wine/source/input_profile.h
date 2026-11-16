@@ -36,12 +36,13 @@ struct input_profile
     struct input_binding pad[INPUT_SOURCE_COUNT], keys[INPUT_SOURCE_COUNT];
     int mode, deadzone[2], keyboard_auto;
     unsigned int left_inherit;
+    unsigned int repeat;   /* bit per source: its keys repeat while held, as on a keyboard */
     int mouse_speed;   /* percent of the built-in cursor speed; 100 is the default */
 };
 struct input_pad { uint64_t buttons; int axis[4]; };
 struct input_output
 {
-    uint64_t keys[INPUT_KEY_WORDS];
+    uint64_t keys[INPUT_KEY_WORDS], repeat[INPUT_KEY_WORDS];
     unsigned int buttons, wheels;
     int mouse_x, mouse_y;
 };
@@ -58,6 +59,7 @@ int input_profile_program( const char *root, const char *program, int keyboard_a
 int input_profile_save( const struct launcher_kv *kv, const char *path );
 int input_binding_parse( struct input_binding *binding, const char *text, int controller );
 int input_binding_save( struct launcher_kv *kv, int source, int controller, const struct input_binding *binding );
+int input_repeat_save( struct launcher_kv *kv, int source, int repeat );
 void input_binding_label( const struct input_binding *binding, int controller, char *out, size_t size );
 const char *input_key_label( unsigned int code );
 void input_filter_stick( int *x, int *y, int deadzone );
@@ -66,5 +68,8 @@ void input_map_keys( const struct input_profile *profile, const struct input_pad
 void input_key_edges_update( struct input_key_edges *edges, const uint64_t held[INPUT_KEY_WORDS] );
 void input_key_edges_take( struct input_key_edges *edges, struct input_key_edges *out );
 int input_key_modifier( unsigned int code );
+unsigned int input_key_repeats( const uint64_t held[INPUT_KEY_WORDS], const uint64_t repeat[INPUT_KEY_WORDS],
+                                uint64_t now_ns, uint64_t due[INPUT_KEY_WORDS * 64],
+                                struct input_key_event events[INPUT_KEY_EVENT_MAX], unsigned int count );
 
 #endif

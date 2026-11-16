@@ -841,6 +841,7 @@ void wine_nx_keyboard_open( void )
 
 static struct input_key_edges runtime_key_edges;
 static uint64_t runtime_keys_delivered[INPUT_KEY_WORDS];
+static uint64_t runtime_key_repeat[INPUT_KEY_WORDS], runtime_key_repeat_due[INPUT_KEY_WORDS * 64];
 static int runtime_wheel[2];
 
 void wine_nx_leave_process( const char *why );
@@ -921,6 +922,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         struct input_output mapped;
         input_map_keys( profile, &raw, &mapped );
         memcpy( output.keys, mapped.keys, sizeof(output.keys) );
+        memcpy( output.repeat, mapped.repeat, sizeof(output.repeat) );
         output.buttons |= mapped.buttons;
         output.wheels = mapped.wheels;
         output.mouse_x = mapped.mouse_x;
@@ -930,6 +932,7 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
         moved |= pointer_cursor_step( &wine_nx_pointer, output.mouse_x, output.mouse_y, elapsed );
     }
     input_key_edges_update( &runtime_key_edges, output.keys );
+    memcpy( runtime_key_repeat, output.repeat, sizeof(runtime_key_repeat) );
     if (output.wheels && (output.wheels != last_wheels || now >= wheel_next))
     {
         int vertical = ((output.wheels & 1) != 0) - ((output.wheels & 2) != 0);
@@ -974,6 +977,8 @@ void wine_nx_input_take( struct input_snapshot *out )
     pointer_cursor_take_motion( &wine_nx_pointer, &out->dx, &out->dy );
     input_key_edges_take( &runtime_key_edges, &edges );
     out->key_count = input_key_events( &edges, runtime_keys_delivered, out->keys );
+    out->key_count = input_key_repeats( edges.held, runtime_key_repeat, armTicksToNs( armGetSystemTick() ),
+                                        runtime_key_repeat_due, out->keys, out->key_count );
     out->wheel = runtime_wheel[0];
     out->hwheel = runtime_wheel[1];
     runtime_wheel[0] = runtime_wheel[1] = 0;
