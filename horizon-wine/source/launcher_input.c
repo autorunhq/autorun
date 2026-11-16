@@ -257,14 +257,17 @@ static int neighbour( const SDL_Rect *rects, int count, int selected, int button
     return next;
 }
 
-static int binding_dialog( struct ui *ui, const struct input_art *art, int source, int controller, struct input_binding *binding )
+static int binding_dialog( struct ui *ui, const struct input_art *art, int source, int controller,
+                           struct input_binding *binding, int *repeat )
 {
     struct input_binding draft = *binding;
+    int repeat_draft = *repeat;
     struct ui_input input;
     SDL_Rect targets[KEYCAP_COUNT + MOUSE_TARGET_COUNT + 1], hits[16];
     int count = controller ? INPUT_PAD_TARGET_COUNT : KEYCAP_COUNT + MOUSE_TARGET_COUNT, selected = 0, result = 0;
-    const SDL_Rect panel = {48,108,1184,512}, apply = {1040,555,156,43};
+    const SDL_Rect panel = {48,108,1184,512}, apply = {1040,555,156,43}, repeat_cap = {820,555,200,43};
     static const struct ui_hint hints[] = { {UI_A,"Add / remove"}, {UI_X,"Clear"}, {UI_PLUS,"Apply"}, {UI_B,"Cancel"} };
+    static const struct ui_hint key_hints[] = { {UI_A,"Add / remove"}, {UI_X,"Clear"}, {UI_Y,"Repeat"}, {UI_PLUS,"Apply"}, {UI_B,"Cancel"} };
     if (controller)
         for (int i = 0; i < count; i++) targets[i] = (SDL_Rect){ 465 + (i%6)*121, 250 + (i/6)*69, 112, 60 };
     else
@@ -284,6 +287,7 @@ static int binding_dialog( struct ui *ui, const struct input_art *art, int sourc
             if (input.button == UI_B) goto done;
             if (input.button == UI_PLUS) { result = 1; goto done; }
             if (input.button == UI_X) { draft.count = 0; ui_sound( ui, LAUNCHER_SOUND_BACK ); }
+            if (!controller && input.button == UI_Y) { repeat_draft = !repeat_draft; ui_sound( ui, LAUNCHER_SOUND_ACCEPT ); }
             if (input.button == UI_LEFT || input.button == UI_RIGHT || input.button == UI_UP || input.button == UI_DOWN)
             {
                 int next = neighbour( targets, count, selected, input.button );
@@ -293,6 +297,8 @@ static int binding_dialog( struct ui *ui, const struct input_art *art, int sourc
             if (input.touch == UI_TOUCH_TAP)
             {
                 if (inside( apply, input.x, input.y )) { result = 1; goto done; }
+                if (!controller && inside( repeat_cap, input.x, input.y ))
+                { repeat_draft = !repeat_draft; ui_sound( ui, LAUNCHER_SOUND_ACCEPT ); }
                 for (int i = 0; i < count; i++) if (inside( targets[i], input.x, input.y )) { selected = i; toggle = 1; }
             }
             if (toggle)
@@ -340,12 +346,14 @@ static int binding_dialog( struct ui *ui, const struct input_art *art, int sourc
             keyboard_draw( ui, targets, &draft, selected );
             mouse_draw( ui, art, targets + KEYCAP_COUNT, &draft, selected - KEYCAP_COUNT );
         }
+        if (!controller) cap( ui, repeat_cap, repeat_draft ? "Repeat: on" : "Repeat: off", repeat_draft, 0, 0 );
         cap( ui, apply, "Apply", 1, 0, 0 );
-        ui_footer( ui, hints, sizeof(hints)/sizeof(hints[0]) );
+        if (controller) ui_footer( ui, hints, sizeof(hints)/sizeof(hints[0]) );
+        else ui_footer( ui, key_hints, sizeof(key_hints)/sizeof(key_hints[0]) );
         ui_fade( ui ); ui_present( ui ); ui_wait( ui );
     }
 done:
-    if (result) *binding = draft;
+    if (result) { *binding = draft; *repeat = repeat_draft; }
     ui_start_screen( ui );
     return result;
 }
@@ -451,6 +459,8 @@ void launcher_input_remap( struct ui *ui, const char *root, const char *program,
                 }
                 char label[192];
                 input_binding_label( controller ? profile.pad + id : profile.keys + id, controller, label, sizeof(label) );
+                if (!controller && profile.keys[id].count && (profile.repeat & (1u << id)))
+                    snprintf( label + strlen( label ), sizeof(label) - strlen( label ), " [repeat]" );
                 SDL_Rect r = {590, y + 3, 45, 45};
                 glyph( ui, art.pad[id], r, ui->text );
                 if (controller)
@@ -480,9 +490,12 @@ void launcher_input_remap( struct ui *ui, const char *root, const char *program,
         if (!ui->running) break;
         int id = selected, changed = -1;
         struct input_binding binding = controller ? profile.pad[id] : profile.keys[id];
-        if (reset) changed = input_binding_save(&kv, id, controller, NULL);
+        int repeat_before = !!(profile.repeat & (1u << id)), repeat = repeat_before;
+        if (reset) changed = input_binding_save(&kv, id, controller, NULL) && (controller || input_repeat_save(&kv, id, -1));
         else if (clear) { binding.count = 0; changed = input_binding_save(&kv, id, controller, &binding); }
-        else if (edit && binding_dialog(ui, &art, id, controller, &binding)) changed = input_binding_save(&kv, id, controller, &binding);
+        else if (edit && binding_dialog(ui, &art, id, controller, &binding, &repeat))
+            changed = input_binding_save(&kv, id, controller, &binding) &&
+                      (controller || repeat == repeat_before || input_repeat_save(&kv, id, repeat));
         if (changed == 0) ui_message(ui, "Controls", "The settings file is full.");
         else if (changed > 0 && !input_profile_save(&kv, path)) ui_message(ui, "Controls", "The control settings could not be saved.");
         ui_start_screen(ui);

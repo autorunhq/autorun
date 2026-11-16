@@ -140,6 +140,55 @@ static void transitions( void )
     assert(input_key_events(&taken,delivered,events)==INPUT_KEY_EVENT_MAX);
 }
 
+static void repeats( void )
+{
+    uint64_t keys[INPUT_KEY_WORDS] = {0}, repeat[INPUT_KEY_WORDS] = {0}, due[INPUT_KEY_WORDS * 64] = {0};
+    struct input_key_event events[INPUT_KEY_EVENT_MAX];
+    keys[0] = 1ull << 0x25;
+    keys[1] = 1ull << (0x41 - 64);
+    repeat[0] = 1ull << 0x25;
+    assert(!input_key_repeats(keys,repeat,1000,due,events,0));
+    assert(!input_key_repeats(keys,repeat,1000+INPUT_KEY_REPEAT_DELAY_NS-1,due,events,0));
+    assert(input_key_repeats(keys,repeat,1000+INPUT_KEY_REPEAT_DELAY_NS,due,events,0)==1);
+    assert(events[0].code==0x25 && events[0].down);
+    assert(!input_key_repeats(keys,repeat,1000+INPUT_KEY_REPEAT_DELAY_NS+1,due,events,0));
+    assert(input_key_repeats(keys,repeat,1000+INPUT_KEY_REPEAT_DELAY_NS+INPUT_KEY_REPEAT_INTERVAL_NS,due,events,0)==1);
+    keys[0] = 0;
+    assert(!input_key_repeats(keys,repeat,1000000000000ull,due,events,0) && !due[0x25]);
+    keys[0] = 1ull << 0x25;
+    repeat[0] = 0;
+    assert(!input_key_repeats(keys,repeat,2000000000000ull,due,events,0));
+    assert(!input_key_repeats(keys,repeat,3000000000000ull,due,events,0));
+}
+
+static void repeat_flag( void )
+{
+    struct input_profile p;
+    struct input_pad raw = {0};
+    struct input_output out;
+    struct launcher_kv kv = {0};
+    input_profile_defaults(&p,1);
+    raw.axis[0] = -32767;
+    input_map_keys(&p,&raw,&out);
+    assert(held(out.keys,'A') && !held(out.repeat,'A'));
+    assert(input_repeat_save(&kv,18,1));
+    input_profile_apply(&p,&kv);
+    assert(p.repeat == 1u << 18);
+    input_map_keys(&p,&raw,&out);
+    assert(held(out.keys,'A') && held(out.repeat,'A'));
+    assert(input_repeat_save(&kv,18,0));
+    input_profile_apply(&p,&kv);
+    assert(!p.repeat);
+    assert(input_repeat_save(&kv,18,-1));
+    assert(!strstr(kv.text,"repeat.LLEFT"));
+    assert(!input_repeat_save(&kv,INPUT_SOURCE_COUNT,1));
+    launcher_kv_set(&kv,"key.LLEFT","0x11");
+    launcher_kv_set(&kv,"repeat.LLEFT","1");
+    input_profile_apply(&p,&kv);
+    input_map_keys(&p,&raw,&out);
+    assert(held(out.keys,0x11) && !held(out.repeat,0x11));
+}
+
 static void persistence( void )
 {
     char root[]="/tmp/autorun-input-XXXXXX", path[768], game[768], saved[768], text[64];
@@ -181,7 +230,7 @@ static void persistence( void )
 
 int main(void)
 {
-    mapping(); transitions(); persistence();
+    mapping(); transitions(); repeats(); repeat_flag(); persistence();
     puts("Input profiles: mapping, deadzones, chords, transitions and inheritance passed");
     return 0;
 }

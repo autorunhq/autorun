@@ -5,6 +5,8 @@
 #define INPUT_KEY_WORDS 4
 #define INPUT_KEY_EVENT_MAX 768
 #define INPUT_NUMPAD_ENTER 0xff
+#define INPUT_KEY_REPEAT_DELAY_NS 500000000ull
+#define INPUT_KEY_REPEAT_INTERVAL_NS 33000000ull
 struct input_key_event { uint16_t code, down; };
 struct input_key_edges
 {
