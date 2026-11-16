@@ -56,6 +56,9 @@ static pthread_mutex_t present_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 #ifdef __SWITCH__
 #include "../../horizon-wine/source/osk.h"
+#include "../../horizon-wine/source/touch_loupe.h"
+extern int wine_nx_loupe_state( int *x, int *y, int *width, int *height, int *zoom );
+extern void wine_nx_loupe_drawable_add( int delta );
 #endif
 
 /* The Upscaling setting a scaled swapchain is made with: 0 bilinear, 1 FSR 1.0
@@ -300,7 +303,9 @@ struct swapchain
     VkFormat nx_format;
     VkExtent2D nx_extent;
     BOOL nx_osk_usable;
+    BOOL nx_loupe_usable;
     struct nx_osk_overlay *nx_osk;
+    struct nx_loupe_overlay *nx_loupe;
 #endif
 #ifdef WINE_NX_MESA_SWITCH
     uint64_t nx_last_present;
@@ -331,6 +336,7 @@ struct swapchain
 
 #ifdef __SWITCH__
 static void nx_osk_free( struct vulkan_device *device, struct nx_osk_overlay *osk );
+static void nx_loupe_free( struct vulkan_device *device, struct nx_loupe_overlay *loupe );
 #endif
 
 static struct swapchain *swapchain_from_handle( VkSwapchainKHR handle )
@@ -3152,6 +3158,13 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
     {
         create_info_host.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         swapchain->nx_osk_usable = TRUE;
+        /* The magnifier reads the image it enlarges; a scaled swapchain already has its own picture size. */
+        if (!swapchain->fshack_dpi && (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+        {
+            create_info_host.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            swapchain->nx_loupe_usable = TRUE;
+            wine_nx_loupe_drawable_add( 1 );
+        }
     }
 #endif
 #ifdef WINE_NX_LSFG
@@ -3250,10 +3263,12 @@ void win32u_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR client
     }
 
 #ifdef __SWITCH__
-    if (swapchain->nx_osk)
+    if (swapchain->nx_loupe_usable) wine_nx_loupe_drawable_add( -1 );
+    if (swapchain->nx_osk || swapchain->nx_loupe)
     {
         device->p_vkDeviceWaitIdle( device->host.device );
-        nx_osk_free( device, swapchain->nx_osk );
+        if (swapchain->nx_osk) nx_osk_free( device, swapchain->nx_osk );
+        if (swapchain->nx_loupe) nx_loupe_free( device, swapchain->nx_loupe );
     }
 #endif
     device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
@@ -3962,6 +3977,366 @@ static void nx_osk_present( struct vulkan_queue *queue, VkPresentInfoKHR *presen
     present_info->waitSemaphoreCount = 1;
     present_info->pWaitSemaphores = &per->done;
 }
+
+/* The finger's magnifier (horizon-wine/source/touch_loupe.h): while the runtime
+ * says it is up, the part of the image around the finger is enlarged into an
+ * image of its own and copied back above the finger, with a border and a
+ * crosshair on the finger's place, both made of regions of a buffer of two lines
+ * of pixels. It runs before the keyboard. The finger moves between presents, so
+ * an image's command buffer is recorded again for each present, after its fence
+ * says the last one is done. */
+#define NX_LOUPE_FENCE_WAIT_NS 100000000ull
+#define NX_LOUPE_BORDER_COLOR 0xffffffffu  /* both are the same with red and blue swapped */
+#define NX_LOUPE_CROSS_COLOR  0xffff00ffu
+#define NX_LOUPE_CROSS_GAP    4            /* from the finger's place to the crosshair's arms */
+#define NX_LOUPE_CROSS_ARM    14
+#define NX_LOUPE_CROSS_WIDTH  2
+#define NX_LOUPE_MAX_REGIONS  8
+
+/* A memory type of the types allowed that has all of the wanted flags, or else
+ * any of them; props->memoryTypeCount when none is allowed. */
+static uint32_t nx_loupe_memory_type( const VkPhysicalDeviceMemoryProperties *props, uint32_t allowed,
+                                     VkMemoryPropertyFlags wanted )
+{
+    uint32_t t, any = props->memoryTypeCount;
+
+    for (t = 0; t < props->memoryTypeCount; t++)
+    {
+        if (!(allowed & (1u << t))) continue;
+        if ((props->memoryTypes[t].propertyFlags & wanted) == wanted) return t;
+        if (any == props->memoryTypeCount) any = t;
+    }
+    return any;
+}
+
+static VkImageMemoryBarrier nx_loupe_barrier( VkImage image, VkImageLayout old_layout, VkImageLayout new_layout,
+                                             VkAccessFlags src_access, VkAccessFlags dst_access )
+{
+    VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcAccessMask = src_access;
+    barrier.dstAccessMask = dst_access;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = barrier.subresourceRange.layerCount = 1;
+    return barrier;
+}
+
+struct nx_loupe_image
+{
+    VkCommandBuffer cmd;
+    VkSemaphore done;
+    VkFence fence;
+};
+
+struct nx_loupe_overlay
+{
+    uint32_t count, family;
+    VkImage *images;
+    struct nx_loupe_image *per;
+    VkCommandPool pool;
+    VkImage image;               /* the enlarged part, as large as it is shown */
+    VkDeviceMemory memory;
+    VkBuffer buffer;             /* the border's line of pixels, then the crosshair's */
+    VkDeviceMemory buffer_memory;
+    BOOL failed;
+};
+
+static void nx_loupe_release( struct vulkan_device *device, struct nx_loupe_overlay *loupe )
+{
+    uint32_t i;
+
+    for (i = 0; loupe->per && i < loupe->count; i++)
+    {
+        device->p_vkDestroySemaphore( device->host.device, loupe->per[i].done, NULL );
+        device->p_vkDestroyFence( device->host.device, loupe->per[i].fence, NULL );
+    }
+    if (loupe->pool) device->p_vkDestroyCommandPool( device->host.device, loupe->pool, NULL );
+    device->p_vkDestroyImage( device->host.device, loupe->image, NULL );
+    device->p_vkFreeMemory( device->host.device, loupe->memory, NULL );
+    device->p_vkDestroyBuffer( device->host.device, loupe->buffer, NULL );
+    device->p_vkFreeMemory( device->host.device, loupe->buffer_memory, NULL );
+    loupe->pool = VK_NULL_HANDLE;
+    loupe->image = VK_NULL_HANDLE;
+    loupe->memory = VK_NULL_HANDLE;
+    loupe->buffer = VK_NULL_HANDLE;
+    loupe->buffer_memory = VK_NULL_HANDLE;
+    if (loupe->per) memset( loupe->per, 0, loupe->count * sizeof(*loupe->per) );
+}
+
+static void nx_loupe_free( struct vulkan_device *device, struct nx_loupe_overlay *loupe )
+{
+    nx_loupe_release( device, loupe );
+    free( loupe->per );
+    free( loupe->images );
+    free( loupe );
+}
+
+/* The enlarged image and the buffer of lines, and a command buffer, semaphore
+ * and fence per swapchain image, made again when the present's queue family
+ * changes. */
+static BOOL nx_loupe_prepare( struct vulkan_device *device, struct swapchain *swapchain, uint32_t family )
+{
+    struct vulkan_physical_device *physical_device = device->physical_device;
+    struct nx_loupe_overlay *loupe = swapchain->nx_loupe;
+    VkPhysicalDeviceMemoryProperties props;
+    VkImageCreateInfo image_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkBufferCreateInfo buffer_info = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    VkMemoryAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkCommandPoolCreateInfo pool_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    VkMemoryRequirements req;
+    uint32_t *pixels, i;
+    void *mapped;
+
+    if (!loupe)
+    {
+        if (!(loupe = swapchain->nx_loupe = calloc( 1, sizeof(*loupe) ))) return FALSE;
+        if (device->p_vkGetSwapchainImagesKHR( device->host.device, swapchain->obj.host.swapchain, &loupe->count, NULL ) ||
+            !(loupe->images = calloc( loupe->count, sizeof(*loupe->images) )) ||
+            !(loupe->per = calloc( loupe->count, sizeof(*loupe->per) )) ||
+            device->p_vkGetSwapchainImagesKHR( device->host.device, swapchain->obj.host.swapchain, &loupe->count, loupe->images ))
+            loupe->failed = TRUE;
+    }
+    if (loupe->failed) return FALSE;
+    if (loupe->pool && loupe->family == family) return TRUE;
+
+    if (loupe->pool) device->p_vkDeviceWaitIdle( device->host.device );
+    nx_loupe_release( device, loupe );
+    physical_device->instance->p_vkGetPhysicalDeviceMemoryProperties( physical_device->host.physical_device, &props );
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = family;
+    if (device->p_vkCreateCommandPool( device->host.device, &pool_info, NULL, &loupe->pool )) goto failed;
+    loupe->family = family;
+
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = swapchain->nx_format;
+    image_info.extent.width = TOUCH_LOUPE_DST_W;
+    image_info.extent.height = TOUCH_LOUPE_DST_H;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (device->p_vkCreateImage( device->host.device, &image_info, NULL, &loupe->image )) goto failed;
+    device->p_vkGetImageMemoryRequirements( device->host.device, loupe->image, &req );
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = nx_loupe_memory_type( &props, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+    if (alloc.memoryTypeIndex == props.memoryTypeCount) goto failed;
+    if (device->p_vkAllocateMemory( device->host.device, &alloc, NULL, &loupe->memory ) ||
+        device->p_vkBindImageMemory( device->host.device, loupe->image, loupe->memory, 0 ))
+        goto failed;
+
+    buffer_info.size = 2 * TOUCH_LOUPE_DST_W * 4;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (device->p_vkCreateBuffer( device->host.device, &buffer_info, NULL, &loupe->buffer )) goto failed;
+    device->p_vkGetBufferMemoryRequirements( device->host.device, loupe->buffer, &req );
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = nx_loupe_memory_type( &props, req.memoryTypeBits,
+                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT );
+    if (alloc.memoryTypeIndex == props.memoryTypeCount) goto failed;
+    if (device->p_vkAllocateMemory( device->host.device, &alloc, NULL, &loupe->buffer_memory ) ||
+        device->p_vkBindBufferMemory( device->host.device, loupe->buffer, loupe->buffer_memory, 0 ) ||
+        device->p_vkMapMemory( device->host.device, loupe->buffer_memory, 0, buffer_info.size, 0, &mapped ))
+        goto failed;
+    pixels = mapped;
+    for (i = 0; i < TOUCH_LOUPE_DST_W; i++)
+    {
+        pixels[i] = NX_LOUPE_BORDER_COLOR;
+        pixels[TOUCH_LOUPE_DST_W + i] = NX_LOUPE_CROSS_COLOR;
+    }
+    device->p_vkUnmapMemory( device->host.device, loupe->buffer_memory );
+
+    for (i = 0; i < loupe->count; i++)
+    {
+        struct nx_loupe_image *per = &loupe->per[i];
+        VkCommandBufferAllocateInfo cmd_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkSemaphoreCreateInfo semaphore_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+
+        cmd_info.commandPool = loupe->pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (device->p_vkAllocateCommandBuffers( device->host.device, &cmd_info, &per->cmd ) ||
+            device->p_vkCreateSemaphore( device->host.device, &semaphore_info, NULL, &per->done ) ||
+            device->p_vkCreateFence( device->host.device, &fence_info, NULL, &per->fence ))
+            goto failed;
+    }
+    nx_vk_trace( "[NXVK] touch magnifier %dx%d on %u images", TOUCH_LOUPE_DST_W, TOUCH_LOUPE_DST_H, loupe->count );
+    return TRUE;
+
+failed:
+    ERR( "could not set up the touch magnifier\n" );
+    nx_vk_trace( "[NXVK] touch magnifier: could not set up its images" );
+    nx_loupe_release( device, loupe );
+    loupe->failed = TRUE;
+    return FALSE;
+}
+
+/* One rectangle of a line of the buffer (0 the border's, 1 the crosshair's), cut
+ * to the magnifier less inset pixels all round; none when nothing is left of it. */
+static int nx_loupe_region( VkBufferImageCopy *out, const struct touch_loupe_rect *r, int line, int inset,
+                            int x, int y, int width, int height )
+{
+    int left = r->dst_x + inset, top = r->dst_y + inset;
+    int x1 = min( x + width, r->dst_x + r->dst_w - inset ), y1 = min( y + height, r->dst_y + r->dst_h - inset );
+
+    x = max( x, left );
+    y = max( y, top );
+    if (x >= x1 || y >= y1) return 0;
+    memset( out, 0, sizeof(*out) );
+    out->bufferOffset = (VkDeviceSize)line * TOUCH_LOUPE_DST_W * 4;
+    out->bufferRowLength = x1 - x;
+    out->imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    out->imageSubresource.layerCount = 1;
+    out->imageOffset.x = x;
+    out->imageOffset.y = y;
+    out->imageExtent.width = x1 - x;
+    out->imageExtent.height = y1 - y;
+    out->imageExtent.depth = 1;
+    return 1;
+}
+
+/* The border and the crosshair: four arms around the finger's place, with a gap
+ * in the middle so that the place itself stays in view. The regions of one
+ * vkCmdCopyBufferToImage must not overlap, so the border's sides do not share
+ * their corners and the arms stay inside the border. */
+static int nx_loupe_regions( VkBufferImageCopy *out, const struct touch_loupe_rect *r )
+{
+    int cx = r->cross_x + r->zoom / 2, cy = r->cross_y + r->zoom / 2;
+    const int gap = NX_LOUPE_CROSS_GAP, arm = NX_LOUPE_CROSS_ARM, w = NX_LOUPE_CROSS_WIDTH;
+    int n = 0;
+
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y, r->dst_w, 1 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y + r->dst_h - 1, r->dst_w, 1 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x, r->dst_y + 1, 1, r->dst_h - 2 );
+    n += nx_loupe_region( out + n, r, 0, 0, r->dst_x + r->dst_w - 1, r->dst_y + 1, 1, r->dst_h - 2 );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - gap - arm, cy - w / 2, arm, w );
+    n += nx_loupe_region( out + n, r, 1, 1, cx + gap, cy - w / 2, arm, w );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - w / 2, cy - gap - arm, w, arm );
+    n += nx_loupe_region( out + n, r, 1, 1, cx - w / 2, cy + gap, w, arm );
+    return n;
+}
+
+static void nx_loupe_present( struct vulkan_queue *queue, VkPresentInfoKHR *present_info,
+                              const VkSwapchainKHR *client_swapchains, struct mempool *pool )
+{
+    struct vulkan_device *device = queue->device;
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkImageSubresourceLayers layers = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    VkBufferImageCopy regions[NX_LOUPE_MAX_REGIONS];
+    struct touch_loupe_rect rect;
+    struct nx_loupe_overlay *loupe;
+    struct nx_loupe_image *per;
+    struct swapchain *swapchain;
+    VkPipelineStageFlags *stages;
+    VkImageMemoryBarrier barriers[2];
+    VkImageBlit blit = {0};
+    VkImageCopy copy = {0};
+    int x, y, screen_width, screen_height, zoom, count;
+    uint32_t index, i;
+    VkImage target;
+
+    if (present_info->swapchainCount != 1) return;
+    swapchain = swapchain_from_handle( client_swapchains[0] );
+    if (!swapchain->nx_loupe_usable) return;
+    if (!wine_nx_loupe_state( &x, &y, &screen_width, &screen_height, &zoom )) return;
+    if (screen_width <= 0 || screen_height <= 0) return;
+    /* The finger's place on the screen, in the swapchain's own pixels. */
+    x = (int)((int64_t)x * swapchain->nx_extent.width / screen_width);
+    y = (int)((int64_t)y * swapchain->nx_extent.height / screen_height);
+    if (!touch_loupe_layout( swapchain->nx_extent.width, swapchain->nx_extent.height, x, y, zoom, &rect )) return;
+    if (!nx_loupe_prepare( device, swapchain, queue->info.queueFamilyIndex )) return;
+    loupe = swapchain->nx_loupe;
+    index = present_info->pImageIndices[0];
+    if (index >= loupe->count) return;
+    per = &loupe->per[index];
+    target = loupe->images[index];
+    /* The image's last submit has finished long before the game gets it back. */
+    if (device->p_vkWaitForFences( device->host.device, 1, &per->fence, VK_TRUE, NX_LOUPE_FENCE_WAIT_NS )) return;
+    count = nx_loupe_regions( regions, &rect );
+
+    if (device->p_vkResetCommandBuffer( per->cmd, 0 )) return;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (device->p_vkBeginCommandBuffer( per->cmd, &begin )) return;
+    barriers[0] = nx_loupe_barrier( target, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT );
+    barriers[1] = nx_loupe_barrier( loupe->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   0, VK_ACCESS_TRANSFER_WRITE_BIT );
+    device->p_vkCmdPipelineBarrier( per->cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    0, 0, NULL, 0, NULL, 2, barriers );
+
+    blit.srcSubresource = blit.dstSubresource = layers;
+    blit.srcOffsets[0].x = rect.src_x;
+    blit.srcOffsets[0].y = rect.src_y;
+    blit.srcOffsets[1].x = rect.src_x + rect.src_w;
+    blit.srcOffsets[1].y = rect.src_y + rect.src_h;
+    blit.srcOffsets[1].z = 1;
+    blit.dstOffsets[1].x = rect.dst_w;
+    blit.dstOffsets[1].y = rect.dst_h;
+    blit.dstOffsets[1].z = 1;
+    /* Nearest: the enlargement is a whole number of times, so the program's
+     * pixels stay sharp. */
+    device->p_vkCmdBlitImage( per->cmd, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, loupe->image,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST );
+
+    barriers[0] = nx_loupe_barrier( target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT );
+    barriers[1] = nx_loupe_barrier( loupe->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT );
+    device->p_vkCmdPipelineBarrier( per->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    0, 0, NULL, 0, NULL, 2, barriers );
+
+    copy.srcSubresource = copy.dstSubresource = layers;
+    copy.dstOffset.x = rect.dst_x;
+    copy.dstOffset.y = rect.dst_y;
+    copy.extent.width = rect.dst_w;
+    copy.extent.height = rect.dst_h;
+    copy.extent.depth = 1;
+    device->p_vkCmdCopyImage( per->cmd, loupe->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy );
+
+    /* The border lies on the copy's own pixels, so the copy has to be done. */
+    barriers[0] = nx_loupe_barrier( target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT );
+    device->p_vkCmdPipelineBarrier( per->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    0, 0, NULL, 0, NULL, 1, barriers );
+    device->p_vkCmdCopyBufferToImage( per->cmd, loupe->buffer, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      count, regions );
+
+    barriers[0] = nx_loupe_barrier( target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                   VK_ACCESS_TRANSFER_WRITE_BIT, 0 );
+    device->p_vkCmdPipelineBarrier( per->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                    0, 0, NULL, 0, NULL, 1, barriers );
+    if (device->p_vkEndCommandBuffer( per->cmd )) return;
+
+    if (!(stages = mem_alloc( pool, sizeof(*stages) * (present_info->waitSemaphoreCount + 1) ))) return;
+    for (i = 0; i < present_info->waitSemaphoreCount; i++) stages[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    submit.waitSemaphoreCount = present_info->waitSemaphoreCount;
+    submit.pWaitSemaphores = present_info->pWaitSemaphores;
+    submit.pWaitDstStageMask = stages;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &per->cmd;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &per->done;
+    if (device->p_vkResetFences( device->host.device, 1, &per->fence )) return;
+    if (device->p_vkQueueSubmit( queue->host.queue, 1, &submit, per->fence ))
+    {
+        /* The fence stays unsignalled, so this image could never be waited
+         * for again: stop rather than skip it forever. */
+        ERR( "could not submit the touch magnifier\n" );
+        loupe->failed = TRUE;
+        return;
+    }
+    present_info->waitSemaphoreCount = 1;
+    present_info->pWaitSemaphores = &per->done;
+}
 #endif
 
 static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentInfoKHR *client_present_info )
@@ -4067,6 +4442,7 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
 
     pthread_mutex_lock( &present_lock );
 #ifdef __SWITCH__
+    nx_loupe_present( queue, present_info, client_swapchains, &pool );
     nx_osk_present( queue, present_info, client_swapchains, &pool );
 #endif
 #ifdef WINE_NX_MESA_SWITCH

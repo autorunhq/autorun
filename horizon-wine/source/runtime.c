@@ -45,6 +45,7 @@
 #include "pointer_cursor.h"
 #include "compositor.h"
 #include "osk.h"
+#include "touch_loupe.h"
 #include "std_stream_lines.h"
 #include "thread_profile.h"
 #include "dxvk_releases.h"
@@ -557,6 +558,13 @@ static struct pointer_buttons wine_nx_pointer_buttons;
 static int wine_nx_pointer_moved;
 /* A touch points at a place, and the place is what Wine is given. */
 static int wine_nx_pointer_placed;
+/* The finger's magnifier (touch_loupe.h): whether it may come up (a program's
+ * setting), and, while it is up, where the finger is. */
+static int wine_nx_loupe_allowed_state;  /* off until a program's setting turns it on */
+static int wine_nx_loupe_drawable_count;
+static int wine_nx_loupe_delay_ms = TOUCH_LOUPE_DELAY_DEFAULT_MS;
+static int wine_nx_loupe_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
+static int wine_nx_loupe_shown, wine_nx_loupe_x, wine_nx_loupe_y;
 /* A finger sending keys: where it went down, and how far it has gone since.
  * Half a centimetre of a 1280-pixel screen, so that a tap is not a direction. */
 /* The position Wine last had, from a take or the program's SetCursorPos. */
@@ -847,6 +855,31 @@ void wine_nx_leave_process( const char *why );
 void wine_nx_request_quit( const char *why );
 
 
+/* A swapchain that the magnifier can be drawn on exists (+1) or is gone (-1),
+ * told by dlls/win32u/vulkan.c. Without one the touch stays as it was: a
+ * magnifier that cannot be seen would only take the press away. */
+void wine_nx_loupe_drawable_add( int delta )
+{
+    __atomic_add_fetch( &wine_nx_loupe_drawable_count, delta, __ATOMIC_RELAXED );
+}
+
+/* Whether the magnifier is up, and the finger's place on the screen, for
+ * dlls/win32u/vulkan.c to draw it. */
+int wine_nx_loupe_state( int *x, int *y, int *width, int *height, int *zoom )
+{
+    int shown;
+
+    pthread_mutex_lock( &wine_nx_pointer_mutex );
+    shown = wine_nx_loupe_shown;
+    *x = wine_nx_loupe_x;
+    *y = wine_nx_loupe_y;
+    pthread_mutex_unlock( &wine_nx_pointer_mutex );
+    *width = WINE_NX_FB_W;
+    *height = WINE_NX_FB_H;
+    *zoom = wine_nx_loupe_zoom;
+    return shown;
+}
+
 int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
 {
     HidTouchScreenState touch = {0};
@@ -854,8 +887,11 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     struct input_output output = {0};
     const struct input_profile *profile = &wine_nx_input_profile;
     u64 now, held, all_held, elapsed;
-    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate;
+    int moved = 0, keyboard = 0, on_keyboard = 0, leave = 0, emulate, touching = 0, touch_left = 1;
+    int touch_x = 0, touch_y = 0;
     static int osk_combo;
+    static struct touch_loupe loupe_touch;
+    static int loupe_ignore;
     static u64 swallowed, quit_since, wheel_next;
     static unsigned int last_wheels;
 
@@ -908,13 +944,53 @@ int wine_nx_pointer_poll( int *x, int *y, unsigned int *buttons )
     }
     emulate = !keyboard && profile->mode == INPUT_KEYBOARD_MOUSE;
 
-    if (!on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0)
+    /* A touch is at touch_x, touch_y, with the left button down unless the
+     * magnifier is still waiting for a decision (touch_loupe.h). */
+    if (!on_keyboard && wine_nx_loupe_allowed_state && __atomic_load_n( &wine_nx_loupe_drawable_count, __ATOMIC_RELAXED ) > 0)
+    {
+        struct touch_loupe_output pressed = {0};
+        unsigned int ids[16];
+        int xs[16], ys[16], i, finger_x = 0, finger_y = 0, down;
+        int count = hidGetTouchScreenStates( &touch, 1 ) ? (int)touch.count : 0;
+
+        if (count > 16) count = 16;
+        for (i = 0; i < count; i++)
+        {
+            ids[i] = touch.touches[i].finger_id;
+            xs[i] = touch.touches[i].x;
+            ys[i] = touch.touches[i].y;
+        }
+        down = touch_loupe_track( &loupe_touch, ids, xs, ys, count, &finger_x, &finger_y );
+        touching = touch_loupe_step( &loupe_touch, down, finger_x, finger_y, armTicksToNs( now ),
+                                     (uint64_t)wine_nx_loupe_delay_ms * 1000000ull, &pressed );
+        touch_x = pressed.x;
+        touch_y = pressed.y;
+        touch_left = pressed.left;
+        wine_nx_loupe_shown = touching && pressed.loupe;
+        wine_nx_loupe_x = pressed.x;
+        wine_nx_loupe_y = pressed.y;
+    }
+    else
+    {
+        int down = !on_keyboard && hidGetTouchScreenStates( &touch, 1 ) && touch.count > 0;
+
+        touching = touch_loupe_plain( &loupe_ignore, loupe_touch.phase != TOUCH_LOUPE_IDLE, down );
+        loupe_touch.phase = TOUCH_LOUPE_IDLE;
+        wine_nx_loupe_shown = 0;
+        if (touching)
+        {
+            touch_x = touch.touches[0].x;
+            touch_y = touch.touches[0].y;
+        }
+    }
+    if (touching)
     {
         int old_x = wine_nx_pointer.x, old_y = wine_nx_pointer.y;
-        pointer_cursor_place( &wine_nx_pointer, touch.touches[0].x, touch.touches[0].y );
+
+        pointer_cursor_place( &wine_nx_pointer, touch_x, touch_y );
         moved = (int)wine_nx_pointer.x != old_x || (int)wine_nx_pointer.y != old_y;
         wine_nx_pointer_placed |= moved;
-        output.buttons |= WINE_NX_POINTER_LEFT;
+        if (touch_left) output.buttons |= WINE_NX_POINTER_LEFT;
     }
     if (emulate)
     {
@@ -4153,6 +4229,9 @@ int main( int argc, char **argv )
         runtime_fex = 0;
 #endif
         runtime_four_cores = 1;
+        wine_nx_loupe_allowed_state = 0;
+        wine_nx_loupe_delay_ms = TOUCH_LOUPE_DELAY_DEFAULT_MS;
+        wine_nx_loupe_zoom = TOUCH_LOUPE_ZOOM_DEFAULT;
         horizon_fast_sync_enabled = 0;
 #ifdef WINE_NX_MESA_SWITCH
         wine_nx_graphics_configure( 0, 1 );
@@ -4175,6 +4254,9 @@ int main( int argc, char **argv )
             runtime_fex = settings.fex;
 #endif
             runtime_four_cores = settings.four_cores;
+            wine_nx_loupe_allowed_state = settings.touch_magnifier;
+            wine_nx_loupe_delay_ms = settings.touch_magnifier_delay;
+            wine_nx_loupe_zoom = settings.touch_magnifier_zoom;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
             if (settings.framebuffer >= 0) wine_nx_compositor_mode = !settings.framebuffer;
