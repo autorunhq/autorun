@@ -5766,7 +5766,7 @@ int main( int argc, char **argv )
               : horizon_fast_sync_enabled ? "shared (server-pool)"
               : "one for each of the program's threads; sharing them needs Horizon synchronization" );
     wine_nx_thread_configure_cores( runtime_four_cores );
-    log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
+    log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 32 per file and kept when it closes, 32 to 192 MB in all"
                                       : "no sdmc device; reads are not cached" );
     if (wine_nx_lazy_file_views)
         log_line( "[INIT] views of files read on demand (lazy-file-views): only the parts a program touches come from the card" );

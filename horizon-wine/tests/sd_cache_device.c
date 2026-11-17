@@ -116,6 +116,7 @@ static void reset(void)
     size_t i;
 
     while (sd_cache_files) sd_cache_close( &test_reent, sd_cache_files->key );
+    sd_cache_kept_clear( &sd_cache_pool );
     sd_stat_forget_all( &sd_stat_cache );
     memset( sd_cache_closed_tally, 0, sizeof(sd_cache_closed_tally) );
     assert( !sd_cache_pool.used && !sd_cache_pool.held && !sd_write_buffers );

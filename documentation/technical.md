@@ -252,9 +252,12 @@ seconds: frames, OpenGL and system call rates, memory and translation counters.
 Its reading figures tell a slow load apart from a busy one: `reads`/`read_mb`
 are what the program asked for, `sd_reads`/`sd_mb` what the card was asked for
 after the read cache, and `cache_mb` what that cache holds. The cache
-(`source/sd_read_cache.h`) keeps up to eight pieces of each open file, and takes
-between 32 and 192 MB depending on the heap a game leaves free; a write to a
-file throws away what is held for it. A miss reads a whole 128 KB chunk; the
+(`source/sd_read_cache.h`) keeps up to 32 pieces of each open file, and of the
+last 32 files closed, for the next open of the same path (Doom 3 opens a `.pk4`
+again for each file in it); it takes between 32 and 192 MB depending on the heap
+a game leaves free, and a write, rename, removal or truncation of a file throws
+away what is held for it. `[SDFILES]` names the files the card gave the most to
+and what was asked of them. A miss reads a whole 128 KB chunk; the
 cache can also read ahead from 16 KB (`fill_min`), which on The Sims 2 halved
 the bytes from the card but not the time. `code_mb` is the translated code the run
 holds now over the code memory Horizon gave it, and `code_all_mb` every byte
