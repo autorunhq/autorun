@@ -180,14 +180,17 @@ static struct handle_entry *alloc_handle( struct handle_table *table, void *user
 
     AcquireSRWLockExclusive( &table->lock );
     if ((ptr = table->next_free)) table->next_free = ptr->next_free;
-    else if (table->count < ARRAY_SIZE(table->handles)) ptr = table->handles + table->count++;
+    else if (table->count < ARRAY_SIZE(table->handles)) ptr = table->handles + table->count;
     else ptr = NULL;
 
     if (ptr)
     {
+        /* The entry first, then its handle and the count: a lookup without
+         * the lock (get_handle_ptr) that sees the handle sees the entry. */
         if (!(generation = HIWORD( ptr->handle ) + 1)) generation++;
-        ptr->handle = MAKELONG( ptr - table->handles + 1, generation );
         ptr->user_data = user_data;
+        WriteRelease( (LONG *)&ptr->handle, MAKELONG( ptr - table->handles + 1, generation ) );
+        if (ptr == table->handles + table->count) WriteRelease( (LONG *)&table->count, table->count + 1 );
     }
 
     if (!ptr) RtlSetLastWin32Error( ERROR_NOT_ENOUGH_MEMORY );
@@ -198,12 +201,19 @@ static struct handle_entry *alloc_handle( struct handle_table *table, void *user
 static void free_handle( struct handle_table *table, struct handle_entry *ptr )
 {
     AcquireSRWLockExclusive( &table->lock );
-    ptr->handle |= 0xffff;
+    WriteRelease( (LONG *)&ptr->handle, ptr->handle | 0xffff );
     ptr->next_free = table->next_free;
     table->next_free = ptr;
     ReleaseSRWLockExclusive( &table->lock );
 }
 
+/* Without the table's lock: every OpenGL call that names an object finds the
+ * current context here, and for a 32-bit program on the Switch the lock was
+ * an SRW acquire, a release and a wake in translated x86 ntdll each time. The
+ * lock never covered the caller's use of the entry anyway, which comes after
+ * it is released. The entries are a fixed array, a handle carries its slot's
+ * generation, so a stale one never matches a reused slot, and whoever holds a
+ * live handle got it after alloc_handle wrote the entry under the lock. */
 static struct handle_entry *get_handle_ptr( struct handle_table *table, HANDLE handle )
 {
     UINT index = ((UINT_PTR)handle & 0xffff) - 1;
@@ -212,13 +222,12 @@ static struct handle_entry *get_handle_ptr( struct handle_table *table, HANDLE h
     if (index >= ARRAY_SIZE(table->handles)) return NULL;
     ptr = table->handles + index;
 
-    AcquireSRWLockShared( &table->lock );
-    if (index >= table->count || ULongToHandle( ptr->handle ) != handle)
+    if (index >= (UINT)ReadAcquire( (LONG *)&table->count ) ||
+        ULongToHandle( (UINT)ReadAcquire( (LONG *)&ptr->handle ) ) != handle)
     {
         RtlSetLastWin32Error( ERROR_INVALID_HANDLE );
         ptr = NULL;
     }
-    ReleaseSRWLockShared( &table->lock );
 
     return ptr;
 }
