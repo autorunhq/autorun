@@ -15,7 +15,7 @@ Compared trees:
 | | Commit | Date |
 |---|---|---|
 | This fork | `1781365` (upstream `autorunhq/autorun` `1ac9b6c` + 19 commits) | 2026-10-16 base |
-| Carafe | `73ffb5a` (v0.5.6) | 2026-11-10 |
+| Carafe | `73ffb5a` (v0.5.6); still its `main` on 2026-11-18, its `optimization` branch merged into it, its open pull requests the desktop app's (#124 Linux packages) and dependabot's | 2026-11-10 |
 | Autorun as Carafe pins it | `636913ca` | 2026-10-03 |
 | Carafe's 127 Autorun patches as a branch | `carafe-patches` `b785476` | on `636913ca` |
 
@@ -409,7 +409,7 @@ Still open in stage 5:
 |---|---|
 | FEX for 64-bit programs (`libarm64ecfex.dll`) | Carafe's patch set is built here for `wow64fex` only; the ARM64EC target was not tried |
 | Carafe's DXVK as the system Direct3D (`0105`, `0133`) | Here it is a source like the others, in a folder put in front of system32, which is what this fork does for every DXVK |
-| Carafe's four changes to Wine's own DLLs (`runtime/patches/wine-pe`: `wow64.dll`, both `ntdll.dll`, both `dinput.dll` and `dinput8.dll`) | This tree's Wine source has had them since the base commit, but a console runs the DLLs of `autorunhq/autorun-horizon-dlls`, which are built without them. Read in its files at `67e2303`: `wow64.dll` does not name `BTCpuSuspendLocalThread`, neither `ntdll.dll` holds `0x46555458`, and all four DirectInput DLLs still hold `nx_joystick_create_device`. So on a console `0126` and `0127` are never handed a wait to take out, a 32-bit thread is suspended without asking FEX, and DirectInput reads the pad through `joystick_nx.c`, not the HID gamepad of `0128` to `0131`. Nothing here builds or releases these seven DLLs yet |
+| Carafe's four changes to Wine's own DLLs (`runtime/patches/wine-pe`: `wow64.dll`, both `ntdll.dll`, both `dinput.dll` and `dinput8.dll`) | This tree's Wine source has had them since the base commit, but a console runs the DLLs of `autorunhq/autorun-horizon-dlls`, which are built without them. Read in its files at `67e2303`: `wow64.dll` does not name `BTCpuSuspendLocalThread`, neither `ntdll.dll` holds `0x46555458`, and all four DirectInput DLLs still hold `nx_joystick_create_device`. So on a console `0126` and `0127` are never handed a wait to take out, a 32-bit thread is suspended without asking FEX, and DirectInput reads the pad through `joystick_nx.c`, not the HID gamepad of `0128` to `0131`. The `build` workflow now builds all seven from this source and leaves them, with `opengl32.dll`, under `refs/dll-drop/wine-dlls`; `horizon-wine/tools/dll-fork-take-drop.py` puts them in a fork of the DLL repository, which a card follows with Windows DLLs > Source. Autorun's own DLL repository still ships them without |
 | dxwrapper | Carafe builds `elishacloud/dxwrapper` with its five patches using MSVC and the Windows SDK, fetched by `mstorsjo/msvc-wine` under Microsoft's licence; nothing here builds it |
 | Wine Mono | A ready archive, `wine-mono-11.3.0-arm64.tar.xz`, which `tools/wine_mono_payload.py` pins and stages; no build passes it to a card and the launcher has no download for it |
 | The WinRT classes | No new DLL: registry lines for DLLs system32 already has. `classes.reg` comes from the DLL repository, so the runtime would have to add the lines itself |

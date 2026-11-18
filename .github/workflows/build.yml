@@ -167,7 +167,7 @@ jobs:
                        check_delete_on_close check_desktop_ancestry check_directshow_reg \
                        check_display_expose_cursor check_download_hosts check_dsound_resample \
                        check_exception_restore check_fex_jit_bridge check_fex_memory check_fex_smc \
-                       check_font_tables check_free_space check_gl_table_locks check_gl_thread check_gl_surfaces check_graphics_driver \
+                       check_dll_fork_drop check_font_tables check_free_space check_gl_table_locks check_gl_thread check_gl_surfaces check_graphics_driver \
                        check_horizon_address_space_limit check_horizon_async check_horizon_async_sockets \
                        check_horizon_byte_pipes check_horizon_fast_sync check_horizon_fragmented_memory \
                        check_horizon_mappings check_horizon_native_view check_horizon_pipe_descriptors \
@@ -447,13 +447,18 @@ jobs:
           ls -l horizon-wine/build-autorun/
           sha256sum horizon-wine/build-autorun/autorun-*.zip
 
-      - name: opengl32.dll of this source, for 32-bit programs
+      - name: Wine DLLs of this source, for the DLL fork
         # The Windows DLLs come from the DLL repository, which is not built
-        # here, so a change to dlls/opengl32 (the object tables without a lock,
-        # 8924c90) does not reach a card with this archive. This builds that
-        # one module from this commit, to be copied over
-        # drive_c/windows/syswow64/opengl32.dll by hand and tried. A failure
-        # here does not fail the build of the card archive.
+        # here, so a change to Wine's own DLLs does not reach a card with this
+        # archive: opengl32's tables without a lock (8924c90, 9f5573c), and
+        # Carafe's four changes this source has had all along, which the DLL
+        # repository's builds lack (carafe/integration/PORTING.md, stage 5):
+        # wow64.dll suspends a 32-bit thread through FEX, both ntdll.dll take
+        # an ended thread's address wait out, and dinput.dll and dinput8.dll
+        # read the pad through the HID gamepad. This builds those modules from
+        # this commit for horizon-wine/tools/dll-fork-take-drop.py to put in a
+        # fork of the DLL repository (Windows DLLs > Source). A failure here
+        # does not fail the build of the card archive.
         if: ${{ inputs.x86 != true }}
         continue-on-error: true
         env:
@@ -461,45 +466,63 @@ jobs:
         run: |
           llvm="$(ls -d "$PWD"/horizon-wine/toolchains/llvm-mingw-*/ | head -n 1)"
           export PATH="${llvm}bin:$PATH"
-          make -C horizon-wine/build-wine-amd64-pe -j"$(nproc)" dlls/opengl32/i386-windows/opengl32.dll \
-            > "$RUNNER_TEMP/opengl32.log" 2>&1 || {
-              { grep -i -m 8 "error\|No rule\|not found" "$RUNNER_TEMP/opengl32.log"; tail -n 4 "$RUNNER_TEMP/opengl32.log"; } |
-                cut -c1-400 | while IFS= read -r line; do printf '::warning::opengl32: %s\n' "$line"; done
-              exit 1
-            }
-          mkdir -p "$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64"
-          out="$RUNNER_TEMP/opengl32/switch/wine/drive_c/windows/syswow64/opengl32.dll"
-          # Without its debug information, as the DLL repository holds its files
-          # (horizon-dlls/tools/build-dlls.py, stripped).
-          llvm-strip --strip-debug -o "$out" horizon-wine/build-wine-amd64-pe/dlls/opengl32/i386-windows/opengl32.dll
-          ls -l "$out"
-          echo "::notice::opengl32.dll (i386) built: $(sha256sum < "$out" | cut -c1-64), $(stat -c %s "$out") bytes"
-          # The same file under a ref of its own (not a branch), with the
-          # runtime features it needs, for putting it in a fork of the DLL
-          # repository from where an artifact cannot be downloaded.
-          drop="$RUNNER_TEMP/opengl32-drop"
-          mkdir -p "$drop" && cp "$out" "$drop/opengl32.dll"
-          python3 horizon-wine/tools/runtime_features.py | grep -i opengl32 > "$drop/features.txt"
+          pe=horizon-wine/build-wine-amd64-pe
+          drop="$RUNNER_TEMP/wine-dlls-drop"
+          out="$RUNNER_TEMP/wine-dlls/switch/wine/drive_c/windows"
+          mkdir -p "$drop" "$out/system32" "$out/syswow64"
+          # folder, the module's source directory, its build architecture, the file.
+          # system32's are ARM64X (aarch64 and arm64ec in one), syswow64's i386.
+          modules="system32:ntdll:aarch64:ntdll.dll system32:wow64:aarch64:wow64.dll
+                   system32:dinput:aarch64:dinput.dll system32:dinput8:aarch64:dinput8.dll
+                   system32:opengl32:aarch64:opengl32.dll syswow64:ntdll:i386:ntdll.dll
+                   syswow64:dinput:i386:dinput.dll syswow64:dinput8:i386:dinput8.dll
+                   syswow64:opengl32:i386:opengl32.dll"
+          built=0
+          for module in $modules; do
+            IFS=: read -r folder dir arch name <<< "$module"
+            if ! make -C "$pe" -j"$(nproc)" "dlls/$dir/$arch-windows/$name" > "$RUNNER_TEMP/dll.log" 2>&1; then
+              { grep -i -m 6 "error\|No rule\|not found" "$RUNNER_TEMP/dll.log"; tail -n 3 "$RUNNER_TEMP/dll.log"; } |
+                cut -c1-400 | while IFS= read -r line; do printf '::warning::%s/%s: %s\n' "$folder" "$name" "$line"; done
+              continue
+            fi
+            # Without debug information, as the DLL repository holds its files
+            # (horizon-dlls/tools/build-dlls.py, stripped).
+            llvm-strip --strip-debug -o "$out/$folder/$name" "$pe/dlls/$dir/$arch-windows/$name"
+            mkdir -p "$drop/$folder" && cp "$out/$folder/$name" "$drop/$folder/$name"
+            echo "::notice::$folder/$name built: $(sha256sum < "$out/$folder/$name" | cut -c1-64), $(stat -c %s "$out/$folder/$name") bytes"
+            built=$((built + 1))
+          done
+          [ "$built" -gt 0 ] || exit 1
+          # The drop as dll-fork-take-drop.py reads it, under a ref of its own
+          # (not a branch), since an artifact cannot be downloaded from where
+          # the fork is updated: the DLLs by folder, every feature this
+          # runtime reports, and the commit. opengl32.dll also at the top, for
+          # the tool as it was before it took more than that one file.
+          [ -f "$drop/syswow64/opengl32.dll" ] && cp "$drop/syswow64/opengl32.dll" "$drop/opengl32.dll"
+          python3 horizon-wine/tools/runtime_features.py > "$drop/features.txt"
           echo "$GITHUB_SHA" > "$drop/commit.txt"
           git -C "$drop" init -q
           git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid add -A
-          git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid commit -qm "opengl32.dll (i386) of $GITHUB_SHA"
-          # A ref of its own if GitHub takes one there, a tag if not.
-          for ref in refs/dll-drop/opengl32-i386 refs/tags/dll-drop-opengl32-i386; do
-            if git -C "$drop" push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$ref" \
-                 > "$RUNNER_TEMP/drop.log" 2>&1; then
-              echo "::notice::opengl32.dll pushed to $ref"; break
-            fi
-            echo "::warning::opengl32.dll not pushed to $ref: $(tr '\n' ' ' < "$RUNNER_TEMP/drop.log" | sed "s/${GH_TOKEN}/***/g" | cut -c1-300)"
+          git -C "$drop" -c user.name=autorun-ci -c user.email=ci@autorun.invalid commit -qm "Wine DLLs of $GITHUB_SHA"
+          # A ref of its own if GitHub takes one there, a tag if not; the old
+          # name as well, which points at the same drop.
+          for name in wine-dlls opengl32-i386; do
+            for ref in "refs/dll-drop/$name" "refs/tags/dll-drop-$name"; do
+              if git -C "$drop" push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:$ref" \
+                   > "$RUNNER_TEMP/drop.log" 2>&1; then
+                echo "::notice::$built DLLs pushed to $ref"; break
+              fi
+              echo "::warning::DLLs not pushed to $ref: $(tr '\n' ' ' < "$RUNNER_TEMP/drop.log" | sed "s/${GH_TOKEN}/***/g" | cut -c1-300)"
+            done
           done
 
-      - name: Upload that opengl32.dll
+      - name: Upload those Wine DLLs
         if: ${{ inputs.x86 != true }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: opengl32-i386-${{ github.sha }}
-          path: ${{ runner.temp }}/opengl32
+          name: wine-dlls-${{ github.sha }}
+          path: ${{ runner.temp }}/wine-dlls
           if-no-files-found: warn
           retention-days: 30
 

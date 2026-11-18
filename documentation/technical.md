@@ -191,7 +191,15 @@ repository the card follows: Autorun's, or the fork of it named in
 fork's own source. The choice is one word in `horizon-dlls/source.txt`; changing
 it only reads the other manifest, and Update then replaces the files whose size
 or SHA-256 differ, either way round. A manifest may name files in either
-repository. The card keeps the manifest it
+repository. What the fork has of its own comes from this repository's `build`
+workflow: it builds the Wine DLLs whose source here differs from what Autorun's
+repository ships (both `ntdll.dll`, `wow64.dll`, both `dinput.dll`,
+`dinput8.dll` and `opengl32.dll`: opengl32's tables without their locks, and
+Carafe's thread suspension through FEX, address waits of ended threads and
+DirectInput through the HID gamepad), leaves them under
+`refs/dll-drop/wine-dlls` and as the `wine-dlls-<commit>` artifact, and
+`tools/dll-fork-take-drop.py`, run in a checkout of the fork, puts them in it
+with their manifest entries. The card keeps the manifest it
 installed from in `horizon-dlls/manifest.json`, and `horizon-dlls/classes.reg`,
 the COM classes its DLLs serve, which the registry loads before `system.reg`. A
 file the runtime cannot run (a feature it does not report,
