@@ -1,0 +1,612 @@
+Carafe: the settings menu is drawn over the game's frame with the frame showing through.
+When wine_nx_osk_translucent (runtime/overlay/carafe_menu.c) says the layer is half-transparent, the menu's
+picture goes into a texture once per change and a render pass blends it over the image about to be shown, so
+the frame never leaves the GPU. Swapchain images get COLOR_ATTACHMENT for that when the surface allows it.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -300,6 +300,7 @@
+     VkFormat nx_format;
+     VkExtent2D nx_extent;
+     BOOL nx_osk_usable;
++    BOOL nx_menu_drawable;
+     struct nx_osk_overlay *nx_osk;
+ #endif
+ #ifdef WINE_NX_MESA_SWITCH
+@@ -3152,6 +3153,11 @@
+     {
+         create_info_host.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+         swapchain->nx_osk_usable = TRUE;
++        if (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
++        {
++            create_info_host.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++            swapchain->nx_menu_drawable = TRUE;
++        }
+     }
+ #endif
+ #ifdef WINE_NX_LSFG
+@@ -3767,6 +3773,33 @@
+     unsigned int generation;
+ };
+ 
++struct nx_menu_gpu
++{
++    BOOL ready, failed, uploading;
++    uint32_t family;
++    unsigned int generation;
++    VkCommandPool pool;
++    VkRenderPass pass;
++    VkImageView *views;
++    VkFramebuffer *framebuffers;
++    VkCommandBuffer *draws;
++    VkSemaphore *done;
++    VkImage texture;
++    VkDeviceMemory texture_memory;
++    VkImageView texture_view;
++    VkSampler sampler;
++    VkBuffer staging;
++    VkDeviceMemory staging_memory;
++    void *pixels;
++    VkCommandBuffer upload;
++    VkFence upload_fence;
++    VkDescriptorSetLayout set_layout;
++    VkDescriptorPool descriptor_pool;
++    VkDescriptorSet set;
++    VkPipelineLayout layout;
++    VkPipeline pipeline;
++};
++
+ struct nx_osk_overlay
+ {
+     uint32_t count, family;
+@@ -3775,8 +3808,13 @@
+     VkCommandPool pool;
+     int x, y, width, height;   /* what the command buffers copy, and where */
+     BOOL failed;
++    struct nx_menu_gpu menu;
+ };
+ 
++extern int wine_nx_osk_translucent( void ) __attribute__((weak));
++
++static void nx_menu_release( struct vulkan_device *device, struct nx_osk_overlay *osk );
++
+ static void nx_osk_release( struct vulkan_device *device, struct nx_osk_overlay *osk )
+ {
+     uint32_t i;
+@@ -3797,6 +3835,7 @@
+ 
+ static void nx_osk_free( struct vulkan_device *device, struct nx_osk_overlay *osk )
+ {
++    nx_menu_release( device, osk );
+     nx_osk_release( device, osk );
+     free( osk->per );
+     free( osk->images );
+@@ -3925,6 +3964,511 @@
+     return FALSE;
+ }
+ 
++static const uint32_t nx_menu_vert_spv[] = {
++    0x07230203,0x00010000,0x0008000b,0x0000002e,0x00000000,0x00020011,0x00000001,0x0006000b,
++    0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++    0x0008000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000c,0x00000018,0x00000020,
++    0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00040005,
++    0x00000009,0x6e726f63,0x00007265,0x00060005,0x0000000c,0x565f6c67,0x65747265,0x646e4978,
++    0x00007865,0x00040005,0x00000018,0x726f6f63,0x00000064,0x00060005,0x0000001e,0x505f6c67,
++    0x65567265,0x78657472,0x00000000,0x00060006,0x0000001e,0x00000000,0x505f6c67,0x7469736f,
++    0x006e6f69,0x00070006,0x0000001e,0x00000001,0x505f6c67,0x746e696f,0x657a6953,0x00000000,
++    0x00070006,0x0000001e,0x00000002,0x435f6c67,0x4470696c,0x61747369,0x0065636e,0x00070006,
++    0x0000001e,0x00000003,0x435f6c67,0x446c6c75,0x61747369,0x0065636e,0x00030005,0x00000020,
++    0x00000000,0x00040047,0x0000000c,0x0000000b,0x0000002a,0x00040047,0x00000018,0x0000001e,
++    0x00000000,0x00050048,0x0000001e,0x00000000,0x0000000b,0x00000000,0x00050048,0x0000001e,
++    0x00000001,0x0000000b,0x00000001,0x00050048,0x0000001e,0x00000002,0x0000000b,0x00000003,
++    0x00050048,0x0000001e,0x00000003,0x0000000b,0x00000004,0x00030047,0x0000001e,0x00000002,
++    0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
++    0x00040017,0x00000007,0x00000006,0x00000002,0x00040020,0x00000008,0x00000007,0x00000007,
++    0x00040015,0x0000000a,0x00000020,0x00000001,0x00040020,0x0000000b,0x00000001,0x0000000a,
++    0x0004003b,0x0000000b,0x0000000c,0x00000001,0x0004002b,0x0000000a,0x0000000e,0x00000001,
++    0x0004002b,0x0000000a,0x00000010,0x00000002,0x00040020,0x00000017,0x00000003,0x00000007,
++    0x0004003b,0x00000017,0x00000018,0x00000003,0x00040017,0x0000001a,0x00000006,0x00000004,
++    0x00040015,0x0000001b,0x00000020,0x00000000,0x0004002b,0x0000001b,0x0000001c,0x00000001,
++    0x0004001c,0x0000001d,0x00000006,0x0000001c,0x0006001e,0x0000001e,0x0000001a,0x00000006,
++    0x0000001d,0x0000001d,0x00040020,0x0000001f,0x00000003,0x0000001e,0x0004003b,0x0000001f,
++    0x00000020,0x00000003,0x0004002b,0x0000000a,0x00000021,0x00000000,0x0004002b,0x00000006,
++    0x00000023,0x40000000,0x0004002b,0x00000006,0x00000025,0x3f800000,0x0004002b,0x00000006,
++    0x00000028,0x00000000,0x00040020,0x0000002c,0x00000003,0x0000001a,0x00050036,0x00000002,
++    0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x00000008,0x00000009,
++    0x00000007,0x0004003d,0x0000000a,0x0000000d,0x0000000c,0x000500c4,0x0000000a,0x0000000f,
++    0x0000000d,0x0000000e,0x000500c7,0x0000000a,0x00000011,0x0000000f,0x00000010,0x0004006f,
++    0x00000006,0x00000012,0x00000011,0x0004003d,0x0000000a,0x00000013,0x0000000c,0x000500c7,
++    0x0000000a,0x00000014,0x00000013,0x00000010,0x0004006f,0x00000006,0x00000015,0x00000014,
++    0x00050050,0x00000007,0x00000016,0x00000012,0x00000015,0x0003003e,0x00000009,0x00000016,
++    0x0004003d,0x00000007,0x00000019,0x00000009,0x0003003e,0x00000018,0x00000019,0x0004003d,
++    0x00000007,0x00000022,0x00000009,0x0005008e,0x00000007,0x00000024,0x00000022,0x00000023,
++    0x00050050,0x00000007,0x00000026,0x00000025,0x00000025,0x00050083,0x00000007,0x00000027,
++    0x00000024,0x00000026,0x00050051,0x00000006,0x00000029,0x00000027,0x00000000,0x00050051,
++    0x00000006,0x0000002a,0x00000027,0x00000001,0x00070050,0x0000001a,0x0000002b,0x00000029,
++    0x0000002a,0x00000028,0x00000025,0x00050041,0x0000002c,0x0000002d,0x00000020,0x00000021,
++    0x0003003e,0x0000002d,0x0000002b,0x000100fd,0x00010038
++};
++static const uint32_t nx_menu_frag_spv[] = {
++    0x07230203,0x00010000,0x0008000b,0x00000014,0x00000000,0x00020011,0x00000001,0x0006000b,
++    0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
++    0x0007000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000009,0x00000011,0x00030010,
++    0x00000004,0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,
++    0x00000000,0x00040005,0x00000009,0x6f6c6f63,0x00000072,0x00040005,0x0000000d,0x756e656d,
++    0x00000000,0x00040005,0x00000011,0x726f6f63,0x00000064,0x00040047,0x00000009,0x0000001e,
++    0x00000000,0x00040047,0x0000000d,0x00000022,0x00000000,0x00040047,0x0000000d,0x00000021,
++    0x00000000,0x00040047,0x00000011,0x0000001e,0x00000000,0x00020013,0x00000002,0x00030021,
++    0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,0x00040017,0x00000007,0x00000006,
++    0x00000004,0x00040020,0x00000008,0x00000003,0x00000007,0x0004003b,0x00000008,0x00000009,
++    0x00000003,0x00090019,0x0000000a,0x00000006,0x00000001,0x00000000,0x00000000,0x00000000,
++    0x00000001,0x00000000,0x0003001b,0x0000000b,0x0000000a,0x00040020,0x0000000c,0x00000000,
++    0x0000000b,0x0004003b,0x0000000c,0x0000000d,0x00000000,0x00040017,0x0000000f,0x00000006,
++    0x00000002,0x00040020,0x00000010,0x00000001,0x0000000f,0x0004003b,0x00000010,0x00000011,
++    0x00000001,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,
++    0x0004003d,0x0000000b,0x0000000e,0x0000000d,0x0004003d,0x0000000f,0x00000012,0x00000011,
++    0x00050057,0x00000007,0x00000013,0x0000000e,0x00000012,0x0003003e,0x00000009,0x00000013,
++    0x000100fd,0x00010038
++};
++
++static void nx_menu_release( struct vulkan_device *device, struct nx_osk_overlay *osk )
++{
++    struct nx_menu_gpu *menu = &osk->menu;
++    uint32_t i;
++
++    if (menu->uploading)
++        device->p_vkWaitForFences( device->host.device, 1, &menu->upload_fence, VK_TRUE, 1000000000ull );
++    for (i = 0; i < osk->count; i++)
++    {
++        if (menu->framebuffers) device->p_vkDestroyFramebuffer( device->host.device, menu->framebuffers[i], NULL );
++        if (menu->views) device->p_vkDestroyImageView( device->host.device, menu->views[i], NULL );
++        if (menu->done) device->p_vkDestroySemaphore( device->host.device, menu->done[i], NULL );
++    }
++    free( menu->framebuffers );
++    free( menu->views );
++    free( menu->done );
++    free( menu->draws );
++    device->p_vkDestroyPipeline( device->host.device, menu->pipeline, NULL );
++    device->p_vkDestroyPipelineLayout( device->host.device, menu->layout, NULL );
++    device->p_vkDestroyDescriptorPool( device->host.device, menu->descriptor_pool, NULL );
++    device->p_vkDestroyDescriptorSetLayout( device->host.device, menu->set_layout, NULL );
++    device->p_vkDestroySampler( device->host.device, menu->sampler, NULL );
++    device->p_vkDestroyImageView( device->host.device, menu->texture_view, NULL );
++    device->p_vkDestroyImage( device->host.device, menu->texture, NULL );
++    device->p_vkFreeMemory( device->host.device, menu->texture_memory, NULL );
++    device->p_vkDestroyBuffer( device->host.device, menu->staging, NULL );
++    device->p_vkFreeMemory( device->host.device, menu->staging_memory, NULL );
++    device->p_vkDestroyFence( device->host.device, menu->upload_fence, NULL );
++    device->p_vkDestroyRenderPass( device->host.device, menu->pass, NULL );
++    if (menu->pool) device->p_vkDestroyCommandPool( device->host.device, menu->pool, NULL );
++    memset( menu, 0, sizeof(*menu) );
++}
++
++static BOOL nx_menu_memory( struct vulkan_device *device, VkMemoryRequirements *req, VkMemoryPropertyFlags wanted,
++                            VkDeviceMemory *memory )
++{
++    struct vulkan_physical_device *physical_device = device->physical_device;
++    VkMemoryAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++    VkPhysicalDeviceMemoryProperties props;
++    uint32_t t;
++
++    physical_device->instance->p_vkGetPhysicalDeviceMemoryProperties( physical_device->host.physical_device, &props );
++    for (t = 0; t < props.memoryTypeCount; t++)
++        if ((req->memoryTypeBits & (1u << t)) && (props.memoryTypes[t].propertyFlags & wanted) == wanted) break;
++    if (t == props.memoryTypeCount)
++    {
++        if (wanted & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) return FALSE;
++        for (t = 0; t < props.memoryTypeCount; t++)
++            if (req->memoryTypeBits & (1u << t)) break;
++        if (t == props.memoryTypeCount) return FALSE;
++    }
++    alloc.allocationSize = req->size;
++    alloc.memoryTypeIndex = t;
++    return !device->p_vkAllocateMemory( device->host.device, &alloc, NULL, memory );
++}
++
++static VkResult nx_menu_record( struct vulkan_device *device, struct swapchain *swapchain, struct nx_menu_gpu *menu,
++                                uint32_t i )
++{
++    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++    VkRenderPassBeginInfo pass = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
++
++    begin.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
++    device->p_vkBeginCommandBuffer( menu->draws[i], &begin );
++    pass.renderPass = menu->pass;
++    pass.framebuffer = menu->framebuffers[i];
++    pass.renderArea.extent = swapchain->nx_extent;
++    device->p_vkCmdBeginRenderPass( menu->draws[i], &pass, VK_SUBPASS_CONTENTS_INLINE );
++    device->p_vkCmdBindPipeline( menu->draws[i], VK_PIPELINE_BIND_POINT_GRAPHICS, menu->pipeline );
++    device->p_vkCmdBindDescriptorSets( menu->draws[i], VK_PIPELINE_BIND_POINT_GRAPHICS, menu->layout, 0, 1, &menu->set,
++                                       0, NULL );
++    device->p_vkCmdDraw( menu->draws[i], 3, 1, 0, 0 );
++    device->p_vkCmdEndRenderPass( menu->draws[i] );
++    return device->p_vkEndCommandBuffer( menu->draws[i] );
++}
++
++static VkResult nx_menu_record_upload( struct vulkan_device *device, struct swapchain *swapchain,
++                                       struct nx_menu_gpu *menu )
++{
++    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++    VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++    VkBufferImageCopy region = {0};
++
++    begin.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
++    device->p_vkBeginCommandBuffer( menu->upload, &begin );
++    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    barrier.srcAccessMask = 0;
++    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    barrier.image = menu->texture;
++    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    barrier.subresourceRange.levelCount = barrier.subresourceRange.layerCount = 1;
++    device->p_vkCmdPipelineBarrier( menu->upload, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                    0, 0, NULL, 0, NULL, 1, &barrier );
++    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    region.imageSubresource.layerCount = 1;
++    region.imageExtent.width = swapchain->nx_extent.width;
++    region.imageExtent.height = swapchain->nx_extent.height;
++    region.imageExtent.depth = 1;
++    device->p_vkCmdCopyBufferToImage( menu->upload, menu->staging, menu->texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                                      1, &region );
++    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++    device->p_vkCmdPipelineBarrier( menu->upload, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
++                                    0, 0, NULL, 0, NULL, 1, &barrier );
++    return device->p_vkEndCommandBuffer( menu->upload );
++}
++
++static VkResult nx_menu_shader( struct vulkan_device *device, const uint32_t *code, size_t size,
++                                VkShaderModule *module )
++{
++    VkShaderModuleCreateInfo info = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
++
++    info.codeSize = size;
++    info.pCode = code;
++    return device->p_vkCreateShaderModule( device->host.device, &info, NULL, module );
++}
++
++static BOOL nx_menu_pipeline( struct vulkan_device *device, struct swapchain *swapchain, struct nx_menu_gpu *menu )
++{
++    VkPipelineShaderStageCreateInfo stages[2] = {{0}, {0}};
++    VkPipelineVertexInputStateCreateInfo vertex = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
++    VkPipelineInputAssemblyStateCreateInfo assembly = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
++    VkPipelineViewportStateCreateInfo viewport_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
++    VkPipelineRasterizationStateCreateInfo raster = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
++    VkPipelineMultisampleStateCreateInfo multisample = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
++    VkPipelineColorBlendAttachmentState blend = {0};
++    VkPipelineColorBlendStateCreateInfo blend_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
++    VkGraphicsPipelineCreateInfo info = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
++    VkViewport viewport = {0};
++    VkRect2D scissor = {{0, 0}, swapchain->nx_extent};
++    VkShaderModule vert = VK_NULL_HANDLE, frag = VK_NULL_HANDLE;
++    VkResult res;
++
++    if (nx_menu_shader( device, nx_menu_vert_spv, sizeof(nx_menu_vert_spv), &vert ) ||
++        nx_menu_shader( device, nx_menu_frag_spv, sizeof(nx_menu_frag_spv), &frag ))
++    {
++        device->p_vkDestroyShaderModule( device->host.device, vert, NULL );
++        return FALSE;
++    }
++    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
++    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
++    stages[0].module = vert;
++    stages[0].pName = "main";
++    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
++    stages[1].module = frag;
++    stages[1].pName = "main";
++    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    viewport.width = (float)swapchain->nx_extent.width;
++    viewport.height = (float)swapchain->nx_extent.height;
++    viewport.maxDepth = 1.0f;
++    viewport_state.viewportCount = 1;
++    viewport_state.pViewports = &viewport;
++    viewport_state.scissorCount = 1;
++    viewport_state.pScissors = &scissor;
++    raster.polygonMode = VK_POLYGON_MODE_FILL;
++    raster.cullMode = VK_CULL_MODE_NONE;
++    raster.lineWidth = 1.0f;
++    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++    blend.blendEnable = VK_TRUE;
++    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
++    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    blend.colorBlendOp = VK_BLEND_OP_ADD;
++    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    blend.alphaBlendOp = VK_BLEND_OP_ADD;
++    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
++                           VK_COLOR_COMPONENT_A_BIT;
++    blend_state.attachmentCount = 1;
++    blend_state.pAttachments = &blend;
++    info.stageCount = 2;
++    info.pStages = stages;
++    info.pVertexInputState = &vertex;
++    info.pInputAssemblyState = &assembly;
++    info.pViewportState = &viewport_state;
++    info.pRasterizationState = &raster;
++    info.pMultisampleState = &multisample;
++    info.pColorBlendState = &blend_state;
++    info.layout = menu->layout;
++    info.renderPass = menu->pass;
++    res = device->p_vkCreateGraphicsPipelines( device->host.device, VK_NULL_HANDLE, 1, &info, NULL, &menu->pipeline );
++    device->p_vkDestroyShaderModule( device->host.device, vert, NULL );
++    device->p_vkDestroyShaderModule( device->host.device, frag, NULL );
++    return !res;
++}
++
++static BOOL nx_menu_prepare( struct vulkan_device *device, struct swapchain *swapchain, uint32_t family )
++{
++    struct nx_osk_overlay *osk = swapchain->nx_osk;
++    struct nx_menu_gpu *menu;
++    VkCommandPoolCreateInfo pool_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
++    VkAttachmentDescription attachment = {0};
++    VkAttachmentReference reference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
++    VkSubpassDescription subpass = {0};
++    VkSubpassDependency dependencies[2] = {{0}, {0}};
++    VkRenderPassCreateInfo pass_info = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
++    VkImageCreateInfo image_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    VkImageViewCreateInfo view_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
++    VkSamplerCreateInfo sampler_info = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
++    VkBufferCreateInfo buffer_info = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++    VkDescriptorSetLayoutBinding binding = {0};
++    VkDescriptorSetLayoutCreateInfo set_layout_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
++    VkDescriptorPoolSize pool_size = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
++    VkDescriptorPoolCreateInfo descriptor_pool_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
++    VkDescriptorSetAllocateInfo set_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
++    VkDescriptorImageInfo image_descriptor = {0};
++    VkWriteDescriptorSet write = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
++    VkPipelineLayoutCreateInfo layout_info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
++    VkCommandBufferAllocateInfo cmd_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++    VkSemaphoreCreateInfo semaphore_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
++    VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
++    VkMemoryRequirements req;
++    VkFormat texture_format;
++    uint32_t i;
++
++    if (!osk)
++    {
++        if (!(osk = swapchain->nx_osk = calloc( 1, sizeof(*osk) ))) return FALSE;
++        if (device->p_vkGetSwapchainImagesKHR( device->host.device, swapchain->obj.host.swapchain, &osk->count, NULL ) ||
++            !(osk->images = calloc( osk->count, sizeof(*osk->images) )) ||
++            !(osk->per = calloc( osk->count, sizeof(*osk->per) )) ||
++            device->p_vkGetSwapchainImagesKHR( device->host.device, swapchain->obj.host.swapchain, &osk->count, osk->images ))
++            osk->failed = TRUE;
++    }
++    if (osk->failed) return FALSE;
++    menu = &osk->menu;
++    if (menu->failed) return FALSE;
++    if (menu->ready && menu->family == family) return TRUE;
++    if (menu->ready) device->p_vkDeviceWaitIdle( device->host.device );
++    nx_menu_release( device, osk );
++    menu->family = family;
++    texture_format = swapchain->nx_format == VK_FORMAT_B8G8R8A8_SRGB || swapchain->nx_format == VK_FORMAT_R8G8B8A8_SRGB ?
++                     VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
++
++    pool_info.queueFamilyIndex = family;
++    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++    attachment.format = swapchain->nx_format;
++    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
++    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++    attachment.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++    attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++    subpass.colorAttachmentCount = 1;
++    subpass.pColorAttachments = &reference;
++    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
++    dependencies[0].dstSubpass = 0;
++    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++    dependencies[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
++    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
++                                    VK_ACCESS_SHADER_READ_BIT;
++    dependencies[1].srcSubpass = 0;
++    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
++    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
++    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    dependencies[1].dstAccessMask = 0;
++    pass_info.attachmentCount = 1;
++    pass_info.pAttachments = &attachment;
++    pass_info.subpassCount = 1;
++    pass_info.pSubpasses = &subpass;
++    pass_info.dependencyCount = 2;
++    pass_info.pDependencies = dependencies;
++    if (device->p_vkCreateCommandPool( device->host.device, &pool_info, NULL, &menu->pool ) ||
++        device->p_vkCreateRenderPass( device->host.device, &pass_info, NULL, &menu->pass ))
++        goto failed;
++
++    image_info.imageType = VK_IMAGE_TYPE_2D;
++    image_info.format = texture_format;
++    image_info.extent.width = swapchain->nx_extent.width;
++    image_info.extent.height = swapchain->nx_extent.height;
++    image_info.extent.depth = 1;
++    image_info.mipLevels = image_info.arrayLayers = 1;
++    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (device->p_vkCreateImage( device->host.device, &image_info, NULL, &menu->texture )) goto failed;
++    device->p_vkGetImageMemoryRequirements( device->host.device, menu->texture, &req );
++    if (!nx_menu_memory( device, &req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &menu->texture_memory ) ||
++        device->p_vkBindImageMemory( device->host.device, menu->texture, menu->texture_memory, 0 ))
++        goto failed;
++    view_info.image = menu->texture;
++    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++    view_info.format = texture_format;
++    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    view_info.subresourceRange.levelCount = view_info.subresourceRange.layerCount = 1;
++    if (device->p_vkCreateImageView( device->host.device, &view_info, NULL, &menu->texture_view )) goto failed;
++    sampler_info.magFilter = sampler_info.minFilter = VK_FILTER_NEAREST;
++    sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
++        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++    sampler_info.maxAnisotropy = 1.0f;
++    if (device->p_vkCreateSampler( device->host.device, &sampler_info, NULL, &menu->sampler )) goto failed;
++
++    buffer_info.size = (VkDeviceSize)swapchain->nx_extent.width * swapchain->nx_extent.height * 4;
++    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++    if (device->p_vkCreateBuffer( device->host.device, &buffer_info, NULL, &menu->staging )) goto failed;
++    device->p_vkGetBufferMemoryRequirements( device->host.device, menu->staging, &req );
++    if (!nx_menu_memory( device, &req, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++                         &menu->staging_memory ) ||
++        device->p_vkBindBufferMemory( device->host.device, menu->staging, menu->staging_memory, 0 ) ||
++        device->p_vkMapMemory( device->host.device, menu->staging_memory, 0, buffer_info.size, 0, &menu->pixels ))
++        goto failed;
++
++    binding.binding = 0;
++    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++    binding.descriptorCount = 1;
++    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
++    set_layout_info.bindingCount = 1;
++    set_layout_info.pBindings = &binding;
++    descriptor_pool_info.maxSets = 1;
++    descriptor_pool_info.poolSizeCount = 1;
++    descriptor_pool_info.pPoolSizes = &pool_size;
++    if (device->p_vkCreateDescriptorSetLayout( device->host.device, &set_layout_info, NULL, &menu->set_layout ) ||
++        device->p_vkCreateDescriptorPool( device->host.device, &descriptor_pool_info, NULL, &menu->descriptor_pool ))
++        goto failed;
++    set_info.descriptorPool = menu->descriptor_pool;
++    set_info.descriptorSetCount = 1;
++    set_info.pSetLayouts = &menu->set_layout;
++    if (device->p_vkAllocateDescriptorSets( device->host.device, &set_info, &menu->set )) goto failed;
++    image_descriptor.sampler = menu->sampler;
++    image_descriptor.imageView = menu->texture_view;
++    image_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    write.dstSet = menu->set;
++    write.descriptorCount = 1;
++    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++    write.pImageInfo = &image_descriptor;
++    device->p_vkUpdateDescriptorSets( device->host.device, 1, &write, 0, NULL );
++    layout_info.setLayoutCount = 1;
++    layout_info.pSetLayouts = &menu->set_layout;
++    if (device->p_vkCreatePipelineLayout( device->host.device, &layout_info, NULL, &menu->layout ) ||
++        !nx_menu_pipeline( device, swapchain, menu ))
++        goto failed;
++
++    if (!(menu->views = calloc( osk->count, sizeof(*menu->views) )) ||
++        !(menu->framebuffers = calloc( osk->count, sizeof(*menu->framebuffers) )) ||
++        !(menu->draws = calloc( osk->count, sizeof(*menu->draws) )) ||
++        !(menu->done = calloc( osk->count, sizeof(*menu->done) )))
++        goto failed;
++    cmd_info.commandPool = menu->pool;
++    cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++    cmd_info.commandBufferCount = 1;
++    if (device->p_vkAllocateCommandBuffers( device->host.device, &cmd_info, &menu->upload ) ||
++        nx_menu_record_upload( device, swapchain, menu ) ||
++        device->p_vkCreateFence( device->host.device, &fence_info, NULL, &menu->upload_fence ))
++        goto failed;
++    for (i = 0; i < osk->count; i++)
++    {
++        VkFramebufferCreateInfo framebuffer_info = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
++
++        view_info.image = osk->images[i];
++        view_info.format = swapchain->nx_format;
++        if (device->p_vkCreateImageView( device->host.device, &view_info, NULL, &menu->views[i] )) goto failed;
++        framebuffer_info.renderPass = menu->pass;
++        framebuffer_info.attachmentCount = 1;
++        framebuffer_info.pAttachments = &menu->views[i];
++        framebuffer_info.width = swapchain->nx_extent.width;
++        framebuffer_info.height = swapchain->nx_extent.height;
++        framebuffer_info.layers = 1;
++        if (device->p_vkCreateFramebuffer( device->host.device, &framebuffer_info, NULL, &menu->framebuffers[i] ) ||
++            device->p_vkCreateSemaphore( device->host.device, &semaphore_info, NULL, &menu->done[i] ) ||
++            device->p_vkAllocateCommandBuffers( device->host.device, &cmd_info, &menu->draws[i] ) ||
++            nx_menu_record( device, swapchain, menu, i ))
++            goto failed;
++    }
++    menu->ready = TRUE;
++    nx_vk_trace( "[NXVK] settings menu drawn by the GPU over %u images", osk->count );
++    return TRUE;
++
++failed:
++    nx_vk_trace( "[NXVK] settings menu: the GPU cannot draw it; it is copied over the frame instead" );
++    nx_menu_release( device, osk );
++    menu->failed = TRUE;
++    return FALSE;
++}
++
++static BOOL nx_menu_present( struct vulkan_queue *queue, VkPresentInfoKHR *present_info, struct swapchain *swapchain,
++                             struct mempool *pool )
++{
++    struct vulkan_device *device = queue->device;
++    VkSubmitInfo submits[2] = {{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO}, {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO}};
++    struct wine_nx_osk_frame frame;
++    struct nx_menu_gpu *menu;
++    VkPipelineStageFlags *stages;
++    uint32_t index, i, count = 0;
++    VkFence fence = VK_NULL_HANDLE;
++
++    if (!wine_nx_osk_frame( swapchain->nx_extent.width, swapchain->nx_extent.height, &frame ) || frame.x || frame.y ||
++        frame.width != (int)swapchain->nx_extent.width || frame.height != (int)swapchain->nx_extent.height)
++        return FALSE;
++    if (!nx_menu_prepare( device, swapchain, queue->info.queueFamilyIndex )) return FALSE;
++    menu = &swapchain->nx_osk->menu;
++    index = present_info->pImageIndices[0];
++    if (index >= swapchain->nx_osk->count) return FALSE;
++    if (menu->generation != frame.generation)
++    {
++        if (menu->uploading)
++        {
++            device->p_vkWaitForFences( device->host.device, 1, &menu->upload_fence, VK_TRUE, 1000000000ull );
++            device->p_vkResetFences( device->host.device, 1, &menu->upload_fence );
++            menu->uploading = FALSE;
++        }
++        if (!(menu->generation = wine_nx_osk_copy( swapchain->nx_extent.width, swapchain->nx_extent.height,
++                                                   menu->pixels, swapchain->nx_extent.width * 4, 0 )))
++            return FALSE;
++        submits[count].commandBufferCount = 1;
++        submits[count].pCommandBuffers = &menu->upload;
++        count++;
++        fence = menu->upload_fence;
++    }
++    if (!(stages = mem_alloc( pool, sizeof(*stages) * (present_info->waitSemaphoreCount + 1) ))) return FALSE;
++    for (i = 0; i < present_info->waitSemaphoreCount; i++) stages[i] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    submits[count].waitSemaphoreCount = present_info->waitSemaphoreCount;
++    submits[count].pWaitSemaphores = present_info->pWaitSemaphores;
++    submits[count].pWaitDstStageMask = stages;
++    submits[count].commandBufferCount = 1;
++    submits[count].pCommandBuffers = &menu->draws[index];
++    submits[count].signalSemaphoreCount = 1;
++    submits[count].pSignalSemaphores = &menu->done[index];
++    count++;
++    if (fence != VK_NULL_HANDLE)
++    {
++        if (device->p_vkQueueSubmit( queue->host.queue, 1, &submits[0], fence ))
++        {
++            menu->generation = 0;
++            return FALSE;
++        }
++        menu->uploading = TRUE;
++        if (device->p_vkQueueSubmit( queue->host.queue, 1, &submits[1], VK_NULL_HANDLE )) return FALSE;
++    }
++    else if (device->p_vkQueueSubmit( queue->host.queue, 1, &submits[0], VK_NULL_HANDLE ))
++        return FALSE;
++    present_info->waitSemaphoreCount = 1;
++    present_info->pWaitSemaphores = &menu->done[index];
++    return TRUE;
++}
++
+ /* The keyboard over the image this present shows, when it is up. The present
+  * then waits for the copy, which waits for what the present waited for. */
+ static void nx_osk_present( struct vulkan_queue *queue, VkPresentInfoKHR *present_info,
+@@ -3941,6 +4485,15 @@
+     if (present_info->swapchainCount != 1) return;
+     swapchain = swapchain_from_handle( client_swapchains[0] );
+     if (!swapchain->nx_osk_usable) return;
++    if (swapchain->nx_menu_drawable && wine_nx_osk_translucent && wine_nx_osk_translucent())
++    {
++        if (nx_menu_present( queue, present_info, swapchain, pool )) return;
++    }
++    else if (swapchain->nx_osk && swapchain->nx_osk->menu.ready)
++    {
++        device->p_vkQueueWaitIdle( queue->host.queue );
++        nx_menu_release( device, swapchain->nx_osk );
++    }
+     if (!wine_nx_osk_frame( swapchain->nx_extent.width, swapchain->nx_extent.height, &frame )) return;
+     if (frame.x < 0 || frame.y < 0 || frame.x + frame.width > (int)swapchain->nx_extent.width ||
+         frame.y + frame.height > (int)swapchain->nx_extent.height)

@@ -1,0 +1,72 @@
+Carafe: after the loading screen or the floating keyboard leaves an OpenGL screen, its buffers are cleared to black.
+Without it their old picture stays where the program does not draw, such as around a 1024x768 game.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_opengl.c
++++ b/dlls/win32u/winnx_opengl.c
+@@ -141,6 +141,9 @@
+ static PFN_glBlitFramebuffer p_glBlitFramebuffer;
+ static PFN_glIsFramebuffer p_glIsFramebuffer;
+ static PFN_glBindBuffer p_glBindBuffer;
++#define NX_SCREEN_CLEARS 8
++static BOOL nx_osk_shown;
++static unsigned int nx_screen_clears;
+ 
+ static void nx_osk_draw( struct opengl_drawable *base )
+ {
+@@ -234,6 +237,7 @@
+                              frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+         if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+         if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
++        nx_osk_shown = TRUE;
+     }
+ 
+     p_glBindFramebuffer( GL_READ_FRAMEBUFFER, read_fb );
+@@ -246,16 +250,47 @@
+     funcs->p_glPixelStorei( GL_UNPACK_ALIGNMENT, alignment );
+ }
+ 
++static void nx_screen_clear( void )
++{
++    GLint draw_fb, draw_buffer;
++    GLfloat color[4];
++    GLboolean mask[4], scissor;
++
++    funcs->p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb );
++    funcs->p_glGetFloatv( GL_COLOR_CLEAR_VALUE, color );
++    funcs->p_glGetBooleanv( GL_COLOR_WRITEMASK, mask );
++    scissor = funcs->p_glIsEnabled( GL_SCISSOR_TEST );
++    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
++    funcs->p_glGetIntegerv( GL_DRAW_BUFFER, &draw_buffer );
++    funcs->p_glDrawBuffer( GL_BACK );
++    if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
++    funcs->p_glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
++    funcs->p_glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
++    funcs->p_glClear( GL_COLOR_BUFFER_BIT );
++    funcs->p_glClearColor( color[0], color[1], color[2], color[3] );
++    funcs->p_glColorMask( mask[0], mask[1], mask[2], mask[3] );
++    if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
++    funcs->p_glDrawBuffer( draw_buffer );
++    p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, draw_fb );
++}
++
+ static BOOL nx_drawable_swap( struct opengl_drawable *base )
+ {
+     unsigned long long start;
+     BOOL ret;
+ 
++    nx_osk_shown = FALSE;
+     nx_osk_draw( base );
+     start = horizon_interrupt_time();
+     ret = funcs->p_eglSwapBuffers( egl->display, base->surface );
+     __atomic_add_fetch( &wine_nx_gl_swap_time, horizon_interrupt_time() - start, __ATOMIC_RELAXED );
+     __atomic_add_fetch( &wine_nx_gl_swaps, 1, __ATOMIC_RELAXED );
++    if (nx_osk_shown) nx_screen_clears = NX_SCREEN_CLEARS;
++    if (ret && nx_screen_clears && p_glBindFramebuffer)
++    {
++        nx_screen_clears--;
++        nx_screen_clear();
++    }
+     return ret;
+ }
+ 

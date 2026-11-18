@@ -504,6 +504,19 @@ long sysconf( int name )
 #ifdef _SC_PAGESIZE
     if (name == _SC_PAGESIZE) return 0x1000;
 #endif
+#if defined(WINE_NX_NXVK) && defined(_SC_PHYS_PAGES)
+    /* nxvk's Mesa learns the console's memory here, where mesa-switch's asks
+     * the kernel itself, the same figure (InfoType_TotalMemorySize). Without
+     * it NVK takes the memory for nothing and refuses the GPU, and Zink with
+     * it: "vkEnumeratePhysicalDevices failed (VK_ERROR_INITIALIZATION_FAILED)". */
+    if (name == _SC_PHYS_PAGES)
+    {
+        u64 total = 0;
+
+        if (R_SUCCEEDED( svcGetInfo( &total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0 ) ) && total)
+            return (long)(total / 0x1000);
+    }
+#endif
     return -1;
 }
 

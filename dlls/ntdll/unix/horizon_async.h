@@ -41,6 +41,7 @@
 #define HORIZON_ASYNC_ACCEPT      1  /* accept(): the server makes a new socket */
 #define HORIZON_ASYNC_ACCEPT_INTO 2  /* AcceptEx: the server accepts into the socket given */
 #define HORIZON_ASYNC_PIPE_LISTEN 3
+#define HORIZON_ASYNC_DEVICE_READ 4
 
 #define HORIZON_ASYNC_STATUS_ALERTED   0x00000101u  /* the operation is to be done now */
 #define HORIZON_ASYNC_STATUS_CANCELLED 0xc0000120u

@@ -1,0 +1,41 @@
+Carafe: with CARAFE_LARGE_GUEST_PAGES=1, a view of 2 MB or more that the program lets Wine place starts on a 2 MB
+boundary when there is room for it, and on Wine's usual 64 KB otherwise. Such views get their own 2 MB-aligned
+backing on Horizon, so a 2 MB-aligned address lets the kernel map them with 2 MB entries instead of 64 KB ones, and
+the A57's TLB covers far more of the game's data. Carafe's overlay sets the variable from the program setting
+large-pages.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2766,6 +2766,20 @@
+     return status;
+ }
+ 
++#define CARAFE_LARGE_GUEST_VIEW ((size_t)0x200000)
++
++static BOOL carafe_large_guest_views(void)
++{
++    static int enabled = -1;
++
++    if (enabled < 0)
++    {
++        const char *value = getenv( "CARAFE_LARGE_GUEST_PAGES" );
++        enabled = value && !strcmp( value, "1" );
++    }
++    return enabled;
++}
++
+ /***********************************************************************
+  *           map_view
+  *
+@@ -2781,6 +2795,10 @@
+     int unix_prot = get_unix_prot( vprot );
+     NTSTATUS status;
+ 
++    if (!align_mask && !base && size >= CARAFE_LARGE_GUEST_VIEW && carafe_large_guest_views() &&
++        !map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, CARAFE_LARGE_GUEST_VIEW - 1 ))
++        return STATUS_SUCCESS;
++
+     if (!align_mask) align_mask = granularity_mask;
+     assert( align_mask >= host_page_mask );
+ 

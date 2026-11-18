@@ -1,0 +1,16 @@
+Carafe: d3d9.unchangedStateFastPath, the switch for the unchanged-state path in Carafe's DXVK build, is one more key
+the runtime copies from the program settings into dxvk.conf.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/dxvk_options.c
++++ b/horizon-wine/source/dxvk_options.c
+@@ -428,6 +428,9 @@
+     OPTION( "dxvk.gplAsyncCache",
+             "GPLAsync's legacy state-cache integration. Available here for 2.3 through 2.6; removed in 2.7 and newer.",
+             boolean, 20300, 20700, 0, 0, 1, 1, "False" ),
++    OPTION( "d3d9.unchangedStateFastPath",
++            "Carafe's DXVK build: a state set to the value it already has returns before the device lock.",
++            boolean, 30101, 0, 0, 0, 1, 0, "True" ),
+ };
+ #undef OPTION
+ 

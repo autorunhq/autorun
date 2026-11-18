@@ -33,6 +33,12 @@ flags="-std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-f
 "$build/sd_stat_cache"
 "$build/sd_write_buffer"
 "$build/sd_read_cache"
+# The device over libnx's sdmc (source/sd_cache.c) with a card in memory.
+# mallinfo's fields are int on the host and size_t on the Switch, where
+# glibc also calls it deprecated: those two warnings are the host's.
+"${CC:-clang}" $flags -Wno-deprecated-declarations -Wno-sign-compare -pthread \
+    -I"$root/horizon-wine/tests/sd-cache-shims" "$root/horizon-wine/tests/sd_cache_device.c" -o "$build/sd_cache_device"
+"$build/sd_cache_device"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/box64_code_arena.c" -o "$build/box64_code_arena"
 "$build/box64_code_arena"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/horizon_registry.c" -o "$build/registry"
@@ -79,15 +85,32 @@ python3 "$root/horizon-wine/tests/check_horizon_backings.py"
 python3 "$root/horizon-wine/tests/check_horizon_sections.py"
 python3 "$root/horizon-wine/tests/check_horizon_image_info.py"
 python3 "$root/horizon-wine/tests/check_memory_status.py"
-python3 "$root/horizon-wine/tests/check_user_profile.py"
+# These three read the game fixes repository, the DLL repository and the
+# vendored Box64, which a checkout without its submodules (CI) or without
+# bootstrap-box64-core.sh lacks; they are passed over there, and say so.
+if [ -f "$root/game-fixes/profiles/falloutnv.json" ]; then
+    python3 "$root/horizon-wine/tests/check_user_profile.py"
+else
+    echo "check_user_profile: skipped, no game-fixes checkout"
+fi
 python3 "$root/horizon-wine/tests/check_lazy_file_views.py"
+python3 "$root/horizon-wine/tests/check_gl_old_extensions.py"
+python3 "$root/horizon-wine/tests/check_screen_fit.py"
 python3 "$root/horizon-wine/tests/check_horizon_sock_bind.py"
 python3 "$root/horizon-wine/tests/check_afd_layouts.py"
 python3 "$root/horizon-wine/tests/check_wow64_buffer_flush.py"
-python3 "$root/horizon-wine/tests/check_dxvk_payload.py"
+if [ -f "$root/horizon-dlls/tools/dxvk_payload.py" ]; then
+    python3 "$root/horizon-wine/tests/check_dxvk_payload.py"
+else
+    echo "check_dxvk_payload: skipped, no horizon-dlls checkout"
+fi
 python3 "$root/horizon-wine/tests/check_vulkan_wow64_mapping.py"
 python3 "$root/horizon-wine/tests/check_d3dkmt_resources.py"
-python3 "$root/horizon-wine/tests/check_package_amd64.py"
+if [ -f "$root/horizon-wine/vendor/box64/LICENSE" ]; then
+    python3 "$root/horizon-wine/tests/check_package_amd64.py"
+else
+    echo "check_package_amd64: skipped, no vendor/box64 (tools/bootstrap-box64-core.sh)"
+fi
 if [ -f "$root/horizon-wine/vendor/dxvk/src/dxvk/dxvk_device_info.cpp" ]; then
     python3 "$root/horizon-wine/tests/check_dxvk_requirements.py"
 fi

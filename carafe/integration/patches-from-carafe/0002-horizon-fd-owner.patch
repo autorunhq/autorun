@@ -1,0 +1,140 @@
+Carafe: fds passed between Wine threads and the Horizon server reach the thread they belong to.
+Both directions used one FIFO queue for the whole process. When threads start in a burst,
+new_thread and init_thread of different threads interleave, and a connection took another
+thread's request, reply or wait pipe: the server then served a thread as someone else.
+Each fd now carries the request pipe of its thread, and a taker picks its own fd.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c	2026-10-05 22:57:51.955570500 +0400
++++ b/dlls/ntdll/unix/horizon.c	2026-10-05 23:03:05.412816600 +0400
+@@ -452,6 +452,7 @@
+ {
+     int fd;
+     unsigned int handle;
++    const struct horizon_pipe *owner;
+     struct horizon_fd_message *next;
+ };
+ 
+@@ -4543,7 +4544,18 @@
+     return -1;
+ }
+ 
+-static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle )
++static const struct horizon_pipe *horizon_fd_client_owner(void)
++{
++    return horizon_pipe_from_fd( get_thread_data()->request_fd );
++}
++
++static const struct horizon_pipe *horizon_fd_server_owner(void)
++{
++    return horizon_server_current ? horizon_server_current->request_pipe : NULL;
++}
++
++static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle,
++                                   const struct horizon_pipe *owner )
+ {
+     struct horizon_fd_message *message = malloc( sizeof(*message) );
+ 
+@@ -4556,6 +4568,7 @@
+ 
+     message->fd = fd;
+     message->handle = handle;
++    message->owner = owner;
+     message->next = NULL;
+ 
+     pthread_mutex_lock( &queue->mutex );
+@@ -4566,7 +4579,8 @@
+     pthread_mutex_unlock( &queue->mutex );
+ }
+ 
+-static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle )
++static void horizon_fd_queue_push_dup( struct horizon_fd_queue *queue, int fd, unsigned int handle,
++                                       const struct horizon_pipe *owner )
+ {
+     int passed_fd = dup( fd );
+ 
+@@ -4576,23 +4590,48 @@
+         exit(1);
+     }
+ 
+-    horizon_fd_queue_push( queue, passed_fd, handle );
++    horizon_fd_queue_push( queue, passed_fd, handle, owner );
++}
++
++static void horizon_fd_queue_report( const char *queue_name, unsigned int skipped, int matched )
++{
++    extern void wine_nx_runtime_trace( const char *msg );
++    static unsigned int reports;
++    char message[160];
++
++    if (__atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) >= 16) return;
++    if (matched)
++        snprintf( message, sizeof(message), "[CARAFE] %s fd: own fd taken past %u of other threads",
++                  queue_name, skipped );
++    else
++        snprintf( message, sizeof(message), "[CARAFE] %s fd: none from this thread, took the oldest of %u",
++                  queue_name, skipped );
++    wine_nx_runtime_trace( message );
+ }
+ 
+-static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, unsigned int *handle )
++static int horizon_fd_queue_pop( struct horizon_fd_queue *queue, const struct horizon_pipe *owner,
++                                 unsigned int *handle, const char *queue_name )
+ {
+-    struct horizon_fd_message *message;
++    struct horizon_fd_message *message, **link;
++    unsigned int skipped = 0;
+     int fd;
+ 
+     pthread_mutex_lock( &queue->mutex );
+     while (!queue->head)
+         horizon_cond_wait_quit( &queue->cond, &queue->mutex );
+ 
+-    message = queue->head;
+-    queue->head = message->next;
+-    if (!queue->head) queue->tail = NULL;
++    for (link = &queue->head; *link && (*link)->owner != owner; link = &(*link)->next) skipped++;
++    if (!*link) link = &queue->head;
++    message = *link;
++    *link = message->next;
++    if (queue->tail == message)
++    {
++        queue->tail = NULL;
++        for (link = &queue->head; *link; link = &(*link)->next) queue->tail = *link;
++    }
+     pthread_mutex_unlock( &queue->mutex );
+ 
++    if (skipped) horizon_fd_queue_report( queue_name, skipped, message->owner == owner );
+     fd = message->fd;
+     if (handle) *handle = message->handle;
+     free( message );
+@@ -4601,12 +4640,12 @@
+ 
+ void horizon_server_queue_fd( int fd, unsigned int handle )
+ {
+-    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle );
++    horizon_fd_queue_push_dup( &horizon_server_to_client_fds, fd, handle, horizon_fd_server_owner() );
+ }
+ 
+ int horizon_server_take_client_fd( unsigned int *handle )
+ {
+-    return horizon_fd_queue_pop( &horizon_client_to_server_fds, handle );
++    return horizon_fd_queue_pop( &horizon_client_to_server_fds, horizon_fd_server_owner(), handle, "client" );
+ }
+ 
+ static int horizon_read_exact( int fd, void *buffer, size_t size )
+@@ -16809,12 +16848,12 @@
+ 
+ void horizon_server_send_fd( int fd )
+ {
+-    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0 );
++    horizon_fd_queue_push_dup( &horizon_client_to_server_fds, fd, 0, horizon_fd_client_owner() );
+ }
+ 
+ int horizon_server_receive_fd( unsigned int *handle )
+ {
+-    return horizon_fd_queue_pop( &horizon_server_to_client_fds, handle );
++    return horizon_fd_queue_pop( &horizon_server_to_client_fds, horizon_fd_client_owner(), handle, "server" );
+ }
+ 
+ #ifndef HORIZON_NO_LIBNX_EXCEPTION_HANDLER

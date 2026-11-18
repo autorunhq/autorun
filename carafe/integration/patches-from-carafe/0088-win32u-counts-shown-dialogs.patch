@@ -1,0 +1,27 @@
+Carafe: win32u counts the dialogs it shows, message boxes among them, in wine_nx_dialogs_shown, so the
+loading screen can step aside when a program asks the player something before it draws anything else.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -4988,6 +4988,10 @@
+ }
+ #endif
+ 
++#ifdef __SWITCH__
++unsigned int wine_nx_dialogs_shown;
++#endif
++
+ static BOOL show_window( HWND hwnd, INT cmd )
+ {
+     WND *win;
+@@ -5015,6 +5019,9 @@
+                          is_iconic( hwnd ) ? ", minimized" : "" );
+         nx_trace_window_words( hwnd );
+     }
++    if (!(style & WS_CHILD) && cmd != SW_HIDE &&
++        get_class_long( hwnd, GCW_ATOM, FALSE ) == LOWORD(DIALOG_CLASS_ATOM))
++        __atomic_add_fetch( &wine_nx_dialogs_shown, 1, __ATOMIC_RELAXED );
+     if (nx_fullscreen && (cmd == SW_SHOW || cmd == SW_SHOWNORMAL || cmd == SW_SHOWDEFAULT))
+         cmd = SW_SHOWMAXIMIZED;
+ #endif

@@ -1,0 +1,95 @@
+Carafe: with BridgeReturn, the WoW64 system-call and unix-call bridge leaves as a return. The guest reaches the bridge
+through a call, and the bridge goes on at the return address that call left on the stack, so the call-return stack
+kept the call's entry: every later return of the outer frames then popped the entry of the frame below it and missed.
+The exit now looks at the top of the call-return stack and, when it holds the return address, pops it and returns to
+its host code; otherwise it leaves the stack alone and takes the lookup as before. Off by default.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -643,6 +643,16 @@
+           "jumps, inserts carry bits with fewer instructions and drops dead NZCV inserts and carry inversions."
+         ]
+       },
++      "BridgeReturn": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "The WoW64 system-call and unix-call bridge, entered by a call and left to the return address, leaves as a",
++          "return: when the top of the call-return stack holds that address it is popped and returned to, so the",
++          "stack stays in step with the guest's calls."
++        ]
++      },
+       "IndirectCallCache": {
+         "Type": "bool",
+         "Default": "false",
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -195,6 +195,16 @@
+     ARMEmitter::ForwardLabel SkipFullLookup;
+     auto RipReg = GetReg(Op->NewRIP);
+ 
++    if (Op->Hint == IR::BranchHint::BridgeReturn) {
++      ARMEmitter::ForwardLabel NotOnTop;
++      ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, REG_CALLRET_SP, 0);
++      sub(TMP1, TMP1, RipReg.X());
++      (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &NotOnTop);
++      add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x10);
++      ret(TMP2);
++      (void)Bind(&NotOnTop);
++    }
++
+     if (Op->Hint == IR::BranchHint::Return) {
+       // First try to pop from the call-ret stack, otherwise follow the normal path (but ending in a ret)
+       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -63,7 +63,9 @@
+   if (Op->TableInfo->Flags & X86Tables::InstFlags::FLAGS_BLOCK_END) {
+     // RIP could have been updated after coming back from the Syscall.
+     NewRIP = _LoadContextGPR(GPRSize, offsetof(FEXCore::Core::CPUState, rip));
+-    ExitFunction(NewRIP);
++    const bool Bridge = BridgeReturnMode() && !IsSyscallInst && !Is64BitMode
++                     && CTX->HostFeatures.HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64;
++    ExitFunction(NewRIP, Bridge ? BranchHint::BridgeReturn : BranchHint::None);
+   }
+ }
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1311,6 +1311,7 @@
+   FEX_CONFIG_OPT(FastStackMode, X87FASTSTACK);
+   FEX_CONFIG_OPT(SinglePrecisionMode, X87SINGLEPRECISION);
+   FEX_CONFIG_OPT(FlagsWithoutFlagMMode, FLAGSWITHOUTFLAGM);
++  FEX_CONFIG_OPT(BridgeReturnMode, BRIDGERETURN);
+ 
+   IR::OpSize X87StackSize() const {
+     return SinglePrecisionMode() ? OpSize::i32Bit : OpSize::i64Bit;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/IR/IRDumper.cpp b/FEXCore/Source/Interface/IR/IRDumper.cpp
+--- a/FEXCore/Source/Interface/IR/IRDumper.cpp
++++ b/FEXCore/Source/Interface/IR/IRDumper.cpp
+@@ -343,6 +343,7 @@
+     case BranchHint::Call: return "Call";
+     case BranchHint::Return: return "Return";
+     case BranchHint::CheckTF: return "CheckTF";
++    case BranchHint::BridgeReturn: return "BridgeReturn";
+     }
+     return "<Unknown Branch Hint>";
+   }();
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/IR/IR.h b/FEXCore/Source/Interface/IR/IR.h
+--- a/FEXCore/Source/Interface/IR/IR.h
++++ b/FEXCore/Source/Interface/IR/IR.h
+@@ -523,7 +523,7 @@
+   ROR,
+ };
+ 
+-enum class BranchHint : uint8_t { None = 0, Call, Return, CheckTF };
++enum class BranchHint : uint8_t { None = 0, Call, Return, CheckTF, BridgeReturn };
+ 
+ 
+ // Converts a size stored as an integer in to an OpSize enum.

@@ -1,0 +1,23 @@
+Carafe: FEX_JUMPTABLES is one more option the runtime passes to FEX; it stays off unless a program turns it on.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/fex_options.h
++++ b/horizon-wine/source/fex_options.h
+@@ -36,6 +36,7 @@
+     NX_FEX_FLAGS_WITHOUT_FLAGM,
+     NX_FEX_INDIRECT_CALL_CACHE,
+     NX_FEX_BRIDGE_RETURN,
++    NX_FEX_JUMP_TABLES,
+     NX_FEX_OPTION_COUNT
+ };
+ 
+@@ -138,6 +139,9 @@
+     { NX_FEX_BRIDGE_RETURN, "FEX_BRIDGERETURN",
+       "The system-call and unix-call bridge leaves as a return, so the call-return stack stays in step.",
+       1, 1, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
++    { NX_FEX_JUMP_TABLES, "FEX_JUMPTABLES",
++      "A switch jumps straight to its cases inside the translated block instead of through the lookup table.",
++      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+ };
+ 
+ static inline int nx_fex_option_choice( const struct nx_fex_option *option, const char *value )

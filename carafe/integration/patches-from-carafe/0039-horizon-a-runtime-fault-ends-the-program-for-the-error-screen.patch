@@ -1,0 +1,46 @@
+Carafe: a fault in the runtime's own code ends the program for the error screen.
+The thread that faulted used to park for good and the game stood still. When carafeErrorNative takes the
+fault, the thread goes on at a quit point on its own stack and asks the program to end, so the runtime gets
+back to the launcher and shows the error screen (0036). A second fault parks as before.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -17617,6 +17617,17 @@
+ 
+ extern __thread volatile int *wine_nx_stop_word;
+ extern void wine_nx_stop_end( void );
++extern _Bool carafeErrorNative( unsigned int esr, unsigned long pc ) __attribute__((weak));
++
++static void horizon_native_failure_exit( void )
++{
++    extern void wine_nx_request_quit( const char *why ) __attribute__((weak));
++    extern void wine_nx_quit_point( void ) __attribute__((weak));
++
++    if (wine_nx_request_quit) wine_nx_request_quit( "the runtime hit an error" );
++    if (wine_nx_quit_point) wine_nx_quit_point();
++    for (;;) svcSleepThread( 1000ULL * 1000ULL * 1000ULL );
++}
+ 
+ void __libnx_exception_handler( ThreadExceptionDump *ctx )
+ {
+@@ -17838,6 +17849,19 @@
+         if ((exception_class == 0x24 || exception_class == 0x25) && !(esr & (1u << 10)) &&
+             wine_nx_box64_handle_fault)
+             wine_nx_box64_handle_fault( (ULONG_PTR)ctx->far.x, (esr >> 6) & 1, ctx->pc.x, x );
++#if defined(__aarch64__)
++        if (carafeErrorNative && carafeErrorNative( (unsigned int)esr, ctx->pc.x ))
++        {
++            snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; ending the program for the error screen",
++                      (unsigned)status );
++            wine_nx_runtime_trace( buf );
++            ctx->sp.x = (ctx->sp.x - 0x400) & ~(u64)15;
++            ctx->fp.x = 0;
++            ctx->lr.x = 0;
++            ctx->pc.x = (ULONG_PTR)horizon_native_failure_exit;
++            horizon_resume_exception( ctx );
++        }
++#endif
+         snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; parking thread", (unsigned)status );
+         wine_nx_runtime_trace( buf );
+         /* Park rather than returning: libnx's exception_returnentry would

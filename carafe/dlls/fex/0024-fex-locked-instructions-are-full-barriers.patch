@@ -1,0 +1,88 @@
+Carafe: an x86 instruction with a lock, and xchg with memory, orders every memory access around it, as on x86.
+Without the atomic instructions of ARMv8.1, which the Switch's Cortex-A57 lacks, FEX built them from an exclusive
+load and store pair, and a later load could be served before the pair's store was seen: a thread that set a flag
+with xchg and then read a queue could read it stale while the other side missed the flag, and the wakeup was lost.
+MIT, as the file it changes.
+
+--- a/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
+@@ -83,6 +83,7 @@
+     // Might have hit the case where ldaxr was hit but stlxr wasn't
+     clrex();
+     (void)Bind(&LoopExpected);
++    dmb(ARMEmitter::BarrierScope::ISH);
+ 
+     // Restore
+     msr(ARMEmitter::SystemRegister::NZCV, TMP1);
+@@ -135,6 +136,7 @@
+     // Might have hit the case where ldaxr was hit but stlxr wasn't
+     clrex();
+     (void)Bind(&LoopExpected);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -164,6 +166,7 @@
+     stlxr(SubEmitSize, TMP4, Src, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     ubfm(EmitSize, GetReg(Node), TMP2, 0, IR::OpSizeAsBits(OpSize) - 1);
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -185,6 +188,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -207,6 +211,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -229,6 +234,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -250,6 +256,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -271,6 +278,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -292,6 +300,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 
+@@ -321,6 +330,7 @@
+     stlxr(SubEmitSize, TMP4, TMP3, MemSrc);
+     (void)cbnz(EmitSize, TMP4, &LoopTop);
+     mov(EmitSize, GetReg(Node), TMP2.R());
++    dmb(ARMEmitter::BarrierScope::ISH);
+   }
+ }
+ 

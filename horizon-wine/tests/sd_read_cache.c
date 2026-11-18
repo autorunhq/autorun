@@ -108,7 +108,7 @@ static void test_end_of_file(void)
 static void test_least_recently_used(void)
 {
     struct sd_cache_pool pool = { .max = 64 };
-    struct fake_file f = make_file( 20LL * SD_CACHE_CHUNK );
+    struct fake_file f = make_file( (SD_CACHE_LINES + 12LL) * SD_CACHE_CHUNK );
     struct sd_cache_file file = { .cacheable = 1 };
     char buf[100];
     unsigned int i, seed = 1;
@@ -117,8 +117,8 @@ static void test_least_recently_used(void)
         assert( cached_read( &file, &pool, &f, (long long)i * SD_CACHE_CHUNK + 7, buf, 10 ) == 10 );
     assert( f.requests == SD_CACHE_LINES );
     assert( cached_read( &file, &pool, &f, 3, buf, 10 ) == 10 && f.requests == SD_CACHE_LINES );
-    /* A ninth chunk replaces chunk 1, the least recently used, not chunk 0. */
-    assert( cached_read( &file, &pool, &f, 8LL * SD_CACHE_CHUNK, buf, 10 ) == 10 );
+    /* One chunk more replaces chunk 1, the least recently used, not chunk 0. */
+    assert( cached_read( &file, &pool, &f, (long long)SD_CACHE_LINES * SD_CACHE_CHUNK, buf, 10 ) == 10 );
     assert( f.requests == SD_CACHE_LINES + 1 && pool.used == SD_CACHE_LINES );
     assert( cached_read( &file, &pool, &f, 11, buf, 10 ) == 10 && f.requests == SD_CACHE_LINES + 1 );
     assert( cached_read( &file, &pool, &f, SD_CACHE_CHUNK, buf, 10 ) == 10 && f.requests == SD_CACHE_LINES + 2 );
@@ -232,7 +232,10 @@ static void test_open_files(void)
     sd_cache_closed( &list, &pool, (void *)4 );
     sd_cache_closed( &list, &pool, (void *)5 );
     sd_cache_closed( &list, &pool, (void *)6 );  /* opened before the cache: unknown */
-    assert( !list && !pool.used );
+    /* The reader's chunk is kept for the next open of the path, once. */
+    assert( !list && pool.kept_count == 1 && pool.used == 1 && sd_cache_same_path( pool.kept->path, grf ) );
+    sd_cache_kept_clear( &pool );
+    assert( !pool.kept && !pool.kept_count && !pool.used );
     free( f.data );
 }
 
@@ -539,6 +542,153 @@ static void test_replay(void)
     assert( ahead.ms <= whole.ms * 1.05 );
 }
 
+/* Doom 3's pattern: a .pk4 opened for a file inside it, its local header and
+ * a body of 2 to 60 KB read, then closed, thousands of times, most of them
+ * near the files read just before (a level's textures and materials are
+ * stored together). Before, every open started with nothing. Replayed with the
+ * chunks kept and without (kept_count forced back to nothing after each close),
+ * costed as test_replay costs the card. */
+struct pk4_result { unsigned long long asked, fetched; unsigned int requests; double ms; };
+
+static void replay_pk4( int keep, struct pk4_result *out )
+{
+    static const char pk4[] = "sdmc:/Roms/Windows/Doom 3/base/pak003.pk4";
+    struct sd_cache_pool pool = { .max = 512 };
+    struct sd_cache_file *list = NULL, *file;
+    struct virtual_file data = { 3, 0, 0 };
+    static char buf[64 * 1024];
+    long long cluster = 0;
+    unsigned int i, seed = 7;
+
+    memset( out, 0, sizeof(*out) );
+    for (i = 0; i < 4000; i++)
+    {
+        long long at, size, done;
+        unsigned int requests = data.requests;
+        unsigned long long bytes = data.bytes;
+
+        seed = seed * 1103515245 + 12345;
+        /* A new cluster now and then; otherwise within 2 MB of it. */
+        if ((seed >> 9) % 16 == 0 || !i)
+            cluster = (long long)((seed * 2654435761u) % (90u * 1024 * 1024)) & ~4095ll;
+        seed = seed * 1103515245 + 12345;
+        at = cluster + (long long)((seed >> 5) % (2u * 1024 * 1024));
+        size = 2048 + (long long)((seed >> 11) % (58 * 1024));
+        assert( (file = sd_cache_opened( &list, &pool, (void *)1, pk4, 0 )) );
+        for (done = -30; done < size; )          /* the 30-byte local header, then the body */
+        {
+            long long piece = done < 0 ? 30 : size - done > 16384 ? 16384 : size - done;
+            long long from = at + (done < 0 ? -30 : done);
+            unsigned int fills = 0;
+
+            assert( sd_cache_read( file, &pool, from, buf, (size_t)piece, virtual_fill, &data, &fills ) == piece );
+            assert( buf[0] == virtual_byte( 3, from ) && buf[piece - 1] == virtual_byte( 3, from + piece - 1 ) );
+            done += piece;
+        }
+        out->asked += (unsigned long long)size + 30;
+        sd_cache_closed( &list, &pool, (void *)1 );
+        if (!keep) sd_cache_kept_clear( &pool );
+        out->ms += (data.requests - requests) * 0.83 + (double)(data.bytes - bytes) / (42.0 * 1024 * 1024) * 1000;
+    }
+    assert( !list );
+    out->fetched = data.bytes;
+    out->requests = data.requests;
+    sd_cache_kept_clear( &pool );
+    assert( !pool.used );
+    free( pool.held );
+}
+
+static void test_pk4_reopened(void)
+{
+    struct pk4_result before, after;
+
+    replay_pk4( 0, &before );
+    replay_pk4( 1, &after );
+    printf( "pk4 opened for each file: %u requests, %.1fx the bytes asked, %.1f s; with chunks kept "
+            "%u requests, %.1fx, %.1f s\n", before.requests, (double)before.fetched / before.asked, before.ms / 1000,
+            after.requests, (double)after.fetched / after.asked, after.ms / 1000 );
+    fflush( stdout );
+    assert( after.fetched * 2 < before.fetched && after.ms * 2 < before.ms );
+}
+
+/* A kept file goes when its path is written, renamed, removed or truncated,
+ * or when another open of it is closed later; at most SD_CACHE_KEPT stay. */
+static void test_kept_invalidated(void)
+{
+    static const char path[] = "sdmc:/game/data.pak";
+    struct sd_cache_pool pool = { .max = 64 };
+    struct fake_file f = make_file( 4 * SD_CACHE_CHUNK );
+    struct sd_cache_file *list = NULL, *a, *b;
+    char buf[16], name[32];
+    unsigned int before, i;
+
+    /* Kept, then taken by the next open: no request for what it held. */
+    a = sd_cache_opened( &list, &pool, (void *)1, path, 0 );
+    assert( cached_read( a, &pool, &f, 100, buf, 10 ) == 10 );
+    sd_cache_closed( &list, &pool, (void *)1 );
+    assert( pool.kept_count == 1 && pool.used == 1 );
+    before = f.requests;
+    a = sd_cache_opened( &list, &pool, (void *)2, "/GAME/DATA.PAK", 0 );
+    assert( !pool.kept && !pool.kept_count && pool.used == 1 && holding( a ) == 1 );
+    assert( cached_read( a, &pool, &f, 200, buf, 10 ) == 10 && f.requests == before );
+    assert( !memcmp( buf, f.data + 200, 10 ) );
+
+    /* Written through another open (shared), with this one closed: dropped. */
+    b = sd_cache_opened( &list, &pool, (void *)3, path, 1 );
+    sd_cache_closed( &list, &pool, (void *)2 );
+    assert( pool.kept_count == 1 );
+    sd_cache_written( list, &pool, path );
+    assert( !pool.kept_count && !pool.used );
+    memset( f.data + 200, 0x55, 10 );
+    sd_cache_closed( &list, &pool, (void *)3 );
+    a = sd_cache_opened( &list, &pool, (void *)4, path, 0 );
+    assert( cached_read( a, &pool, &f, 200, buf, 10 ) == 10 && buf[0] == 0x55 );
+    sd_cache_closed( &list, &pool, (void *)4 );
+
+    /* Renamed, removed or truncated (sd_cache_forget_path): dropped. */
+    assert( pool.kept_count == 1 );
+    sd_cache_forget_path( list, &pool, "sdmc:/game//DATA.pak" );
+    assert( !pool.kept_count && !pool.used );
+
+    /* Two opens closed one after the other: one kept, the newer. */
+    a = sd_cache_opened( &list, &pool, (void *)5, path, 0 );
+    b = sd_cache_opened( &list, &pool, (void *)6, path, 0 );
+    assert( cached_read( a, &pool, &f, 0, buf, 10 ) == 10 );
+    assert( cached_read( b, &pool, &f, SD_CACHE_CHUNK, buf, 10 ) == 10 );
+    sd_cache_closed( &list, &pool, (void *)5 );
+    sd_cache_closed( &list, &pool, (void *)6 );
+    assert( pool.kept_count == 1 && pool.used == 1 && pool.kept->lines[0].start == SD_CACHE_CHUNK );
+    sd_cache_kept_clear( &pool );
+
+    /* A file closed with nothing read is not kept. */
+    a = sd_cache_opened( &list, &pool, (void *)7, path, 0 );
+    sd_cache_closed( &list, &pool, (void *)7 );
+    assert( !pool.kept_count );
+
+    /* No more than SD_CACHE_KEPT, the oldest going first; the pool's limit
+     * still takes kept chunks like any other. */
+    for (i = 0; i <= SD_CACHE_KEPT; i++)
+    {
+        snprintf( name, sizeof(name), "sdmc:/many/%u", i );
+        a = sd_cache_opened( &list, &pool, (void *)8, name, 0 );
+        assert( cached_read( a, &pool, &f, 0, buf, 10 ) == 10 );
+        sd_cache_closed( &list, &pool, (void *)8 );
+    }
+    assert( pool.kept_count == SD_CACHE_KEPT && pool.used == SD_CACHE_KEPT );
+    for (a = pool.kept; a; a = a->next) assert( strcmp( a->path, "sdmc:/many/0" ) );
+    pool.max = 4;
+    sd_cache_trim( &pool );
+    assert( pool.used == 4 && pool.kept_count == SD_CACHE_KEPT );
+    a = sd_cache_opened( &list, &pool, (void *)9, "sdmc:/many/1", 0 );  /* its chunk went to the trim */
+    before = f.requests;
+    assert( cached_read( a, &pool, &f, 0, buf, 10 ) == 10 && f.requests == before + 1 );
+    sd_cache_closed( &list, &pool, (void *)9 );
+    sd_cache_kept_clear( &pool );
+    assert( !list && !pool.used && !pool.kept_count );
+    free( pool.held );
+    free( f.data );
+}
+
 int main(void)
 {
     test_sprite_reads();
@@ -551,8 +701,10 @@ int main(void)
     test_readahead();
     test_replay();
     test_open_files();
+    test_pk4_reopened();
+    test_kept_invalidated();
     puts( "SD read cache: sprite reads, end of file, least recently used, failures, a full pool taking the "
           "oldest chunk of any file, 300 open files, a pool that grows and shrinks with the free heap, "
-          "readahead, and open files a program writes to passed" );
+          "readahead, open files a program writes to, chunks kept after a close and Doom 3's reopened pk4 passed" );
     return 0;
 }

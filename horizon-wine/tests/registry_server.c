@@ -212,6 +212,69 @@ static void test_machine_identity(void)
     }
     puts("Machine identity: NetBIOS/DNS defaults and saved overrides passed");
 }
+/* The DirectShow filters of horizon_directshow_reg.h are in the registry
+ * after every start, found whatever the case of the path, and survive a
+ * restart: what a filter graph reads before it connects a file to the screen. */
+static void test_directshow_filters(void)
+{
+    static const unsigned short categories[] =
+        u"software\\classes\\clsid\\{da4e3da0-d07d-11d0-bd50-00a0c911ce86}\\instance\\{083863f1-70de-11d0-bd40-00a0c911ce86}";
+    static const unsigned short audio[] =
+        u"Software\\Classes\\CLSID\\{DA4E3DA0-D07D-11D0-BD50-00A0C911CE86}\\Instance\\{E0F158E1-CB04-11D0-BD4E-00A0C911CE86}";
+    static const unsigned short *filters[] = {
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{F9D8D64E-A144-47DC-8EE0-F53498372C29}",
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{70E102B0-5556-11CE-97C0-00AA0055595A}",
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{6BC1CFFA-8FC1-4261-AC22-CFB4CC38DB50}",
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{E436EBB5-524F-11CE-9F53-0020AF0BA770}",
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{6A08CF80-0E18-11CF-A24D-0020AFD79767}",
+        u"Software\\Classes\\CLSID\\{083863F1-70DE-11D0-BD40-00A0C911CE86}\\Instance\\{CF49D4E0-1115-11CE-B03A-0020AF0BA770}",
+    };
+    /* Version 2, MERIT_NORMAL - 1, three pins; the first takes a stream. */
+    static const unsigned char splitter_start[] = { 2,0,0,0, 0xff,0xff,0x5f,0, 3,0,0,0, 0,0,0,0, '0','p','i','3' };
+    static const unsigned short merit[] = u"Merit", friendly[] = u"FriendlyName", clsid[] = u"CLSID", data[] = u"FilterData";
+    static const unsigned short category_name[] = u"DirectShow Filters", splitter_name[] = u"GStreamer splitter filter";
+    static const unsigned short splitter_clsid[] = u"{F9D8D64E-A144-47DC-8EE0-F53498372C29}";
+    static const unsigned int normal = 0x600000;
+    unsigned char buffer[512];
+    unsigned int pass, i, len, total, size;
+    struct horizon_reg_key *key;
+    int type;
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        check_value(machine_key(), categories, sizeof(categories) - 2, merit, sizeof(merit) - 2,
+                    HORIZON_REG_DWORD, &normal, sizeof(normal));
+        check_value(machine_key(), categories, sizeof(categories) - 2, friendly, sizeof(friendly) - 2,
+                    HORIZON_REG_SZ, category_name, sizeof(category_name));
+        check_value(machine_key(), audio, sizeof(audio) - 2, merit, sizeof(merit) - 2,
+                    HORIZON_REG_DWORD, &normal, sizeof(normal));
+        for (i = 0; i < sizeof(filters) / sizeof(filters[0]); i++)
+        {
+            for (len = 0; filters[i][len / 2]; len += 2) {}
+            key = open_key(machine_key(), filters[i], len);
+            assert(key);
+            total = size = 0;
+            assert(horizon_reg_get_value(key, data, sizeof(data) - 2, &type, &total, buffer, sizeof(buffer), &size)
+                   == HORIZON_REG_SUCCESS);
+            /* The fixed part and at least the two GUIDs one media type names. */
+            assert(type == HORIZON_REG_BINARY && total == size && size >= 16 + 24 + 16 + 32);
+            assert(buffer[0] == 2 && !buffer[1] && !buffer[2] && !buffer[3]);
+            if (!i) assert(size == 200 && !memcmp(buffer, splitter_start, sizeof(splitter_start)));
+            horizon_reg_release(&horizon_registry, key);
+        }
+        for (len = 0; filters[0][len / 2]; len += 2) {}
+        check_value(machine_key(), filters[0], len, friendly, sizeof(friendly) - 2,
+                    HORIZON_REG_SZ, splitter_name, sizeof(splitter_name));
+        check_value(machine_key(), filters[0], len, clsid, sizeof(clsid) - 2,
+                    HORIZON_REG_SZ, splitter_clsid, sizeof(splitter_clsid));
+        if (!pass)
+        {
+            assert(horizon_registry_flush());
+            reload();
+        }
+    }
+    puts("DirectShow: two categories and six filters registered at start passed");
+}
 static void read_file(const char *path, char *buffer, size_t size)
 {
     FILE *file = fopen(path, "rb");
@@ -480,6 +543,7 @@ int main(void)
     for(i=0;i<handle_count;i++) horizon_server_free_object(handles[i].object);
     test_batching();
     test_machine_identity();
+    test_directshow_filters();
     test_session_key();
     test_save_and_load();
     puts("Registry server: protocol layouts, HKCU identity, COM/audio seeds, truncated replies, notifications and saved hives passed");

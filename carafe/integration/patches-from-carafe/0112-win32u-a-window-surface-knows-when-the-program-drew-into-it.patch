@@ -1,0 +1,56 @@
+Carafe: each drawing into a window surface is collected in a rectangle of its own and added to the surface's
+bounds when the surface is unlocked; when it drew something and the thread is not painting a window's background
+or frame for the system (wine_nx_system_painting, patch 0113), the window driver is told with wine_nx_surface_drawn
+(patch 0108).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/dibdrv/dc.c
++++ b/dlls/win32u/dibdrv/dc.c
+@@ -547,8 +547,16 @@
+     struct dibdrv_physdev *dibdrv;
+     struct window_surface *surface;
+     UINT lock_count;
++#ifdef __SWITCH__
++    RECT drawn, *bounds;
++#endif
+ };
+ 
++#ifdef __SWITCH__
++__thread int wine_nx_system_painting;
++extern void wine_nx_surface_drawn( struct window_surface *surface );
++#endif
++
+ static const struct gdi_dc_funcs window_driver;
+ 
+ static inline struct windrv_physdev *get_windrv_physdev( PHYSDEV dev )
+@@ -566,6 +574,11 @@
+         window_surface_lock( surface );
+         if (IsRectEmpty( dev->dibdrv->bounds ) || !surface->draw_start_ticks)
+             surface->draw_start_ticks = NtGetTickCount();
++#ifdef __SWITCH__
++        reset_bounds( &dev->drawn );
++        dev->bounds = dev->dibdrv->bounds;
++        if (dev->bounds) dev->dibdrv->bounds = &dev->drawn;
++#endif
+     }
+ }
+ 
+@@ -575,7 +588,17 @@
+ 
+     if (!--dev->lock_count)
+     {
+-        DWORD ticks = NtGetTickCount() - surface->draw_start_ticks;
++        DWORD ticks;
++
++#ifdef __SWITCH__
++        dev->dibdrv->bounds = dev->bounds;
++        if (dev->bounds && !IsRectEmpty( &dev->drawn ))
++        {
++            add_bounds_rect( dev->bounds, &dev->drawn );
++            if (!wine_nx_system_painting) wine_nx_surface_drawn( surface );
++        }
++#endif
++        ticks = NtGetTickCount() - surface->draw_start_ticks;
+         window_surface_unlock( surface );
+         if (ticks > FLUSH_PERIOD) window_surface_flush( dev->surface );
+     }

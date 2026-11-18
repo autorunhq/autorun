@@ -1,0 +1,36 @@
+Experimental: the disk cache of translated code is kept apart for each experimental build.
+MIT, as the file it changes.
+
+The cache is keyed by its format, the host CPU and the options, not by the FEX
+that filled it: with FEX options, disk cache on, build 2609-4 ran what 2609-3
+had stored and its own change was never translated. The build script writes
+the version into Interface/Core/ExperimentalBuild.h, and it goes into the key.
+
+diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
+index 8f328bc..f8fb953 100644
+--- a/FEXCore/Source/Interface/Core/DiskCache.cpp
++++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
+@@ -16,6 +16,11 @@
+ #include "FEXCore/fextl/memory.h"
+ #include <cstdint>
+ #include <cstring>
++
++// Experimental: the build script writes this header with the build's version.
++#if __has_include("Interface/Core/ExperimentalBuild.h")
++#include "Interface/Core/ExperimentalBuild.h"
++#endif
+ #include <atomic>
+ 
+ namespace FEXCore {
+@@ -437,6 +442,11 @@ namespace DiskCache {
+     }
+ 
+     fextl::string SerializedConfig = FEXCore::Config::SerializeForCache();
++#ifdef FEX_EXPERIMENTAL_BUILD
++    // Each experimental build translates differently, and code another build
++    // stored would run as that build made it: a cache of its own for each.
++    SerializedConfig += "\nexperimental build " FEX_EXPERIMENTAL_BUILD;
++#endif
+ 
+     struct __attribute__((packed)) {
+       uint16_t FormatVersion;

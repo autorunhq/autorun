@@ -29,12 +29,98 @@
 #include "thread_profile.h"
 
 #define NX_PROF_MAX_THREADS  128
+#define WINE_NX_STOP_SUSPEND 1
+#define WINE_NX_STOP_END     2
+#define WINE_NX_STOP_KERNEL  4
+#define WINE_NX_STOP_HELD    8
+#define WINE_NX_STOP_LEAVING 16
+#define WINE_NX_STOP_GONE    32
 #define NX_PROF_TARGETS      4
 #define NX_PROF_PERIOD_NS    2000000
 #define NX_PROF_MIN_PERMILLE 30  /* sample threads that used at least 3% of a core */
 #define NX_PROF_DEPTH        8
 #define NX_PROF_LINE         1000
 #define NX_PROF_MAX_REQUESTS 1024
+
+#define NX_PROF_BOX64_ESP 14
+#define NX_PROF_BOX64_EBP 15
+
+#define NX_PROF_FEX_STATE             28
+#define NX_PROF_FEX_ESP               8
+#define NX_PROF_FEX_EBP               9
+#define NX_PROF_FEX_BLOCK_MAX         0x1000000
+#define NX_PROF_FEX_SCAN_MAX          0x40000
+#define NX_PROF_FEX_TAIL_SIZE         32
+#define NX_PROF_FEX_TAIL_RIP          8
+#define NX_PROF_FEX_TAIL_ENTRIES      24
+#define NX_PROF_FEX_TAIL_ENTRY_OFFSET 28
+#define NX_PROF_FEX_FRAME_SIZE        3776
+#define NX_PROF_FEX_FALLBACKS         1640
+#define NX_PROF_FEX_FALLBACK_COUNT    47
+#define NX_PROF_FEX_LOOP_TOP          2912
+#define NX_PROF_FEX_LOOP_TOP_FILL     2920
+#define NX_PROF_FEX_LINKER            2944
+#define NX_PROF_FEX_SIGILL            2968
+#define NX_PROF_FEX_LUDIV             3016
+#define NX_PROF_FEX_SIN               3032
+#define NX_PROF_FEX_DISPATCHER_SIZE   0x4000
+#define NX_PROF_FEX_STORE_HEADER      0xf9000380u
+
+enum nx_prof_fex_part
+{
+    NX_PROF_FEX_ENTRY,
+    NX_PROF_FEX_LOOKUP,
+    NX_PROF_FEX_LINK,
+    NX_PROF_FEX_DIVIDE,
+    NX_PROF_FEX_X87,
+    NX_PROF_FEX_FALLBACK,
+    NX_PROF_FEX_DISPATCHER,
+    NX_PROF_FEX_PARTS
+};
+
+#define NX_PROF_JIT_PCS       16384
+#define NX_PROF_JIT_BLOCKS    256
+#define NX_PROF_JIT_FIRST     20000
+#define NX_PROF_JIT_HOST_MAX  0x10000
+#define NX_PROF_JIT_GUEST_MAX 0x2000
+#define NX_PROF_JIT_FILE      "sdmc:/switch/wine/logs/jit-blocks.txt"
+
+static size_t nx_prof_vl64pair_size( uint8_t type )
+{
+    if (!(type & 0x80)) return 1;
+    if ((type & 0xc0) == 0x80) return 2;
+    return type == 0xc0 ? 9 : 17;
+}
+
+static size_t nx_prof_vl64pair( const uint8_t *data, uint64_t *arm, uint64_t *rip )
+{
+    uint8_t type = data[0];
+    int32_t arm32, rip32;
+
+    if (!(type & 0x80))
+    {
+        *arm = (uint64_t)((type & 0xf) + 1) << 2;
+        *rip = ((type >> 4) & 7) + 1;
+        return 1;
+    }
+    if ((type & 0xc0) == 0x80)
+    {
+        *arm = (uint64_t)((int64_t)(int8_t)data[1] * 4);
+        *rip = (uint64_t)(int64_t)((int8_t)(uint8_t)(type << 2) >> 2);
+        return 2;
+    }
+    if (type == 0xc0)
+    {
+        memcpy( &arm32, data + 1, sizeof(arm32) );
+        memcpy( &rip32, data + 5, sizeof(rip32) );
+        *arm = (uint64_t)(int64_t)arm32;
+        *rip = (uint64_t)(int64_t)rip32;
+        return 9;
+    }
+    memcpy( arm, data + 1, sizeof(*arm) );
+    memcpy( rip, data + 9, sizeof(*rip) );
+    return 17;
+}
 
 extern void wine_nx_runtime_trace( const char *msg );
 extern int wine_nx_box64_pc_to_x86( uintptr_t pc, uintptr_t *x86 ) __attribute__((weak));
@@ -67,7 +153,10 @@ struct nx_prof_thread
     s32 app_core, app_priority;
     u64 app_mask;
     uint64_t teb;
-    uint64_t last_ticks, balance_ticks;
+    uint64_t last_ticks, balance_ticks, orchestrator_ticks;
+    volatile int stop[2];
+    const void * volatile frame;
+    const void * volatile changed_contexts;
 };
 
 /* horizon.c: a moved Wine thread's server connection thread follows it. */
@@ -75,6 +164,7 @@ extern void horizon_follow_thread_cores( void *teb, unsigned int mask ) __attrib
 static __thread int affinity_fixed;
 int wine_nx_balance_enabled = 1;
 static int four_cores_enabled;
+static u32 reserved_cores;
 
 struct nx_prof_row
 {
@@ -94,8 +184,16 @@ struct nx_prof_target
     uint64_t teb;
     uint32_t samples, missed;
     uint32_t kinds[NX_PROF_KINDS];
+    uint32_t fex_parts[NX_PROF_FEX_PARTS];
     struct nx_prof_table tables[NX_PROF_TABLES];
+    struct nx_prof_table stages;
+    uint32_t rooted;
 };
+
+#define NX_PROF_STAGE_DEPTH  64
+#define NX_PROF_STAGE_LEVELS 8
+#define NX_PROF_STAGE_SHOWN  3
+#define NX_PROF_FRAME_CACHE  256
 
 static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct nx_prof_thread registry[NX_PROF_MAX_THREADS];
@@ -107,6 +205,15 @@ static int profiling;
 /* The runtime's image: __start__ is an absolute 0, so the base comes from the
  * kernel's view of the code mapping. */
 static uintptr_t runtime_base, runtime_end;
+static struct nx_prof_table jit_blocks;
+static struct nx_prof_bucket jit_pcs[NX_PROF_JIT_PCS];
+static uint32_t jit_samples, jit_next_dump = NX_PROF_JIT_FIRST;
+
+__thread volatile int *wine_nx_stop_word;
+__thread const void *wine_nx_kernel_frame;
+static __thread struct nx_prof_thread *self_thread;
+
+extern int horizon_futex_wait( const int *addr, int value, long long timeout_ns );
 
 extern Result __real_svcSetThreadCoreMask( Handle handle, s32 core, u32 mask );
 
@@ -170,8 +277,9 @@ static int migrate_shader_locked( struct nx_prof_thread *thread )
     s32 previous_core;
 
     if (thread->fixed || thread->migratable) return 0;
-    if (R_FAILED( svcGetInfo( &mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 ) ) || !(mask &= 7) ||
-        R_FAILED( svcGetThreadCoreMask( &previous_core, &previous_mask, thread->handle ) ) ||
+    if (R_FAILED( svcGetInfo( &mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 ) ) || !(mask &= 7)) return -1;
+    if (mask & ~reserved_cores) mask &= ~reserved_cores;
+    if (R_FAILED( svcGetThreadCoreMask( &previous_core, &previous_mask, thread->handle ) ) ||
         R_FAILED( svcSetThreadCoreMask( thread->handle, -1, mask ) )) return -1;
     thread->app_core = previous_core;
     thread->app_mask = previous_mask;
@@ -316,7 +424,10 @@ void wine_nx_thread_register( char kind, unsigned int tid, void *teb )
         registry[slot].core = core;
         registry[slot].teb = (uintptr_t)teb;
         registry[slot].fixed = affinity_fixed;
-        registry[slot].last_ticks = registry[slot].balance_ticks = thread_ticks( handle );
+        registry[slot].last_ticks = registry[slot].balance_ticks = registry[slot].orchestrator_ticks =
+            thread_ticks( handle );
+        wine_nx_stop_word = registry[slot].stop;
+        self_thread = &registry[slot];
         if (kind == 'c')
         {
             snprintf( registry[slot].name, sizeof(registry[slot].name), "compositor" );
@@ -382,7 +493,14 @@ void wine_nx_thread_unregister( void )
 
     pthread_mutex_lock( &registry_mutex );
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
-        if (registry[i].handle == handle) registry[i].handle = 0;
+        if (registry[i].handle == handle)
+        {
+            __atomic_fetch_or( &registry[i].stop[0], WINE_NX_STOP_GONE, __ATOMIC_SEQ_CST );
+            svcSignalToAddress( (void *)&registry[i].stop[0], SignalType_Signal, 0, -1 );
+            registry[i].handle = 0;
+        }
+    wine_nx_stop_word = NULL;
+    self_thread = NULL;
     pthread_mutex_unlock( &registry_mutex );
     pthread_mutex_lock( &profile_mutex );
     for (i = 0; i < NX_PROF_TARGETS; i++)
@@ -393,6 +511,243 @@ void wine_nx_thread_unregister( void )
 static int in_runtime( uint64_t address )
 {
     return address - runtime_base < runtime_end - runtime_base;
+}
+
+int wine_nx_thread_stop_request( const void *teb, unsigned int tid, int set, int clear, int code, Handle *handle )
+{
+    unsigned int i;
+    int found = 0;
+
+    if (!teb) return 0;
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS && !found; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+
+        if (!thread->handle || thread->teb != (uintptr_t)teb || thread->tid != tid) continue;
+        if (set & WINE_NX_STOP_END) thread->stop[1] = code;
+        if (set) __atomic_fetch_or( &thread->stop[0], set, __ATOMIC_SEQ_CST );
+        if (clear) __atomic_fetch_and( &thread->stop[0], ~clear, __ATOMIC_SEQ_CST );
+        svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
+        if (handle) *handle = thread->handle;
+        found = 1;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return found;
+}
+
+static int stop_state( struct nx_prof_thread *thread )
+{
+    return __atomic_load_n( &thread->stop[0], __ATOMIC_SEQ_CST );
+}
+
+static void stop_signal( struct nx_prof_thread *thread )
+{
+    svcSignalToAddress( (void *)&thread->stop[0], SignalType_Signal, 0, -1 );
+}
+
+static void wait_while_held( struct nx_prof_thread *thread )
+{
+    int state;
+
+    while (((state = stop_state( thread )) & WINE_NX_STOP_HELD) && !(state & WINE_NX_STOP_END))
+        horizon_futex_wait( (const int *)&thread->stop[0], state, -1 );
+}
+
+static const void *take_changed( struct nx_prof_thread *thread )
+{
+    if (!__atomic_load_n( &thread->changed_contexts, __ATOMIC_ACQUIRE )) return NULL;
+    return __atomic_exchange_n( &thread->changed_contexts, NULL, __ATOMIC_SEQ_CST );
+}
+
+const void *wine_nx_kernel_enter( const void *frame )
+{
+    struct nx_prof_thread *thread = self_thread;
+    int state, next;
+
+    if (!thread) return NULL;
+    if (!frame)
+    {
+        __atomic_fetch_and( &thread->stop[0], ~WINE_NX_STOP_LEAVING, __ATOMIC_SEQ_CST );
+        return NULL;
+    }
+    __atomic_store_n( &thread->frame, frame, __ATOMIC_SEQ_CST );
+    state = stop_state( thread );
+    do
+    {
+        next = (state | WINE_NX_STOP_KERNEL) & ~WINE_NX_STOP_LEAVING;
+        if ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END)) next |= WINE_NX_STOP_HELD;
+    } while (!__atomic_compare_exchange_n( &thread->stop[0], &state, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
+    if (!(next & WINE_NX_STOP_HELD)) return NULL;
+    stop_signal( thread );
+    wait_while_held( thread );
+    return take_changed( thread );
+}
+
+const void *wine_nx_kernel_leave( void )
+{
+    struct nx_prof_thread *thread = self_thread;
+    int state, next;
+
+    if (!thread) return NULL;
+    state = stop_state( thread );
+    for (;;)
+    {
+        if ((state & WINE_NX_STOP_HELD) && !(state & WINE_NX_STOP_END))
+        {
+            wait_while_held( thread );
+            state = stop_state( thread );
+            continue;
+        }
+        if ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END)) next = state | WINE_NX_STOP_HELD;
+        else next = (state & ~(WINE_NX_STOP_KERNEL | WINE_NX_STOP_HELD)) | WINE_NX_STOP_LEAVING;
+        if (!__atomic_compare_exchange_n( &thread->stop[0], &state, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+            continue;
+        if (!(next & WINE_NX_STOP_HELD)) break;
+        stop_signal( thread );
+        state = next;
+    }
+    return take_changed( thread );
+}
+
+int wine_nx_suspend_requested( void )
+{
+    return self_thread && (stop_state( self_thread ) & WINE_NX_STOP_SUSPEND);
+}
+
+static struct nx_prof_thread *registered_locked( const void *teb, unsigned int tid )
+{
+    unsigned int i;
+
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+        if (registry[i].handle && registry[i].teb == (uintptr_t)teb && registry[i].tid == tid) return &registry[i];
+    return NULL;
+}
+
+int wine_nx_thread_state( const void *teb, unsigned int tid, const void **frame )
+{
+    struct nx_prof_thread *thread;
+    int state = -1;
+
+    if (!teb) return -1;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        state = stop_state( thread );
+        if (frame) *frame = thread->frame;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return state;
+}
+
+int wine_nx_thread_hold( const void *teb, unsigned int tid, const void **frame, int *changed )
+{
+    struct nx_prof_thread *thread;
+    int state, held = 0;
+
+    if (!teb) return 0;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        state = stop_state( thread );
+        while ((state & WINE_NX_STOP_SUSPEND) && !(state & WINE_NX_STOP_END))
+        {
+            if (state & WINE_NX_STOP_HELD) held = 1;
+            else if (!(state & WINE_NX_STOP_KERNEL)) break;
+            else if (__atomic_compare_exchange_n( &thread->stop[0], &state, state | WINE_NX_STOP_HELD, 0,
+                                                  __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
+            {
+                stop_signal( thread );
+                held = 1;
+            }
+            if (held) break;
+        }
+        if (held)
+        {
+            *frame = thread->frame;
+            *changed = __atomic_load_n( &thread->changed_contexts, __ATOMIC_SEQ_CST ) != NULL;
+        }
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return held;
+}
+
+void wine_nx_thread_signal( const void *teb, unsigned int tid )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        __atomic_fetch_or( &thread->stop[0], WINE_NX_STOP_HELD, __ATOMIC_SEQ_CST );
+        stop_signal( thread );
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
+
+void wine_nx_thread_release( const void *teb, unsigned int tid, const void *changed )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    if ((thread = registered_locked( teb, tid )))
+    {
+        if (changed) __atomic_store_n( &thread->changed_contexts, changed, __ATOMIC_SEQ_CST );
+        __atomic_fetch_and( &thread->stop[0], ~WINE_NX_STOP_HELD, __ATOMIC_SEQ_CST );
+        stop_signal( thread );
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
+
+void wine_nx_thread_wait_change( const void *teb, unsigned int tid, int observed )
+{
+    struct nx_prof_thread *thread;
+
+    if (!teb) return;
+    pthread_mutex_lock( &registry_mutex );
+    thread = registered_locked( teb, tid );
+    pthread_mutex_unlock( &registry_mutex );
+    if (thread) horizon_futex_wait( (const int *)&thread->stop[0], observed, 20000000LL );
+}
+
+int wine_nx_stop_state( int *code )
+{
+    volatile int *word = wine_nx_stop_word;
+
+    if (!word) return 0;
+    if (code) *code = word[1];
+    return __atomic_load_n( word, __ATOMIC_ACQUIRE );
+}
+
+void wine_nx_stop_sleep( s64 ns )
+{
+    volatile int *word = wine_nx_stop_word;
+    int value;
+
+    if (!word) svcSleepThread( ns );
+    else if (!((value = __atomic_load_n( word, __ATOMIC_ACQUIRE )) & WINE_NX_STOP_END))
+        svcWaitForAddress( (void *)word, ArbitrationType_WaitIfEqual, value, ns );
+}
+
+int wine_nx_in_runtime_code( uint64_t address )
+{
+    MemoryInfo info;
+    u32 page;
+
+    if (!runtime_end)
+    {
+        if (R_FAILED( svcQueryMemory( &info, &page, (u64)(uintptr_t)&wine_nx_in_runtime_code ) )) return 1;
+        runtime_base = info.addr;
+        runtime_end = (uintptr_t)__end__;
+    }
+    return in_runtime( address );
+}
+
+int wine_nx_thread_pause_granted( void )
+{
+    return envIsSyscallHinted( 0x32 ) && envIsSyscallHinted( 0x33 );
 }
 
 static uint64_t read_word( uint64_t address )
@@ -431,26 +786,328 @@ static unsigned int walk_callers( const ThreadContext *ctx, uint64_t *callers )
                             read_word, callers, NX_PROF_DEPTH );
 }
 
-static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
+#define CARAFE_SCAN_WORDS 512
+
+static int image_at( uint64_t address, void **base, char *name, size_t size );
+
+static unsigned int copy_stack( const ThreadContext *ctx, uint64_t *words )
+{
+    MemoryInfo info;
+    uint64_t at, end;
+    unsigned int count = 0;
+
+    if (!readable( ctx->sp, &info )) return 0;
+    end = info.addr + info.size;
+    for (at = ctx->sp & ~7ull; at + 8 <= end && count < CARAFE_SCAN_WORDS; at += 8) words[count++] = read_word( at );
+    return count;
+}
+
+static int in_code( uint64_t address, MemoryInfo *last )
+{
+    u32 page;
+
+    if (address >= last->addr && address - last->addr < last->size) return (last->perm & Perm_X) != 0;
+    if (R_FAILED( svcQueryMemory( last, &page, address ) ) || address < last->addr)
+    {
+        last->addr = last->size = 0;
+        return 0;
+    }
+    return (last->perm & Perm_X) != 0;
+}
+
+static int after_call( uint64_t address, MemoryInfo *last )
+{
+    uint32_t insn;
+    char name[8];
+    void *base;
+
+    if ((address & 3) || address < 0x10000 || !in_code( address - 4, last )) return 0;
+    insn = read_word32( address - 4 );
+    if ((insn & 0xfc000000) != 0x94000000 && (insn & 0xfffffc1f) != 0xd63f0000) return 0;
+    return image_at( address, &base, name, sizeof(name) );
+}
+
+static unsigned int pick_calls( const uint64_t *words, unsigned int count, uint64_t *callers )
+{
+    MemoryInfo last = { 0 };
+    unsigned int i, picked = 0;
+
+    for (i = 0; i < count && picked < NX_PROF_DEPTH; i++)
+        if (after_call( words[i], &last ) && (!picked || callers[picked - 1] != words[i])) callers[picked++] = words[i];
+    return picked;
+}
+
+static int fex_x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
+{
+    MemoryInfo info;
+    uint64_t thread, frame;
+    uint32_t control;
+
+    if (!readable_size( teb + NX_PROF_TEB_FEX_THREAD, 2 * sizeof(uint64_t), &info )) return 0;
+    thread = read_word( teb + NX_PROF_TEB_FEX_THREAD );
+    control = read_word32( teb + NX_PROF_TEB_FEX_CONTROL );
+    if (!thread || (control & (NX_PROF_FEX_IN_JIT | NX_PROF_FEX_AREA_DIRTY))) return 0;
+    if (!readable_size( thread, sizeof(uint64_t), &info )) return 0;
+    frame = read_word( thread );
+    if (frame <= thread || frame >= thread + NX_PROF_FEX_THREAD_SPAN) return 0;
+    if (!readable_size( frame, NX_PROF_FEX_GREGS + (NX_PROF_FEX_REG_EBP + 1) * sizeof(uint64_t), &info )) return 0;
+    *eip = (uint32_t)read_word( frame + NX_PROF_FEX_RIP );
+    *esp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_ESP * sizeof(uint64_t) );
+    *ebp = (uint32_t)read_word( frame + NX_PROF_FEX_GREGS + NX_PROF_FEX_REG_EBP * sizeof(uint64_t) );
+    return read_word32( teb + NX_PROF_TEB_FEX_CONTROL ) == control;
+}
+
+static int x86_registers( uint64_t teb, uint32_t *eip, uint32_t *esp, uint32_t *ebp )
 {
     MemoryInfo info;
     uint64_t cpu, context;
 
-    if (!teb || !(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
+    if (!teb || !readable_size( teb + NX_PROF_TEB_CPU_AREA, sizeof(uint64_t), &info )) return 0;
+    if (!(cpu = read_word( teb + NX_PROF_TEB_CPU_AREA ))) return 0;
     context = cpu + NX_PROF_CPU_CONTEXT;
-    if (!readable( read_word32( context + NX_PROF_I386_ESP ), &info )) return 0;
-    return nx_prof_x86_callers( read_word32( context + NX_PROF_I386_ESP ), read_word32( context + NX_PROF_I386_EBP ),
-                                info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+    if (!readable_size( cpu, NX_PROF_CPU_CONTEXT + NX_PROF_I386_ESP + sizeof(uint32_t), &info )) return 0;
+    if (*(const uint16_t *)(uintptr_t)(cpu + NX_PROF_CPU_MACHINE) != NX_PROF_MACHINE_I386) return 0;
+    if (fex_x86_registers( teb, eip, esp, ebp )) return 1;
+    *eip = 0;
+    *esp = read_word32( context + NX_PROF_I386_ESP );
+    *ebp = read_word32( context + NX_PROF_I386_EBP );
+    return 1;
+}
+
+static unsigned int walk_x86( uint64_t teb, uint32_t *callers )
+{
+    MemoryInfo info;
+    uint32_t eip, esp, ebp;
+
+    if (!x86_registers( teb, &eip, &esp, &ebp ) || !readable( esp, &info )) return 0;
+    return nx_prof_x86_callers( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
 }
 
 /* Inside translated code, the x86 frame chain from the guest's EBP and ESP. */
-static unsigned int walk_x86_frames( const ThreadContext *ctx, uint32_t *callers )
+static unsigned int walk_x86_frames( const ThreadContext *ctx, unsigned int esp_reg, unsigned int ebp_reg,
+                                     uint32_t *callers )
 {
-    uint32_t esp = (uint32_t)ctx->cpu_gprs[14].x, ebp = (uint32_t)ctx->cpu_gprs[15].x;
+    uint32_t esp = (uint32_t)ctx->cpu_gprs[esp_reg].x, ebp = (uint32_t)ctx->cpu_gprs[ebp_reg].x;
     MemoryInfo info;
 
     if (!readable( esp, &info )) return 0;
     return nx_prof_x86_frames( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+}
+
+static unsigned int walk_x86_root( uint32_t esp, uint32_t ebp, uint32_t *chain, int *rooted )
+{
+    MemoryInfo info;
+    uint64_t lo, hi;
+    unsigned int n = 0;
+
+    *rooted = 0;
+    if (!readable( esp, &info )) return 0;
+    lo = info.addr;
+    hi = info.addr + info.size;
+    while (n < NX_PROF_STAGE_DEPTH && ebp >= lo && ebp >= esp && (uint64_t)ebp + 8 <= hi && !(ebp & 3))
+    {
+        uint32_t next = read_word32( ebp ), ret = read_word32( (uint64_t)ebp + 4 );
+
+        if (ret) chain[n++] = ret;
+        if (!next || (uint64_t)next + 8 > hi)
+        {
+            *rooted = 1;
+            break;
+        }
+        if (next <= ebp) break;
+        ebp = next;
+    }
+    return n;
+}
+
+static unsigned int stage_chain( const struct nx_prof_target *target, const ThreadContext *ctx, int translated,
+                                 int fex, uint32_t *chain )
+{
+    uint32_t eip, esp, ebp;
+    unsigned int n;
+    int rooted;
+
+    if (fex)
+    {
+        esp = (uint32_t)ctx->cpu_gprs[NX_PROF_FEX_ESP].x;
+        ebp = (uint32_t)ctx->cpu_gprs[NX_PROF_FEX_EBP].x;
+    }
+    else if (translated)
+    {
+        esp = (uint32_t)ctx->cpu_gprs[NX_PROF_BOX64_ESP].x;
+        ebp = (uint32_t)ctx->cpu_gprs[NX_PROF_BOX64_EBP].x;
+    }
+    else if (!x86_registers( target->teb, &eip, &esp, &ebp )) return 0;
+    n = walk_x86_root( esp, ebp, chain, &rooted );
+    return rooted ? n : 0;
+}
+
+static int game_frame( uint32_t address )
+{
+    static struct { uint32_t address; int game; } seen[NX_PROF_FRAME_CACHE];
+    unsigned int slot = (address >> 2) % NX_PROF_FRAME_CACHE;
+    char module[64];
+    void *base;
+
+    if (seen[slot].address != address)
+    {
+        seen[slot].game = image_at( address, &base, module, sizeof(module) ) && !module[0];
+        seen[slot].address = address;
+    }
+    return seen[slot].game;
+}
+
+static unsigned int game_anchor( const uint32_t *chain, unsigned int n )
+{
+    unsigned int anchor;
+
+    for (anchor = n; anchor > 0; anchor--)
+        if (game_frame( chain[anchor - 1] )) break;
+    return anchor;
+}
+
+static void add_stages( struct nx_prof_target *target, const uint32_t *chain, unsigned int anchor )
+{
+    unsigned int level;
+
+    target->rooted++;
+    for (level = 1; level <= NX_PROF_STAGE_LEVELS && level <= anchor; level++)
+        nx_prof_add( &target->stages, ((uint64_t)level << 32) | chain[anchor - level] );
+}
+
+static int fex_block_pc_to_x86( uint64_t block, uint64_t pc, uintptr_t *x86 )
+{
+    uint64_t tail, host, guest, entry, end;
+    uint32_t entries, i;
+    MemoryInfo info;
+
+    if (pc < block || pc - block >= NX_PROF_FEX_BLOCK_MAX || !readable_size( block, sizeof(uint32_t), &info ))
+        return 0;
+    tail = block + read_word32( block );
+    if (!readable_size( tail, NX_PROF_FEX_TAIL_SIZE, &info ) || pc - block >= read_word( tail )) return 0;
+    host = block;
+    guest = read_word( tail + NX_PROF_FEX_TAIL_RIP );
+    entries = read_word32( tail + NX_PROF_FEX_TAIL_ENTRIES );
+    entry = tail + read_word32( tail + NX_PROF_FEX_TAIL_ENTRY_OFFSET );
+    end = entry;
+    for (i = 0; i < entries; i++)
+    {
+        uint64_t arm, rip;
+        size_t size;
+
+        if (entry >= end)
+        {
+            if (!readable( entry, &info )) return 0;
+            end = info.addr + info.size;
+        }
+        size = nx_prof_vl64pair_size( *(const uint8_t *)(uintptr_t)entry );
+        if (end - entry < size) return 0;
+        nx_prof_vl64pair( (const uint8_t *)(uintptr_t)entry, &arm, &rip );
+        if (pc < host + arm) break;
+        host += arm;
+        guest += rip;
+        entry += size;
+    }
+    *x86 = guest;
+    return 1;
+}
+
+static void jit_pc_add( uint64_t pc )
+{
+    unsigned int start = (unsigned int)((pc * 0x9e3779b97f4a7c15ull) >> 50), i;
+
+    for (i = 0; i < NX_PROF_PROBES; i++)
+    {
+        struct nx_prof_bucket *bucket = &jit_pcs[(start + i) & (NX_PROF_JIT_PCS - 1)];
+
+        if (bucket->count && bucket->key != pc) continue;
+        bucket->key = pc;
+        bucket->count++;
+        return;
+    }
+}
+
+static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86, uint64_t *start )
+{
+    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x;
+    MemoryInfo info;
+
+    if (in_runtime( pc ) || !readable_size( state, sizeof(uint64_t), &info )) return 0;
+    *start = read_word( state );
+    return fex_block_pc_to_x86( *start, pc, x86 );
+}
+
+static int fex_entry_to_x86( uint64_t pc, uintptr_t *x86, uint64_t *start )
+{
+    uint64_t at = pc;
+    uint32_t word;
+    int64_t offset;
+    MemoryInfo info;
+
+    if (in_runtime( pc ) || !readable_size( pc, sizeof(uint32_t), &info )) return 0;
+    word = read_word32( pc );
+    if (word == NX_PROF_FEX_STORE_HEADER)
+    {
+        if (pc - 4 < info.addr) return 0;
+        at = pc - 4;
+        word = read_word32( at );
+    }
+    if ((word & 0x9f00001fu) != 0x10000000u) return 0;
+    offset = (int64_t)((((word >> 5) & 0x7ffff) << 2) | ((word >> 29) & 3));
+    if (offset & 0x100000) offset -= 0x200000;
+    if (offset >= 0) return 0;
+    *start = at + offset;
+    return fex_block_pc_to_x86( *start, pc, x86 );
+}
+
+static int fex_scan_to_x86( uint64_t pc, uintptr_t *x86, uint64_t *start )
+{
+    uint64_t at, low;
+    uint32_t word;
+    int64_t offset;
+    MemoryInfo info;
+
+    if (in_runtime( pc ) || !readable_size( pc, sizeof(uint32_t), &info )) return 0;
+    low = pc - info.addr > NX_PROF_FEX_SCAN_MAX ? pc - NX_PROF_FEX_SCAN_MAX : info.addr;
+    for (at = (pc & ~3ull) - 4; at >= low && at + 8 <= info.addr + info.size; at -= 4)
+    {
+        if (read_word32( at + 4 ) != NX_PROF_FEX_STORE_HEADER) continue;
+        word = read_word32( at );
+        if ((word & 0x9f00001fu) != 0x10000000u) continue;
+        offset = (int64_t)((((word >> 5) & 0x7ffff) << 2) | ((word >> 29) & 3));
+        if (offset & 0x100000) offset -= 0x200000;
+        if (offset >= 0) continue;
+        if (fex_block_pc_to_x86( at + offset, pc, x86 ))
+        {
+            *start = at + offset;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fex_dispatcher_part( const ThreadContext *ctx )
+{
+    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x, fill, fallback = ~0ull, handler;
+    MemoryInfo info;
+    unsigned int i;
+
+    if (in_runtime( pc ) || !readable_size( state, NX_PROF_FEX_FRAME_SIZE, &info )) return -1;
+    fill = read_word( state + NX_PROF_FEX_LOOP_TOP_FILL );
+    if (!fill || pc + 0x100 < fill || pc + 0x100 - fill >= NX_PROF_FEX_DISPATCHER_SIZE) return -1;
+    for (i = 0; i < NX_PROF_FEX_FALLBACK_COUNT; i++)
+    {
+        handler = read_word( state + NX_PROF_FEX_FALLBACKS + i * 16 );
+        if (handler > fill && handler < fallback) fallback = handler;
+    }
+    if (pc >= fallback) return NX_PROF_FEX_FALLBACK;
+    if (pc >= read_word( state + NX_PROF_FEX_SIN )) return NX_PROF_FEX_X87;
+    if (pc >= read_word( state + NX_PROF_FEX_LUDIV )) return NX_PROF_FEX_DIVIDE;
+    if (pc >= read_word( state + NX_PROF_FEX_LINKER ) && pc < read_word( state + NX_PROF_FEX_SIGILL ))
+        return NX_PROF_FEX_LINK;
+    if (pc >= read_word( state + NX_PROF_FEX_LOOP_TOP ) && pc < read_word( state + NX_PROF_FEX_LINKER ))
+        return NX_PROF_FEX_LOOKUP;
+    return NX_PROF_FEX_DISPATCHER;
 }
 
 static void record( struct nx_prof_target *target, const ThreadContext *ctx, int translated, uintptr_t x86,
@@ -505,9 +1162,13 @@ static void sampler( void *arg )
 {
     uint64_t callers[NX_PROF_DEPTH];
     uint32_t x86_callers[NX_PROF_DEPTH];
+    uint32_t stage_chains[NX_PROF_TARGETS][NX_PROF_STAGE_DEPTH];
+    unsigned int stage_counts[NX_PROF_TARGETS], stage_anchors[NX_PROF_TARGETS];
+    Handle stage_handles[NX_PROF_TARGETS];
     unsigned int i, tries, count, x86_count;
     uintptr_t x86 = 0;
-    int translated;
+    uint64_t block = 0;
+    int translated, fex, part;
 
     (void)arg;
     for (;;)
@@ -516,6 +1177,7 @@ static void sampler( void *arg )
         /* It reads other threads' stacks and contexts, so it must stop before
          * they and the memory they ran in are taken away. */
         if (&wine_nx_quit_requested && wine_nx_quit_requested) break;
+        memset( stage_counts, 0, sizeof(stage_counts) );
         pthread_mutex_lock( &profile_mutex );
         for (i = 0; i < NX_PROF_TARGETS; i++)
         {
@@ -523,6 +1185,7 @@ static void sampler( void *arg )
             ThreadContext ctx;
             Result rc;
 
+            stage_handles[i] = 0;
             if (!target->handle) continue;
             if (R_FAILED( svcSetThreadActivity( target->handle, ThreadActivity_Paused ) ))
             {
@@ -533,18 +1196,40 @@ static void sampler( void *arg )
             for (tries = 0; R_FAILED( rc = svcGetThreadContext3( &ctx, target->handle ) ) && tries < 4; tries++)
                 svcSleepThread( 0 );
             count = x86_count = 0;
-            translated = 0;
+            translated = fex = 0;
             if (R_SUCCEEDED( rc ))
             {
                 count = walk_callers( &ctx, callers );
                 if (&wine_nx_box64_pc_to_x86) translated = wine_nx_box64_pc_to_x86( ctx.pc.x, &x86 );
-                x86_count = translated ? walk_x86_frames( &ctx, x86_callers ) :
-                                          walk_x86( target->teb, x86_callers );
+                if (!translated) translated = fex = fex_pc_to_x86( &ctx, &x86, &block );
+                part = -1;
+                if (!translated && (translated = fex = fex_entry_to_x86( ctx.pc.x, &x86, &block ))) part = NX_PROF_FEX_ENTRY;
+                if (!translated) translated = fex = fex_scan_to_x86( ctx.pc.x, &x86, &block );
+                if (!translated) part = fex_dispatcher_part( &ctx );
+                if (part >= 0) target->fex_parts[part]++;
+                x86_count = fex ? walk_x86_frames( &ctx, NX_PROF_FEX_ESP, NX_PROF_FEX_EBP, x86_callers ) :
+                            translated ? walk_x86_frames( &ctx, NX_PROF_BOX64_ESP, NX_PROF_BOX64_EBP, x86_callers ) :
+                                         walk_x86( target->teb, x86_callers );
+                stage_counts[i] = stage_chain( target, &ctx, translated, fex, stage_chains[i] );
             }
             svcSetThreadActivity( target->handle, ThreadActivity_Runnable );
+            stage_handles[i] = target->handle;
             if (R_SUCCEEDED( rc )) record( target, &ctx, translated, x86, callers, count, x86_callers, x86_count );
             else target->missed++;
+            if (R_SUCCEEDED( rc ) && fex)
+            {
+                nx_prof_add( &jit_blocks, block );
+                jit_pc_add( ctx.pc.x & ~3ull );
+                jit_samples++;
+            }
         }
+        pthread_mutex_unlock( &profile_mutex );
+        for (i = 0; i < NX_PROF_TARGETS; i++)
+            stage_anchors[i] = stage_counts[i] ? game_anchor( stage_chains[i], stage_counts[i] ) : 0;
+        pthread_mutex_lock( &profile_mutex );
+        for (i = 0; i < NX_PROF_TARGETS; i++)
+            if (stage_anchors[i] && targets[i].handle == stage_handles[i])
+                add_stages( &targets[i], stage_chains[i], stage_anchors[i] );
         pthread_mutex_unlock( &profile_mutex );
     }
 }
@@ -629,6 +1314,9 @@ static int image_at( uint64_t address, void **base, char *name, size_t size )
     return &wine_nx_image_at && wine_nx_image_at( (void *)(uintptr_t)address, base, name, size );
 }
 
+/* The runtime's own functions by name (source/runtime_symbols.c). */
+extern int wine_nx_runtime_symbol( uintptr_t address, char *out, size_t size ) __attribute__((weak));
+
 static void name_address( uint64_t address, char *buf, size_t size )
 {
     char module[64];
@@ -636,7 +1324,7 @@ static void name_address( uint64_t address, char *buf, size_t size )
 
     if (image_at( address, &base, module, sizeof(module) ))
         snprintf( buf, size, "%s+%#lx", module[0] ? module : "exe", (unsigned long)(address - (uintptr_t)base) );
-    else
+    else if (!wine_nx_runtime_symbol || (!wine_nx_runtime_symbol( (uintptr_t)address, buf, size ) && !buf[0]))
         snprintf( buf, size, "%#lx", (unsigned long)address );
 }
 
@@ -658,10 +1346,12 @@ void wine_nx_threads_report_stalled( void )
 
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
-        uint64_t callers[NX_PROF_DEPTH];
+        uint64_t callers[NX_PROF_DEPTH], native[NX_PROF_DEPTH], words[CARAFE_SCAN_WORDS];
+        uint32_t x86_callers[NX_PROF_DEPTH], eip = 0, esp, ebp;
         char line[NX_PROF_LINE], where[96], kind;
         Handle handle = registry[i].handle;
-        unsigned int frames, f, tid;
+        unsigned int frames, copied = 0, natives, f, tid, x86_frames = 0;
+        int x86 = 0;
         ThreadContext ctx;
         Result rc;
         int tries, len;
@@ -678,9 +1368,16 @@ void wine_nx_threads_report_stalled( void )
         frames = R_SUCCEEDED( rc ) ? walk_callers( &ctx, callers ) : 0;
         tid = registry[i].tid;
         kind = registry[i].kind;
+        if (R_SUCCEEDED( rc ) && kind == 'w')
+        {
+            copied = copy_stack( &ctx, words );
+            if ((x86 = x86_registers( registry[i].teb, &eip, &esp, &ebp )))
+                x86_frames = walk_x86( registry[i].teb, x86_callers );
+        }
         svcSetThreadActivity( handle, ThreadActivity_Runnable );
         pthread_mutex_unlock( &profile_mutex );
         if (R_FAILED( rc )) continue;
+        natives = pick_calls( words, copied, native );
         name_address( ctx.pc.x, where, sizeof(where) );
         len = snprintf( line, sizeof(line), "[STALL] thread %u%c at %s sp=%#lx lr=%#lx",
                         tid, kind, where,
@@ -688,6 +1385,22 @@ void wine_nx_threads_report_stalled( void )
         for (f = 0; f < frames; f++)
         {
             name_address( callers[f], where, sizeof(where) );
+            len = appendf( line, len, " < %s", where );
+        }
+        if (natives) len = appendf( line, len, " | native" );
+        for (f = 0; f < natives; f++)
+        {
+            name_address( native[f], where, sizeof(where) );
+            len = appendf( line, len, " < %s", where );
+        }
+        if (x86)
+        {
+            name_address( eip, where, sizeof(where) );
+            len = appendf( line, len, " | x86 at %s esp=%#x ebp=%#x", where, esp, ebp );
+        }
+        for (f = 0; f < x86_frames; f++)
+        {
+            name_address( x86_callers[f], where, sizeof(where) );
             len = appendf( line, len, " < %s", where );
         }
         wine_nx_runtime_trace( line );
@@ -702,10 +1415,11 @@ void wine_nx_threads_report_stalled( void )
 }
 
 /* Translated code by module, busiest first. */
-static void report_modules( const struct nx_prof_target *target, char *line )
+static void report_modules( const struct nx_prof_target *target, enum nx_prof_kind kind, const char *label,
+                            const char *outside, char *line )
 {
     struct { void *base; char name[48]; uint32_t count; } modules[16], swap;
-    const struct nx_prof_table *table = &target->tables[NX_PROF_X86];
+    const struct nx_prof_table *table = &target->tables[kind];
     unsigned int count = 0, i, j;
     uint32_t unknown = 0;
     int len;
@@ -744,12 +1458,68 @@ static void report_modules( const struct nx_prof_target *target, char *line )
             modules[j - 1] = modules[j];
             modules[j] = swap;
         }
-    len = appendf( line, 0, "[PROF] %u%c x86 by module:", target->tid, target->kind );
+    len = appendf( line, 0, "[PROF] %u%c %s by module:", target->tid, target->kind, label );
     for (i = 0; i < count && i < 8; i++)
         len = appendf( line, len, " %s %u.%u%%", modules[i].name, share( modules[i].count, target->samples ) / 10,
                        share( modules[i].count, target->samples ) % 10 );
-    if (unknown) len = appendf( line, len, " unknown %u.%u%%", share( unknown, target->samples ) / 10,
+    if (unknown) len = appendf( line, len, " %s %u.%u%%", outside, share( unknown, target->samples ) / 10,
                                 share( unknown, target->samples ) % 10 );
+    if (table->dropped)
+        len = appendf( line, len, " unbucketed %u.%u%%", share( table->dropped, target->samples ) / 10,
+                       share( table->dropped, target->samples ) % 10 );
+    wine_nx_runtime_trace( line );
+}
+
+static void report_fex_parts( const struct nx_prof_target *target, char *line )
+{
+    static const char *const names[NX_PROF_FEX_PARTS] = { "block-entry", "lookup", "link-compile", "divide",
+                                                          "x87-math", "fallback", "dispatcher" };
+    unsigned int k, total = 0;
+    int len;
+
+    for (k = 0; k < NX_PROF_FEX_PARTS; k++) total += target->fex_parts[k];
+    if (!total) return;
+    len = appendf( line, 0, "[PROF] %u%c fex outside blocks:", target->tid, target->kind );
+    for (k = 0; k < NX_PROF_FEX_PARTS; k++)
+        len = appendf( line, len, " %s %u.%u%%", names[k], share( target->fex_parts[k], target->samples ) / 10,
+                       share( target->fex_parts[k], target->samples ) % 10 );
+    wine_nx_runtime_trace( line );
+}
+
+static void report_stages( const struct nx_prof_target *target, char *line )
+{
+    unsigned int level, i, j, shown, top[NX_PROF_STAGE_SHOWN];
+    char name[96];
+    int len;
+
+    len = appendf( line, 0, "[PROF] %u%c stages from the game's first frame on the stack, "
+                            "%u.%u%% of samples reach it:", target->tid,
+                   target->kind, share( target->rooted, target->samples ) / 10,
+                   share( target->rooted, target->samples ) % 10 );
+    for (level = 1; level <= NX_PROF_STAGE_LEVELS; level++)
+    {
+        shown = 0;
+        for (i = 0; i < NX_PROF_BUCKETS; i++)
+        {
+            const struct nx_prof_bucket *bucket = &target->stages.buckets[i];
+
+            if (!bucket->count || (bucket->key >> 32) != level) continue;
+            j = shown < NX_PROF_STAGE_SHOWN ? shown++ : NX_PROF_STAGE_SHOWN;
+            for (; j > 0 && target->stages.buckets[top[j - 1]].count < bucket->count; j--)
+                if (j < NX_PROF_STAGE_SHOWN) top[j] = top[j - 1];
+            if (j < NX_PROF_STAGE_SHOWN) top[j] = i;
+        }
+        if (!shown) break;
+        len = appendf( line, len, " L%u", level );
+        for (j = 0; j < shown; j++)
+        {
+            const struct nx_prof_bucket *bucket = &target->stages.buckets[top[j]];
+
+            name_address( (uint32_t)bucket->key, name, sizeof(name) );
+            len = appendf( line, len, " %s %u.%u%%", name, share( bucket->count, target->rooted ) / 10,
+                           share( bucket->count, target->rooted ) % 10 );
+        }
+    }
     wine_nx_runtime_trace( line );
 }
 
@@ -773,7 +1543,9 @@ static void profile_report( const struct nx_prof_row *rows, unsigned int count )
             len = appendf( line, len, " %s=%u.%u%%", table_names[k], share( target->kinds[k], target->samples ) / 10,
                            share( target->kinds[k], target->samples ) % 10 );
         wine_nx_runtime_trace( line );
-        if (target->kinds[NX_PROF_X86]) report_modules( target, line );
+        if (target->kinds[NX_PROF_X86]) report_modules( target, NX_PROF_X86, "x86", "unknown", line );
+        if (target->kinds[NX_PROF_IMAGE]) report_modules( target, NX_PROF_IMAGE, "pe", "jit", line );
+        report_fex_parts( target, line );
         for (k = 0; k < NX_PROF_TABLES; k++)
         {
             const struct nx_prof_table *table = &target->tables[k];
@@ -803,6 +1575,7 @@ static void profile_report( const struct nx_prof_row *rows, unsigned int count )
             if (table->dropped) len = appendf( line, len, " (+%u in no bucket)", table->dropped );
             wine_nx_runtime_trace( line );
         }
+        if (target->rooted) report_stages( target, line );
     }
     /* The next interval samples the threads busiest in this one. */
     memset( targets, 0, sizeof(targets) );
@@ -859,17 +1632,116 @@ static void server_report( void )
     wine_nx_runtime_trace( line );
 }
 
-void wine_nx_thread_report( void )
+static void jit_dump_hex( FILE *file, const char *label, uint64_t address, uint64_t size )
 {
-    static u64 last;
-    struct nx_prof_row rows[NX_PROF_MAX_THREADS], row;
-    u64 now = armGetSystemTick(), interval = last ? now - last : 0, mask;
-    unsigned int count = 0, total = 0, i, j;
-    char line[NX_PROF_LINE + 24];
-    int len;
+    static const char digits[] = "0123456789abcdef";
+    char chunk[512];
+    unsigned int n = 0;
+    MemoryInfo info;
+    uint64_t i;
 
-    last = now;
+    fprintf( file, "%s %#llx %#llx ", label, (unsigned long long)address, (unsigned long long)size );
+    if (readable_size( address, size, &info ))
+        for (i = 0; i < size; i++)
+        {
+            uint8_t byte = ((const volatile uint8_t *)(uintptr_t)address)[i];
+
+            chunk[n++] = digits[byte >> 4];
+            chunk[n++] = digits[byte & 15];
+            if (n == sizeof(chunk))
+            {
+                fwrite( chunk, 1, n, file );
+                n = 0;
+            }
+        }
+    chunk[n++] = '\n';
+    fwrite( chunk, 1, n, file );
+}
+
+static void jit_dump_block( FILE *file, const struct nx_prof_bucket *bucket )
+{
+    uint64_t block = bucket->key, tail, size, host = 0, guest, low, high, entry;
+    uint32_t entries, i;
+    MemoryInfo info;
+
+    if (!readable_size( block, sizeof(uint32_t), &info )) return;
+    tail = block + read_word32( block );
+    if (!readable_size( tail, NX_PROF_FEX_TAIL_SIZE, &info )) return;
+    size = read_word( tail );
+    if (size > NX_PROF_JIT_HOST_MAX) size = NX_PROF_JIT_HOST_MAX;
+    guest = low = high = read_word( tail + NX_PROF_FEX_TAIL_RIP );
+    entries = read_word32( tail + NX_PROF_FEX_TAIL_ENTRIES );
+    entry = tail + read_word32( tail + NX_PROF_FEX_TAIL_ENTRY_OFFSET );
+    fprintf( file, "block %#llx samples %u rip %#llx size %#llx entries %u\nmap", (unsigned long long)block,
+             bucket->count, (unsigned long long)guest, (unsigned long long)size, entries );
+    for (i = 0; i < entries; i++)
+    {
+        uint64_t arm, rip;
+        size_t step;
+
+        if (!readable( entry, &info )) break;
+        step = nx_prof_vl64pair_size( *(const uint8_t *)(uintptr_t)entry );
+        if (!readable_size( entry, step, &info )) break;
+        nx_prof_vl64pair( (const uint8_t *)(uintptr_t)entry, &arm, &rip );
+        host += arm;
+        guest += rip;
+        entry += step;
+        if (guest < low) low = guest;
+        if (guest > high) high = guest;
+        fprintf( file, " %#llx:%#llx", (unsigned long long)host, (unsigned long long)guest );
+    }
+    fputs( "\nhot", file );
+    for (i = 0; i < NX_PROF_JIT_PCS; i++)
+        if (jit_pcs[i].count && jit_pcs[i].key - block < size)
+            fprintf( file, " %#llx:%u", (unsigned long long)(jit_pcs[i].key - block), jit_pcs[i].count );
+    fputc( '\n', file );
+    if (high - low + 16 > NX_PROF_JIT_GUEST_MAX) high = low + NX_PROF_JIT_GUEST_MAX - 16;
+    jit_dump_hex( file, "guest", low, high - low + 16 );
+    jit_dump_hex( file, "host", block, size );
+}
+
+static void jit_dump( void )
+{
+    static unsigned int top[NX_PROF_JIT_BLOCKS];
+    static struct nx_prof_bucket blocks[NX_PROF_JIT_BLOCKS];
+    unsigned int shown, i;
+    uint32_t samples, dropped;
+    char line[200];
+    FILE *file;
+
+    pthread_mutex_lock( &profile_mutex );
+    shown = nx_prof_top( &jit_blocks, top, NX_PROF_JIT_BLOCKS );
+    for (i = 0; i < shown; i++) blocks[i] = jit_blocks.buckets[top[i]];
+    samples = jit_samples;
+    dropped = jit_blocks.dropped;
+    jit_next_dump = samples * 3;
+    pthread_mutex_unlock( &profile_mutex );
+    if (!(file = fopen( NX_PROF_JIT_FILE, "w" ))) return;
+    fprintf( file, "jit-blocks 1 samples %u dropped %u blocks %u\n", samples, dropped, shown );
+    for (i = 0; i < shown; i++) jit_dump_block( file, &blocks[i] );
+    fclose( file );
+    snprintf( line, sizeof(line), "[PROF] jit: the %u busiest blocks of %u samples in logs/jit-blocks.txt", shown,
+              samples );
+    wine_nx_runtime_trace( line );
+}
+
+/* The tick the shares are measured from, and the rows themselves: filled under
+ * registry_mutex, which is held for the whole walk, so neither the [THREADS]
+ * line nor the tasks panel races the registry. */
+static u64 rows_last;
+static struct nx_prof_row rows_all[NX_PROF_MAX_THREADS];
+
+static unsigned int collect_rows( struct nx_prof_row *rows, unsigned int max, unsigned int *total )
+{
+    u64 now, interval, mask;
+    unsigned int count = 0, i, j;
+    struct nx_prof_row row;
+
+    *total = 0;
     pthread_mutex_lock( &registry_mutex );
+    now = armGetSystemTick();
+    interval = rows_last ? now - rows_last : 0;
+    rows_last = now;
     for (i = 0; i < NX_PROF_MAX_THREADS; i++)
     {
         struct nx_prof_thread *thread = &registry[i];
@@ -877,6 +1749,11 @@ void wine_nx_thread_report( void )
 
         if (!thread->handle) continue;
         ticks = thread_ticks( thread->handle );
+        if (!interval)
+        {
+            thread->last_ticks = ticks;
+            continue;
+        }
         row.handle = thread->handle;
         row.tid = thread->tid;
         row.kind = thread->kind;
@@ -885,12 +1762,51 @@ void wine_nx_thread_report( void )
         row.permille = nx_prof_permille( ticks, thread->last_ticks, interval );
         if (R_FAILED( svcGetThreadCoreMask( &row.core, &mask, thread->handle ) )) row.core = thread->core;
         thread->last_ticks = ticks;
-        for (j = count++; j > 0 && rows[j - 1].permille < row.permille; j--) rows[j] = rows[j - 1];
-        rows[j] = row;
-        total += row.permille;
+        for (j = count++; j > 0 && rows_all[j - 1].permille < row.permille; j--) rows_all[j] = rows_all[j - 1];
+        rows_all[j] = row;
+        *total += row.permille;
     }
+    if (!interval)
+    {
+        pthread_mutex_unlock( &registry_mutex );
+        return 0;
+    }
+    if (count > max) count = max;
+    memcpy( rows, rows_all, count * sizeof(*rows) );
     pthread_mutex_unlock( &registry_mutex );
-    if (!interval) return;
+    return count;
+}
+
+unsigned int wine_nx_tasks_snapshot( struct wine_nx_task *tasks, unsigned int max, unsigned int *total )
+{
+    /* Twelve rows fill a panel that is one column, and two columns are 24: no
+     * caller needs more than this, and the panel is drawn from a thread whose
+     * stack is not the runtime's. */
+    struct nx_prof_row rows[24];
+    unsigned int count, i;
+
+    if (max > sizeof(rows) / sizeof(rows[0])) max = sizeof(rows) / sizeof(rows[0]);
+    count = collect_rows( rows, max, total );
+    for (i = 0; i < count; i++)
+    {
+        tasks[i].tid = rows[i].tid;
+        tasks[i].kind = rows[i].kind;
+        tasks[i].core = (int)rows[i].core;
+        tasks[i].permille = rows[i].permille;
+        snprintf( tasks[i].name, sizeof(tasks[i].name), "%s", rows[i].name );
+    }
+    return count;
+}
+
+void wine_nx_thread_report( void )
+{
+    struct nx_prof_row rows[NX_PROF_MAX_THREADS];
+    unsigned int count, total = 0, i;
+    char line[NX_PROF_LINE + 24];
+    int len;
+
+    count = collect_rows( rows, NX_PROF_MAX_THREADS, &total );
+    if (!count) return;
 
     /* tid, w (Wine) or s (server connection), @core, share of that core. */
     len = appendf( line, 0, "[THREADS] %u threads use %u.%02u cores:", count, total / 1000, total % 1000 / 10 );
@@ -901,6 +1817,7 @@ void wine_nx_thread_report( void )
     wine_nx_runtime_trace( line );
     if (profiling) server_report();
     if (profiling) profile_report( rows, count );
+    if (profiling && __atomic_load_n( &jit_samples, __ATOMIC_RELAXED ) >= jit_next_dump) jit_dump();
 }
 
 /* Names the threads that did not stop, so the wait they are in can be found. */
@@ -1019,4 +1936,121 @@ void wine_nx_thread_balance( void )
     }
     pthread_mutex_unlock( &registry_mutex );
     wine_nx_runtime_trace( line );
+}
+
+struct wine_nx_thread_view
+{
+    unsigned int tid;
+    char kind;
+    char name[32];
+    unsigned int permille;
+    u64 mask;
+    int movable;
+    int side;
+};
+
+unsigned int wine_nx_thread_side_cores( void )
+{
+    return four_cores_enabled ? 8u : 0u;
+}
+
+unsigned int wine_nx_thread_views( struct wine_nx_thread_view *views, unsigned int max )
+{
+    static u64 last;
+    u64 now = armGetSystemTick(), interval = last ? now - last : 0;
+    unsigned int i, count = 0;
+    s32 core;
+
+    last = now;
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+        uint64_t ticks;
+
+        if (!thread->handle) continue;
+        ticks = thread_ticks( thread->handle );
+        if (interval && count < max)
+        {
+            struct wine_nx_thread_view *view = &views[count++];
+
+            view->tid = thread->tid;
+            view->kind = thread->kind;
+            memcpy( view->name, thread->name, sizeof(view->name) );
+            view->permille = nx_prof_permille( ticks, thread->orchestrator_ticks, interval );
+            if (R_FAILED( svcGetThreadCoreMask( &core, &view->mask, thread->handle ) )) view->mask = 0;
+            view->movable = thread->kind == 'w' && !thread->fixed && !thread->migratable;
+            view->side = thread->helper;
+        }
+        thread->orchestrator_ticks = ticks;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return count;
+}
+
+int wine_nx_thread_place( unsigned int tid, s32 core, u32 mask )
+{
+    unsigned int i;
+    int placed = 0;
+
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+
+        if (!thread->handle || thread->kind != 'w' || thread->tid != tid) continue;
+        if (thread->fixed || thread->migratable) break;
+        if (mask == 8u)
+            placed = thread->helper || offload_thread_locked( thread ) > 0;
+        else if (thread->helper)
+            placed = restore_thread_locked( thread, core, mask );
+        else if (R_SUCCEEDED( svcSetThreadCoreMask( thread->handle, core, mask ) ))
+        {
+            if (thread->teb && &horizon_follow_thread_cores)
+                horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );
+            placed = 1;
+        }
+        break;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return placed;
+}
+
+void wine_nx_thread_reserve_core( s32 core )
+{
+    unsigned int i;
+    u64 process_mask, mask;
+
+    if (R_FAILED( svcGetInfo( &process_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0 ) ) || !(process_mask &= 7))
+        return;
+    pthread_mutex_lock( &registry_mutex );
+    reserved_cores = core >= 0 ? 1u << core : 0;
+    mask = process_mask & ~reserved_cores ? process_mask & ~reserved_cores : process_mask;
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        struct nx_prof_thread *thread = &registry[i];
+
+        if (!thread->handle || !thread->migratable || thread->fixed) continue;
+        if (R_SUCCEEDED( svcSetThreadCoreMask( thread->handle, -1, mask ) ) && thread->teb &&
+            &horizon_follow_thread_cores)
+            horizon_follow_thread_cores( (void *)(uintptr_t)thread->teb, mask );
+    }
+    pthread_mutex_unlock( &registry_mutex );
+}
+
+unsigned int wine_nx_thread_tid( Handle handle, char *kind, char *name, size_t size )
+{
+    unsigned int i, tid = 0;
+
+    pthread_mutex_lock( &registry_mutex );
+    for (i = 0; i < NX_PROF_MAX_THREADS; i++)
+    {
+        if (registry[i].handle != handle) continue;
+        tid = registry[i].tid;
+        if (kind) *kind = registry[i].kind;
+        if (name && size) snprintf( name, size, "%s", registry[i].name );
+        break;
+    }
+    pthread_mutex_unlock( &registry_mutex );
+    return tid;
 }

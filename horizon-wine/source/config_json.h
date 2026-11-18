@@ -51,6 +51,9 @@ static inline const char *wine_nx_config_string( const char *at, char *out, size
 
         if (c == '\\')
         {
+            /* A file cut short just after a backslash: its end is not escaped,
+             * and reading on would go past it. */
+            if (!*at) return NULL;
             switch (*at++)
             {
             case '"': c = '"'; break;
@@ -210,9 +213,18 @@ static inline int wine_nx_config_write( const struct wine_nx_config *config, FIL
 
     if (fputs( "{\n", file ) < 0) return 0;
     for (i = 0; i < config->count; i++)
-        if (fprintf( file, "  \"%s\": %s%s\n", config->entries[i].key, config->entries[i].value,
-                     i + 1 < config->count ? "," : "" ) < 0)
+    {
+        const char *key = config->entries[i].key;
+
+        /* A key is kept as read, its escapes undone: a quote or a backslash in
+         * it is escaped again, or the file would end at it the next time. */
+        if (fputs( "  \"", file ) < 0) return 0;
+        for (; *key; key++)
+            if (((*key == '"' || *key == '\\') && fputc( '\\', file ) == EOF) || fputc( *key, file ) == EOF)
+                return 0;
+        if (fprintf( file, "\": %s%s\n", config->entries[i].value, i + 1 < config->count ? "," : "" ) < 0)
             return 0;
+    }
     return fputs( "}\n", file ) >= 0;
 }
 

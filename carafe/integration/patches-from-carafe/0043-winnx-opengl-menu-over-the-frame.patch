@@ -1,0 +1,232 @@
+Carafe: the settings menu is drawn over an OpenGL program's frame with the frame showing through.
+When wine_nx_osk_translucent says the layer is half-transparent, the layer's texture is drawn over the back
+buffer with blending by a program of each context's own instead of being blitted.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_opengl.c
++++ b/dlls/win32u/winnx_opengl.c
+@@ -132,6 +132,8 @@
+     int width, height;
+     unsigned int generation;
+     void *pixels;
++    GLuint menu_program, menu_array;
++    BOOL menu_failed;
+ };
+ static struct nx_osk_gl nx_osk_gl[8];
+ static unsigned int nx_osk_gl_next;
+@@ -145,6 +147,193 @@
+ static BOOL nx_osk_shown;
+ static unsigned int nx_screen_clears;
+ 
++extern int wine_nx_osk_translucent( void ) __attribute__((weak));
++
++static PFN_glCreateShader p_glCreateShader;
++static PFN_glShaderSource p_glShaderSource;
++static PFN_glCompileShader p_glCompileShader;
++static PFN_glGetShaderiv p_glGetShaderiv;
++static PFN_glDeleteShader p_glDeleteShader;
++static PFN_glCreateProgram p_glCreateProgram;
++static PFN_glAttachShader p_glAttachShader;
++static PFN_glLinkProgram p_glLinkProgram;
++static PFN_glGetProgramiv p_glGetProgramiv;
++static PFN_glDeleteProgram p_glDeleteProgram;
++static PFN_glUseProgram p_glUseProgram;
++static PFN_glIsProgram p_glIsProgram;
++static PFN_glActiveTexture p_glActiveTexture;
++static PFN_glBlendFuncSeparate p_glBlendFuncSeparate;
++static PFN_glBlendEquationSeparate p_glBlendEquationSeparate;
++static PFN_glGenVertexArrays p_glGenVertexArrays;
++static PFN_glBindVertexArray p_glBindVertexArray;
++static PFN_glIsVertexArray p_glIsVertexArray;
++static PFN_glBindSampler p_glBindSampler;
++static BOOL nx_menu_gl_loaded, nx_menu_gl_usable, nx_menu_gl_logged;
++
++static const char nx_menu_gl_vertex[] =
++    "#version 130\n"
++    "out vec2 coord;\n"
++    "void main()\n"
++    "{\n"
++    "    vec2 c = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
++    "    coord = vec2(c.x, 1.0 - c.y);\n"
++    "    gl_Position = vec4(c * 2.0 - 1.0, 0.0, 1.0);\n"
++    "}\n";
++
++static const char nx_menu_gl_fragment[] =
++    "#version 130\n"
++    "in vec2 coord;\n"
++    "out vec4 color;\n"
++    "uniform sampler2D menu;\n"
++    "void main()\n"
++    "{\n"
++    "    color = texture(menu, coord);\n"
++    "}\n";
++
++static BOOL nx_menu_gl_load( void )
++{
++    if (nx_menu_gl_loaded) return nx_menu_gl_usable;
++    nx_menu_gl_loaded = TRUE;
++    p_glCreateShader = (void *)funcs->p_eglGetProcAddress( "glCreateShader" );
++    p_glShaderSource = (void *)funcs->p_eglGetProcAddress( "glShaderSource" );
++    p_glCompileShader = (void *)funcs->p_eglGetProcAddress( "glCompileShader" );
++    p_glGetShaderiv = (void *)funcs->p_eglGetProcAddress( "glGetShaderiv" );
++    p_glDeleteShader = (void *)funcs->p_eglGetProcAddress( "glDeleteShader" );
++    p_glCreateProgram = (void *)funcs->p_eglGetProcAddress( "glCreateProgram" );
++    p_glAttachShader = (void *)funcs->p_eglGetProcAddress( "glAttachShader" );
++    p_glLinkProgram = (void *)funcs->p_eglGetProcAddress( "glLinkProgram" );
++    p_glGetProgramiv = (void *)funcs->p_eglGetProcAddress( "glGetProgramiv" );
++    p_glDeleteProgram = (void *)funcs->p_eglGetProcAddress( "glDeleteProgram" );
++    p_glUseProgram = (void *)funcs->p_eglGetProcAddress( "glUseProgram" );
++    p_glIsProgram = (void *)funcs->p_eglGetProcAddress( "glIsProgram" );
++    p_glActiveTexture = (void *)funcs->p_eglGetProcAddress( "glActiveTexture" );
++    p_glBlendFuncSeparate = (void *)funcs->p_eglGetProcAddress( "glBlendFuncSeparate" );
++    p_glBlendEquationSeparate = (void *)funcs->p_eglGetProcAddress( "glBlendEquationSeparate" );
++    p_glGenVertexArrays = (void *)funcs->p_eglGetProcAddress( "glGenVertexArrays" );
++    p_glBindVertexArray = (void *)funcs->p_eglGetProcAddress( "glBindVertexArray" );
++    p_glIsVertexArray = (void *)funcs->p_eglGetProcAddress( "glIsVertexArray" );
++    p_glBindSampler = (void *)funcs->p_eglGetProcAddress( "glBindSampler" );
++    nx_menu_gl_usable = p_glCreateShader && p_glShaderSource && p_glCompileShader && p_glGetShaderiv &&
++                        p_glDeleteShader && p_glCreateProgram && p_glAttachShader && p_glLinkProgram &&
++                        p_glGetProgramiv && p_glDeleteProgram && p_glUseProgram && p_glIsProgram &&
++                        p_glActiveTexture && p_glBlendFuncSeparate && p_glBlendEquationSeparate &&
++                        p_glGenVertexArrays && p_glBindVertexArray && p_glIsVertexArray;
++    return nx_menu_gl_usable;
++}
++
++static GLuint nx_menu_gl_shader( GLenum type, const char *source )
++{
++    GLuint shader = p_glCreateShader( type );
++    GLint compiled = 0;
++
++    if (!shader) return 0;
++    p_glShaderSource( shader, 1, &source, NULL );
++    p_glCompileShader( shader );
++    p_glGetShaderiv( shader, GL_COMPILE_STATUS, &compiled );
++    if (compiled) return shader;
++    p_glDeleteShader( shader );
++    return 0;
++}
++
++static BOOL nx_menu_gl_prepare( struct nx_osk_gl *osk )
++{
++    GLuint vertex, fragment, program;
++    GLint linked = 0;
++
++    if (osk->menu_failed || !nx_menu_gl_load()) return FALSE;
++    if (osk->menu_program && p_glIsProgram( osk->menu_program ) && osk->menu_array &&
++        p_glIsVertexArray( osk->menu_array ))
++        return TRUE;
++    osk->menu_program = osk->menu_array = 0;
++    vertex = nx_menu_gl_shader( GL_VERTEX_SHADER, nx_menu_gl_vertex );
++    fragment = nx_menu_gl_shader( GL_FRAGMENT_SHADER, nx_menu_gl_fragment );
++    program = vertex && fragment ? p_glCreateProgram() : 0;
++    if (program)
++    {
++        p_glAttachShader( program, vertex );
++        p_glAttachShader( program, fragment );
++        p_glLinkProgram( program );
++        p_glGetProgramiv( program, GL_LINK_STATUS, &linked );
++        if (!linked) p_glDeleteProgram( program );
++    }
++    if (vertex) p_glDeleteShader( vertex );
++    if (fragment) p_glDeleteShader( fragment );
++    if (linked) p_glGenVertexArrays( 1, &osk->menu_array );
++    if (!linked || !osk->menu_array)
++    {
++        osk->menu_failed = TRUE;
++        nx_log( "[NXGL] settings menu: the blending program could not be built, it is shown opaque" );
++        return FALSE;
++    }
++    osk->menu_program = program;
++    if (!nx_menu_gl_logged)
++    {
++        nx_menu_gl_logged = TRUE;
++        nx_log( "[NXGL] settings menu drawn by the GPU over the frame" );
++    }
++    return TRUE;
++}
++
++static BOOL nx_menu_gl_draw( struct nx_osk_gl *osk, const struct wine_nx_osk_frame *frame, EGLint height )
++{
++    GLint program, array, active, texture, sampler = 0, viewport[4];
++    GLint src_rgb, dst_rgb, src_alpha, dst_alpha, equation_rgb, equation_alpha;
++    GLboolean blend, depth, stencil, cull, discard, mask[4];
++
++    if (!nx_menu_gl_prepare( osk )) return FALSE;
++
++    funcs->p_glGetIntegerv( GL_CURRENT_PROGRAM, &program );
++    funcs->p_glGetIntegerv( GL_VERTEX_ARRAY_BINDING, &array );
++    funcs->p_glGetIntegerv( GL_ACTIVE_TEXTURE, &active );
++    funcs->p_glGetIntegerv( GL_VIEWPORT, viewport );
++    funcs->p_glGetIntegerv( GL_BLEND_SRC_RGB, &src_rgb );
++    funcs->p_glGetIntegerv( GL_BLEND_DST_RGB, &dst_rgb );
++    funcs->p_glGetIntegerv( GL_BLEND_SRC_ALPHA, &src_alpha );
++    funcs->p_glGetIntegerv( GL_BLEND_DST_ALPHA, &dst_alpha );
++    funcs->p_glGetIntegerv( GL_BLEND_EQUATION_RGB, &equation_rgb );
++    funcs->p_glGetIntegerv( GL_BLEND_EQUATION_ALPHA, &equation_alpha );
++    funcs->p_glGetBooleanv( GL_COLOR_WRITEMASK, mask );
++    blend = funcs->p_glIsEnabled( GL_BLEND );
++    depth = funcs->p_glIsEnabled( GL_DEPTH_TEST );
++    stencil = funcs->p_glIsEnabled( GL_STENCIL_TEST );
++    cull = funcs->p_glIsEnabled( GL_CULL_FACE );
++    discard = funcs->p_glIsEnabled( GL_RASTERIZER_DISCARD );
++    p_glActiveTexture( GL_TEXTURE0 );
++    funcs->p_glGetIntegerv( GL_TEXTURE_BINDING_2D, &texture );
++    if (p_glBindSampler) funcs->p_glGetIntegerv( GL_SAMPLER_BINDING, &sampler );
++
++    p_glUseProgram( osk->menu_program );
++    p_glBindVertexArray( osk->menu_array );
++    funcs->p_glBindTexture( GL_TEXTURE_2D, osk->texture );
++    if (p_glBindSampler) p_glBindSampler( 0, 0 );
++    funcs->p_glViewport( frame->x, height - frame->y - frame->height, frame->width, frame->height );
++    funcs->p_glEnable( GL_BLEND );
++    p_glBlendFuncSeparate( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
++    p_glBlendEquationSeparate( GL_FUNC_ADD, GL_FUNC_ADD );
++    funcs->p_glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
++    funcs->p_glDisable( GL_DEPTH_TEST );
++    funcs->p_glDisable( GL_STENCIL_TEST );
++    funcs->p_glDisable( GL_CULL_FACE );
++    funcs->p_glDisable( GL_RASTERIZER_DISCARD );
++    funcs->p_glDrawArrays( GL_TRIANGLES, 0, 3 );
++
++    if (discard) funcs->p_glEnable( GL_RASTERIZER_DISCARD );
++    if (cull) funcs->p_glEnable( GL_CULL_FACE );
++    if (stencil) funcs->p_glEnable( GL_STENCIL_TEST );
++    if (depth) funcs->p_glEnable( GL_DEPTH_TEST );
++    if (!blend) funcs->p_glDisable( GL_BLEND );
++    funcs->p_glColorMask( mask[0], mask[1], mask[2], mask[3] );
++    p_glBlendEquationSeparate( equation_rgb, equation_alpha );
++    p_glBlendFuncSeparate( src_rgb, dst_rgb, src_alpha, dst_alpha );
++    funcs->p_glViewport( viewport[0], viewport[1], viewport[2], viewport[3] );
++    if (p_glBindSampler) p_glBindSampler( 0, sampler );
++    funcs->p_glBindTexture( GL_TEXTURE_2D, texture );
++    p_glActiveTexture( active );
++    p_glBindVertexArray( array );
++    p_glUseProgram( program );
++    return TRUE;
++}
++
+ static void nx_osk_draw( struct opengl_drawable *base )
+ {
+     struct wine_nx_osk_frame frame;
+@@ -153,6 +342,7 @@
+     EGLContext context;
+     GLint read_fb, draw_fb, texture, unpack_buffer, row_length, skip_pixels, skip_rows, alignment;
+     GLboolean scissor, srgb;
++    BOOL drawn;
+     unsigned int i;
+ 
+     if (!wine_nx_osk_visible()) return;
+@@ -232,9 +422,11 @@
+         p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+         if (scissor) funcs->p_glDisable( GL_SCISSOR_TEST );
+         if (srgb) funcs->p_glDisable( GL_FRAMEBUFFER_SRGB );
++        drawn = wine_nx_osk_translucent && wine_nx_osk_translucent() && nx_menu_gl_draw( osk, &frame, height );
+         /* The picture's first row is its top; the window's first is its bottom. */
+-        p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
+-                             frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
++        if (!drawn)
++            p_glBlitFramebuffer( 0, 0, frame.width, frame.height, frame.x, height - frame.y,
++                                 frame.x + frame.width, height - frame.y - frame.height, GL_COLOR_BUFFER_BIT, GL_NEAREST );
+         if (scissor) funcs->p_glEnable( GL_SCISSOR_TEST );
+         if (srgb) funcs->p_glEnable( GL_FRAMEBUFFER_SRGB );
+         nx_osk_shown = TRUE;

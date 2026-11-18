@@ -1,0 +1,61 @@
+Carafe: the in-process server answers lock_file and unlock_file instead of "not implemented".
+LockFileEx and UnlockFileEx failed with ERROR_INVALID_FUNCTION on every file, so a program that locks a file
+before writing it gave up: FEX's disk cache created its file and never wrote it. The runtime is one process, so
+no other process can hold a lock; the server grants every lock at once, the way Wine does on a file system without
+locks, and the reply carries no wait handle.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -522,6 +522,8 @@
+ #define HORIZON_REQ_SET_NAMED_PIPE_INFO 141
+ #define HORIZON_REQ_CREATE_MAPPING 63
+ #define HORIZON_REQ_OPEN_MAPPING 64
++#define HORIZON_REQ_LOCK_FILE 53
++#define HORIZON_REQ_UNLOCK_FILE 54
+ #define HORIZON_REQ_GET_MAPPING_INFO 65
+ #define HORIZON_REQ_GET_IMAGE_MAP_ADDRESS 66
+ #define HORIZON_REQ_MAP_VIEW 67
+@@ -1937,6 +1939,13 @@
+ };
+ 
+ /* Wine's luid_t after the reply header: AllocateLocallyUniqueId's answer. */
++struct horizon_lock_file_reply
++{
++    struct horizon_server_reply_header header;
++    unsigned int handle;
++    int overlapped;
++};
++
+ struct horizon_allocate_locally_unique_id_reply
+ {
+     struct horizon_server_reply_header header;
+@@ -15735,6 +15744,15 @@
+ /* Identifiers that are unique for as long as this process runs, which is what
+  * the name promises. wined3d asks for one before it will create an adapter, so
+  * Direct3D does not start without this; the wineserver counts up the same way. */
++static int horizon_server_handle_lock_file( struct horizon_server_connection *connection )
++{
++    struct horizon_lock_file_reply reply;
++
++    memset( &reply, 0, sizeof(reply) );
++    reply.header.error = HORIZON_STATUS_SUCCESS;
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++}
++
+ static int horizon_server_handle_allocate_locally_unique_id( struct horizon_server_connection *connection )
+ {
+     static LONG last_luid;
+@@ -16645,6 +16663,12 @@
+         case HORIZON_REQ_ALLOCATE_LOCALLY_UNIQUE_ID:
+             status = horizon_server_handle_allocate_locally_unique_id( connection );
+             break;
++        case HORIZON_REQ_LOCK_FILE:
++            status = horizon_server_handle_lock_file( connection );
++            break;
++        case HORIZON_REQ_UNLOCK_FILE:
++            status = horizon_server_write_status( connection->reply_fd, HORIZON_STATUS_SUCCESS );
++            break;
+         case HORIZON_REQ_CREATE_KEY:
+         case HORIZON_REQ_OPEN_KEY:
+         case HORIZON_REQ_DELETE_KEY:

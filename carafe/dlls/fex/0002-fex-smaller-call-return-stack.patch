@@ -1,0 +1,18 @@
+Carafe: a thread's call-return stack takes 512 KB instead of 4 MB.
+The stack only predicts where a guest RET goes; when it runs over, the guard page resets it. Every thread of a
+32-bit game took 4 MB of the game's own 4 GB for it, committed, and with some 80 threads the address space ran
+out and threads could no longer start or end (the threads probe's churn phase). 512 KB still holds 32768
+nested calls.
+MIT, as the file it changes.
+
+--- a/FEXCore/include/FEXCore/Debug/InternalThreadState.h
++++ b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+@@ -109,7 +109,7 @@
+   ///< Data pointer for exclusive use by the frontend
+   void* FrontendPtr;
+ 
+-  static constexpr size_t CALLRET_STACK_SIZE {0x400000};
++  static constexpr size_t CALLRET_STACK_SIZE {0x80000};
+ 
+   // The low address of the call-ret stack allocation (not including guard pages)
+   void* CallRetStackBase {};

@@ -98,6 +98,7 @@ struct horizon_msgq
     unsigned long long shm_id;                     /* for the server */
     unsigned long long shm_offset;
     void *sync;
+    int hook_chains[17];
     struct horizon_msgq *next;
 };
 

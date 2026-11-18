@@ -1,0 +1,31 @@
+Carafe: the keyboard layer is blended over the windows when wine_nx_osk_translucent says it is half-transparent,
+which is the settings menu (runtime/overlay/carafe_menu.c).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/compositor.c
++++ b/horizon-wine/source/compositor.c
+@@ -13,6 +13,8 @@
+ #include "thread_profile.h"
+ #include "compositor_gl.h"
+ 
++extern int wine_nx_osk_translucent( void ) __attribute__((weak));
++
+ struct wine_nx_layer
+ {
+     struct wine_nx_layer *next;             /* in comp.layers */
+@@ -438,6 +440,7 @@
+             quads[i].width = layer->visible_width < layer->width ? layer->visible_width : layer->width;
+             quads[i].height = layer->visible_height < layer->height ? layer->visible_height : layer->height;
+             quads[i].src_x = quads[i].src_y = 0;
++            quads[i].blend = 0;
+         }
+         if (count < capacity && wine_nx_osk_frame( comp.width, comp.height, &osk ))
+         {
+@@ -478,6 +481,7 @@
+                 quads[count].width = keyboard->width;
+                 quads[count].height = keyboard->height;
+                 quads[count].src_x = quads[count].src_y = 0;
++                quads[count].blend = wine_nx_osk_translucent && wine_nx_osk_translucent();
+                 drawn[count++] = keyboard;
+             }
+         }

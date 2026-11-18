@@ -10,7 +10,7 @@ int main(void)
     struct launcher_kv kv = {{0}, 0};
     const struct nx_fex_option *option;
     char value[64];
-    int main_count = 0, advanced_count = 0, i;
+    int main_count = 0, advanced_count = 0, carafe_count = 0, i;
 
     for (i = 0; i < NX_FEX_OPTION_COUNT; i++)
     {
@@ -18,10 +18,21 @@ int main(void)
         assert( (int)option->id == i );
         assert( option->default_choice < option->value_count );
         assert( nx_fex_option_choice( option, nx_fex_option_default( option ) ) == option->default_choice );
+        /* What only Carafe's FEX build reads comes last, so that the rows of
+         * a program on the stock one are the ones there always were. */
+        if (nx_fex_option_carafe( option )) { carafe_count++; continue; }
+        assert( !carafe_count );
         if (option->advanced) advanced_count++;
         else main_count++;
     }
-    assert( main_count == 7 && advanced_count == 12 );
+    assert( main_count == 7 && advanced_count == 12 && carafe_count == 12 );
+    assert( !nx_fex_option_carafe( nx_fex_options + NX_FEX_L1_DECREASE ) );
+    option = nx_fex_options + NX_FEX_DISK_CACHE;
+    assert( nx_fex_option_carafe( option ) && !strcmp( option->name, "FEX_DISKCACHE" ) );
+    assert( !strcmp( nx_fex_option_default( option ), "0" ) );
+    option = nx_fex_options + NX_FEX_SLIM_RETURN_POINTS;
+    assert( nx_fex_option_carafe( option ) && !strcmp( option->name, "FEX_SLIMRETURNPOINTS" ) );
+    assert( !strcmp( nx_fex_option_default( option ), "1" ) );
     option = nx_fex_options + NX_FEX_TSO;
     assert( !strcmp( option->name, "FEX_TSOENABLED" ) );
     assert( !strcmp( nx_fex_option_default( option ), "0" ) );

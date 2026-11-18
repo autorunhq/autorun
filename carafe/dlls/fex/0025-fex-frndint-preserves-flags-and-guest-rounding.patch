@@ -1,0 +1,24 @@
+Carafe: FRNDINT preserves live integer flags and rounds nearest independently of SSE.
+MIT, as the file it changes.
+
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -1366,8 +1366,9 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         Ref Value {};
+         if (ReducedPrecisionMode && ConversionRoundingMode) {
++          Ref NZCV = IREmit->_LoadNZCV();
+           Ref FCW = IREmit->_LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW));
+           Ref RoundBits = IREmit->_Bfe(OpSize::i32Bit, 2, 10, FCW);
+-          Value = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, RoundMode::Host);
++          Value = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, RoundMode::Nearest);
+           const std::pair<uint64_t, RoundMode> Modes[] = {
+             {1, RoundMode::NegInfinity},
+             {2, RoundMode::PosInfinity},
+@@ -1379,6 +1380,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+                                        IREmit->_Constant(~0ULL), IREmit->_Constant(0));
+             Value = IREmit->_VBSL(OpSize::i128Bit, IREmit->_VDupFromGPR(OpSize::i128Bit, OpSize::i64Bit, Mask), Rounded, Value);
+           }
++          IREmit->_StoreNZCV(NZCV);
+         } else if (ReducedPrecisionMode) {
+           Value = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, RoundMode::Host);
+         } else {

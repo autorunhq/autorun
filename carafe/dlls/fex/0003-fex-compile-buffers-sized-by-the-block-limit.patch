@@ -1,0 +1,77 @@
+Carafe: a thread's compile buffers are sized by the block limit instead of for 65536 instructions.
+Every thread that compiles takes a decoded-instruction buffer for 65536 instructions (8 MB) and two IR lists of
+8 MB, 24 MB of the game's own 4 GB. A block holds at most MaxInst instructions, 1000 in Carafe, and with some 23
+threads compiling at once a 32-bit game had 552 MB of its address space in these buffers and could no longer
+place one 132 MB reservation. The decoder now takes MaxInst plus 64 entries, and each IR list keeps upstream's
+8 MB per 5000 instructions, rounded up to whole megabytes, at least 1 MB and at most 8 MB.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -69,7 +69,8 @@
+ Decoder::Decoder(FEXCore::Core::InternalThreadState* Thread)
+   : Thread {Thread}
+   , CTX {static_cast<FEXCore::Context::ContextImpl*>(Thread->CTX)}
+-  , PoolObject {CTX->FrontendAllocator, sizeof(FEXCore::X86Tables::DecodedInst) * DefaultDecodedBufferSize} {
++  , DecodedBufferSize {DecodedBufferSizeForBlock(CTX->Config.MaxInstPerBlock)}
++  , PoolObject {CTX->FrontendAllocator, sizeof(FEXCore::X86Tables::DecodedInst) * DecodedBufferSize} {
+ 
+   FEX_CONFIG_OPT(ReducedPrecision, X87REDUCEDPRECISION);
+   if (ReducedPrecision) {
+@@ -1623,7 +1624,7 @@
+       }
+ 
+       // Check if we need to end the entire multiblock
+-      FinalInstruction = DecodedSize >= MaxInst || DecodedSize >= DefaultDecodedBufferSize || TotalInstructions >= MaxInst;
++      FinalInstruction = DecodedSize >= MaxInst || DecodedSize >= DecodedBufferSize || TotalInstructions >= MaxInst;
+       if (FinalInstruction) {
+         break;
+       }
+--- a/FEXCore/Source/Interface/Core/Frontend.h
++++ b/FEXCore/Source/Interface/Core/Frontend.h
+@@ -131,6 +131,13 @@
+   void DecodeREXIfValid(int8_t ExpectedOffset = -1);
+ 
+   static constexpr size_t DefaultDecodedBufferSize = 0x10000;
++
++  static size_t DecodedBufferSizeForBlock(uint64_t MaxInst) {
++    const uint64_t Wanted = MaxInst + 64;
++    return Wanted < 256 ? 256 : Wanted > DefaultDecodedBufferSize ? DefaultDecodedBufferSize : Wanted;
++  }
++
++  size_t DecodedBufferSize {DefaultDecodedBufferSize};
+   FEXCore::X86Tables::DecodedInst* DecodedBuffer {};
+   Utils::PoolBufferWithTimedRetirement<FEXCore::X86Tables::DecodedInst*, 5000, 500> PoolObject;
+   size_t DecodedSize {};
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -4598,7 +4598,7 @@
+ }
+ 
+ OpDispatchBuilder::OpDispatchBuilder(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::InternalThreadState* Thread)
+-  : IREmitter {ctx->OpDispatcherAllocator, ctx->HostFeatures.SupportsTSOImm9 != 0}
++  : IREmitter {ctx->OpDispatcherAllocator, ctx->HostFeatures.SupportsTSOImm9 != 0, ListSizeForBlock(ctx->Config.MaxInstPerBlock)}
+   , CTX {ctx}
+   , Thread {Thread} {
+   if (CTX->HostFeatures.SupportsAVX && CTX->HostFeatures.SupportsSVE256) {
+--- a/FEXCore/Source/Interface/IR/IREmitter.h
++++ b/FEXCore/Source/Interface/IR/IREmitter.h
+@@ -19,8 +19,16 @@
+ 
+ class IREmitter {
+ public:
+-  IREmitter(FEXCore::Utils::IntrusivePooledAllocator& ThreadAllocator, bool SupportsTSOImm9)
+-    : DualListData {ThreadAllocator, 8 * 1024 * 1024}
++  static constexpr size_t FullListSize = 8 * 1024 * 1024;
++
++  static size_t ListSizeForBlock(uint64_t MaxInst) {
++    constexpr size_t Unit = 1024 * 1024;
++    const size_t Wanted = (FullListSize / 5000 * MaxInst + Unit - 1) / Unit * Unit;
++    return std::clamp(Wanted, Unit, FullListSize);
++  }
++
++  IREmitter(FEXCore::Utils::IntrusivePooledAllocator& ThreadAllocator, bool SupportsTSOImm9, size_t ListSize = FullListSize)
++    : DualListData {ThreadAllocator, ListSize}
+     , SupportsTSOImm9(SupportsTSOImm9) {}
+ 
+   virtual ~IREmitter() = default;

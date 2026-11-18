@@ -1,0 +1,37 @@
+Carafe: reserve the guest's part of a 32-bit address space from libnx's first placement.
+In a 32-bit address space the stack region starts at 0x200000, where fixed low bases are, and libnx
+placed stacks and shared memory there at random until virtual_init reserved it. The range below the
+native window (5/8 of the region, at most 768 MB, as virtual.c computes it) is reserved at once.
+Nothing changes in a 36- or 39-bit address space. docs/research/fixed-base/REPORT.md, P2.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/low_window.c	2026-10-07 08:48:40.581443300 +0400
++++ b/horizon-wine/source/low_window.c	2026-10-07 08:49:37.207774100 +0400
+@@ -11,6 +11,19 @@
+ static int profile_checked, low_window;
+ static VirtmemReservation *guest_reservation;
+ 
++static VirtmemReservation *reserve_32bit_guest_range( u64 aslr_end )
++{
++    const u64 window_max = 768ull * 1024 * 1024;
++    u64 start, size, window, end;
++
++    if (aslr_end > 0x100000000ull ||
++        R_FAILED(svcGetInfo( &start, InfoType_StackRegionAddress, CUR_PROCESS_HANDLE, 0 )) ||
++        R_FAILED(svcGetInfo( &size, InfoType_StackRegionSize, CUR_PROCESS_HANDLE, 0 ))) return NULL;
++    window = size / 8 * 5 < window_max ? size / 8 * 5 : window_max;
++    end = (start + size - window) & ~0xffffull;
++    return end > start ? __real_virtmemAddReservation( (void *)start, end - start ) : NULL;
++}
++
+ int wine_nx_low_window_reserve(void)
+ {
+     u64 base, size;
+@@ -20,6 +33,7 @@
+         if (R_FAILED(svcGetInfo( &base, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0 )) ||
+             R_FAILED(svcGetInfo( &size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0 ))) return 0;
+         low_window = wine_nx_is_low_window( base, size );
++        if (!low_window) guest_reservation = reserve_32bit_guest_range( base + size );
+         profile_checked = 1;
+     }
+     if (!low_window) return 1;

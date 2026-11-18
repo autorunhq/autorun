@@ -10,7 +10,8 @@ fixture = fixture.replace('int main(', 'int socket_test_main(')
 fixture = fixture.replace('int type, refs, signaled, file_fd;', '''int type, refs, signaled, file_fd;
     int file_peer_fd;
     unsigned int file_sharing, pipe_flags, rootdir, name_len;
-    unsigned char *name;''')
+    unsigned char *name;
+    void *device_file;''')
 fixture = fixture.replace('struct horizon_server_object *object; };',
                           'struct horizon_server_object *object; struct horizon_server_handle_entry *next; };')
 fixture = fixture.replace('static unsigned int next_handle = 1;', '''static unsigned int next_handle = 1;
@@ -65,6 +66,9 @@ extra = r'''
 #define HORIZON_NAMED_PIPE_NONBLOCKING_MODE 4
 #define HORIZON_NAMED_PIPE_SERVER_END 0x8000
 #define HORIZON_SERVER_OBJECT_NSI 99
+#define HORIZON_SERVER_OBJECT_DEVICE 100
+static void *(*carafeHidOpen)(const void *, unsigned int);
+static void (*carafeHidClose)(void *);
 unsigned char pipe_output[1056];
 unsigned int pipe_output_size;
 

@@ -60,7 +60,8 @@ void launcher_dxvk_options( struct ui *ui, const char *runtime_dir, const char *
     ids = calloc( dxvk_option_count + 1, sizeof(*ids) );
     if (!rows || !ids) goto done;
     snprintf( context, sizeof(context), "%s / %s %s", title,
-              source == DXVK_SOURCE_SAREK ? "Sarek" : source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" : "DXVK", version );
+              source == DXVK_SOURCE_SAREK ? "Sarek" : source == DXVK_SOURCE_GPLASYNC ? "GPLAsync" :
+              source == DXVK_SOURCE_CARAFE ? "Carafe" : "DXVK", version );
     for (;;)
     {
         const struct dxvk_option *option;

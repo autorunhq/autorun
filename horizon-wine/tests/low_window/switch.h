@@ -7,7 +7,8 @@ typedef uint64_t u64;
 typedef struct VirtmemReservation VirtmemReservation;
 typedef struct { u64 addr, size; u32 type, perm; } MemoryInfo;
 typedef enum { InfoType_AslrRegionAddress, InfoType_AslrRegionSize, InfoType_HeapRegionAddress,
-               InfoType_AliasRegionAddress, InfoType_StackRegionAddress } InfoType;
+               InfoType_AliasRegionAddress, InfoType_StackRegionAddress,
+               InfoType_StackRegionSize } InfoType;
 #define CUR_PROCESS_HANDLE 1
 #define MemType_Unmapped 0
 #define Perm_Rx 5

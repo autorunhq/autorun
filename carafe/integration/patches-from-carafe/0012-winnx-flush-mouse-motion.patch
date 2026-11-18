@@ -1,0 +1,31 @@
+Carafe: the Switch display driver hands Wine the mouse motion it has sent at the end of each pass.
+win32u keeps plain mouse motion back until a button, the wheel or MOUSEEVENTF_MOVE_NOCOALESCE asks for it,
+as winex11 and winewayland do after their events. The driver never asked, so stick motion reached the game
+only with the next click or touch, and the cursor stood still. ProcessEvents now sends a
+MOUSEEVENTF_MOVE_NOCOALESCE input after its mouse input, the way those drivers flush.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_drv.c	2026-10-10 03:44:31.854360600 +0400
++++ b/dlls/win32u/winnx_drv.c	2026-10-10 03:44:40.003613200 +0400
+@@ -681,6 +681,13 @@
+     NtUserSendHardwareInput( 0, 0, &input, 0 );
+ }
+ 
++static void wine_nx_flush_mouse(void)
++{
++    static const INPUT input = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
++
++    NtUserSendHardwareInput( 0, 0, &input, 0 );
++}
++
+ /* Where the cursor really is. NtUserGetCursorPos is not it: without a recent
+  * change it asks the display driver, which is this one, and maps the answer
+  * through the thread's DPI. The stick works in the screen's own coordinates,
+@@ -812,6 +819,7 @@
+     if (placed || first) wine_nx_send_mouse( x, y, (placed ? MOUSEEVENTF_MOVE : 0) | first );
+     if (stepped) wine_nx_send_mouse_motion( dx, dy );
+     if (second) wine_nx_send_mouse( x, y, second );
++    wine_nx_flush_mouse();
+     wine_nx_send_extra_mouse( last_buttons, buttons, pressed, released, wheel, hwheel );
+     for (unsigned int i = key_after; i < key_count; i++) wine_nx_send_key( key_events + i );
+     if (moved || placed || stepped)

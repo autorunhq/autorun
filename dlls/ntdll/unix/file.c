@@ -6162,6 +6162,10 @@ static unsigned int server_read_file( HANDLE handle, HANDLE event, PIO_APC_ROUTI
         options     = reply->options;
         if (wait_handle && status != STATUS_PENDING)
             set_sync_iosb( io, status, wine_server_reply_size( reply ), options );
+#ifdef __SWITCH__
+        else if (!wait_handle && status != STATUS_PENDING && !NT_ERROR(status))
+            set_sync_iosb( io, status, wine_server_reply_size( reply ), options );
+#endif
     }
     SERVER_END_REQ;
 
@@ -6197,6 +6201,10 @@ static unsigned int server_write_file( HANDLE handle, HANDLE event, PIO_APC_ROUT
         options     = reply->options;
         if (wait_handle && status != STATUS_PENDING)
             set_sync_iosb( io, status, reply->size, options );
+#ifdef __SWITCH__
+        else if (!wait_handle && status != STATUS_PENDING && !NT_ERROR(status))
+            set_sync_iosb( io, status, reply->size, options );
+#endif
     }
     SERVER_END_REQ;
 

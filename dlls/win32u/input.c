@@ -1189,6 +1189,14 @@ BOOL WINAPI NtUserGetKeyboardState( BYTE *state )
 
     TRACE("(%p)\n", state);
 
+    /* Hardware input lands in the desktop's key state the moment the server
+     * takes it, while this thread's copy of it only catches up when the thread
+     * reads its queue. A program that polls its keyboard once a frame through
+     * a video reads none of its queue, and on Windows the driver would answer
+     * it anyway; asking for one key is what brings the copy up to date, and
+     * costs a request only when it is stale. */
+    NtUserGetKeyState( 0 );
+
     while ((status = get_shared_input( GetCurrentThreadId(), &lock, &input_shm )) == STATUS_PENDING)
         memcpy( state, (const void *)input_shm->keystate, 256 );
     if (status) memset( state, 0, 256 );
@@ -2983,6 +2991,19 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
         rect = &new_rect;
     }
 
+#ifdef __SWITCH__
+    if (!rect)
+    {
+        new_rect = map_rect_virt_to_raw( get_virtual_screen_rect( dpi, MDT_DEFAULT ), dpi );
+        rect = &new_rect;
+    }
+    {
+        RECT panel = get_virtual_screen_rect( no_dpi, MDT_RAW_DPI );
+        if (!IsRectEmpty( &panel ) && !IsRectEmpty( &new_rect ) &&
+            !intersect_rect( &new_rect, &new_rect, &panel ))
+            new_rect = panel;
+    }
+#endif
     SERVER_START_REQ( set_cursor )
     {
         if (rect)

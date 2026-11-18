@@ -1,0 +1,39 @@
+Carafe: a thread held in a wait in the server while it is suspended looks at everything again when it is let
+go, before it waits on: whether it is being ended, an APC, the objects. FEX suspends a thread before it is
+terminated, and the thread let go by the termination went back to sleep without seeing it was ending, until
+the wait's next recheck 250 ms later. The signal of a signal-and-wait is still sent once.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -17038,7 +17038,7 @@
+         }
+     }
+ #endif
+-    for (int initial = 1;; initial = 0)
++    for (;;)
+     {
+         LARGE_INTEGER now;
+         long long timeout = 0x7fffffffffffffffLL;
+@@ -17104,6 +17104,7 @@
+                 reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
+                 break;
+             }
++            continue;
+         }
+ #endif
+ 
+@@ -17113,11 +17114,12 @@
+             break;
+         }
+ 
+-        if (initial && signals)
++        if (signals)
+         {
+             const unsigned char *select_data = data;
+             const struct horizon_select_signal_and_wait_op *op;
+ 
++            signals = 0;
+             if (data_size >= HORIZON_APC_RESULT_SIZE + request->size) select_data += HORIZON_APC_RESULT_SIZE;
+             op = (const void *)select_data;
+             reply.header.error = horizon_server_wait_object_locked( op->wait, FALSE );

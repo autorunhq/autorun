@@ -1,0 +1,136 @@
+Carafe: the screen follows the game's main window: the largest visible window of the game without an owner,
+at least 640x400. The screen takes its client size and the window moves so its client is in the corner.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_drv.c
++++ b/dlls/win32u/winnx_drv.c
+@@ -779,6 +779,112 @@
+     wine_nx_cursor_show( wine_nx_cursor_visible_for( cursor, count, &seen ) );
+ }
+ 
++#define WINE_NX_GAME_WINDOW_MIN_W 640
++#define WINE_NX_GAME_WINDOW_MIN_H 400
++
++extern LONG wine_nx_fit_screen( UINT width, UINT height );
++
++static LONG wine_nx_fit_pending;
++
++static BOOL wine_nx_game_window( HWND hwnd, RECT *client )
++{
++    struct ratio dpi = get_thread_dpi();
++    DWORD style = get_window_long( hwnd, GWL_STYLE );
++    DWORD pid = 0;
++
++    if (!(style & WS_VISIBLE) || (style & (WS_CHILD | WS_MINIMIZE))) return FALSE;
++    if (get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_TOOLWINDOW) return FALSE;
++    if (get_window_relative( hwnd, GW_OWNER )) return FALSE;
++    if (!NtUserGetWindowThread( hwnd, &pid ) || pid != GetCurrentProcessId()) return FALSE;
++    if (!get_client_rect( hwnd, client, dpi )) return FALSE;
++    map_window_points( hwnd, 0, (POINT *)client, 2, dpi );
++    return client->right - client->left >= WINE_NX_GAME_WINDOW_MIN_W &&
++           client->bottom - client->top >= WINE_NX_GAME_WINDOW_MIN_H;
++}
++
++static void wine_nx_log_window( HWND hwnd, BOOL chosen )
++{
++    static unsigned int logged;
++    struct ratio dpi = get_thread_dpi();
++    RECT client = {0};
++    DWORD pid = 0;
++    char line[200];
++
++    if (!&wine_nx_runtime_trace || logged >= 40) return;
++    logged++;
++    NtUserGetWindowThread( hwnd, &pid );
++    if (get_client_rect( hwnd, &client, dpi )) map_window_points( hwnd, 0, (POINT *)&client, 2, dpi );
++    snprintf( line, sizeof(line), "[NXSCREEN] window %p style %08x exstyle %08x owner %p pid %u client %d,%d %dx%d: %s",
++              hwnd, (unsigned int)get_window_long( hwnd, GWL_STYLE ), (unsigned int)get_window_long( hwnd, GWL_EXSTYLE ),
++              get_window_relative( hwnd, GW_OWNER ), (unsigned int)pid, (int)client.left, (int)client.top,
++              (int)(client.right - client.left), (int)(client.bottom - client.top), chosen ? "a candidate" : "skipped" );
++    wine_nx_runtime_trace( line );
++}
++
++static HWND wine_nx_find_game_window( RECT *client )
++{
++    HWND *list, game = 0;
++    RECT rect;
++    LONGLONG area, best = 0;
++    unsigned int i;
++
++    if (!(list = list_window_children( NtUserGetDesktopWindow() ))) return 0;
++    for (i = 0; list[i]; i++)
++    {
++        BOOL candidate = wine_nx_game_window( list[i], &rect );
++
++        if (get_window_long( list[i], GWL_STYLE ) & WS_VISIBLE) wine_nx_log_window( list[i], candidate );
++        if (!candidate) continue;
++        area = (LONGLONG)(rect.right - rect.left) * (rect.bottom - rect.top);
++        if (area <= best) continue;
++        best = area;
++        game = list[i];
++        *client = rect;
++    }
++    free( list );
++    return game;
++}
++
++static void wine_nx_fit_screen_to_game( void )
++{
++    struct ratio dpi = get_thread_dpi();
++    int width, height, screen_width, screen_height;
++    RECT client, window;
++    HWND game;
++    UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
++    LONG ret;
++    char line[160];
++
++    if (!InterlockedExchange( &wine_nx_fit_pending, 0 )) return;
++    if (!(game = wine_nx_find_game_window( &client ))) return;
++    width = client.right - client.left;
++    height = client.bottom - client.top;
++    screen_width = get_system_metrics( SM_CXSCREEN );
++    screen_height = get_system_metrics( SM_CYSCREEN );
++    if (width != screen_width || height != screen_height)
++    {
++        ret = wine_nx_fit_screen( width, height );
++        if (&wine_nx_runtime_trace)
++        {
++            snprintf( line, sizeof(line), "[NXSCREEN] the screen follows the game's window: %dx%d, was %dx%d, result %d",
++                      width, height, screen_width, screen_height, (int)ret );
++            wine_nx_runtime_trace( line );
++        }
++        if (ret != DISP_CHANGE_SUCCESSFUL || !wine_nx_game_window( game, &client )) return;
++        flags |= SWP_FRAMECHANGED;
++    }
++    if (!client.left && !client.top) flags |= SWP_NOMOVE;
++    if ((flags & SWP_NOMOVE) && !(flags & SWP_FRAMECHANGED)) return;
++    if (!get_window_rect( game, &window, dpi )) return;
++    NtUserSetWindowPos( game, 0, window.left - client.left, window.top - client.top, 0, 0, flags );
++    if (!(flags & SWP_NOMOVE) && &wine_nx_runtime_trace)
++    {
++        snprintf( line, sizeof(line), "[NXSCREEN] the game's window moved by %d,%d to the screen's corner",
++                  (int)-client.left, (int)-client.top );
++        wine_nx_runtime_trace( line );
++    }
++}
++
+ BOOL wine_nx_drv_ProcessEvents( DWORD mask )
+ {
+     static unsigned int delivering;
+@@ -793,6 +899,7 @@
+     int x, y, dx, dy;
+ 
+     (void)mask;
++    wine_nx_fit_screen_to_game();
+     if (__atomic_exchange_n( &delivering, 1, __ATOMIC_ACQUIRE )) return FALSE;
+     wine_nx_fb_present();
+     /* Poll here too, then deliver everything the polls saw since the last
+@@ -956,6 +1063,8 @@
+     BOOL has_old_screen_rect = wine_nx_get_cached_screen_rect( hwnd, &old_screen_rect );
+ 
+     nxdrv_trace( "[NXDRV] WindowPosChanged surface=%d swp=%x", surface ? 1 : 0, swp_flags, 0, 0 );
++    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
++        InterlockedExchange( &wine_nx_fit_pending, 1 );
+     if (swp_flags & SWP_HIDEWINDOW)
+     {
+         wine_nx_note_surface_hidden( hwnd );

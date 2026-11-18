@@ -626,7 +626,9 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
+    source/runtime_symbols.c
     source/dxvk_releases.c
+    source/fex_build.c
     source/runtime_platform.c
     source/sd_cache.c
     source/wow64_box64_bridge.c
@@ -643,6 +645,24 @@ add_executable(wine-nx-runtime
     source/osk.c
     source/compositor_gl.c
     source/compositor_egl.c
+    source/carafe_hid.c
+    source/carafe_overlay.c
+    source/carafe_loading.c
+    source/carafe_error.c
+    source/carafe_draw.c
+    source/carafe_text.c
+    source/carafe_settings.c
+    source/carafe_registry.c
+    source/carafe_menu.c
+    source/carafe_diag.c
+    source/carafe_bench.c
+    source/carafe_waits.c
+    source/carafe_fex_stats.c
+    source/orchestrator.c
+    source/orchestrator_policy.c
+    source/saltynx.c
+    ../dlls/winebus.sys/hid.c
+    ../dlls/hidparse.sys/main.c
     $<TARGET_OBJECTS:wine-horizon-real>
     $<TARGET_OBJECTS:wine-server-real>
     $<TARGET_OBJECTS:wine-sync-real>
@@ -669,9 +689,10 @@ add_executable(wine-nx-runtime
 
 target_sources(wine-nx-runtime PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
     source/launcher.c source/launcher_graphics.c source/launcher_dxvk.c source/dxvk_options.c source/launcher_catalog.c source/launcher_console.c
     source/input_profile.c source/launcher_input.c
-    source/game_settings.c source/launcher_game_settings.c
+    source/game_settings.c source/launcher_game_settings.c source/launcher_text_edit.c
     source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
     source/launcher_image.c source/launcher_artwork.c source/steamgriddb.c source/autorun_update.c source/autorun_install.c
     source/launcher_update.c source/launcher_setup.c source/setup_boot.c source/forwarder.c
@@ -689,6 +710,13 @@ add_custom_command(
             --header "${CMAKE_CURRENT_BINARY_DIR}/horizon_dll_features.h"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/runtime_features.py" ${HORIZON_DLL_FEATURE_SOURCES}
     VERBATIM)
+# What this build was made from (build.sh passes the commit, GitHub Actions has
+# one), so the first line of a log says which runtime is on the card.
+set(WINE_NX_BUILD_ID "" CACHE STRING "Identifier of the commit this build is made from")
+if(WINE_NX_BUILD_ID)
+    target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_BUILD_ID="${WINE_NX_BUILD_ID}")
+endif()
+
 if(WINE_NX_BOOT_BUNDLE)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_BOOT_BUNDLE)
     target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_BOOT_BUNDLE}")
@@ -740,12 +768,53 @@ if(ELF2NSO AND NPDMTOOL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
         VERBATIM
     )
+    set(CARAFE_MENU_TXT "${CMAKE_CURRENT_BINARY_DIR}/carafe_menu.txt")
+    add_custom_command(
+        OUTPUT "${CARAFE_MENU_TXT}"
+        COMMAND "${CMAKE_COMMAND}" -E env python3
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
+                "${CARAFE_MENU_TXT}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-carafe-menu.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/carafe-menu-texts.json"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/dxvk_options.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/fex_options.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/input_profile.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/source/key_names.h"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
+        COMMAND "${CMAKE_COMMAND}" -E env python3
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py" --asm
+                "${CMAKE_CURRENT_BINARY_DIR}/carafe_embed.S"
+                carafe_menu_txt "${CARAFE_MENU_TXT}"
+                carafe_font_regular "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Regular.ttf"
+                carafe_font_bold "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Bold.ttf"
+                carafe_font_extrabold "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-ExtraBold.ttf"
+        DEPENDS "${CARAFE_MENU_TXT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Regular.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-Bold.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/MPLUS1p-ExtraBold.ttf"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
+        VERBATIM
+    )
 else()
     message(FATAL_ERROR "elf2nso and npdmtool are needed to build the forwarder loader")
 endif()
 # libnx's service macros use C11's static_assert, which the rest of the tree,
 # built as gnu99, does not have.
-set_source_files_properties(source/forwarder.c PROPERTIES COMPILE_OPTIONS "-std=gnu11")
+set_source_files_properties(source/forwarder.c source/carafe_hid.c
+    source/carafe_overlay.c source/carafe_loading.c source/carafe_error.c
+    source/carafe_draw.c source/carafe_text.c
+    source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c
+    source/carafe_diag.c source/carafe_bench.c source/carafe_waits.c source/carafe_fex_stats.c
+    source/carafe_lock_boost.c source/carafe_mesa.c source/orchestrator.c source/orchestrator_policy.c
+    source/saltynx.c
+    PROPERTIES COMPILE_OPTIONS "-std=gnu11")
+set_property(SOURCE source/carafe_hid.c ../dlls/winebus.sys/hid.c APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../dlls/winebus.sys")
+set_property(SOURCE ../dlls/hidparse.sys/main.c APPEND PROPERTY
+    COMPILE_OPTIONS -include "${CMAKE_CURRENT_SOURCE_DIR}/source/carafe_hid_kernel.h")
 set_source_files_properties(source/audio_unix.c source/wma_unix.c source/xinput_unix.c
     source/schannel_mbedtls.c source/crypt32_roots.c PROPERTIES COMPILE_DEFINITIONS WINE_UNIX_LIB)
 include(cmake/Media.cmake)
@@ -885,7 +954,26 @@ endif()
 target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
     -Wl,--wrap=svcSetThreadCoreMask
     -Wl,--wrap=virtmemFindAslr -Wl,--wrap=virtmemFindCodeMemory
-    -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation)
+    -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation
+    -Wl,--wrap=main -Wl,--wrap=wine_nx_osk_visible -Wl,--wrap=wine_nx_osk_generation
+    -Wl,--wrap=wine_nx_osk_frame -Wl,--wrap=wine_nx_osk_copy -Wl,--wrap=wine_nx_compositor_cursor)
+# Carafe's diagnostics (source/carafe_diag.c, carafe_waits.c): the stall report
+# also prints the server's last events and the alertable waits, the thread
+# report the frame rate, the clocks and, with the profiler on, what each thread
+# waited for and FEX's counters; every native thread's start is counted.
+# Carafe's orchestrator (source/orchestrator.c, GPL-3.0-or-later) stands in
+# front of the balancer and, for a program that asks for it, lays the busy
+# threads out over the cores itself.
+foreach(symbol wine_nx_threads_report_stalled wine_nx_thread_report pthread_create
+        horizon_futex_wait horizon_server_sync_call wine_nx_thread_balance)
+    target_link_options(wine-nx-runtime PRIVATE "-Wl,--wrap=${symbol}")
+endforeach()
+# The time a thread waits for a libnx mutex (source/carafe_lock_boost.c). The
+# swap experiment wraps the same kernel call for its own purpose.
+if(NOT WINE_NX_SWAP_POC)
+    target_sources(wine-nx-runtime PRIVATE source/carafe_lock_boost.c)
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=svcArbitrateLock)
+endif()
 
 # freetype (+ its deps) for win32u font rendering; nx last for the libnx syscalls
 find_library(SWITCH_FREETYPE freetype HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
@@ -934,13 +1022,43 @@ if(WINE_NX_MESA_SWITCH_DIR)
     endif()
     find_library(SWITCH_EXPAT expat HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib" REQUIRED)
     list(APPEND SWITCH_EGL ${SWITCH_ELF} ${SWITCH_EXPAT} ${SWITCH_ZSTD} ${SWITCH_Z} -Wl,--end-group)
+    # nxvk (https://github.com/PalindromicBreadLoaf/nxvk): another Mesa for the
+    # Switch, NVK for Vulkan and Zink over it for OpenGL, with no nvc0. A runtime
+    # linked with it instead of mesa-switch is a second NRO on the card,
+    # wine-nx-runtime-nxvk.nro, which a program set to it is started in
+    # (source/runtime.c). Two Mesas cannot share one program: they define the
+    # same symbols. mesa-switch's headers still compile the runtime; the APIs
+    # are the same, and what only mesa-switch has is weak or shimmed
+    # (source/nxvk_entry.c). Built by build-nxvk.sh; the folder is its pkg.
+    set(WINE_NX_NXVK_DIR "" CACHE PATH "nxvk's staged package (lib/libnvk.a, libnvk_support.a, libnvk_gl.a), to link instead of mesa-switch")
+    if(WINE_NX_NXVK_DIR)
+        foreach(lib nvk nvk_support nvk_gl)
+            if(NOT EXISTS "${WINE_NX_NXVK_DIR}/lib/lib${lib}.a")
+                message(FATAL_ERROR "nxvk package is missing lib/lib${lib}.a; run build-nxvk.sh")
+            endif()
+        endforeach()
+        message(STATUS "Mesa: nxvk, ${WINE_NX_NXVK_DIR} (mesa-switch's headers)")
+        set(SWITCH_EGL
+            -Wl,--whole-archive "${WINE_NX_NXVK_DIR}/lib/libnvk_gl.a" "${WINE_NX_NXVK_DIR}/lib/libnvk.a"
+            -Wl,--no-whole-archive
+            -Wl,--start-group "${WINE_NX_NXVK_DIR}/lib/libnvk_support.a" ${SWITCH_EXPAT} ${SWITCH_ZSTD} ${SWITCH_Z}
+            -Wl,--end-group)
+        target_sources(wine-nx-runtime PRIVATE source/nxvk_entry.c)
+        target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_NXVK)
+        target_compile_definitions(wine-win32u-real PRIVATE WINE_NX_NXVK)
+    endif()
     set(SWITCH_GLAPI "")
     set(SWITCH_DRM_NOUVEAU "")
     target_include_directories(wine-nx-runtime BEFORE PRIVATE "${WINE_NX_MESA_SWITCH_DIR}/../include")
     target_link_options(wine-nx-runtime PRIVATE
         -Wl,-u,vk_icdGetInstanceProcAddr -Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion -pthread)
     target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_MESA_SWITCH)
-    target_sources(wine-nx-runtime PRIVATE source/vulkan_probe.c)
+    target_sources(wine-nx-runtime PRIVATE source/vulkan_probe.c source/graphics_selftest.c)
+    # The log says which thread pools Mesa starts and how large (source/carafe_mesa.c).
+    target_sources(wine-nx-runtime PRIVATE source/carafe_mesa.c)
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=util_queue_init)
+    # Mesa's debug messages go into the runtime's log as well (carafe_mesa.c).
+    target_link_options(wine-nx-runtime PRIVATE -Wl,--wrap=os_log_message)
     set_source_files_properties(source/vulkan_probe.c PROPERTIES
         INCLUDE_DIRECTORIES "${WINE_NX_MESA_SWITCH_DIR}/../include")
 
@@ -981,7 +1099,8 @@ if(WINE_NX_MESA_SWITCH_DIR)
             APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_SHADER_ALLOC_CACHE)
     endif()
     option(WINE_NX_LSFG "Enable the GPL LSFG-VK frame-generation backend" ON)
-    if(WINE_NX_LSFG)
+    # LSFG-VK comes built against mesa-switch's NVK, not nxvk's.
+    if(WINE_NX_LSFG AND NOT WINE_NX_NXVK_DIR)
         include(cmake/LsfgVk.cmake)
     endif()
 endif()
@@ -989,7 +1108,9 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher_game_settings.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/launcher_game_settings.c source/launcher_text_edit.c source/launcher_input.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_dxvk.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_artwork.c source/launcher_update.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/launcher_fixes.c source/steamgriddb.c source/dxvk_releases.c source/osk.c
+    source/carafe_loading.c source/carafe_error.c
+    source/carafe_draw.c source/carafe_text.c source/carafe_settings.c source/carafe_registry.c source/carafe_menu.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 set_property(SOURCE source/launcher_update.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_BUILD_VERSION)

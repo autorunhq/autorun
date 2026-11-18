@@ -827,6 +827,19 @@ static void init_locale(void)
         if (preferred_langs) CFRelease( preferred_langs );
     }
 #endif
+#ifdef __SWITCH__
+    {
+        extern const char *wine_nx_console_locale( void ) __attribute__((weak));
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        char line[96];
+
+        if (&wine_nx_console_locale)
+            snprintf( system_locale, sizeof(system_locale), "%s", wine_nx_console_locale() );
+        strcpy( user_locale, "en-US" );
+        snprintf( line, sizeof(line), "[NLS] system locale %s, user locale %s", system_locale, user_locale );
+        if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
+    }
+#endif
 
     if ((header = read_nls_file( "locale.nls" )))
     {

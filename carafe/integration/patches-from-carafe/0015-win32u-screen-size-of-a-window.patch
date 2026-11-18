@@ -1,0 +1,46 @@
+Carafe: the screen can take any size, not only one of the listed modes, and modes are emulated by default.
+wine_nx_fit_screen sets the virtual screen to the size of the game's window; Wine then fits it into the
+console's screen, keeping its proportions and centring it.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -165,7 +165,11 @@
+ static UINT64 monitor_update_serial;
+ static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
++#ifdef __SWITCH__
++BOOL emulate_modeset = TRUE;
++#else
+ BOOL emulate_modeset = FALSE;
++#endif
+ BOOL decorated_mode = TRUE;
+ UINT64 thunk_lock_callback = 0;
+ 
+@@ -4632,6 +4636,26 @@
+     return ret;
+ }
+ 
++#ifdef __SWITCH__
++LONG wine_nx_fit_screen( UINT width, UINT height )
++{
++    DEVMODEW mode = {.dmSize = sizeof(DEVMODEW)};
++    struct source *source;
++    LONG ret;
++
++    if (!(source = find_source( NULL ))) return DISP_CHANGE_BADPARAM;
++    source_get_current_settings( source, &mode );
++    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
++    mode.dmPelsWidth = width;
++    mode.dmPelsHeight = height;
++    mode.dmPosition.x = 0;
++    mode.dmPosition.y = 0;
++    ret = apply_display_settings( source, &mode, NULL, CDS_FULLSCREEN, NULL );
++    source_release( source );
++    return ret;
++}
++#endif
++
+ static BOOL source_enum_display_settings( const struct source *source, UINT index, DEVMODEW *devmode, UINT flags )
+ {
+     DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)};

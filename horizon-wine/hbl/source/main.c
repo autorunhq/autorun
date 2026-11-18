@@ -127,6 +127,15 @@ static u64 calculateMaxHeapSize(void) {
     if (size > 0x6000000)
         size -= 0x6000000;
 
+    // The heap has to fit its region, which in a 32-bit address space is
+    // 1 GiB, or 2 GiB without the alias region (a game's 32-bit forwarder):
+    // less than the memory an application has, and svcSetHeapSize refuses a
+    // heap larger than its region. 36 and 39 bits leave 6 and 8 GiB for it.
+    u64 region = 0;
+    if (R_SUCCEEDED(svcGetInfo(&region, InfoType_HeapRegionSize, CUR_PROCESS_HANDLE, 0)) &&
+        region && size > region)
+        size = region & ~0x1FFFFFull;
+
     return size;
 }
 
@@ -487,6 +496,16 @@ void NX_NORETURN loadNro(void) {
             map_addr = virtmemFindCodeMemory(total_size, 0);
         if ((uintptr_t)map_addr < WINE_NX_NATIVE_BASE)
             diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 18));
+    } else if (aslr_base + aslr_size <= 0x100000000ull) {
+        // A 32-bit address space (a game's 32-bit forwarder) is the program's
+        // too, and images linked at a fixed base want its low addresses,
+        // 0x400000 first. The highest of a number of random places keeps the
+        // NRO out of their way.
+        for (unsigned int attempt = 0; map_addr && attempt < 64; ++attempt) {
+            void* other = virtmemFindCodeMemory(total_size, 0);
+            if ((uintptr_t)other > (uintptr_t)map_addr)
+                map_addr = other;
+        }
     }
     rc = svcMapProcessCodeMemory(g_procHandle, (u64)map_addr, (u64)g_heapAddr, total_size);
     virtmemUnlock();

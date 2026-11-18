@@ -1,0 +1,101 @@
+Carafe: with X87FastStack, the x87 condition bits C0 to C3 written in a block are reused by later reads in the same
+block instead of being loaded back from memory, and storing the same constant twice is skipped. FNSTSW after FCOM
+loaded the four bits FCOM had just stored, and every FXCH stored C1 = 0 again. The bits are still stored once, so
+the state seen outside the block does not change.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -4622,6 +4622,8 @@ void OpDispatchBuilder::ResetWorkingList() {
+   CurrentCodeBlock = nullptr;
+   RegCache.Written = 0;
+   RegCache.Cached = 0;
++  X87ConditionBlock = nullptr;
++  X87ConditionValues.fill(nullptr);
+ }
+ 
+ void OpDispatchBuilder::UnhandledOp(OpcodeArgs) {
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1309,6 +1309,8 @@ private:
+   FEX_CONFIG_OPT(ReducedPrecisionMode, X87REDUCEDPRECISION);
+   FEX_CONFIG_OPT(ConversionRoundingMode, X87CONVERSIONROUNDING);
+   FEX_CONFIG_OPT(FastStackMode, X87FASTSTACK);
++  Ref X87ConditionBlock {};
++  std::array<Ref, 8> X87ConditionValues {};
+ 
+   struct JumpTargetInfo {
+     Ref BlockEntry;
+@@ -1844,10 +1846,27 @@ private:
+         _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, Value, Constant(0), _And(OpSize::i32Bit, PackedTF, Constant(~1)), Constant(1));
+       _StoreContextGPR(OpSize::i8Bit, NewPackedTF, ARRAY_OFFSETOF(FEXCore::Core::CPUState, flags, BitOffset));
+     } else {
++      if (FastStackMode && IsX87ConditionFlag(BitOffset)) {
++        if (X87ConditionBlock != CurrentCodeBlock) {
++          X87ConditionValues.fill(nullptr);
++          X87ConditionBlock = CurrentCodeBlock;
++        }
++        Ref& Cached = X87ConditionValues[BitOffset - FEXCore::X86State::X87FLAG_C0_LOC];
++        uint64_t Old {}, New {};
++        if (Cached && IsValueConstant(WrapNode(Cached), &Old) && IsValueConstant(WrapNode(Value), &New) && Old == New) {
++          return;
++        }
++        Cached = Value;
++      }
+       _StoreContextGPR(OpSize::i8Bit, Value, ARRAY_OFFSETOF(FEXCore::Core::CPUState, flags, BitOffset));
+     }
+   }
+ 
++  static bool IsX87ConditionFlag(unsigned BitOffset) {
++    return BitOffset == FEXCore::X86State::X87FLAG_C0_LOC || BitOffset == FEXCore::X86State::X87FLAG_C1_LOC ||
++           BitOffset == FEXCore::X86State::X87FLAG_C2_LOC || BitOffset == FEXCore::X86State::X87FLAG_C3_LOC;
++  }
++
+   void SetAF(unsigned K) {
+     // AF is stored in bit 4 of the AF flag byte, with garbage in the other
+     // bits. This allows us to defer the extract in the usual case. When it is
+@@ -2100,6 +2119,10 @@ private:
+       // Recover the sign bit, it is the logical DF value
+       return _Lshr(OpSize::i64Bit, LoadDF(), Constant(63));
+     } else {
++      if (FastStackMode && IsX87ConditionFlag(BitOffset) && X87ConditionBlock == CurrentCodeBlock &&
++          X87ConditionValues[BitOffset - FEXCore::X86State::X87FLAG_C0_LOC]) {
++        return X87ConditionValues[BitOffset - FEXCore::X86State::X87FLAG_C0_LOC];
++      }
+       return _LoadContextGPR(OpSize::i8Bit, ARRAY_OFFSETOF(Core::CPUState, flags, BitOffset));
+     }
+   }
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
+@@ -747,17 +747,20 @@ Ref OpDispatchBuilder::ReconstructFSW_Helper(Ref T) {
+   Ref FSW = _Lshl(OpSize::i64Bit, Top, Constant(11));
+ 
+   // We must construct the FSW from our various bits
+-  auto C0 = GetRFLAG(FEXCore::X86State::X87FLAG_C0_LOC);
+-  FSW = _Orlshl(OpSize::i64Bit, FSW, C0, 8);
+-
+-  auto C1 = GetRFLAG(FEXCore::X86State::X87FLAG_C1_LOC);
+-  FSW = _Orlshl(OpSize::i64Bit, FSW, C1, 9);
+-
+-  auto C2 = GetRFLAG(FEXCore::X86State::X87FLAG_C2_LOC);
+-  FSW = _Orlshl(OpSize::i64Bit, FSW, C2, 10);
+-
+-  auto C3 = GetRFLAG(FEXCore::X86State::X87FLAG_C3_LOC);
+-  FSW = _Orlshl(OpSize::i64Bit, FSW, C3, 14);
++  const std::pair<unsigned, unsigned> Conditions[] = {
++    {FEXCore::X86State::X87FLAG_C0_LOC, 8},
++    {FEXCore::X86State::X87FLAG_C1_LOC, 9},
++    {FEXCore::X86State::X87FLAG_C2_LOC, 10},
++    {FEXCore::X86State::X87FLAG_C3_LOC, 14},
++  };
++  for (const auto& [Flag, Shift] : Conditions) {
++    Ref C = GetRFLAG(Flag);
++    uint64_t Value {};
++    if (FastStackMode && IsValueConstant(WrapNode(C), &Value) && Value == 0) {
++      continue;
++    }
++    FSW = _Orlshl(OpSize::i64Bit, FSW, C, Shift);
++  }
+ 
+   auto IE = GetRFLAG(FEXCore::X86State::X87FLAG_IE_LOC);
+   FSW = _Or(OpSize::i64Bit, FSW, IE);

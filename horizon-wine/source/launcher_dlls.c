@@ -19,6 +19,8 @@ struct launcher_dlls
     SDL_mutex *mutex;
     SDL_atomic_t cancel, done;
     int job;
+    /* Which repository: 0 Autorun's, 1 its fork (HORIZON_DLLS_SOURCE on the card). */
+    int fork;
     /* The worker's while it runs, the launcher's between jobs. */
     struct horizon_dll_manifest remote, local;
     int have_remote, have_local, planned, notify;
@@ -64,6 +66,32 @@ static int progress( void *opaque, const char *what, unsigned long long current,
     SDL_UnlockMutex( d->mutex );
     if (log) wine_nx_runtime_trace( line );
     return SDL_AtomicGet( &d->cancel );
+}
+
+/* Which repository the card follows, and saying so on the card. */
+static int read_source( const char *root )
+{
+    char path[640], word[16] = "";
+    FILE *file;
+
+    snprintf( path, sizeof(path), "%s/%s", root, HORIZON_DLLS_SOURCE );
+    if (!(file = fopen( path, "r" ))) return 0;
+    if (!fgets( word, sizeof(word), file )) word[0] = 0;
+    fclose( file );
+    return !strncmp( word, "fork", 4 );
+}
+
+static int write_source( const char *root, int fork )
+{
+    char path[640];
+    FILE *file;
+    int ok;
+
+    snprintf( path, sizeof(path), "%s/%s", root, HORIZON_DLLS_SOURCE );
+    if (!fork) { remove( path ); return 1; }
+    if (!(file = fopen( path, "w" ))) return 0;
+    ok = fputs( "fork\n", file ) >= 0;
+    return !fclose( file ) && ok;
 }
 
 /* Whether a program can start on what the card holds, and if not, why. */
@@ -124,10 +152,12 @@ static int worker( void *opaque )
             set_what( d, "Downloading the Windows DLLs" );
             d->logged_at = SDL_GetTicks();
             d->logged_bytes = 0;
-            d->result = horizon_dlls_download( transports, connections, HORIZON_DLLS_BUNDLE_URL, &bundle, &size,
+            d->result = horizon_dlls_download( transports, connections,
+                                               d->fork ? HORIZON_DLLS_FORK_BUNDLE_URL : HORIZON_DLLS_BUNDLE_URL, &bundle, &size,
                                                progress, d, &stats );
-            snprintf( line, sizeof(line), "[DLLS] release: %s; %llu KB over %u connections in %u ms (%.0f KB/s); %s",
-                      horizon_dlls_error( d->result ), stats.bytes >> 10, stats.connections, stats.download_ms,
+            snprintf( line, sizeof(line), "[DLLS] release of %s: %s; %llu KB over %u connections in %u ms (%.0f KB/s); %s",
+                      d->fork ? "the fork" : "the repository", horizon_dlls_error( d->result ), stats.bytes >> 10,
+                      stats.connections, stats.download_ms,
                       stats.download_ms ? (stats.bytes >> 10) * 1000.0 / stats.download_ms : 0,
                       horizon_dlls_curl_last( &transports[0] ) );
             wine_nx_runtime_trace( line );
@@ -166,8 +196,9 @@ static int worker( void *opaque )
     else
     {
         set_what( d, "Reading the DLL repository" );
-        d->result = horizon_dlls_fetch_manifest( &transports[0], HORIZON_DLLS_MANIFEST_URL, horizon_dll_runtime_features,
-                                                 FEATURE_COUNT, &fetched, progress, d );
+        d->result = horizon_dlls_fetch_manifest( &transports[0],
+                                                 d->fork ? HORIZON_DLLS_FORK_MANIFEST_URL : HORIZON_DLLS_MANIFEST_URL,
+                                                 horizon_dll_runtime_features, FEATURE_COUNT, &fetched, progress, d );
         if (d->result == HORIZON_DLLS_OK)
         {
             horizon_dlls_free( &d->remote );
@@ -182,9 +213,10 @@ static int worker( void *opaque )
     {
         char line[400], why[160];
 
-        snprintf( line, sizeof(line), "[DLLS] %s in %u ms over %u connections: %s; %u files, %u to download (%llu KB), "
+        snprintf( line, sizeof(line), "[DLLS] %s from %s in %u ms over %u connections: %s; %u files, %u to download (%llu KB), "
                   "%u need another runtime, %u in folders this build does not know; the card %s",
                   d->job == JOB_APPLY ? "download" : d->job == JOB_VERIFY ? "verify" : "check",
+                  d->fork ? HORIZON_DLLS_FORK_OWNER "'s fork" : "the repository",
                   SDL_GetTicks() - started, connections, horizon_dlls_error( d->result ), d->have_remote ? d->remote.count : 0,
                   d->planned ? d->plan.pending : 0, d->planned ? d->plan.download_bytes >> 10 : 0,
                   d->planned ? d->plan.unsupported : 0, d->have_remote ? d->remote.skipped : 0,
@@ -241,6 +273,7 @@ struct launcher_dlls *launcher_dlls_create( struct ui *ui, const char *root )
     /* No slash at the end: paths are joined with one. */
     while (strlen( d->root ) > 1 && d->root[strlen( d->root ) - 1] == '/') d->root[strlen( d->root ) - 1] = 0;
     d->notify = 1;
+    d->fork = read_source( d->root );
     start( d, JOB_CHECK );
     return d;
 }
@@ -371,7 +404,7 @@ static int update( struct launcher_dlls *d )
 void launcher_dlls_open( struct launcher_dlls *d )
 {
     struct ui *ui = d ? d->ui : NULL;
-    struct ui_row rows[3 + HORIZON_DLLS_CATEGORIES];
+    struct ui_row rows[4 + HORIZON_DLLS_CATEGORIES];
     char context[96], titles[HORIZON_DLLS_CATEGORIES][48], amount[32];
     struct ui_list list = {0};
     enum ui_action action;
@@ -407,7 +440,13 @@ void launcher_dlls_open( struct launcher_dlls *d )
         rows[2].disabled = offline;
         rows[2].help = "Reads every DLL on the card and downloads again any that is not what it should be. "
                        "Takes a few minutes.";
-        count = 3;
+        snprintf( rows[3].label, sizeof(rows[3].label), "Source" );
+        snprintf( rows[3].value, sizeof(rows[3].value), "%s", d->fork ? HORIZON_DLLS_FORK_OWNER "'s fork" : "Autorun" );
+        rows[3].kind = UI_ROW_ACTION;
+        rows[3].help = "Which DLL repository on GitHub the card follows: Autorun's, or " HORIZON_DLLS_FORK_OWNER
+                       "'s fork of it with its own builds. Changing it downloads nothing by itself: Update "
+                       "then replaces the files that differ, and changing back does the same the other way.";
+        count = 4;
         for (i = 0; i < m->category_count && d->planned; i++)
         {
             const struct horizon_dlls_category_plan *c = &d->plan.categories[i];
@@ -444,6 +483,18 @@ void launcher_dlls_open( struct launcher_dlls *d )
                 if (d->plan.pending) update( d );
                 else ui_message( ui, "Windows DLLs", "Every file on the card is what it should be." );
             }
+            break;
+        case 3:
+            d->fork = !d->fork;
+            if (!write_source( d->root, d->fork ) && ui->running)
+                ui_message( ui, "Windows DLLs", "The choice could not be written to the card; it holds until "
+                            "Autorun closes." );
+            /* What the other repository had is not this one's. */
+            horizon_dlls_free( &d->remote );
+            memset( &d->remote, 0, sizeof(d->remote) );
+            d->have_remote = d->planned = 0;
+            if (run( d, JOB_CHECK, "Checking the DLL repository" ) != HORIZON_DLLS_OK && ui->running)
+                ui_message( ui, "Windows DLLs", horizon_dlls_error( d->result ) );
             break;
         }
     }

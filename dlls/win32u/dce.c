@@ -150,7 +150,14 @@ struct scaled_surface
     struct window_surface *target_surface;
     struct ratio dpi_from;
     struct ratio dpi_to;
+#ifdef __SWITCH__
+    LONG drawn;
+#endif
 };
+
+#ifdef __SWITCH__
+extern void wine_nx_driver_surface_drawn( struct window_surface *surface ) __attribute__((weak));
+#endif
 
 static struct scaled_surface *get_scaled_surface( struct window_surface *window_surface )
 {
@@ -210,6 +217,10 @@ static BOOL scaled_surface_flush( struct window_surface *window_surface, const R
                                     window_surface->alpha_bits, window_surface->alpha_mask );
     }
 
+#ifdef __SWITCH__
+    if (InterlockedExchange( &surface->drawn, 0 ) && wine_nx_driver_surface_drawn)
+        wine_nx_driver_surface_drawn( surface->target_surface );
+#endif
     window_surface_flush( surface->target_surface );
     return TRUE;
 }
@@ -227,6 +238,14 @@ static const struct window_surface_funcs scaled_surface_funcs =
     .flush = scaled_surface_flush,
     .destroy = scaled_surface_destroy
 };
+
+#ifdef __SWITCH__
+void wine_nx_surface_drawn( struct window_surface *surface )
+{
+    if (surface->funcs == &scaled_surface_funcs) InterlockedExchange( &get_scaled_surface( surface )->drawn, 1 );
+    else if (wine_nx_driver_surface_drawn) wine_nx_driver_surface_drawn( surface );
+}
+#endif
 
 static void scaled_surface_set_target( struct scaled_surface *surface, struct window_surface *target, struct ratio dpi_to )
 {

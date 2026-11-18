@@ -385,6 +385,7 @@ static int horizon_sync_call( struct __server_request_info *req )
     case REQ_query_mutex:
     case REQ_release_semaphore:
     case REQ_query_semaphore:
+    case REQ_get_handle_fd:
         break;
     default:
         return 0;

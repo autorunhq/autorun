@@ -1,0 +1,517 @@
+Carafe: fewer waits of the game thread for the front end. A managed buffer that no queued call has used and that was
+never locked past the front end gets empty memory at its first lock, freed at the unlock, as its contents are not yet
+defined; a game that creates buffers while it plays and fills each once no longer waits for every one of them.
+The end of an event query is queued, and asking for its result no longer waits for the queue: until the queued end
+has run the event is not signalled, as on a busy GPU, and a flush the game asks for is queued once per end.
+SetGammaRamp with the ramp already set returns at once. DISCARD locks of up to 256 KB, not 64 KB, are staged. The
+handle lookups of Wine's effect interface, which only read the effect's structure, are called without waiting. The
+report counts the new buffers locked this way, the size of the buffer locks that wait and the waits of the effect
+library's methods that are not queued.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_common_buffer.cpp b/src/d3d9/d3d9_common_buffer.cpp
+--- a/src/d3d9/d3d9_common_buffer.cpp
++++ b/src/d3d9/d3d9_common_buffer.cpp
+@@ -37,9 +37,12 @@
+       if (frontEnd->StagesLock(this, OffsetToLock, SizeToLock, Flags)
+        || frontEnd->CopiesLock(this, OffsetToLock, SizeToLock, Flags))
+         return frontEnd->LockStaged(this, OffsetToLock, SizeToLock, ppbData, Flags);
+-      frontEnd->NoteWaitingLock(false, m_desc.Pool, m_desc.Usage, Flags, m_frontEndUsed);
++      UINT offset = std::min<UINT>(OffsetToLock, m_desc.Size);
++      UINT bytes = SizeToLock == 0 ? m_desc.Size - offset : std::min<UINT>(SizeToLock, m_desc.Size - offset);
++      frontEnd->NoteWaitingLock(false, m_desc.Pool, m_desc.Usage, Flags, m_frontEndUsed, bytes);
+     }
+ 
++    m_lockedDirect = true;
+     for (auto& staging : m_frontEndStaging) {
+       if (staging.copied)
+         staging.stale.exchange(1u);
+diff -ruN a/src/d3d9/d3d9_common_buffer.h b/src/d3d9/d3d9_common_buffer.h
+--- a/src/d3d9/d3d9_common_buffer.h
++++ b/src/d3d9/d3d9_common_buffer.h
+@@ -78,6 +78,7 @@
+     uint32_t             locks  = 0;
+     bool                 locked = false;
+     bool                 copied = false;
++    bool                 fresh  = false;
+     std::atomic<uint32_t> stale { 0u };
+     void*                owner  = nullptr;
+     void               (*addRef)(void*)  = nullptr;
+@@ -92,6 +93,8 @@
+ 
+     bool m_frontEndUsed = false;
+ 
++    bool m_lockedDirect = false;
++
+     D3D9CommonBuffer(
+             D3D9DeviceEx*      pDevice,
+       const D3D9_BUFFER_DESC*  pDesc);
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -602,6 +602,9 @@
+     if (unlikely(iSwapChain != 0))
+       return;
+ 
++    if (Queuing() != nullptr && m_implicitSwapchain->HasGammaRamp(pRamp))
++      return;
++
+     m_implicitSwapchain->SetGammaRamp(Flags, pRamp);
+   }
+ 
+@@ -5253,7 +5256,7 @@
+             DWORD                   Flags) {
+     if (D3D9FrontEnd* frontEnd = Queuing())
+       frontEnd->NoteWaitingLock(true, pResource->Desc()->Pool, pResource->Desc()->Usage, Flags,
+-        (pResource->Desc()->Usage & D3DUSAGE_RENDERTARGET) != 0);
++        (pResource->Desc()->Usage & D3DUSAGE_RENDERTARGET) != 0, 0);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -8151,6 +8154,13 @@
+ 
+ 
+   void D3D9DeviceEx::End(D3D9Query* pQuery) {
++    if (pQuery->IsEvent()) {
++      if (D3D9FrontEnd* frontEnd = Queuing()) {
++        frontEnd->QueueQuery(D3D9FrontEndOp::QueryEnd, pQuery);
++        return;
++      }
++    }
++
+     D3D9DeviceLock lock = LockDevice();
+ 
+     EmitCs([cQuery = Com<D3D9Query, false>(pQuery)](DxvkContext* ctx) {
+@@ -8168,6 +8178,18 @@
+   }
+ 
+ 
++  void D3D9DeviceEx::FlushForQuery(D3D9Query* pQuery) {
++    if (D3D9FrontEnd* frontEnd = Queuing()) {
++      frontEnd->QueueQuery(D3D9FrontEndOp::QueryFlush, pQuery);
++      return;
++    }
++
++    D3D9DeviceLock lock = LockDevice();
++    pQuery->NotifyStall();
++    ConsiderFlush(GpuFlushType::ImplicitSynchronization);
++  }
++
++
+   void D3D9DeviceEx::SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits) {
+     m_state.vsConsts->bConsts[idx] &= ~mask;
+     m_state.vsConsts->bConsts[idx] |= bits & mask;
+diff -ruN a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1102,6 +1102,8 @@
+     void Begin(D3D9Query* pQuery);
+     void End(D3D9Query* pQuery);
+ 
++    void FlushForQuery(D3D9Query* pQuery);
++
+     void SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits);
+     void SetPixelBoolBitfield (uint32_t idx, uint32_t mask, uint32_t bits);
+ 
+diff -ruN a/src/d3d9/d3d9_effect_hooks.cpp b/src/d3d9/d3d9_effect_hooks.cpp
+--- a/src/d3d9/d3d9_effect_hooks.cpp
++++ b/src/d3d9/d3d9_effect_hooks.cpp
+@@ -222,9 +222,9 @@
+       return frontEnd != nullptr && !g_direct && frontEnd->Queues() ? frontEnd : nullptr;
+     }
+ 
+-    void DrainForEffects() {
++    void __cdecl DrainForEffects(uint32_t slot) {
+       if (D3D9FrontEnd* frontEnd = Effects())
+-        frontEnd->DrainProducer();
++        frontEnd->DrainForEffect(slot);
+     }
+ 
+     template <uint32_t Slot>
+@@ -301,7 +301,7 @@
+         | (technique != g_technique.end() ? technique->second : 0u);
+       auto cached = g_passes.find(key);
+       if (cached == g_passes.end()) {
+-        frontEnd->DrainProducer();
++        frontEnd->DrainForEffect(SlotBegin);
+         g_direct = true;
+         HRESULT hr = CallOriginal<SlotBegin>(effect, 2, a);
+         g_direct = false;
+@@ -318,6 +318,9 @@
+       return D3D_OK;
+     }
+ 
++    constexpr uint32_t FirstHandleSlot = 8;
++    constexpr uint32_t LastHandleSlot  = 19;
++
+     const Queued g_wineQueued[] = {
+       { 20, 3, Payload::Bytes,   0,  reinterpret_cast<void*>(&Hook3<20, Payload::Bytes>) },
+       { 22, 2, Payload::None,    0,  reinterpret_cast<void*>(&Hook2<22>) },
+@@ -448,7 +451,7 @@
+         }
+       }
+ 
+-      constexpr uint32_t DrainBytes = 20;
++      constexpr uint32_t DrainBytes = 32;
+       auto thunks = static_cast<uint8_t*>(VirtualAlloc(nullptr, publicSlots * DrainBytes, MEM_COMMIT | MEM_RESERVE,
+         PAGE_EXECUTE_READWRITE));
+       if (thunks == nullptr)
+@@ -458,20 +461,26 @@
+       for (uint32_t i = 0; i < publicSlots; i++) {
+         uint8_t* t = thunks + i * DrainBytes;
+         uint32_t target = uint32_t(reinterpret_cast<uintptr_t>(&g_queueOriginal[i]));
++        std::memset(t, 0xcc, DrainBytes);
+         t[0] = 0x50; t[1] = 0x51; t[2] = 0x52;
+-        t[3] = 0xff; t[4] = 0x15;
+-        std::memcpy(t + 5, &drain, 4);
+-        t[9] = 0x5a; t[10] = 0x59; t[11] = 0x58;
+-        t[12] = 0xff; t[13] = 0x25;
+-        std::memcpy(t + 14, &target, 4);
+-        t[18] = 0xcc; t[19] = 0xcc;
++        t[3] = 0x68;
++        std::memcpy(t + 4, &i, 4);
++        t[8] = 0xff; t[9] = 0x15;
++        std::memcpy(t + 10, &drain, 4);
++        t[14] = 0x83; t[15] = 0xc4; t[16] = 0x04;
++        t[17] = 0x5a; t[18] = 0x59; t[19] = 0x58;
++        t[20] = 0xff; t[21] = 0x25;
++        std::memcpy(t + 22, &target, 4);
+       }
+       FlushInstructionCache(GetCurrentProcess(), thunks, publicSlots * DrainBytes);
+ 
+       uint32_t replaced[MaxSlots];
+       std::memcpy(replaced, entries, slots * 4);
+-      for (uint32_t i = 2; i < publicSlots; i++)
+-        replaced[i] = uint32_t(reinterpret_cast<uintptr_t>(thunks + i * DrainBytes));
++      for (uint32_t i = 2; i < publicSlots; i++) {
++        bool handleLookup = queued == g_wineQueued && i >= FirstHandleSlot && i <= LastHandleSlot;
++        if (!handleLookup)
++          replaced[i] = uint32_t(reinterpret_cast<uintptr_t>(thunks + i * DrainBytes));
++      }
+       for (size_t n = 0; n < queuedCount; n++)
+         replaced[queued[n].slot] = uint32_t(reinterpret_cast<uintptr_t>(queued[n].hook));
+ 
+diff -ruN a/src/d3d9/d3d9_front_end.cpp b/src/d3d9/d3d9_front_end.cpp
+--- a/src/d3d9/d3d9_front_end.cpp
++++ b/src/d3d9/d3d9_front_end.cpp
+@@ -3,6 +3,7 @@
+ #include "d3d9_device.h"
+ #include "d3d9_stateblock.h"
+ #include "d3d9_buffer.h"
++#include "d3d9_query.h"
+ #include "d3d9_shader.h"
+ #include "d3d9_surface.h"
+ #include "d3d9_texture.h"
+@@ -1013,8 +1014,15 @@
+     if (!staging.copied) {
+       if (!staging.locked) {
+         staging.locked = true;
+-        return false;
++        if (pBuffer->m_frontEndUsed || pBuffer->m_lockedDirect)
++          return false;
++        staging.memory.assign(desc->Size, 0);
++        staging.fresh = true;
++        m_statFresh++;
++        return true;
+       }
++      if (staging.fresh)
++        return true;
+       void* data = nullptr;
+       if (FAILED(m_device->LockBuffer(pBuffer, 0, 0, &data, D3DLOCK_READONLY)) || data == nullptr)
+         return false;
+@@ -1033,6 +1041,17 @@
+   }
+ 
+ 
++  void D3D9FrontEnd::QueueQuery(D3D9FrontEndOp Op, D3D9Query* pQuery) {
++    RefPrivate<D3D9Query>(pQuery, true);
++    auto args = reinterpret_cast<ObjectArgs*>(Allocate(Op, sizeof(ObjectArgs)));
++    args->object = pQuery;
++    args->a = 0;
++    args->b = 0;
++    args->c = 0;
++    Publish();
++  }
++
++
+   HRESULT D3D9FrontEnd::LockStaged(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, void** ppbData,
+       DWORD Flags) {
+     if (unlikely(ppbData == nullptr))
+@@ -1076,20 +1095,25 @@
+       return D3D_OK;
+     if (--staging.locks != 0)
+       return D3D_OK;
+-    if (staging.flags & D3DLOCK_READONLY)
+-      return D3D_OK;
+ 
+-    m_statStaged++;
+-    staging.addRef(staging.owner);
+-    auto args = reinterpret_cast<UploadArgs*>(Allocate(D3D9FrontEndOp::BufferUpload,
+-      sizeof(UploadArgs) + staging.size));
+-    args->buffer = pBuffer;
+-    args->owner = staging.owner;
+-    args->release = staging.release;
+-    args->offset = staging.offset;
+-    args->size = staging.size;
+-    args->flags = staging.flags;
+-    std::memcpy(args + 1, staging.memory.data() + staging.offset, staging.size);
++    if (!(staging.flags & D3DLOCK_READONLY)) {
++      m_statStaged++;
++      staging.addRef(staging.owner);
++      auto args = reinterpret_cast<UploadArgs*>(Allocate(D3D9FrontEndOp::BufferUpload,
++        sizeof(UploadArgs) + staging.size));
++      args->buffer = pBuffer;
++      args->owner = staging.owner;
++      args->release = staging.release;
++      args->offset = staging.offset;
++      args->size = staging.size;
++      args->flags = staging.flags;
++      std::memcpy(args + 1, staging.memory.data() + staging.offset, staging.size);
++    }
++
++    if (staging.fresh) {
++      staging.fresh = false;
++      std::vector<uint8_t>().swap(staging.memory);
++    }
+     return D3D_OK;
+   }
+ 
+@@ -1100,8 +1124,11 @@
+       uint64_t(double(m_statQueued) / frames), ", unchanged states dropped ", uint64_t(double(m_statDropped) / frames),
+       ", buffer locks staged ", uint64_t(double(m_statStaged) / frames), "; in all: drains ", m_statDrains, " (",
+       m_statDrainUs, " us), waits for ring room ", m_statRoomWaits, ", frames waited for the worker ",
+-      m_statFrameWaits, m_managedCopies ? str::format(", managed buffers copied ", m_statCopies) : std::string()));
++      m_statFrameWaits, m_managedCopies
++        ? str::format(", managed buffers copied ", m_statCopies, ", new ones locked without a wait ", m_statFresh)
++        : std::string()));
+     m_statCopies = 0;
++    m_statFresh = 0;
+     std::sort(m_drainSites.begin(), m_drainSites.end(),
+       [] (const auto& a, const auto& b) { return a.second > b.second; });
+     std::string sites;
+@@ -1121,10 +1148,24 @@
+       locks += str::format(" ", texture ? "texture" : "buffer", "/", pools[kind & 3u],
+         (kind & 4u) ? "/dynamic" : "", "/", flagNames[(kind >> 4) & 3u],
+         (kind & 64u) ? (texture ? "/render target" : "/drawn from") : "", " ", m_waitingLocks[kind]);
++      if (!texture) {
++        locks += str::format(" (", m_waitingBytes[kind] / m_waitingLocks[kind] >> 10, " KB on average, ",
++          m_waitingLargest[kind] >> 10, " KB at most)");
++      }
+     }
+     if (!locks.empty())
+       Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " locks that wait:", locks));
+     m_waitingLocks = { };
++    m_waitingBytes = { };
++    m_waitingLargest = { };
++    std::string effectWaits;
++    for (uint32_t slot = 0; slot < m_effectWaits.size(); slot++) {
++      if (m_effectWaits[slot] != 0)
++        effectWaits += str::format(" +0x", std::hex, slot * 4, std::dec, " ", m_effectWaits[slot]);
++    }
++    if (!effectWaits.empty())
++      Logger::info(str::format("[D3D9 effects] waits by effect method:", effectWaits));
++    m_effectWaits = { };
+     if (m_passMerge) {
+       std::string breaks;
+       for (uint32_t op = 0; op < m_passBreakOps.size(); op++) {
+@@ -1498,6 +1539,18 @@
+       case D3D9FrontEndOp::EffectFlush:
+         break;
+ 
++      case D3D9FrontEndOp::QueryEnd: {
++        auto query = static_cast<D3D9Query*>(static_cast<const ObjectArgs*>(body)->object);
++        device->End(query);
++        RefPrivate<D3D9Query>(query, false);
++      } break;
++
++      case D3D9FrontEndOp::QueryFlush: {
++        auto query = static_cast<D3D9Query*>(static_cast<const ObjectArgs*>(body)->object);
++        device->FlushForQuery(query);
++        RefPrivate<D3D9Query>(query, false);
++      } break;
++
+       case D3D9FrontEndOp::RenderState: {
+         auto args = static_cast<const Args3*>(body);
+         if (m_replayPublic)
+diff -ruN a/src/d3d9/d3d9_front_end.h b/src/d3d9/d3d9_front_end.h
+--- a/src/d3d9/d3d9_front_end.h
++++ b/src/d3d9/d3d9_front_end.h
+@@ -64,11 +64,14 @@
+     StateBlockCapture,
+     BufferUpload,
+     EffectFlush,
++    QueryEnd,
++    QueryFlush,
+     Stop,
+   };
+ 
+   class D3D9VertexBuffer;
+   class D3D9VertexDecl;
++  class D3D9Query;
+ 
+   struct D3D9FrontEndStream {
+     D3D9VertexBuffer* buffer;
+@@ -106,7 +109,7 @@
+     static constexpr uint32_t PublishEvery  = 32;
+     static constexpr uint32_t SpinCount     = 4000;
+     static constexpr uint32_t ReportFrames  = 600;
+-    static constexpr uint32_t StagedLockMax = 64u << 10;
++    static constexpr uint32_t StagedLockMax = 256u << 10;
+     static constexpr uint32_t CopiedBufferMax = 4u << 20;
+     static constexpr uint32_t CopiedLockMax = 256u << 10;
+ 
+@@ -154,6 +157,12 @@
+ 
+     void DrainProducer();
+ 
++    void DrainForEffect(uint32_t Slot) {
++      if (m_pending && Slot < m_effectWaits.size())
++        m_effectWaits[Slot]++;
++      DrainProducer();
++    }
++
+     bool EffectCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pArgs, const void* pData,
+       uint32_t DataBytes, uint32_t DataArg, IDirect3DBaseTexture9* pTexture);
+ 
+@@ -340,17 +349,21 @@
+ 
+     void ForwardUpload(const void* pRecord, uint32_t Bytes);
+ 
++    void QueueQuery(D3D9FrontEndOp Op, D3D9Query* pQuery);
++
+     HRESULT LockStaged(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, void** ppbData, DWORD Flags);
+ 
+     HRESULT UnlockStaged(D3D9CommonBuffer* pBuffer);
+ 
+     uint32_t StagedLocks(D3D9CommonBuffer* pBuffer) const;
+ 
+-    void NoteWaitingLock(bool Texture, D3DPOOL Pool, DWORD Usage, DWORD Flags, bool Used) {
++    void NoteWaitingLock(bool Texture, D3DPOOL Pool, DWORD Usage, DWORD Flags, bool Used, uint32_t Bytes) {
+       uint32_t flags = (Flags & D3DLOCK_READONLY) ? 3u : (Flags & D3DLOCK_NOOVERWRITE) ? 2u : (Flags & D3DLOCK_DISCARD) ? 1u : 0u;
+       uint32_t kind = (uint32_t(Pool) & 3u) | ((Usage & D3DUSAGE_DYNAMIC) ? 4u : 0u) | (Texture ? 8u : 0u)
+         | (flags << 4) | (Used ? 64u : 0u);
+       m_waitingLocks[kind]++;
++      m_waitingBytes[kind] += Bytes;
++      m_waitingLargest[kind] = std::max(m_waitingLargest[kind], Bytes);
+     }
+ 
+   private:
+@@ -406,6 +419,10 @@
+     std::array<std::pair<uintptr_t, uint32_t>, 8> m_drainSites = { };
+ 
+     std::array<uint32_t, 128> m_waitingLocks = { };
++    std::array<uint64_t, 128> m_waitingBytes = { };
++    std::array<uint32_t, 128> m_waitingLargest = { };
++
++    std::array<uint32_t, 128> m_effectWaits = { };
+ 
+     struct OpenPass {
+       void*             effect = nullptr;
+@@ -416,6 +433,7 @@
+ 
+     bool               m_managedCopies = false;
+     uint64_t           m_statCopies    = 0;
++    uint64_t           m_statFresh     = 0;
+ 
+     bool               m_passMerge   = false;
+     bool               m_mayHoldPass = false;
+diff -ruN a/src/d3d9/d3d9_query.cpp b/src/d3d9/d3d9_query.cpp
+--- a/src/d3d9/d3d9_query.cpp
++++ b/src/d3d9/d3d9_query.cpp
+@@ -115,6 +115,7 @@
+           m_parent->Begin(this);
+ 
+         m_resetCtr.fetch_add(1);
++        m_flushQueued = false;
+ 
+         m_parent->End(this);
+ 
+@@ -127,6 +128,9 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Query::GetData(void* pData, DWORD dwSize, DWORD dwGetDataFlags) {
++    if (m_queryType == D3DQUERYTYPE_EVENT && m_parent->Queuing() != nullptr)
++      return GetQueuedEventData(pData, dwSize, dwGetDataFlags);
++
+     D3D9DeviceLock lock = m_parent->LockDevice();
+     m_parent->CountSync(D3D9DeviceEx::D3D9Sync::QueryData);
+ 
+@@ -166,6 +170,43 @@
+   }
+ 
+ 
++  HRESULT D3D9Query::GetQueuedEventData(void* pData, DWORD dwSize, DWORD dwGetDataFlags) {
++    bool flush = dwGetDataFlags & D3DGETDATA_FLUSH;
++
++    if (unlikely(m_parent->IsDeviceLost()))
++      return flush ? D3DERR_DEVICELOST : S_FALSE;
++
++    if (m_state == D3D9_VK_QUERY_INITIAL)
++      this->Issue(D3DISSUE_END);
++
++    bool signaled = m_state == D3D9_VK_QUERY_CACHED;
++
++    if (!signaled && m_resetCtr == 0u) {
++      DxvkGpuEventStatus status = m_event[0]->test();
++
++      if (status == DxvkGpuEventStatus::Invalid)
++        return D3DERR_INVALIDCALL;
++
++      signaled = status == DxvkGpuEventStatus::Signaled;
++    }
++
++    if (pData != nullptr && dwSize != 0)
++      *static_cast<BOOL*>(pData) = signaled;
++
++    if (signaled) {
++      m_state = D3D9_VK_QUERY_CACHED;
++      return D3D_OK;
++    }
++
++    if (flush && !m_flushQueued) {
++      m_flushQueued = true;
++      m_parent->FlushForQuery(this);
++    }
++
++    return S_FALSE;
++  }
++
++
+   HRESULT D3D9Query::GetQueryData(void* pData, DWORD dwSize) {
+     // Let the game know that calling end might be a good idea...
+     if (m_state == D3D9_VK_QUERY_BEGUN)
+diff -ruN a/src/d3d9/d3d9_query.h b/src/d3d9/d3d9_query.h
+--- a/src/d3d9/d3d9_query.h
++++ b/src/d3d9/d3d9_query.h
+@@ -43,6 +43,8 @@
+ 
+     HRESULT GetQueryData(void* pData, DWORD dwSize);
+ 
++    HRESULT GetQueuedEventData(void* pData, DWORD dwSize, DWORD dwGetDataFlags);
++
+     void Begin(DxvkContext* ctx);
+     void End(DxvkContext* ctx);
+ 
+@@ -80,6 +82,8 @@
+     uint32_t m_stallMask = 0;
+     bool     m_stallFlag = false;
+ 
++    bool     m_flushQueued = false;
++
+     std::atomic<uint32_t> m_resetCtr = { 0u };
+ 
+     D3D9_QUERY_DATA m_dataCache;
+diff -ruN a/src/d3d9/d3d9_swapchain.h b/src/d3d9/d3d9_swapchain.h
+--- a/src/d3d9/d3d9_swapchain.h
++++ b/src/d3d9/d3d9_swapchain.h
+@@ -118,6 +118,10 @@
+ 
+     void    GetGammaRamp(D3DGAMMARAMP* pRamp);
+ 
++    bool    HasGammaRamp(const D3DGAMMARAMP* pRamp) const {
++      return pRamp != nullptr && std::memcmp(&m_ramp, pRamp, sizeof(m_ramp)) == 0;
++    }
++
+     void    Invalidate(HWND hWindow);
+ 
+     void SetCursorTexture(UINT Width, UINT Height, uint8_t* pCursorBitmap);

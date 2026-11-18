@@ -127,6 +127,10 @@ copies.
 1. Copy the game's folder into `switch/wine/drive_c` on the SD card (that
    folder is the game's `C:` drive), or onto a USB drive.
 2. In Autorun, press **+** -> **Add game** and choose the game's `.exe`.
+   A shortcut (`.lnk`) or a batch file (`.bat`, `.cmd`) kept with the game's
+   files can be chosen instead: the program it starts is added, with the
+   arguments it gives it. **+ -> Run a program once** takes one the same
+   way, and starts its program with those arguments.
 3. Press **A** to play.
 
 Adding a game gives it DXVK, which draws Direct3D through the Switch's Vulkan
@@ -156,11 +160,103 @@ The touchscreen works everywhere too.
 - pick how its graphics are drawn (Wine's Direct3D or DXVK), how a picture
   smaller than the screen is enlarged (FSR 1.0, or whole-pixel steps for pixel
   art), and **Frame Generation**;
-- pick the CPU translator (FEX or Box64), and give it its own controls.
+- pick the CPU translator (FEX or Box64), and give it its own controls;
+- **Run another program** from the game's folder, such as its configuration
+  tool or its setup (see below);
+- **Edit a text file** of the game's, such as an `.ini` or a `.cfg` (see below).
 
 **Settings (−)**: show hidden games, the controls every game uses by default,
 a [SteamGridDB](https://www.steamgriddb.com) API key for artwork, returning to
 Autorun when a game ends, updates, the Windows DLLs, and the credits.
+
+### A game's other programs and its text files
+
+Many games keep a configuration tool beside their `.exe`, where the resolution
+and other settings their own menu lacks are, and keep those settings in text
+files. Two rows under **General** in a game's options open the game's folder:
+
+- **Run another program** lists its programs (and folders, and **Up one
+  folder** for one beside it). The one you choose starts at once with its own
+  settings and stays out of the library, as **+ -> Run a program once** does;
+  the game's own entry is unchanged. A .NET configurator needs Wine Mono (see
+  below).
+- **Edit a text file** lists its `.ini`, `.cfg`, `.txt`, `.xml`, `.json` and
+  other text files. A file opens one line to a row, and a setting of an `.ini`
+  shows its name and its value. **A** changes the value, or the whole of any
+  other line, with the keyboard; **Y** changes the whole line, adds a line
+  above or below, or removes it. **B** leaves, and asks whether to save what
+  changed. The file is written back as it was, in its encoding (UTF-8,
+  UTF-16, or the Windows code page) and with its line ends, but for the lines
+  you changed, and only once it has been written whole beside the old one.
+  A line longer than the keyboard's 500 characters cannot be changed here.
+
+### Carafe's builds of DXVK and FEX
+
+Two downloads come from this repository's own releases instead of the projects
+that make them: DXVK and FEX with [Carafe](https://github.com/carafe-nx/carafe)'s
+patches. Both are in a game's options and neither is on by default.
+
+- **Graphics, DXVK version, DXVK Carafe** lists the releases and installs the
+  one you pick, as the other DXVK sources do. **DXVK options** then also shows
+  what only this build reads (background pipeline compilation, the Direct3D 9
+  front end and effect threads, the frame limiter's methods).
+- **Emulation, FEX build, Carafe** does the same for FEX. It is there for 32-bit
+  games set to FEX; 64-bit games keep Autorun's FEX. **FEX options** then also
+  shows what only this build reads. Choosing **Autorun** again, or pressing the
+  reset button on the row, goes back.
+
+They are built by the `carafe dlls` workflow from `carafe/dlls`; a fork that
+builds its own has to name itself in `WINE_NX_CARAFE_DLLS_REPO`
+(`horizon-wine/source/dxvk_releases.h`).
+
+### Carafe's thread placement
+
+Two more switches under **Emulation** in a game's options come from Carafe, and
+both are off until you turn them on:
+
+- **Thread orchestrator** watches how busy each core is. When one core is full
+  it gives the busiest thread a core to itself and spreads the other busy
+  threads by their load; the rest of the time Autorun's own balancer places
+  threads, as it does with the switch off.
+- **Lock wait boost** lets a game thread that waits for one of the runtime's
+  locks wait one priority higher.
+
+Neither has been measured on a console in this fork yet, so try them per game
+and compare. The log says what the orchestrator did in lines that start with
+`[ORCHESTRATOR]`.
+
+### Carafe's shared server threads
+
+Every thread of a game has a second thread behind it that answers its requests
+to Wine's server, and both count against the number of threads the console
+gives an application. **Emulation, Shared server threads** in a game's options
+lets the game's threads share a few of those instead, which is Carafe's server
+thread pool. It is off until you turn it on, and it works only with
+**Synchronization** set to **Horizon**; the row is greyed out otherwise. It is
+meant for games that start many threads. It has not been tried on a console in
+this fork yet.
+
+The log says which is in use in the line `[SYNC] server threads: ...`. The
+`[BUDGET]` line, written about every 30 seconds, has the pool in its `pool=` field:
+its threads, how many of them are idle and how many are waiting inside a
+request.
+
+### The settings menu in the console's language
+
+The settings menu over a running game follows the console's language. Its
+settings, values and pages used to be English only; they now carry Carafe's
+texts in Russian, Simplified and Traditional Chinese, Japanese, Korean,
+French, Canadian French, German, Italian, Spanish, Latin American Spanish,
+Dutch, Portuguese and Brazilian Portuguese, for the settings both menus have:
+91 of the 141, with their values. What only Autorun has stays English there
+(among it 26 DXVK and 10 FEX options), and English itself reads as before. A
+console set to any other language gets English. The launcher is English only.
+
+The menu also has the rows that came with Carafe's parts: **DXVK build** offers
+**DXVK Carafe**, **FEX build** chooses between Autorun's and Carafe's, and
+**Shared server threads**, **Thread orchestrator** and **Lock wait boost** are
+there as in a game's options. An option of DXVK or FEX is listed only while the
+build chosen in the menu reads it. None of this has been seen on a console yet.
 
 ### Frame generation
 
@@ -170,6 +266,33 @@ drawing a frame between each two the game draws. It needs Lossless Scaling's
 installation to `switch/wine/lsfg/Lossless.dll`, then turn on **LSFG-VK (2x)** in
 the game's **Frame Generation** options.
 
+### FPSLocker
+
+With SaltyNX and FPSLocker's overlay installed, a game Autorun runs as an
+application (from its forwarder, or from the homebrew menu opened over a game)
+shows its frame rate in FPSLocker, and the limit set there holds the game to
+it, from the next start too once FPSLocker saved it. With FPSLocker's display
+sync on, the screen's refresh rate follows the limit (40 Hz for 40 FPS, for
+example; 30 FPS stays at 60 Hz and shows every frame twice) from the game's
+start, and Autorun puts the screen back to 60 Hz when the game ends. These are
+the builds of
+[SaltyNX](https://github.com/berlint-hub/SaltyNX/tree/arena%2Fe0ad6872-saltynx)
+and [FPSLocker](https://github.com/berlint-hub/FPSLocker/tree/arena%2F369175f0-fpslocker)
+that NetherSX2_nx uses. Started from the album, Autorun is not an application
+and FPSLocker does not follow it. `[FPSLOCKER]` lines in the game's log show
+what Autorun found; `"fpslocker": false` in `config/settings.json` turns it off.
+
+### .NET programs (Wine Mono)
+
+A program written for .NET, as many games' configurators are, needs Wine Mono,
+which Autorun does not include. Download `wine-mono-11.3.0-x86.tar.xz` from
+[Wine Mono's releases](https://github.com/wine-mono/wine-mono/releases/tag/wine-mono-11.3.0),
+unpack it, and copy the folder `wine-mono-11.3.0` (with `bin`, `etc`, `lib` and
+`support` in it) to `switch/wine/share/wine/mono/`, so that
+`switch/wine/share/wine/mono/wine-mono-11.3.0/bin/libmono-2.0-x86.dll` exists.
+A `[MONO]` line in a program's log says whether Autorun sees it. .NET programs
+run slowly: their code is compiled as they run, and that code is x86.
+
 ## Playing
 
 Out of the box the controller works as a mouse and keyboard:
@@ -178,35 +301,66 @@ Out of the box the controller works as a mouse and keyboard:
 |---|---|
 | Right stick, or a finger on the screen | Moves the mouse pointer |
 | **A** / **B** | Left / right mouse button |
-| D-pad, left stick | Arrow keys |
+| D-pad | Arrow keys |
+| Left stick | W A S D |
+| **ZL**, **ZR** | Arrow down, arrow up |
 | **+** | Esc |
 | **X**, **Y** | Space, F |
 | **L**, **R** | Tab, Shift |
+
+Two fingers on the screen scroll the wheel vertically; a USB mouse connected
+to the dock moves the cursor and sends left, right, middle, and wheel events
+when no finger is on the screen.
+
+**Keyboard / mouse preset** in the same Controls menu sets every button at
+once for a kind of game, with the mouse buttons on the triggers:
+
+| Control | First-person shooter | Action RPG | Point-and-click / strategy |
+|---|---|---|---|
+| Left stick | W A S D | W A S D | Mouse pointer |
+| Right stick | Mouse | Mouse | Wheel, arrows left / right |
+| **ZR** / **ZL** | Left / right click | Left / right click | Left / right click |
+| **A** / **B** | Space / Ctrl | E / Space | Left / right click |
+| **X** / **Y** | R / E | R / Tab | Space / I |
+| **L** / **R** | Wheel up / down | Ctrl / Shift | Shift / Ctrl |
+| Stick clicks | Shift / F | Shift / Q | Middle click / Tab |
+| **+** / **-** | Esc / Tab | Esc / Tab | Esc / Tab |
+| D-pad | 1 2 3 4 | I, M, F9, F5 | Arrow keys |
+
+**Autorun default** there brings back the table above.
 
 Every button can be changed: **Settings -> Game defaults -> Controls** for all
 games, or a game's options (**Y**) -> **Controls** for that game alone. Each
 stick, the d-pad and the touchscreen can move the mouse or send the arrow keys
 or W A S D. Games with controller support see an Xbox 360 controller, through
-XInput or DirectInput.
+XInput or DirectInput (**Controller face buttons** switches between Xbox
+positions and Nintendo A/B/X/Y labels), and **Picture of another mode**
+controls how non-native display modes fill the screen (**Whole**, **Edges
+cropped**, **Stretched**, or **Own size**).
 
 **Hold + and − together for a second** to close a game.
 
-**Minus + right stick click** opens the on-screen keyboard over the game (it
+**Minus + B** opens the on-screen keyboard over the game (it
 also opens by itself when a text field is selected; **Settings -> On-screen
-keyboard** turns that off). It types like a real keyboard, one key at a time:
+keyboard** turns that off). It works like a physical keyboard with F1–F12 on the
+top row, key repeat, sticky or held Shift, and multi-touch chord input:
 
 | On the keyboard | Does |
 |---|---|
 | D-pad, left stick | Move between keys |
-| **A**, or tap a key | Press it |
+| **A**, or a finger on a key | Holds the key while pressed |
 | **B** | Backspace |
-| **Y** / **X** | Space / Shift for the next key |
+| **Y** / **X** | Space / Shift |
 | **L**, **R** | Cursor left, right |
 | **+** | Enter |
 | **ZL**, **ZR** | Keyboard to the top, back to the bottom |
 | **−** | Close it |
 
-While it is open, the game gets no controller input.
+**Minus + A** shows the **Controls** panel over the program (what each button
+and stick sends under the active profile). **Minus + Y** shows the **Tasks**
+panel over the program (running threads, core shares, memory, SD card rate,
+and FPS, refreshed every second). While the keyboard or either panel is open,
+the game gets no controller input.
 
 ## If something goes wrong
 
@@ -260,7 +414,9 @@ Autorun is built from these projects; each keeps its own copyright and license.
 | [DXVK](https://github.com/doitsujin/dxvk) | zlib/libpng | Direct3D 8 to 11 over Vulkan |
 | [VKD3D-Proton](https://github.com/HansKristian-Work/vkd3d-proton) | LGPL-2.1-or-later | Direct3D 12 over Vulkan |
 | [Mesa](https://mesa3d.org) and [mesa-switch](https://github.com/danfromtico/mesa-switch) | MIT (mostly) | OpenGL and Vulkan on the Switch's GPU |
+| [nxvk](https://github.com/PalindromicBreadLoaf/nxvk) | GPL-2.0-or-later (its own files; Mesa's keep theirs) | The second graphics runtime, `wine-nx-runtime-nxvk.nro`: Vulkan through NVK and OpenGL through Zink, for a game set to it under Graphics driver |
 | [LSFG-VK](https://git.lsfg-vk.dev/lsfg-vk-archive.git) | GPL-3.0-or-later | Frame generation |
+| [Carafe](https://github.com/carafe-nx/carafe) | LGPL-2.1-or-later (runtime overlay and Autorun patches); GPL-3.0-or-later (the thread orchestrator, `horizon-wine/source/orchestrator*.c`, and the settings menu's texts in fourteen languages, `horizon-wine/tools/carafe-menu-texts.json`) | The in-game settings menu, the loading and error screens, the registry overlay, video playback through FFmpeg, the thread orchestrator and runtime fixes; see [carafe/integration/PORTING.md](carafe/integration/PORTING.md) |
 | [libusbhsfs](https://github.com/ITotalJustice/libusbhsfs) | ISC | USB drives |
 | [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) and [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC) | GPL-2.0 | The boot changes Quick setup installs |
 | [libnx](https://github.com/switchbrew/libnx) and [devkitPro](https://devkitpro.org) | ISC, per component | The Switch system library and toolchain |

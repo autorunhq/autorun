@@ -63,6 +63,37 @@ static void versions(void)
     assert( find( "dxvk.enableImplicitResolves", DXVK_SOURCE_OFFICIAL, "3.0" ) );
     assert( !find( "dxvk.latencySleep", DXVK_SOURCE_OFFICIAL, "2.5.3" ) );
     assert( find( "dxvk.latencySleep", DXVK_SOURCE_OFFICIAL, "2.6" ) );
+
+    /* Carafe's build is DXVK 3.1.1 with more options: what the official
+     * release of that version reads, and what only its patches do. */
+    assert( dxvk_options_version( DXVK_SOURCE_CARAFE, "3.1.1-1" ) == 30101 );
+    assert( !dxvk_options_version( DXVK_SOURCE_CARAFE, "3.2-1" ) );
+    assert( find( "dxvk.latencySleep", DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
+    assert( find( "dxvk.enableDescriptorHeap", DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
+    assert( !find( "dxvk.gplAsyncCache", DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
+    {
+        static const char *const carafe[] =
+        {
+            "dxvk.shaderCompilationMethod", "dxvk.allCompilerWorkers", "dxvk.skipRedundantPipelineBinds",
+            "dxvk.frameRateMethod", "dxvk.frameRatePacing", "d3d9.unchangedStateFastPath", "d3d9.frontEndThread",
+            "d3d9.effectThread", "d3d9.effectPassMerge", "d3d9.managedBufferCopies",
+        };
+        const struct dxvk_option *option;
+
+        for (unsigned int i = 0; i < sizeof(carafe) / sizeof(carafe[0]); i++)
+        {
+            assert( find( carafe[i], DXVK_SOURCE_CARAFE, "3.1.1-1" ) );
+            assert( !find( carafe[i], DXVK_SOURCE_OFFICIAL, "3.1.1" ) );
+            assert( !find( carafe[i], DXVK_SOURCE_GPLASYNC, "3.1.1-1" ) );
+        }
+        /* Sarek has an option of the same name, with a default of its own. */
+        option = find( "dxvk.shaderCompilationMethod", DXVK_SOURCE_CARAFE, "3.1.1-1" );
+        assert( !strcmp( dxvk_option_default( option, DXVK_SOURCE_CARAFE, 30101, 0 ), "async" ) );
+        option = find( "dxvk.shaderCompilationMethod", DXVK_SOURCE_SAREK, "1.13.0" );
+        assert( !strcmp( dxvk_option_default( option, DXVK_SOURCE_SAREK, 11300, 0 ), "dyasync" ) );
+        option = find( "dxvk.frameRatePacing", DXVK_SOURCE_CARAFE, "3.1.1-1" );
+        assert( option->choice_count == 5 && !strcmp( option->choices[4].value, "\"spin\"" ) );
+    }
 }
 
 static void configuration(void)
@@ -92,6 +123,19 @@ static void configuration(void)
     assert( strstr( config, "d3d9.deviceLocalConstantBuffers = Auto\n" ) );
     assert( !strstr( config, "enableStateCache" ) && !strstr( config, "shaderCompilationMethod" ) );
     assert( !strstr( config, "gplAsyncCache" ) && !strstr( config, "FEX_MAXINST" ) );
+    {
+        char carafe[LAUNCHER_KV_MAX] = "";
+
+        assert( launcher_kv_set( &kv, "d3d9.frontEndThread", "False" ) );
+        assert( dxvk_options_apply( &kv, DXVK_SOURCE_CARAFE, "3.1.1-1", carafe, sizeof(carafe) ) );
+        assert( strstr( carafe, "dxvk.shaderCompilationMethod = \"async\"\n" ) );
+        assert( strstr( carafe, "d3d9.frontEndThread = False\n" ) );
+        assert( strstr( carafe, "dxvk.numCompilerThreads = 3\n" ) && !strstr( carafe, "gplAsyncCache" ) );
+        carafe[0] = 0;
+        assert( dxvk_options_apply( &kv, DXVK_SOURCE_OFFICIAL, "3.1.1", carafe, sizeof(carafe) ) );
+        assert( !strstr( carafe, "frontEndThread" ) );
+        assert( launcher_kv_set( &kv, "d3d9.frontEndThread", NULL ) );
+    }
     assert( strstr( config, "dxvk.enableDescriptorBuffer = False" ) );
     assert( strstr( config, "dxvk.maxFrameRate = 30" ) );
     static const char game[] = "dxvk.numCompilerThreads = 2";

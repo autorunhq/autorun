@@ -119,7 +119,7 @@ unsigned int CDECL wine_server_call(void *ptr) {
     int status;
     switch (req->u.req.request_header.req) {
 '''
-for name in ('DUP_HANDLE', 'COMPARE_OBJECTS', 'GET_OBJECT_INFO', 'OPEN_THREAD', 'GET_NEXT_THREAD'):
+for name in ('DUP_HANDLE', 'COMPARE_OBJECTS', 'GET_OBJECT_INFO', 'OPEN_THREAD', 'GET_NEXT_THREAD', 'GET_THREAD_INFO'):
     dispatch += re.search(r'        case HORIZON_REQ_' + name + r':\n.*?            break;', source, re.S)[0]
 dispatch += r'''
     default: assert(0); return STATUS_NOT_IMPLEMENTED;
@@ -158,17 +158,33 @@ NTSTATUS WINAPI NtQueryInformationProcess(HANDLE handle, PROCESSINFOCLASS class,
 #undef __SWITCH__
 '''
 signal = (root / 'dlls/ntdll/unix/signal_arm64.c').read_text()
-contexts = signal[signal.index('static NTSTATUS check_current_thread_context_access('):signal.index('/* Windows leaves the wait')]
+contexts = signal[signal.index('static NTSTATUS check_current_thread_context_access('):signal.index('extern void wine_nx_call_pe_apc(')]
 context_fixture = r'''
 static TEB teb;
 #define NtCurrentTeb() (&teb)
 static WOW64_CPURESERVED cpu = {0, IMAGE_FILE_MACHINE_I386};
-static I386_CONTEXT saved;
-struct thread_data {};
-static struct thread_data thread_data;
+static I386_CONTEXT saved, other_saved;
+static WOW64_CPURESERVED other_cpu = {0, IMAGE_FILE_MACHINE_I386};
+struct thread_data { TEB *teb; };
+/* Where ntdll keeps a thread's own data in its TEB (unix_private.h). */
+struct teb_data { void *cpu_data[16]; void *syscall_table, *syscall_frame; int syscall_trace; struct thread_data *thread; };
+static TEB other_teb;
+static struct thread_data thread_data = {&teb}, other_thread_data = {&other_teb};
 static struct thread_data *get_thread_data(void) { return &thread_data; }
 static void *get_cpu_area(struct thread_data *data, USHORT machine) {
-    assert(data == &thread_data && machine == IMAGE_FILE_MACHINE_I386); return &saved;
+    assert(machine == IMAGE_FILE_MACHINE_I386);
+    if (data == &other_thread_data) return &other_saved;
+    assert(data == &thread_data); return &saved;
+}
+/* The wait for another thread to stop: its native context is asked for. */
+static unsigned stop_waits;
+static NTSTATUS stop_status;
+NTSTATUS get_thread_context(HANDLE handle, void *context, BOOL *self, USHORT machine) {
+    assert(handle != NtCurrentThread() && machine == IMAGE_FILE_MACHINE_ARM64);
+    assert(((CONTEXT *)context)->ContextFlags == CONTEXT_ARM64_CONTROL);
+    *self = FALSE;
+    stop_waits++;
+    return stop_status;
 }
 '''
 tls_fixture = r'''
@@ -463,7 +479,39 @@ int main(void) {
     entry = horizon_server_create_handle_for_object_locked(&other);
     entry->access = THREAD_ALL_ACCESS;
     assert(NtCompareObjects(wine_server_ptr_handle(entry->handle), alias) == STATUS_NOT_SAME_OBJECT);
-    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_NOT_IMPLEMENTED);
+    /* Another thread: found by its TEB, and read once it has stopped. */
+    assert(!stop_waits);
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_INVALID_PARAMETER);
+    other.thread.tid = 8;
+    other.thread.teb = (uintptr_t)&other_teb;
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_INVALID_PARAMETER);
+    ((struct teb_data *)&other_teb.GdiTebBatch)->thread = &other_thread_data;
+    assert(!stop_waits);
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_INVALID_PARAMETER);
+    assert(stop_waits == 1);
+    other_teb.TlsSlots[WOW64_TLS_CPURESERVED] = &other_cpu;
+    other_saved.Esp = 0x026ffff0;
+    other_saved.Eip = 0x021f5970;
+    other_saved.SegCs = 0x23;
+    other_saved.EFlags = 0x246;
+    stop_status = STATUS_UNSUCCESSFUL;
+    ctx.Eip = 0;
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_UNSUCCESSFUL);
+    assert(stop_waits == 2 && !ctx.Eip);
+    stop_status = 0;
+    assert(!get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    assert(stop_waits == 3 && ctx.Esp == other_saved.Esp && ctx.Eip == other_saved.Eip && ctx.EFlags == other_saved.EFlags);
+    ctx.Eip += 32;
+    assert(!set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    assert(stop_waits == 4 && other_saved.Eip == ctx.Eip && saved.Eip != ctx.Eip);
+    /* The handle has to grant the access, and is refused before the thread is asked to stop. */
+    entry->access = THREAD_GET_CONTEXT;
+    assert(set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_ACCESS_DENIED);
+    assert(!get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    entry->access = THREAD_SET_CONTEXT;
+    assert(get_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)) == STATUS_ACCESS_DENIED);
+    assert(!set_thread_wow64_context(wine_server_ptr_handle(entry->handle), &ctx, sizeof(ctx)));
+    assert(stop_waits == 6);
     assert(NtQueryObject((HANDLE)0xdead, ObjectBasicInformation, &info, sizeof(info), &size) == STATUS_INVALID_HANDLE && !size);
     assert(NtQueryObject(alias, ObjectBasicInformation, &info, sizeof(info) - 1, &size) == STATUS_INFO_LENGTH_MISMATCH && !size);
     assert(NtCompareObjects((HANDLE)0xdead, (HANDLE)0xdead) == STATUS_INVALID_HANDLE);

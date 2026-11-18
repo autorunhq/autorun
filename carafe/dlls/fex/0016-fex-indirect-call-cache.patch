@@ -1,0 +1,241 @@
+Carafe: with IndirectCallCache, an indirect call keeps the first target it reaches. The call site gets a record of
+the guest target and its host code after the block's jump thunks; a call to the same target loads the host code from
+the record instead of hashing into the L1 lookup table, and other targets take the lookup as before. An empty record
+sends the call through a dispatcher stub that finds or compiles the target, fills the record once and registers a
+block link whose delinker clears it when the target's code goes. Off by default.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -347,6 +347,7 @@
+   uint64_t SyscallHandlerObj {};
+   uint64_t SyscallHandlerFunc {};
+   uint64_t ExitFunctionLink {};
++  uint64_t IndirectCallLink {};
+   uint64_t MonoBackpatcherWrite {};
+   uint64_t LUDIV {};
+   uint64_t LDIV {};
+@@ -368,6 +369,7 @@
+   uint64_t DispatcherLoopTopEnterEC {};
+   uint64_t DispatcherLoopTopEnterECFillSRA {};
+   uint64_t ExitFunctionLinker {};
++  uint64_t IndirectCallLinker {};
+   uint64_t ThreadStopHandlerSpillSRA {};
+   uint64_t ThreadPauseHandlerSpillSRA {};
+   uint64_t GuestSignal_SIGILL {};
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -643,6 +643,15 @@
+           "jumps, inserts carry bits with fewer instructions and drops dead NZCV inserts and carry inversions."
+         ]
+       },
++      "IndirectCallCache": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "Each indirect call keeps the first target it reaches and that target's code next to the block: a call to the",
++          "same target skips the lookup table, others take it as before. The entry is cleared when the target's code goes."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -317,6 +317,31 @@
+     br(TMP1);
+   }
+ 
++  {
++    IndirectCallLinkerAddress = GetCursorAddress<uint64_t>();
++    EmitSignalGuardedRegion([&]() {
++      SpillStaticRegs(TMP1);
++
++      mov(ARMEmitter::XReg::x0, STATE);
++      mov(ARMEmitter::XReg::x1, TMP3);
++
++      ldr(ARMEmitter::XReg::x2, STATE_PTR(CpuStateFrame, Pointers.IndirectCallLink));
++      if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
++        GenerateIndirectRuntimeCall<uintptr_t, void*, void*>(ARMEmitter::Reg::r2);
++      } else {
++        blr(ARMEmitter::Reg::r2);
++      }
++
++      if (!TMP_ABIARGS) {
++        mov(TMP1, ARMEmitter::XReg::x0);
++      }
++
++      FillStaticRegs();
++    });
++
++    br(TMP1);
++  }
++
+   // Need to create the block
+   {
+     (void)Bind(&NoBlock);
+@@ -2629,6 +2654,7 @@
+     Ptrs.DispatcherLoopTopEnterEC = AbsoluteLoopTopAddressEnterEC;
+     Ptrs.DispatcherLoopTopEnterECFillSRA = AbsoluteLoopTopAddressEnterECFillSRA;
+     Ptrs.ExitFunctionLinker = ExitFunctionLinkerAddress;
++    Ptrs.IndirectCallLinker = IndirectCallLinkerAddress;
+     Ptrs.ThreadStopHandlerSpillSRA = ThreadStopHandlerAddressSpillSRA;
+     Ptrs.ThreadPauseHandlerSpillSRA = ThreadPauseHandlerAddressSpillSRA;
+     Ptrs.GuestSignal_SIGILL = GuestSignal_SIGILL;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+@@ -82,6 +82,7 @@
+   uint64_t ThreadPauseHandlerAddress {};
+   uint64_t ThreadPauseHandlerAddressSpillSRA {};
+   uint64_t ExitFunctionLinkerAddress {};
++  uint64_t IndirectCallLinkerAddress {};
+   uint64_t SignalHandlerReturnAddress {};
+   uint64_t SignalHandlerReturnAddressRT {};
+   uint64_t GuestSignal_SIGILL {};
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -212,6 +212,27 @@
+       }
+     }
+ 
++    ARMEmitter::ForwardLabel CallCacheHit;
++    const bool CallCache = Op->Hint == IR::BranchHint::Call && IndirectCallCache();
++    if (CallCache) {
++      ARMEmitter::ForwardLabel CallCacheMiss;
++      ARMEmitter::ForwardLabel CallCacheFill;
++      PendingCallCaches.emplace_back();
++      (void)adr(TMP3, &PendingCallCaches.back());
++      ldar(TMP2, TMP3);
++      (void)cbz(ARMEmitter::Size::i64Bit, TMP2, &CallCacheFill);
++      sub(TMP2, TMP2, RipReg.X());
++      (void)cbnz(ARMEmitter::Size::i64Bit, TMP2, &CallCacheMiss);
++      ldr(TMP2, TMP3, offsetof(IndirectCallCacheRecord, HostCode));
++      (void)cbnz(ARMEmitter::Size::i64Bit, TMP2, &CallCacheHit);
++      (void)b(&CallCacheMiss);
++      (void)Bind(&CallCacheFill);
++      str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
++      ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.IndirectCallLinker));
++      (void)b(&CallCacheHit);
++      (void)Bind(&CallCacheMiss);
++    }
++
+     // L1 Cache
+ 
+     // Calculate (tmp1 + ((ripreg & L1_ENTRIES_MASK) << 4)) for the address
+@@ -231,6 +252,9 @@
+     str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+ 
+     (void)Bind(&SkipFullLookup);
++    if (CallCache) {
++      (void)Bind(&CallCacheHit);
++    }
+     if (Op->Hint == IR::BranchHint::Call) {
+       ARMEmitter::ForwardLabel l_CallReturn;
+       if (!Op->CallReturnBlock.IsInvalid()) {
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -110,6 +110,15 @@
+   };
+   fextl::vector<PendingJumpThunk> PendingJumpThunks;
+ 
++  struct IndirectCallCacheRecord {
++    uint64_t GuestRIP;
++    uint64_t HostCode;
++  };
++  fextl::vector<ARMEmitter::ForwardLabel> PendingCallCaches;
++  FEX_CONFIG_OPT(IndirectCallCache, INDIRECTCALLCACHE);
++
++  static uint64_t IndirectCallLink(FEXCore::Core::CpuStateFrame* Frame, IndirectCallCacheRecord* Record);
++
+   Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempCodeBufferAllocator;
+ 
+   static uint64_t ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record);
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -614,6 +614,48 @@
+   return HostCode;
+ }
+ 
++uint64_t Arm64JITCore::IndirectCallLink(FEXCore::Core::CpuStateFrame* Frame, IndirectCallCacheRecord* Record) {
++  auto Thread = Frame->Thread;
++  const uint64_t GuestRip = Frame->State.rip;
++  if (Thread->CurrentFrame->State.flags[X86State::RFLAG_TF_RAW_LOC]) {
++    return Frame->Pointers.DispatcherLoopTop;
++  }
++
++  uintptr_t HostCode {};
++  {
++    auto lk_inval =
++      GuardSignalDeferringSection<std::shared_lock>(static_cast<Context::ContextImpl*>(Thread->CTX)->CodeInvalidationMutex, Thread);
++    HostCode = Thread->LookupCache->FindBlock(Thread, GuestRip);
++  }
++  if (!HostCode) {
++    auto CodeBuffer = static_cast<Arm64JITCore*>(Thread->CPUBackend.get())->CurrentCodeBuffer;
++    HostCode = static_cast<Context::ContextImpl*>(Thread->CTX)->CompileBlock(Frame, GuestRip, 0);
++    if (Thread->LookupCache->Shared != CodeBuffer->LookupCache.get()) {
++      return HostCode;
++    }
++  }
++
++  auto lk_inval = GuardSignalDeferringSection<std::shared_lock>(static_cast<Context::ContextImpl*>(Thread->CTX)->CodeInvalidationMutex, Thread);
++  auto lk = Thread->LookupCache->AcquireWriteLock();
++  if (std::atomic_ref<uint64_t>(Record->GuestRIP).load(std::memory_order::acquire) != 0) {
++    return HostCode;
++  }
++
++  std::atomic_ref<uint64_t>(*ARMEmitter::Emitter::WritableAddress(&Record->HostCode)).store(HostCode, std::memory_order::relaxed);
++  std::atomic_ref<uint64_t>(*ARMEmitter::Emitter::WritableAddress(&Record->GuestRIP)).store(GuestRip, std::memory_order::release);
++#ifdef FEX_HORIZON
++  ARMEmitter::Emitter::ClearICache(Record, sizeof(*Record));
++#endif
++  Thread->LookupCache->AddBlockLink(
++    GuestRip, reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(Record),
++    [](FEXCore::Context::ExitFunctionLinkData* Link) {
++      auto Cached = reinterpret_cast<IndirectCallCacheRecord*>(Link);
++      std::atomic_ref<uint64_t>(*ARMEmitter::Emitter::WritableAddress(&Cached->GuestRIP)).store(0, std::memory_order::release);
++    },
++    lk);
++  return HostCode;
++}
++
+ void Arm64JITCore::Op_NoOp(const IR::IROp_Header* IROp, IR::Ref Node) {}
+ 
+ Arm64JITCore::Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::InternalThreadState* Thread)
+@@ -665,6 +707,7 @@
+       Ptrs.SyscallHandlerFunc = PMF.GetVTableEntry(CTX->SyscallHandler);
+     }
+     Ptrs.ExitFunctionLink = reinterpret_cast<uintptr_t>(&Arm64JITCore::ExitFunctionLink);
++    Ptrs.IndirectCallLink = reinterpret_cast<uintptr_t>(&Arm64JITCore::IndirectCallLink);
+     Ptrs.LUDIV = reinterpret_cast<uint64_t>(LUDIV);
+     Ptrs.LDIV = reinterpret_cast<uint64_t>(LDIV);
+   }
+@@ -885,6 +928,7 @@
+   JumpTargets.clear();
+   CallReturnTargets.clear();
+   PendingJumpThunks.clear();
++  PendingCallCaches.clear();
+   JumpTargets.resize(IR->GetHeader()->BlockCount, {});
+   Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
+ 
+@@ -1044,6 +1088,13 @@
+     dc64(PendingJumpThunk.CallerAddress - ThunkAddress); // CallerOffset
+   }
+ 
++  for (auto& CallCache : PendingCallCaches) {
++    Align(8);
++    BindOrRestart(&CallCache);
++    dc64(0);
++    dc64(0);
++  }
++
+   BindOrRestart(&l_ExitLink);
+   PlaceNamedSymbolLiteral(InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER));
+ 

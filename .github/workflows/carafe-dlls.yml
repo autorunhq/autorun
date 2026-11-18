@@ -1,0 +1,240 @@
+name: carafe dlls
+
+# The two Windows modules Carafe builds differently from the DLL repository:
+# FEX for 32-bit programs (libwow64fex.dll) and DXVK, each with Carafe's
+# patches from carafe/dlls. A card does not get them with Autorun: the launcher
+# downloads them from this repository's releases, where this workflow puts
+# them, tagged fex-carafe-<version> and dxvk-carafe-<version> with the versions
+# in carafe/dlls/versions.txt.
+#
+# It runs when what it builds from changes, or from the Actions tab. A version
+# that is already released keeps its archive: a card may hold that release's
+# digest from the last time it looked, and would refuse another file under the
+# same name. So raise the version in versions.txt for a new build to be
+# published. Only a run started by hand with "replace" swaps the archive of a
+# released version.
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+      - main
+    paths:
+      - 'carafe/dlls/**'
+      - 'horizon-wine/fex/**'
+      - '.github/workflows/carafe-dlls.yml'
+  workflow_dispatch:
+    inputs:
+      replace:
+        description: Replace the archive of a version that is already released
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  LLVM_MINGW: llvm-mingw-20260505-ucrt-ubuntu-22.04-x86_64
+  LLVM_MINGW_VERSION: '20260505'
+
+jobs:
+  fex:
+    # Twice: Carafe's build, and the experimental one, which is Carafe's with
+    # the patches of carafe/dlls/fex-experimental on top and is released apart
+    # from it (fex-experimental-<version>), so an experiment never replaces
+    # the build games already run on.
+    name: FEX ${{ matrix.build }} (libwow64fex.dll)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build: carafe
+            package: fex
+            title: Carafe build
+          - build: experimental
+            package: fex-experimental
+            title: experimental build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: llvm-mingw
+        id: llvm
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llvm-mingw
+          key: ${{ env.LLVM_MINGW }}
+
+      - name: Fetch llvm-mingw
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/llvm-mingw"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/llvm.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$LLVM_MINGW.tar.xz"
+          tar -xJf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm-mingw" --strip-components=1
+
+      - name: ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Build
+        run: |
+          export WINE_NX_LLVM_MINGW="$RUNNER_TEMP/llvm-mingw" WINE_NX_JOBS="$(nproc)"
+          sh carafe/dlls/build-fex.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-build" ${{ matrix.build }} 2>&1 | tee "$RUNNER_TEMP/build.log"
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: Pack
+        run: |
+          export PATH="$RUNNER_TEMP/llvm-mingw/bin:$PATH"
+          python3 carafe/dlls/package.py ${{ matrix.package }} "$RUNNER_TEMP/fex-build/Bin/libwow64fex.dll" \
+            "$RUNNER_TEMP/fex" "$RUNNER_TEMP/out" 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: What went wrong
+        # The job's log cannot be read from everywhere the run can; an
+        # annotation can, so the lines that failed go there.
+        if: failure()
+        run: |
+          test -f "$RUNNER_TEMP/build.log" || exit 0
+          { grep -i -m 12 "error[: ]\|does not apply\|undefined\|Missing \|lacks \|imports " "$RUNNER_TEMP/build.log"; tail -n 4 "$RUNNER_TEMP/build.log"; } |
+            cut -c1-400 | while IFS= read -r line; do printf '::error::%s\n' "$line"; done
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fex-${{ matrix.build }}-${{ github.sha }}
+          path: ${{ runner.temp }}/out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: What was built
+        # In an annotation, for the same reason: the CPU it was compiled for,
+        # and what CMake said of the compiler, preserve_all among it.
+        run: |
+          { grep -m 1 '^FEX: built for' "$RUNNER_TEMP/build.log"
+            grep -m 4 'Clang version\|clang::preserve_all\|asynchronous-unwind-tables\|experimental patches applied' "$RUNNER_TEMP/build.log"; } |
+            cut -c1-300 | tr '\n' ';' | sed 's/^/::notice::/'
+          echo
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLACE: ${{ inputs.replace }}
+        run: |
+          version="$(python3 carafe/dlls/package.py ${{ matrix.package }}-version)"
+          tag="fex-${{ matrix.build }}-$version"
+          asset="$RUNNER_TEMP/out/$tag.tar.gz"
+          notes="FEX-2609 for 32-bit programs with Carafe's patches (carafe/dlls/fex), built from $GITHUB_SHA. Autorun's launcher downloads it: Game Settings, Emulation, FEX build, Carafe (32-bit programs on FEX)."
+          if [ "${{ matrix.build }}" = experimental ]; then
+            notes="FEX-2609 for 32-bit programs with Carafe's patches and the experimental ones on top (carafe/dlls/fex-experimental), built from $GITHUB_SHA. For trying changes out: it may be faster, or not work. Autorun's launcher downloads it: Game Settings, Emulation, FEX build, Experimental."
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$REPLACE" != true ]; then
+              echo "::notice::$tag is already released and keeps its archive; raise the version in carafe/dlls/versions.txt to publish this build"
+              exit 0
+            fi
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --notes "$notes"
+          else
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" --latest=false \
+              --title "FEX, ${{ matrix.title }} $version" --notes "$notes"
+          fi
+          echo "::notice::released $tag"
+
+  dxvk:
+    name: DXVK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: llvm-mingw
+        id: llvm
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llvm-mingw
+          key: ${{ env.LLVM_MINGW }}
+
+      - name: Fetch llvm-mingw
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/llvm-mingw"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/llvm.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/$LLVM_MINGW.tar.xz"
+          tar -xJf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm-mingw" --strip-components=1
+
+      - name: meson, ninja and glslang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends meson ninja-build glslang-tools
+
+      - name: Build
+        run: |
+          export WINE_NX_LLVM_MINGW="$RUNNER_TEMP/llvm-mingw" WINE_NX_JOBS="$(nproc)"
+          sh carafe/dlls/build-dxvk.sh "$RUNNER_TEMP/dxvk" "$RUNNER_TEMP/dxvk-build" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: Pack
+        run: |
+          python3 carafe/dlls/package.py dxvk "$RUNNER_TEMP/dxvk-build" "$RUNNER_TEMP/dxvk" "$RUNNER_TEMP/out" \
+            2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: What went wrong
+        if: failure()
+        run: |
+          test -f "$RUNNER_TEMP/build.log" || exit 0
+          { grep -i -m 12 "error[: ]\|undefined\|Missing \|is not a " "$RUNNER_TEMP/build.log"; tail -n 4 "$RUNNER_TEMP/build.log"; } |
+            cut -c1-400 | while IFS= read -r line; do printf '::error::%s\n' "$line"; done
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dxvk-carafe-${{ github.sha }}
+          path: ${{ runner.temp }}/out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLACE: ${{ inputs.replace }}
+        run: |
+          version="$(python3 carafe/dlls/package.py dxvk-version)"
+          tag="dxvk-carafe-$version"
+          asset="$RUNNER_TEMP/out/$tag.tar.gz"
+          notes="DXVK 3.1.1 with Carafe's patches (carafe/dlls/dxvk), built from $GITHUB_SHA. Autorun's launcher downloads it: Game Settings, Graphics, DXVK version, DXVK Carafe."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$REPLACE" != true ]; then
+              echo "::notice::$tag is already released and keeps its archive; raise the version in carafe/dlls/versions.txt to publish this build"
+              exit 0
+            fi
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --notes "$notes"
+          else
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" --latest=false \
+              --title "DXVK, Carafe build $version" --notes "$notes"
+          fi
+          echo "::notice::released $tag"
+
+  launcher:
+    name: the launcher takes them
+    # What was just released, listed, downloaded and installed by the
+    # launcher's own code (horizon-wine/tests/carafe_dlls.c): the release list
+    # it reads, the names it looks for, GitHub's digest, the archive's layout
+    # and the machine of each DLL.
+    needs: [fex, dxvk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: curl, zstd and zlib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libzstd-dev zlib1g-dev
+
+      - name: Download and install
+        run: python3 horizon-wine/tests/check_carafe_dlls.py --live

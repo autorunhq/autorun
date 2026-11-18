@@ -236,7 +236,9 @@ static u8 *read_nca( int index, size_t *size )
 /* Walk a section of the NCA the way the console would: the table says where. */
 static const struct nca_header *nca_of( const u8 *data ) { return (const struct nca_header *)data; }
 
-static void check_program( const u8 *data, size_t size, const char *nro_path )
+/* argv is what the loader is told to start the NRO with: its path, and the
+ * arguments after it. */
+static void check_program( const u8 *data, size_t size, const char *nro_path, const char *argv )
 {
     const struct nca_header *header = nca_of( data );
     u64 romfs_start = (u64)header->fs_table[1].media_start_offset * 0x200;
@@ -278,8 +280,10 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
         if (!strcmp( name, "nextNroPath" ) || !strcmp( name, "nextArgv" ))
         {
             /* With no arguments of its own, the loader is handed the path twice. */
-            assert( file.dataSize == strlen( nro_path ) );
-            assert( !memcmp( base + romfs->fileDataOff + file.dataOff, nro_path, file.dataSize ) );
+            const char *want = name[4] == 'N' ? nro_path : argv;
+
+            assert( file.dataSize == strlen( want ) );
+            assert( !memcmp( base + romfs->fileDataOff + file.dataOff, want, file.dataSize ) );
             found |= name[4] == 'N' ? 1 : 2;
         }
         offset = file.sibling;
@@ -287,7 +291,8 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
-static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
+/* address_space is the NPDM's: 3 for 39 bits, 2 for 32 without the alias region. */
+static void check_exefs_npdm( const u8 *data, u64 tid, int relay, u32 address_space )
 {
     const struct nca_header *header = nca_of( data );
     u64 start = (u64)header->fs_table[0].media_start_offset * 0x200;
@@ -322,7 +327,8 @@ static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
     /* The three bits that decide where the program's address space begins. */
-    assert( ((meta->flags >> 1) & 7) == 3 );
+    assert( ((meta->flags >> 1) & 7) == address_space );
+    assert( meta->flags & 1 );  /* still an AArch64 program */
     assert( meta->sys_resource_size == 16 * 1024 * 1024 );
     aci0 = (const struct npdm_aci0 *)((const u8 *)meta + meta->aci0_offset);
     acid = (const struct npdm_acid *)((const u8 *)meta + meta->acid_offset);
@@ -448,7 +454,7 @@ int main( int argc, char **argv )
     sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
     assert( wine_nx_forwarder_title_id( nro_path, NULL ) ==
             (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
-    forwarder_hash( nro_file, NULL, 0, plain_hash );
+    forwarder_hash( nro_file, NULL, 0, NPDM_ADDRESS_SPACE_39_BIT, plain_hash );
     plain_tid = 0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull);
     assert( tid != plain_tid );
 
@@ -472,8 +478,8 @@ int main( int argc, char **argv )
     program = read_nca( 1, &program_size );
     control = read_nca( 2, &control_size );
     meta = read_nca( 3, &meta_size );
-    check_program( program, program_size, nro_file );
-    check_exefs_npdm( program, tid, 0 );
+    check_program( program, program_size, nro_file, nro_file );
+    check_exefs_npdm( program, tid, 0, 3 );
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     assert( nca_of( meta )->content_type == NCA_CONTENT_META );
     assert( nca_of( meta )->fs_header[0].fs_type == NCA_FS_PFS0 );
@@ -485,18 +491,18 @@ int main( int argc, char **argv )
 
     assert( !wine_nx_forwarder_install( &request, &step ) );
     program = read_nca( 4, &program_size );
-    check_exefs_npdm( program, tid, 0 );
+    check_exefs_npdm( program, tid, 0, 3 );
     free( program );
 
     request.game_id = 42;
     placeholders = registered = deleted_completely_count = deleted_after_write = 0;
-    tid = wine_nx_forwarder_game_title_id( 42 );
+    tid = wine_nx_forwarder_game_title_id( 42, WINE_NX_FORWARDER_39_BIT );
     assert( tid != wine_nx_forwarder_title_id( nro_file, NULL ) );
-    assert( tid != wine_nx_forwarder_game_title_id( 43 ) );
+    assert( tid != wine_nx_forwarder_game_title_id( 43, WINE_NX_FORWARDER_39_BIT ) );
     assert( !wine_nx_forwarder_install( &request, &step ) );
     assert( deleted_completely_count == 1 && deleted_completely[0] == tid );
     program = read_nca( 1, &program_size );
-    check_exefs_npdm( program, tid, 1 );
+    check_exefs_npdm( program, tid, 1, 3 );
     {
         const struct nca_header *header = nca_of( program );
         const struct integrity_level *levels = header->fs_header[1].hash_data.integrity_meta_info.info_level_hash.levels;
@@ -522,7 +528,43 @@ int main( int argc, char **argv )
     check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
     free( control );
 
+    /* The same game's 32-bit forwarder: no relay to Autorun's application but
+     * the loader itself, in a 32-bit address space without the alias region,
+     * starting the NRO with the game's id, under a title id of its own that
+     * leaves the 39-bit one where it is. */
+    {
+        char argv32[600];
+        u64 tid39 = tid;
+
+        request.address_space = WINE_NX_FORWARDER_32_BIT_NO_ALIAS;
+        placeholders = registered = deleted_completely_count = deleted_after_write = 0;
+        tid = wine_nx_forwarder_game_title_id( 42, WINE_NX_FORWARDER_32_BIT_NO_ALIAS );
+        assert( (tid >> 56) == 0x05 && !(tid & 0xFFF) );
+        assert( tid != tid39 && tid != AUTORUN_TITLE_ID );
+        assert( tid != wine_nx_forwarder_game_title_id( 43, WINE_NX_FORWARDER_32_BIT_NO_ALIAS ) );
+        assert( !wine_nx_forwarder_install( &request, &step ) );
+        assert( !step );
+        assert( deleted_completely_count == 1 && deleted_completely[0] == tid );
+        program = read_nca( 1, &program_size );
+        snprintf( argv32, sizeof(argv32), "%s " WINE_NX_FORWARDER_GAME_ARG "42", nro_file );
+        check_program( program, program_size, nro_file, argv32 );
+        check_exefs_npdm( program, tid, 0, 2 );
+        free( program );
+        control = read_nca( 2, &control_size );
+        check_control( control, control_size, "Autorun", "ticoverse.com", "autorun-nro-nacp", tid );
+        free( control );
+
+        /* Autorun's own forwarder is its 39-bit application, and an address
+         * space the NPDM has no name for is not written. */
+        request.game_id = 0;
+        assert( wine_nx_forwarder_install( &request, &step ) );
+        request.game_id = 42;
+        request.address_space = (enum wine_nx_forwarder_address_space)7;
+        assert( wine_nx_forwarder_install( &request, &step ) );
+    }
+
     puts( "forwarder: title ids, program exefs and romfs, the address space and ForceDebug in the NPDM, the "
-          "four-core permissions, control romfs and the NACP it inherits, and taking the old entry away before writing passed" );
+          "four-core permissions, control romfs and the NACP it inherits, taking the old entry away before writing, "
+          "and a game's 32-bit (no alias) forwarder beside its 39-bit one passed" );
     return 0;
 }

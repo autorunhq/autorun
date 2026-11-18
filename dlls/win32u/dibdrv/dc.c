@@ -547,7 +547,15 @@ struct windrv_physdev
     struct dibdrv_physdev *dibdrv;
     struct window_surface *surface;
     UINT lock_count;
+#ifdef __SWITCH__
+    RECT drawn, *bounds;
+#endif
 };
+
+#ifdef __SWITCH__
+__thread int wine_nx_system_painting;
+extern void wine_nx_surface_drawn( struct window_surface *surface ) __attribute__((weak));
+#endif
 
 static const struct gdi_dc_funcs window_driver;
 
@@ -566,6 +574,11 @@ static inline void lock_surface( struct windrv_physdev *dev )
         window_surface_lock( surface );
         if (IsRectEmpty( dev->dibdrv->bounds ) || !surface->draw_start_ticks)
             surface->draw_start_ticks = NtGetTickCount();
+#ifdef __SWITCH__
+        reset_bounds( &dev->drawn );
+        dev->bounds = dev->dibdrv->bounds;
+        if (dev->bounds) dev->dibdrv->bounds = &dev->drawn;
+#endif
     }
 }
 
@@ -575,7 +588,17 @@ static inline void unlock_surface( struct windrv_physdev *dev )
 
     if (!--dev->lock_count)
     {
-        DWORD ticks = NtGetTickCount() - surface->draw_start_ticks;
+        DWORD ticks;
+
+#ifdef __SWITCH__
+        dev->dibdrv->bounds = dev->bounds;
+        if (dev->bounds && !IsRectEmpty( &dev->drawn ))
+        {
+            add_bounds_rect( dev->bounds, &dev->drawn );
+            if (!wine_nx_system_painting && wine_nx_surface_drawn) wine_nx_surface_drawn( surface );
+        }
+#endif
+        ticks = NtGetTickCount() - surface->draw_start_ticks;
         window_surface_unlock( surface );
         if (ticks > FLUSH_PERIOD) window_surface_flush( dev->surface );
     }

@@ -1,0 +1,14 @@
+Carafe: dxvk::thread takes how long to retry a thread it cannot create (0001), 120 s by default.
+Zlib, as the file it changes.
+
+--- a/src/util/thread.h
++++ b/src/util/thread.h
+@@ -69,7 +69,7 @@
+ 
+     thread() { }
+ 
+-    explicit thread(ThreadProc&& proc);
++    explicit thread(ThreadProc&& proc, uint32_t retryMs = 120000);
+ 
+     ~thread();
+ 

@@ -11,14 +11,31 @@ export SDL_AUDIODRIVER=dummy
 [ -d /opt/homebrew/lib ] && export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 horizon_wine="$root/horizon-wine"
-# Wine's Notepad, the program that stands in for the games under several names,
-# is the DLL repository's.
-notepad="$root/horizon-dlls/switch/wine/drive_c/windows/syswow64/notepad.exe"
-[ -f "$notepad" ] || { echo "no $notepad: check out horizon-dlls" >&2; exit 1; }
 build="$(mktemp -d "${TMPDIR:-/tmp}/wine-nx-launcher.XXXXXX")"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
+# Wine's Notepad, the program that stands in for the games under several names,
+# is the DLL repository's. Without that checkout (CI's is without submodules) a
+# bare 32-bit image made here stands in for it: the same runs, without icons.
+notepad="$root/horizon-dlls/switch/wine/drive_c/windows/syswow64/notepad.exe"
+if [ ! -f "$notepad" ]; then
+    notepad="$build/program.exe"
+    python3 - "$notepad" <<'PY'
+import sys
+pe = bytearray(128)
+pe[0:2] = b'MZ'
+pe[0x3c] = 64
+pe[64:68] = b'PE\0\0'
+pe[68:70] = (0x14c).to_bytes(2, 'little')
+open(sys.argv[1], 'wb').write(pe)
+PY
+    echo "no horizon-dlls checkout: a bare 32-bit image stands in for Notepad"
+fi
 font="${LAUNCHER_FONT:-/System/Library/Fonts/Supplemental/Arial.ttf}"
+# Linux has no Arial where macOS keeps it: DejaVu Sans, as CI's keyboard test uses.
+[ -n "${LAUNCHER_FONT:-}" ] || [ -f "$font" ] || font=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 shots="${LAUNCHER_SHOTS:-$build}"
+# OpenSSL's SHA-256 for horizon_dlls.c on Linux; macOS has it in CommonCrypto.
+crypto=""; [ "$(uname -s)" = Linux ] && crypto=-lcrypto
 
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
@@ -33,7 +50,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
     -I "$horizon_wine/source" -I "$horizon_wine/tests" -I/opt/homebrew/include \
     "-DGAME_FIXES_INDEX_PATH=\"$root/game-fixes/switch/wine/game-fixes/index.json\"" \
     "$horizon_wine/tests/game_settings.c" "$horizon_wine/source/game_fixes.c" "$horizon_wine/source/horizon_dlls.c" \
-    -L/opt/homebrew/lib -lzstd -lz -o "$build/game_settings"
+    -L/opt/homebrew/lib -lzstd -lz $crypto -o "$build/game_settings"
 "$build/game_settings"
 clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$horizon_wine/tests/launcher_svg.c" "$horizon_wine/source/launcher_svg.c" -o "$build/launcher_svg"
@@ -79,8 +96,10 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include -I/opt/homebrew/opt/openssl/include \
     "$horizon_wine/tests/launcher_host.c" "$horizon_wine/source/launcher.c" "$horizon_wine/source/launcher_catalog.c" "$horizon_wine/source/launcher_ui.c" "$horizon_wine/source/launcher_audio.c" \
     "$horizon_wine/source/game_settings.c" "$horizon_wine/source/launcher_game_settings.c" \
+    "$horizon_wine/source/launcher_text_edit.c" \
     "$horizon_wine/source/input_profile.c" "$horizon_wine/source/launcher_input.c" \
     "$horizon_wine/source/launcher_graphics.c" "$horizon_wine/source/launcher_dxvk.c" "$horizon_wine/source/dxvk_options.c" \
+    "$horizon_wine/source/fex_build.c" \
     "$horizon_wine/source/launcher_forwarder.c" "$horizon_wine/source/launcher_image.c" \
     "$horizon_wine/source/launcher_setup.c" "$horizon_wine/source/setup_boot.c" \
     "$horizon_wine/source/steamgriddb.c" "$horizon_wine/source/launcher_artwork.c" \
@@ -95,7 +114,10 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
     "$horizon_wine/tests/osk.c" "$horizon_wine/source/osk.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -o "$build/osk"
-"$build/osk" "$font" "$shots"
+# Its font stays loaded for the life of the process, as on the console; CI runs
+# it the same way (.github/workflows/build.yml), and LeakSanitizer is on by
+# default on Linux.
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" "$build/osk" "$font" "$shots"
 
 card="$build/card/sdmc:"
 mkdir -p "$card/switch/wine/drive_c/openttd" "$card/games/deep/er/still"
@@ -130,6 +152,41 @@ if [ -f "$card/switch/wine/launcher-library-v2.ini" ] && grep -q '^\[game ' "$ca
 fi
 rm -f "$card/switch/wine/launcher-library-v2.ini" "$card/switch/wine/target.txt"
 echo "launcher host run: + Run a program once starts it without adding it"
+
+# Run once through a batch file: the program it starts, with its arguments
+# kept beside it (NAME.args.txt, as Add Game keeps them), still out of the
+# library. On a card of its own, so the runs below see no arguments file.
+batcard="$build/card-bat/sdmc:"
+mkdir -p "$batcard/switch/wine/drive_c/Game"
+ln -s "$notepad" "$batcard/switch/wine/drive_c/Game/game.exe"
+printf '@echo off\r\ncd /d "%%~dp0"\r\nstart "" game.exe -windowed -nosound\r\n' > "$batcard/switch/wine/drive_c/Game/play.bat"
+cat > "$build/bat-script.txt" <<SCRIPT
+wait 10
+key plus
+wait 3
+key down
+wait 2
+key a
+wait 3
+key a
+wait 3
+key a
+wait 3
+key down
+wait 2
+key a
+wait 5
+SCRIPT
+( cd "$build/card-bat" && SDL_VIDEODRIVER=dummy "$build/launcher_host" "$font" "$build/bat-script.txt" \
+    > "$build/bat-out.txt" 2>&1 ) || { cat "$build/bat-out.txt"; exit 1; }
+grep -q "launcher returned 1 target 'sdmc:/switch/wine/drive_c/Game/game.exe'" "$build/bat-out.txt" || {
+    cat "$build/bat-out.txt"; exit 1; }
+grep -qx -- "-windowed -nosound" "$batcard/switch/wine/drive_c/Game/game.args.txt" || {
+    cat "$build/bat-out.txt"; exit 1; }
+if [ -f "$batcard/switch/wine/launcher-library-v2.ini" ] && grep -q '^\[game ' "$batcard/switch/wine/launcher-library-v2.ini"; then
+    cat "$batcard/switch/wine/launcher-library-v2.ini"; exit 1
+fi
+echo "launcher host run: + Run a program once through a batch file starts its program with its arguments"
 
 # An empty explicit catalog must stay empty even though drive_c contains several
 # executables. Add OpenTTD through the browser, verify that adding did not launch

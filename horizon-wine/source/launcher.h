@@ -27,6 +27,7 @@ struct wine_nx_launcher_options
     int (*machine_of)( const char *path, unsigned short *machine );
     int (*list_usb)( struct wine_nx_launcher_usb_volume *volumes, int max );
     int vulkan;                /* the runtime has Vulkan for DXVK */
+    int mesa_zink;             /* its mesa-switch has Zink; without, a game set to it runs on nxvk */
     /* The forwarder's host address-space width, or 0 if unavailable. */
     int address_space_bits;
     int low_window;
@@ -46,6 +47,10 @@ struct wine_nx_launcher_options
     int reopen_launcher;  /* come back here when a program ends, rather than to the menu */
     int dxvk_on_add;      /* a game added to the library starts with DXVK enabled */
     int swkbd_auto;       /* the on-screen keyboard opens when a text field takes focus */
+    int mode_emulation;   /* win32u emulates a display mode a program asks for */
+    int picture_mode;     /* a mode of the program's own: 0 whole with bars, 1 filling
+                           * the screen with its edges cropped, 2 stretched to it, 3 at
+                           * its own size in the middle */
 };
 
 /* Show the launcher. Returns 1 with the chosen program's path in target, or 0

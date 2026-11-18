@@ -1,0 +1,49 @@
+Carafe: a thread DXVK cannot create is tried again for up to retryMs, 120 s by default, before DXVK gives up.
+On the Switch an application has 96 threads. At the limit DXVK threw std::system_error, which nothing catches,
+and the game ended; now it waits, a little longer each time, and says so in its log every 5 s.
+Zlib, as the file it changes.
+
+--- a/src/util/thread.cpp
++++ b/src/util/thread.cpp
+@@ -1,17 +1,37 @@
++#include <algorithm>
+ #include <atomic>
+ 
+ #include "thread.h"
+ #include "util_likely.h"
++#include "util_string.h"
++#include "./log/log.h"
+ 
+ #ifdef _WIN32
+ 
+ namespace dxvk {
+ 
+-  thread::thread(ThreadProc&& proc)
++  thread::thread(ThreadProc&& proc, uint32_t retryMs)
+   : m_data(new ThreadData(std::move(proc))) {
+-    m_data->handle = ::CreateThread(nullptr, 0x100000,
+-      thread::threadProc, m_data, STACK_SIZE_PARAM_IS_A_RESERVATION,
+-      &m_data->id);
++    DWORD start = ::GetTickCount();
++    DWORD pause = 10;
++    DWORD noted = 0;
++
++    while (!(m_data->handle = ::CreateThread(nullptr, 0x100000,
++        thread::threadProc, m_data, STACK_SIZE_PARAM_IS_A_RESERVATION,
++        &m_data->id))) {
++      DWORD waited = ::GetTickCount() - start;
++
++      if (waited >= retryMs)
++        break;
++
++      if (waited - noted >= 5000 || !noted) {
++        Logger::warn(str::format("DXVK: No thread could be created for ", waited, " ms, trying again"));
++        noted = waited ? waited : 1;
++      }
++
++      ::Sleep(pause);
++      pause = std::min<DWORD>(pause * 2, 1000);
++    }
+ 
+     if (!m_data->handle) {
+       delete m_data;

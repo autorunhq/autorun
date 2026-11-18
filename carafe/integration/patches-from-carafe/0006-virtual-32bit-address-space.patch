@@ -1,0 +1,91 @@
+Carafe: shared user data and thread data in a 32-bit address space.
+A Win32 program without relocations needs its fixed low base, which only a process Horizon creates
+with a 32-bit address space (NPDM type 2) has. There the kernel's heap region covers 0x7ffe0000 and
+nothing lies above 4 GB. KUSER_SHARED_DATA moves to a free page below 4 GB when its address is taken,
+as before Wine 11.18 (b231b265): PE ntdll, kernel32 and kernelbase find it through
+wine_nx_user_shared_data, direct reads are redirected by horizon.c. Thread data takes the top of the
+space instead of requiring addresses above 4 GB. Nothing changes in a 36- or 39-bit address space.
+docs/research/fixed-base/REPORT.md, P1.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/virtual.c	2026-10-07 08:48:40.276329800 +0400
++++ b/dlls/ntdll/unix/virtual.c	2026-10-07 08:49:37.207271900 +0400
+@@ -4996,15 +4996,30 @@
+ }
+ 
+ 
++#ifdef __SWITCH__
++static ULONG_PTR thread_data_limit_low( unsigned int *alloc_type )
++{
++    if ((ULONG_PTR)host_addr_space_limit > limit_4g) return limit_4g;
++    *alloc_type |= MEM_TOP_DOWN;
++    return 0;
++}
++#else
++static inline ULONG_PTR thread_data_limit_low( unsigned int *alloc_type )
++{
++    return limit_4g;
++}
++#endif
++
+ /***********************************************************************
+  *           virtual_alloc_first_thread_data
+  */
+ struct thread_data *virtual_alloc_first_thread_data(void)
+ {
+-    unsigned int status;
++    unsigned int status, alloc_type = MEM_TOP_DOWN;
+     struct thread_data *thread_data;
+     struct file_view *view;
+     SIZE_T size = signal_stack_mask + 1;
++    ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+ #ifndef __SWITCH__
+     size += kernel_stack_size;
+ #endif
+@@ -5015,14 +5030,28 @@
+                        VPROT_WRITE |
+ #endif
+                        VPROT_READ | VPROT_COMMITTED, 0, 0, 0 );
++#ifdef __SWITCH__
++    if (status && (ULONG_PTR)host_addr_space_limit <= limit_4g)
++    {
++        unsigned int fixed_status = status;
++        char msg[128];
++
++        status = map_view( &view, NULL, page_size, MEM_TOP_DOWN, VPROT_WRITE | VPROT_READ | VPROT_COMMITTED,
++                           0, limit_4g - 1, 0 );
++        if (!status) user_shared_data = view->base;
++        snprintf( msg, sizeof(msg), "[USD] 0x7ffe0000 unavailable (%08x); shared user data at %p (%08x)",
++                  fixed_status, status ? NULL : view->base, status );
++        if (&wine_nx_runtime_trace) wine_nx_runtime_trace( msg );
++    }
++#endif
+     if (status)
+     {
+         ERR( "wine: failed to map the shared user data: %08x\n", status );
+         exit(1);
+     }
+ 
+-    status = map_view( &view, NULL, size, MEM_TOP_DOWN,
+-                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
++    status = map_view( &view, NULL, size, alloc_type,
++                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_low, 0, 0 );
+     if (status)
+     {
+         ERR( "wine: failed to allocate initial thread data: %08x\n", status );
+@@ -5167,12 +5196,14 @@
+     struct file_view *view;
+     struct thread_data *data = NULL;
+     SIZE_T size = signal_stack_mask + 1;
++    unsigned int alloc_type = 0;
++    ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+ #ifndef __SWITCH__
+     size += kernel_stack_size;
+ #endif
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
++    status = map_view( &view, NULL, size, alloc_type, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_low, 0, 0 );
+     if (!status)
+     {
+ #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)

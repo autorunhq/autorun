@@ -1,0 +1,141 @@
+Carafe: with CompactReturns and IndirectCallCache both on, an indirect call keeps only the cache check in line (the
+record's guest RIP compared, its host code loaded, the push and the call). Filling an empty record and the lookup for
+a call that misses the record go after the block's code and come back to the call. That moves about 60 bytes out of
+the hot code at every indirect call site. The L1 lookup of the out-of-line pieces is shared by returns and calls.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -235,7 +235,30 @@
+ 
+     ARMEmitter::ForwardLabel CallCacheHit;
+     const bool CallCache = Op->Hint == IR::BranchHint::Call && IndirectCallCache();
+-    if (CallCache) {
++    const bool CompactCallCache = CallCache && CompactReturns();
++    if (CompactCallCache) {
++      PendingCallCaches.emplace_back();
++      (void)adr(TMP3, &PendingCallCaches.back());
++      ldar(TMP2, TMP3);
++      sub(TMP2, TMP2, RipReg.X());
++      auto& CallCacheMiss = PendingCallCacheMisses.emplace_back(PendingCallCacheMiss {.RipReg = RipReg});
++      cbnz_OrRestart(ARMEmitter::Size::i64Bit, TMP2, &CallCacheMiss.Label);
++      ldr(TMP2, TMP3, offsetof(IndirectCallCacheRecord, HostCode));
++      cbz_OrRestart(ARMEmitter::Size::i64Bit, TMP2, &CallCacheMiss.Label);
++      (void)Bind(&CallCacheMiss.Hit);
++      ARMEmitter::ForwardLabel l_CallReturn;
++      if (!Op->CallReturnBlock.IsInvalid()) {
++        auto CallReturnAddressReg = GetReg(Op->CallReturnAddress).X();
++        PendingCallReturnTargetLabel = &CallReturnTargets.try_emplace(Op->CallReturnBlock.ID()).first->second;
++        (void)adr(TMP1, &l_CallReturn);
++        stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
++      } else {
++        stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
++      }
++      blr(TMP2);
++      (void)Bind(&l_CallReturn);
++      return;
++    } else if (CallCache) {
+       ARMEmitter::ForwardLabel CallCacheMiss;
+       ARMEmitter::ForwardLabel CallCacheFill;
+       PendingCallCaches.emplace_back();
+@@ -296,20 +319,9 @@
+   }
+ }
+ 
+-void Arm64JITCore::EmitReturnLookup(ARMEmitter::Register RipReg) {
++void Arm64JITCore::EmitL1Lookup(ARMEmitter::Register RipReg) {
+   ARMEmitter::ForwardLabel Found;
+ 
+-  if (ProfileStats()) {
+-    ARMEmitter::ForwardLabel NoStats;
+-    ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Thread));
+-    ldr(TMP1, TMP1, offsetof(FEXCore::Core::InternalThreadState, ThreadStats));
+-    (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &NoStats);
+-    ldr(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
+-    add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 1);
+-    str(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
+-    (void)Bind(&NoStats);
+-  }
+-
+   eor(ARMEmitter::Size::i64Bit, TMP1, RipReg, RipReg, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
+   ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Mask));
+   and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1);
+@@ -321,6 +333,34 @@
+   ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherLoopTop));
+   str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
+   (void)Bind(&Found);
++}
++
++void Arm64JITCore::EmitCallCacheMiss(ARMEmitter::Register RipReg, ARMEmitter::BackwardLabel* Hit) {
++  ARMEmitter::ForwardLabel Lookup;
++
++  ldar(TMP2, TMP3);
++  (void)cbnz(ARMEmitter::Size::i64Bit, TMP2, &Lookup);
++  str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
++  ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.IndirectCallLinker));
++  b_OrRestart(Hit);
++  (void)Bind(&Lookup);
++  EmitL1Lookup(RipReg);
++  b_OrRestart(Hit);
++}
++
++void Arm64JITCore::EmitReturnLookup(ARMEmitter::Register RipReg) {
++  if (ProfileStats()) {
++    ARMEmitter::ForwardLabel NoStats;
++    ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Thread));
++    ldr(TMP1, TMP1, offsetof(FEXCore::Core::InternalThreadState, ThreadStats));
++    (void)cbz(ARMEmitter::Size::i64Bit, TMP1, &NoStats);
++    ldr(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++    add(ARMEmitter::Size::i64Bit, TMP2, TMP2, 1);
++    str(TMP2, TMP1, offsetof(FEXCore::SHMStats::ThreadStats, AccumulatedReturnMissCount));
++    (void)Bind(&NoStats);
++  }
++
++  EmitL1Lookup(RipReg);
+   ret(TMP2);
+ }
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -138,7 +138,16 @@
+   fextl::vector<PendingReturnLookup> PendingReturnLookups;
+   FEX_CONFIG_OPT(CompactReturns, COMPACTRETURNS);
+ 
++  struct PendingCallCacheMiss {
++    ARMEmitter::ForwardLabel Label;
++    ARMEmitter::BackwardLabel Hit;
++    ARMEmitter::Register RipReg;
++  };
++  fextl::vector<PendingCallCacheMiss> PendingCallCacheMisses;
++
++  void EmitL1Lookup(ARMEmitter::Register RipReg);
+   void EmitReturnLookup(ARMEmitter::Register RipReg);
++  void EmitCallCacheMiss(ARMEmitter::Register RipReg, ARMEmitter::BackwardLabel* Hit);
+ 
+   static uint64_t IndirectCallLink(FEXCore::Core::CpuStateFrame* Frame, IndirectCallCacheRecord* Record);
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -932,6 +932,7 @@
+   PendingJumpTableCases.clear();
+   PendingJumpTables.clear();
+   PendingReturnLookups.clear();
++  PendingCallCacheMisses.clear();
+   JumpTargets.resize(IR->GetHeader()->BlockCount, {});
+   Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
+ 
+@@ -1069,6 +1070,11 @@
+     EmitReturnLookup(ReturnLookup.RipReg);
+   }
+ 
++  for (auto& CallCacheMiss : PendingCallCacheMisses) {
++    BindOrRestart(&CallCacheMiss.Label);
++    EmitCallCacheMiss(CallCacheMiss.RipReg, &CallCacheMiss.Hit);
++  }
++
+   ARMEmitter::ForwardLabel l_ExitLink;
+   for (auto& PendingJumpThunk : PendingJumpThunks) {
+     // Align as 64-bit atomics are used on the HostCode field.

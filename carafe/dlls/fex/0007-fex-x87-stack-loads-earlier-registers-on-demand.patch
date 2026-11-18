@@ -1,0 +1,293 @@
+Carafe: with X87FastStack, the x87 stack pass stays on its fast path when a block reads registers pushed by an
+earlier block. Without it, the first such read writes the block's stack back to memory and moves the rest of the
+block to the slow path, which recomputes register addresses from TOP and writes every value, TOP and the tag word
+again at the end. Every branch and every call return starts a new block, so float code with branches, loops or
+float return values paid this all the time. Now each such register is loaded once, and at the block's end only the
+registers that changed are stored and only the tags that changed are written; a register pushed and popped inside
+the block costs nothing. FXAM still reads the stored tag of a register it has not changed. Assumes, as FEX already
+does, that the program neither overflows the x87 stack nor reads registers it has popped. Off by default.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -614,6 +614,16 @@
+           "every float to integer conversion."
+         ]
+       },
++      "X87FastStack": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "Keeps the x87 stack on its fast path when a block reads registers pushed by earlier blocks: each one is loaded",
++          "once, and at the block's end only changed registers and tags are written back. FNSTSW reads TOP without writing",
++          "the stack back. Assumes the program neither overflows the x87 stack nor reads registers it has popped."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -46,6 +46,7 @@ static void DeriveOp(Ref& RefV, IROps NewOp, IREmitter::IRPair<T> Expr) {
+ }
+ 
+ enum class StackSlot { UNUSED, INVALID, VALID };
++enum class EntryTag : uint8_t { Unknown, Valid, Empty };
+ // FixedSizeStack is a model of the x87 Stack where each element in this
+ // fixed size stack lives at an offset from top. The top of the stack is at
+ // index 0.
+@@ -70,30 +71,71 @@ public:
+   void push(const T& Value) {
+     rotate();
+     buffer.front() = {StackSlot::VALID, Value};
++    slots.front().Dirty = true;
++    if (slots.front().Entry == EntryTag::Unknown) {
++      slots.front().Entry = EntryTag::Empty;
++    }
+   }
+ 
+   // Rotate the elements with the direction controlled by Right
+   void rotate(bool Right = true) {
+     if (Right) {
+       std::rotate(buffer.begin(), buffer.end() - 1, buffer.end());
++      std::rotate(slots.begin(), slots.end() - 1, slots.end());
+       TopOffset++;
+     } else {
+       std::rotate(buffer.begin(), buffer.begin() + 1, buffer.end());
++      std::rotate(slots.begin(), slots.begin() + 1, slots.end());
+       TopOffset--;
+     }
+   }
+ 
+   void pop() {
+     buffer.front() = {StackSlot::INVALID, T::Invalid};
++    slots.front().Dirty = false;
++    if (slots.front().Entry == EntryTag::Unknown) {
++      slots.front().Entry = EntryTag::Valid;
++    }
+     rotate(false);
+   }
+ 
++  void load(const T& Value, size_t Offset) {
++    buffer[Offset] = {StackSlot::VALID, Value};
++    slots[Offset] = {false, EntryTag::Valid};
++  }
++
++  bool isDirty(size_t Offset) const {
++    return slots[Offset].Dirty;
++  }
++
++  void forgetEntry(size_t Offset) {
++    if (slots[Offset].Entry == EntryTag::Valid) {
++      slots[Offset].Entry = EntryTag::Unknown;
++    }
++  }
++
++  EntryTag entryTag(size_t Offset) const {
++    return slots[Offset].Entry;
++  }
++
++  void markWritten() {
++    for (size_t i = 0; i < buffer.size(); i++) {
++      slots[i].Dirty = false;
++      if (buffer[i].Type == StackSlot::VALID) {
++        slots[i].Entry = EntryTag::Valid;
++      } else if (buffer[i].Type == StackSlot::INVALID) {
++        slots[i].Entry = EntryTag::Empty;
++      }
++    }
++  }
++
+   const StackSlotEntry& top(size_t Offset = 0) const {
+     return buffer[Offset];
+   }
+ 
+   void setTop(const T& Value, size_t Offset = 0) {
+     buffer[Offset] = {StackSlot::VALID, Value};
++    slots[Offset].Dirty = true;
+   }
+ 
+   bool isValid(size_t Offset) const {
+@@ -102,6 +144,7 @@ public:
+ 
+   void clear() {
+     buffer.fill({StackSlot::UNUSED, T::Invalid});
++    slots.fill({});
+     TopOffset = 0;
+   }
+ 
+@@ -121,6 +164,7 @@ public:
+ 
+   void setTagInvalid(size_t Index) {
+     buffer[Index].Type = StackSlot::INVALID;
++    slots[Index].Dirty = false;
+   }
+ 
+   // Returns a mask to set in AbridgedTagWord
+@@ -145,8 +189,34 @@ public:
+     return Mask;
+   }
+ 
++  uint8_t getChangedValidMask() const {
++    uint8_t Mask = 0;
++    for (size_t i = 0; i < buffer.size(); i++) {
++      if (buffer[i].Type == StackSlot::VALID && slots[i].Entry != EntryTag::Valid) {
++        Mask |= 1U << i;
++      }
++    }
++    return Mask;
++  }
++
++  uint8_t getChangedInvalidMask() const {
++    uint8_t Mask = 0;
++    for (size_t i = 0; i < buffer.size(); i++) {
++      if (buffer[i].Type == StackSlot::INVALID && slots[i].Entry != EntryTag::Empty) {
++        Mask |= 1U << i;
++      }
++    }
++    return Mask;
++  }
++
+ private:
++  struct SlotState final {
++    bool Dirty = false;
++    EntryTag Entry = EntryTag::Unknown;
++  };
++
+   std::array<StackSlotEntry, size> buffer {};
++  std::array<SlotState, size> slots {};
+ };
+ 
+ class X87StackOptimization final : public Pass {
+@@ -158,6 +228,8 @@ public:
+     ReducedPrecisionMode = ReducedPrecision;
+     FEX_CONFIG_OPT(ConversionRounding, X87CONVERSIONROUNDING);
+     ConversionRoundingMode = ConversionRounding;
++    FEX_CONFIG_OPT(FastStack, X87FASTSTACK);
++    FastStackMode = FastStack;
+   }
+   void Run(IREmitter* Emit) override;
+ 
+@@ -166,6 +238,7 @@ private:
+   const OpSize GPROpSize;
+   bool ReducedPrecisionMode;
+   bool ConversionRoundingMode;
++  bool FastStackMode;
+   FEX_CONFIG_OPT(DisableVixlIndirectCalls, DISABLE_VIXL_INDIRECT_RUNTIME_CALLS);
+ 
+   // Helpers
+@@ -327,6 +400,9 @@ private:
+ 
+   // Path Migration helper management
+   std::optional<StackMemberInfo> MigrateToSlowPath_IfInvalid(uint8_t Offset = 0);
++  uint8_t EntryOffset(uint8_t Offset) const {
++    return static_cast<uint8_t>(Offset - StackData.TopOffset) & 7;
++  }
+   Ref LoadStackValue(uint8_t Offset = 0);
+   void StoreStackValue(Ref Value, uint8_t Offset = 0, bool SetValid = false);
+   void StackPop();
+@@ -495,6 +571,13 @@ inline Ref X87StackOptimization::RotateRight8(uint32_t V, Ref Amount) {
+ }
+ 
+ inline std::optional<X87StackOptimization::StackMemberInfo> X87StackOptimization::MigrateToSlowPath_IfInvalid(uint8_t Offset) {
++  if (FastStackMode && !SlowPath && StackData.top(Offset).Type == StackSlot::UNUSED) {
++    const auto Size = ReducedPrecisionMode ? OpSize::i64Bit : OpSize::i128Bit;
++    Ref Address = GetOffsetTopAddressWithCache_Slow(EntryOffset(Offset));
++    Ref Value = IREmit->_LoadMemFPR(Size, Address, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1);
++    StackData.load(StackMemberInfo {Value}, Offset);
++    return StackData.top(Offset).Value;
++  }
+   const auto& [Valid, StackMember] = StackData.top(Offset);
+   MigrateToSlowPathIf(Valid != StackSlot::VALID);
+   if (Valid == StackSlot::VALID) {
+@@ -695,7 +778,20 @@ Ref X87StackOptimization::SynchronizeStackValues() {
+ 
+   if (TopOffset != 0) {
+     Ref NewTop = GetOffsetTopWithCache_Slow(TopOffset, true);
++    const auto OldOffsets = TopOffsetCache;
++    const auto OldAddresses = TopOffsetAddressCache;
+     SetTopWithCache_Slow(NewTop);
++    if (FastStackMode) {
++      for (size_t i = 0; i < OldOffsets.size(); i++) {
++        const auto New = static_cast<size_t>(i + TopOffset) & 7;
++        if (OldOffsets[i]) {
++          TopOffsetCache[New] = OldOffsets[i];
++        }
++        if (OldAddresses[i]) {
++          TopOffsetAddressCache[New] = OldAddresses[i];
++        }
++      }
++    }
+   }
+   StackData.TopOffset = 0;
+ 
+@@ -706,13 +802,13 @@ Ref X87StackOptimization::SynchronizeStackValues() {
+   for (size_t i = 0; i < StackData.size; ++i) {
+     const auto& [Valid, StackMember] = StackData.top(i);
+ 
+-    if (Valid == StackSlot::VALID) {
++    if (Valid == StackSlot::VALID && (!FastStackMode || StackData.isDirty(i))) {
+       StoreStackValueAtOffset_Slow(StackMember.StackDataNode, i, false);
+     }
+   }
+   { // Set valid tags
+-    uint8_t ValidMask = StackData.getValidMask();
+-    uint8_t InvalidMask = StackData.getInvalidMask();
++    uint8_t ValidMask = FastStackMode ? StackData.getChangedValidMask() : StackData.getValidMask();
++    uint8_t InvalidMask = FastStackMode ? StackData.getChangedInvalidMask() : StackData.getInvalidMask();
+     for (auto& Elem : TopValidCache) {
+       Elem = (ValidMask & 1) ? StackSlot::VALID : ((InvalidMask & 1) ? StackSlot::INVALID : StackSlot::UNUSED);
+ 
+@@ -722,6 +818,10 @@ Ref X87StackOptimization::SynchronizeStackValues() {
+     FlushValidPending = true;
+   }
+ 
++  if (FastStackMode) {
++    StackData.markWritten();
++  }
++
+   return TopValue;
+ }
+ 
+@@ -986,6 +1086,19 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         // Returns 0 if value is valid and 1 otherwise.
+         const auto* Op = IROp->C<IROp_StackValidTag>();
+         auto Offset = Op->StackLocation;
++        if (FastStackMode && !SlowPath) {
++          const auto Type = StackData.top(Offset).Type;
++          const bool Loaded = Type == StackSlot::VALID && StackData.entryTag(Offset) == EntryTag::Valid && !StackData.isDirty(Offset);
++          Ref Tag {};
++          if (Type == StackSlot::UNUSED || Loaded) {
++            Tag = IREmit->_And(OpSize::i32Bit, IREmit->_Lshr(OpSize::i32Bit, GetFTW(), GetOffsetTopWithCache_Slow(EntryOffset(Offset))),
++                               GetConstant(1));
++          } else {
++            Tag = GetConstant(Type == StackSlot::VALID ? 1 : 0);
++          }
++          IREmit->ReplaceUsesWithAfter(CodeNode, Tag, CodeNode);
++          break;
++        }
+         auto Value = MigrateToSlowPath_IfInvalid(Offset);
+ 
+         Ref Tag {};
+@@ -1051,6 +1164,9 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+           StoreStackValueAtOffset_Slow(LoadStackValueAtOffset_Slow(), Offset);
+         } else {
+           StackData.setTop(*Value, Offset);
++          if (FastStackMode) {
++            StackData.forgetEntry(Offset);
++          }
+         }
+         break;
+       }
+@@ -1082,6 +1198,10 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+           StackData.setTop(StackMemberOffset, 0);
+           StackData.setTop(StackMemberTop, Offset);
+         }
++        if (FastStackMode && !SlowPath) {
++          StackData.forgetEntry(0);
++          StackData.forgetEntry(Offset);
++        }
+         break;
+       }
+ 

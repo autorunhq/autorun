@@ -77,13 +77,16 @@ struct compositor_gl_texture
     int width, height;  /* size of its storage */
 };
 
-/* One window on the screen: its pixels from (src_x, src_y), drawn at the
- * screen rectangle x, y, width, height, which may reach past the edges. */
+/* One window on the screen: its pixels from (src_x, src_y, src_width, src_height),
+ * drawn at the screen rectangle x, y, width, height, which may reach past the
+ * edges.  Zero src_width/src_height draws 1:1 (src size == width, height). */
 struct compositor_gl_quad
 {
     const struct compositor_gl_texture *texture;
     int x, y, width, height;
     int src_x, src_y;
+    int src_width, src_height;
+    int blend;
 };
 
 struct compositor_gl

@@ -32,6 +32,8 @@ send = function(horizon, 'static int horizon_server_handle_send_hardware_message
 # touch, which owes nothing to where the cursor is.
 assert send.index('dx = mouse->x;') < send.index('if (x < desktop->cursor.clip.left)')
 assert send.index('mouse->x - horizon_pointed_at_x') < send.index('if (x < desktop->cursor.clip.left)')
+assert send.index('if (x >= desktop->cursor.clip.right)') < send.index('if (x < desktop->cursor.clip.left)')
+assert send.index('if (y >= desktop->cursor.clip.bottom)') < send.index('if (y < desktop->cursor.clip.top)')
 assert 'if (flags & HORIZON_MOUSEEVENTF_LEFTDOWN) dx = dy = 0;' in send
 # Raw input first, and a program that asked for the mouse alone gets nothing else.
 assert send.index('horizon_server_queue_raw_mouse_locked') < send.index('HORIZON_WM_MOUSEMOVE')

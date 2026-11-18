@@ -1,0 +1,219 @@
+Carafe: DXVK-Sarek's choices for the frame rate limiter. dxvk.frameRateMethod (or DXVK_FRAME_RATE_METHOD) is
+"timeline", DXVK's own cadence and the default, "deviation", the limiter of DXVK 1.x that carries the error of one
+frame into the next, or "reactive", which waits a whole frame from every present. dxvk.frameRatePacing (or
+DXVK_FRAME_RATE_PACING) is how the wait is spent: "precise", DXVK's sleep with a busy wait for its last
+milliseconds and the default, "sleep", one sleep and no busy wait, "sliced", sleeps of at most 1 ms with a busy
+wait for the last 0.15 ms, or "spin", a busy wait throughout.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -30,6 +30,28 @@
+ 
+     skipRedundantPipelineBinds = config.getOption<bool>("dxvk.skipRedundantPipelineBinds", false);
+ 
++    std::string rateMethod = env::getEnvVar("DXVK_FRAME_RATE_METHOD");
++
++    if (rateMethod.empty())
++      rateMethod = config.getOption<std::string>("dxvk.frameRateMethod", "timeline");
++
++    if (rateMethod == "deviation")
++      frameRateMethod = 1u;
++    else if (rateMethod == "reactive")
++      frameRateMethod = 2u;
++
++    std::string ratePacing = env::getEnvVar("DXVK_FRAME_RATE_PACING");
++
++    if (ratePacing.empty())
++      ratePacing = config.getOption<std::string>("dxvk.frameRatePacing", "precise");
++
++    if (ratePacing == "sleep")
++      frameRatePacing = 1u;
++    else if (ratePacing == "sliced")
++      frameRatePacing = 2u;
++    else if (ratePacing == "spin")
++      frameRatePacing = 3u;
++
+     std::string method = env::getEnvVar("DXVK_SHADER_COMPILATION_METHOD");
+ 
+     if (method.empty())
+diff -ruN a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -102,6 +102,10 @@
+ 
+     bool skipRedundantPipelineBinds = false;
+ 
++    uint32_t frameRateMethod = 0;
++
++    uint32_t frameRatePacing = 0;
++
+   };
+ 
+ }
+diff -ruN a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -23,6 +23,8 @@
+     m_vki(device->instance()->vki()),
+     m_vkd(device->vkd()),
+     m_surfaceProc(std::move(proc)) {
++    m_fpsLimiter.setPacing(m_device->config().frameRateMethod, m_device->config().frameRatePacing);
++
+     // Only enable FSE if the user explicitly opts in. On Windows, FSE
+     // is required to support VRR or HDR, but blocks alt-tabbing or
+     // overlapping windows, which breaks a number of games.
+diff -ruN a/src/util/util_fps_limiter.cpp b/src/util/util_fps_limiter.cpp
+--- a/src/util/util_fps_limiter.cpp
++++ b/src/util/util_fps_limiter.cpp
+@@ -68,8 +68,29 @@
+     // that can be written by setTargetFrameRate
+     lock.unlock();
+ 
++    if (m_method == 1u) {
++      TimerDuration frameTime = t1 - m_lastFrame;
++
++      if (frameTime * 100 > interval * 103 - m_deviation * 100) {
++        m_deviation = TimerDuration::zero();
++      } else {
++        t1 = Sleep::sleepUntil(t1, t1 + (interval - m_deviation - frameTime), m_pacing);
++        frameTime = t1 - m_lastFrame;
++        m_deviation += frameTime - interval;
++        m_deviation = std::min(m_deviation, interval / 16);
++      }
++
++      m_lastFrame = t1;
++      return;
++    }
++
++    if (m_method == 2u) {
++      m_nextFrame = Sleep::sleepUntil(t1, t1 + interval, m_pacing);
++      return;
++    }
++
+     if (t1 < m_nextFrame)
+-      Sleep::sleepUntil(t1, m_nextFrame);
++      Sleep::sleepUntil(t1, m_nextFrame, m_pacing);
+ 
+     m_nextFrame = (t1 < m_nextFrame + interval)
+       ? m_nextFrame + interval
+@@ -77,6 +98,12 @@
+   }
+ 
+ 
++  void FpsLimiter::setPacing(uint32_t method, uint32_t pacing) {
++    m_method = method;
++    m_pacing = pacing;
++  }
++
++
+   bool FpsLimiter::testRefreshHeuristic(TimerDuration interval, TimePoint now, uint32_t maxLatency) {
+     if (m_heuristicEnable)
+       return true;
+diff -ruN a/src/util/util_fps_limiter.h b/src/util/util_fps_limiter.h
+--- a/src/util/util_fps_limiter.h
++++ b/src/util/util_fps_limiter.h
+@@ -40,6 +40,8 @@
+      */
+     void delay();
+ 
++    void setPacing(uint32_t method, uint32_t pacing);
++
+   private:
+ 
+     using TimePoint = dxvk::high_resolution_clock::time_point;
+@@ -49,6 +51,10 @@
+ 
+     TimerDuration   m_targetInterval  = TimerDuration::zero();
+     TimePoint       m_nextFrame       = TimePoint();
++    TimePoint       m_lastFrame       = TimePoint();
++    TimerDuration   m_deviation       = TimerDuration::zero();
++    uint32_t        m_method          = 0;
++    uint32_t        m_pacing          = 0;
+     uint32_t        m_maxLatency      = 0;
+ 
+     uint32_t        m_heuristicFrameCount = 0;
+diff -ruN a/src/util/util_sleep.cpp b/src/util/util_sleep.cpp
+--- a/src/util/util_sleep.cpp
++++ b/src/util/util_sleep.cpp
+@@ -107,6 +107,54 @@
+   }
+ 
+ 
++  Sleep::TimePoint Sleep::sleep(TimePoint t0, TimerDuration duration, uint32_t pacing) {
++    if (!pacing)
++      return sleep(t0, duration);
++
++    if (duration <= TimerDuration::zero())
++      return t0;
++
++    if (!m_initialized.load())
++      initialize();
++
++    if (pacing == 1u) {
++      systemSleep(duration);
++      return dxvk::high_resolution_clock::now();
++    }
++
++    if (pacing == 3u)
++      return spin(t0, duration);
++
++    TimerDuration margin = std::chrono::duration_cast<TimerDuration>(std::chrono::microseconds(150));
++    TimerDuration step = std::chrono::duration_cast<TimerDuration>(std::chrono::milliseconds(1));
++    TimerDuration remaining = duration;
++    TimePoint t1 = t0;
++
++    while (remaining > margin) {
++      systemSleep(std::min(remaining - margin, step));
++      t1 = dxvk::high_resolution_clock::now();
++      remaining -= std::chrono::duration_cast<TimerDuration>(t1 - t0);
++      t0 = t1;
++    }
++
++    return spin(t0, remaining);
++  }
++
++
++  Sleep::TimePoint Sleep::spin(TimePoint t0, TimerDuration duration) {
++    TimerDuration remaining = duration;
++    TimePoint t1 = t0;
++
++    while (remaining > TimerDuration::zero()) {
++      t1 = dxvk::high_resolution_clock::now();
++      remaining -= std::chrono::duration_cast<TimerDuration>(t1 - t0);
++      t0 = t1;
++    }
++
++    return t1;
++  }
++
++
+   void Sleep::systemSleep(TimerDuration duration) {
+ #ifdef _WIN32
+     if (NtDelayExecution) {
+diff -ruN a/src/util/util_sleep.h b/src/util/util_sleep.h
+--- a/src/util/util_sleep.h
++++ b/src/util/util_sleep.h
+@@ -41,6 +41,10 @@
+       return sleepFor(t0, t1 - t0);
+     }
+ 
++    static TimePoint sleepUntil(TimePoint t0, TimePoint t1, uint32_t pacing) {
++      return s_instance.sleep(t0, std::chrono::duration_cast<TimerDuration>(t1 - t0), pacing);
++    }
++
+   private:
+ 
+     static Sleep s_instance;
+@@ -71,6 +75,10 @@
+ 
+     TimePoint sleep(TimePoint t0, TimerDuration duration);
+ 
++    TimePoint sleep(TimePoint t0, TimerDuration duration, uint32_t pacing);
++
++    TimePoint spin(TimePoint t0, TimerDuration duration);
++
+     void systemSleep(TimerDuration duration);
+ 
+   };

@@ -1,0 +1,48 @@
+Carafe: wine_nx_surface_drawn (patch 0112) marks a scaled window surface, which a program draws into in a scaled
+display mode, and its flush passes the mark on to the surface it is stretched into, whose driver is told with
+wine_nx_driver_surface_drawn (patch 0108).
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -150,8 +150,15 @@
+     struct window_surface *target_surface;
+     struct ratio dpi_from;
+     struct ratio dpi_to;
++#ifdef __SWITCH__
++    LONG drawn;
++#endif
+ };
+ 
++#ifdef __SWITCH__
++extern void wine_nx_driver_surface_drawn( struct window_surface *surface );
++#endif
++
+ static struct scaled_surface *get_scaled_surface( struct window_surface *window_surface )
+ {
+     return CONTAINING_RECORD( window_surface, struct scaled_surface, header );
+@@ -210,6 +217,9 @@
+                                     window_surface->alpha_bits, window_surface->alpha_mask );
+     }
+ 
++#ifdef __SWITCH__
++    if (InterlockedExchange( &surface->drawn, 0 )) wine_nx_driver_surface_drawn( surface->target_surface );
++#endif
+     window_surface_flush( surface->target_surface );
+     return TRUE;
+ }
+@@ -228,6 +238,14 @@
+     .destroy = scaled_surface_destroy
+ };
+ 
++#ifdef __SWITCH__
++void wine_nx_surface_drawn( struct window_surface *surface )
++{
++    if (surface->funcs == &scaled_surface_funcs) InterlockedExchange( &get_scaled_surface( surface )->drawn, 1 );
++    else wine_nx_driver_surface_drawn( surface );
++}
++#endif
++
+ static void scaled_surface_set_target( struct scaled_surface *surface, struct window_surface *target, struct ratio dpi_to )
+ {
+     if (surface->target_surface) window_surface_release( surface->target_surface );

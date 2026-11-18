@@ -1,0 +1,26 @@
+Carafe: where a WoW64 thread's FEX state is found from its TEB, and the fields of that state the profiler reads.
+FEX keeps its thread state in the TEB's last WoW64 TLS slots; the state starts with the frame whose eip and
+registers are exact while the thread is outside translated code.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.h
++++ b/horizon-wine/source/thread_profile.h
+@@ -171,6 +171,18 @@
+ #define NX_PROF_I386_EBP     0xb4
+ #define NX_PROF_I386_ESP     0xc4
+ 
++#define NX_PROF_CPU_MACHINE     2
++#define NX_PROF_MACHINE_I386    0x14c
++#define NX_PROF_TEB_FEX_THREAD  0x1500
++#define NX_PROF_TEB_FEX_CONTROL 0x1508
++#define NX_PROF_FEX_IN_JIT      1
++#define NX_PROF_FEX_AREA_DIRTY  4
++#define NX_PROF_FEX_THREAD_SPAN 0x10000
++#define NX_PROF_FEX_RIP         24
++#define NX_PROF_FEX_GREGS       32
++#define NX_PROF_FEX_REG_ESP     4
++#define NX_PROF_FEX_REG_EBP     5
++
+ /* Return addresses on that x86 stack, innermost first: the two words at esp
+  * (at a gate, the returns into the stub and into its caller), then the frame
+  * chain from ebp ([ebp] the saved ebp, [ebp + 4] the return address) while it

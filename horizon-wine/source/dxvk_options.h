@@ -19,6 +19,7 @@ struct dxvk_option
     const struct dxvk_option_choice *choices;
     unsigned int choice_count;
     struct dxvk_option_range official, sarek;
+    /* gpl_only: 1 only DXVK Async reads it, 2 only Carafe's DXVK build does. */
     int advanced, gpl_only;
 };
 

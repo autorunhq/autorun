@@ -1,0 +1,60 @@
+Carafe: the keys of the DXVK-Sarek choices carried over to Carafe's DXVK build are copied from the program settings
+into dxvk.conf: dxvk.shaderCompilationMethod now applies to the official DXVK as well and shows "async", Carafe's
+default, and dxvk.skipRedundantPipelineBinds, dxvk.frameRateMethod, dxvk.frameRatePacing and dxvk.allCompilerWorkers
+are new.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/dxvk_options.c
++++ b/horizon-wine/source/dxvk_options.c
+@@ -170,6 +170,23 @@
+     { "\"min-latency\"", "min-latency" },
+ };
+ 
++static const struct dxvk_option_choice frame_rate_method[] =
++{
++    { NULL, "Default" },
++    { "\"timeline\"", "timeline" },
++    { "\"deviation\"", "deviation" },
++    { "\"reactive\"", "reactive" },
++};
++
++static const struct dxvk_option_choice frame_rate_pacing[] =
++{
++    { NULL, "Default" },
++    { "\"precise\"", "precise" },
++    { "\"sleep\"", "sleep" },
++    { "\"sliced\"", "sliced" },
++    { "\"spin\"", "spin" },
++};
++
+ static const struct dxvk_option_choice feature_level[] =
+ {
+     { NULL, "Default" },
+@@ -211,7 +228,7 @@
+             threads, 10000, 0, 11003, 0, 0, 0, "0 / Auto" ),
+     OPTION( "dxvk.shaderCompilationMethod",
+             "Sarek compilation mode. Deferred compilation reduces stalls but can temporarily omit effects; none compiles synchronously.",
+-            compilation, 0, 0, 11300, 0, 0, 0, "dyasync" ),
++            compilation, 30101, 0, 11300, 0, 0, 0, "async" ),
+     OPTION( "dxvk.numShaderCompilerThreads",
+             "Sarek workers for deferred shader compilation, separate from state-cache compilation.",
+             threads, 0, 0, 11300, 0, 0, 0, "0 / Auto" ),
+@@ -443,6 +460,18 @@
+     OPTION( "d3d9.managedBufferCopies",
+             "Carafe's DXVK build: locks of managed buffers use a copy instead of waiting for the front end thread.",
+             boolean, 30101, 0, 0, 0, 1, 0, "False" ),
++    OPTION( "dxvk.skipRedundantPipelineBinds",
++            "Carafe's DXVK build: a graphics pipeline already bound is not bound again, as DXVK-Sarek does.",
++            boolean, 30101, 0, 0, 0, 1, 0, "False" ),
++    OPTION( "dxvk.frameRateMethod",
++            "Carafe's DXVK build: how the frame rate limiter keeps time, DXVK-Sarek's choices.",
++            frame_rate_method, 30101, 0, 0, 0, 1, 0, "timeline" ),
++    OPTION( "dxvk.frameRatePacing",
++            "Carafe's DXVK build: how the frame rate limiter waits, DXVK-Sarek's choices.",
++            frame_rate_pacing, 30101, 0, 0, 0, 1, 0, "precise" ),
++    OPTION( "dxvk.allCompilerWorkers",
++            "Carafe's DXVK build: every shader compiler worker takes every job, as DXVK-Sarek's DXVK_ALL_CORES does.",
++            boolean, 30101, 0, 0, 0, 1, 0, "True" ),
+ };
+ #undef OPTION
+ 

@@ -56,6 +56,12 @@ typedef unsigned long long u64;
 typedef u32 Result;
 typedef u32 Handle;
 #define R_FAILED(rc) ((rc) != 0)
+#define R_MODULE(rc) ((rc) & 0x1ff)
+#define R_DESCRIPTION(rc) ((rc) >> 9)
+#define Module_Kernel 1
+#define KernelError_ResourceExhausted 103
+#define KernelError_OutOfMemory 104
+#define KernelError_InvalidMemoryState 106
 #define WARN(...) ((void)0)
 #define horizon_trace(...) ((void)0)
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -159,7 +165,7 @@ static int unmap_code_memory_range( void *addr, void *source, size_t size )
 static Result svcMapProcessMemory( void *dst, Handle process, u64 src, u64 size )
 {
     assert( process == 1 );
-    return host_alias( dst, (void *)(uintptr_t)src, size ) ? 1 : 0;
+    return host_alias( dst, (void *)(uintptr_t)src, size ) ? ((KernelError_OutOfMemory << 9) | Module_Kernel) : 0;
 }
 static Result svcUnmapProcessMemory( void *dst, Handle process, u64 src, u64 size )
 {
@@ -208,6 +214,8 @@ static int protect_reservation_mapping( struct horizon_mapping *m, char *start, 
 { (void)m; (void)start; (void)size; (void)prot; abort(); }
 static int map_backing_at( void *addr, size_t size, int prot, int fd, off_t offset, int flags, int map_errno )
 { (void)addr; (void)size; (void)prot; (void)fd; (void)offset; (void)flags; (void)map_errno; abort(); }
+static int map_anonymous_backings( void *addr, size_t size, int prot, int flags, int map_errno )
+{ (void)addr; (void)size; (void)prot; (void)flags; (void)map_errno; abort(); }
 '''
 for name in ['static void list_add_mapping(', 'static void list_remove_mapping(',
              'static struct horizon_mapping *find_overlap_mapping(', 'static struct horizon_mapping *alloc_mapping(',

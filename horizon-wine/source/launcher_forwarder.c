@@ -131,6 +131,20 @@ static int steam_icon( struct ui *ui, struct forwarder_job *job, char *key, size
     return launcher_image_square( &job->image );
 }
 
+/* The name the home menu shows for a game's 32-bit forwarder, which sits
+ * beside its 39-bit one: the game's, marked. */
+#define FORWARDER_32_BIT_MARK " (32-bit)"
+
+static void forwarder_mark_name( char *name, size_t size, const char *game, int marked )
+{
+    char with[160];
+
+    snprintf( with, sizeof(with), "%s" FORWARDER_32_BIT_MARK, game );
+    /* Only the name as it was given: one the user typed is theirs. */
+    if (marked && !strcmp( name, game )) snprintf( name, size, "%s", with );
+    else if (!marked && !strcmp( name, with )) snprintf( name, size, "%s", game );
+}
+
 void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_options *options,
     const struct launcher_forwarder_game *game, char *api_key, size_t key_size,
     int (*pick_image)( void *, char *, size_t ), void *picker_data )
@@ -140,8 +154,14 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
     struct launcher_icon icon = {0};
     struct ui_input input;
     SDL_Texture *background = keep_background( ui ), *preview = NULL;
-    SDL_Rect card = { (ui->width - 760) / 2, (ui->height - 428) / 2, 760, 428 };
-    SDL_Rect rows[4];
+    /* A 32-bit game can also have a forwarder of a 32-bit address space: a row
+     * more, between the author and the button, for which address space. */
+    const int choose_space = game->machine == 0x014c;
+    const int space_row = choose_space ? 3 : -1, install = choose_space ? 4 : 3, count = install + 1;
+    const int card_height = choose_space ? 508 : 428;
+    SDL_Rect card = { (ui->width - 760) / 2, (ui->height - card_height) / 2, 760, card_height };
+    SDL_Rect rows[5];
+    enum wine_nx_forwarder_address_space space = WINE_NX_FORWARDER_39_BIT;
     char name[128], author[128] = "Autorun", path[512], edited[128];
     int selected = 1, right = 1, i, updated;
 
@@ -153,8 +173,8 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
     preview = image_texture( ui, &icon );
     if (!preview) { ui_message( ui, "Forwarder", "Could not create the icon preview." ); goto done; }
     rows[0] = (SDL_Rect){ card.x + 30, card.y + 86, 224, 224 };
-    for (i = 1; i < 4; i++)
-        rows[i] = (SDL_Rect){ card.x + 286, card.y + 86 + (i - 1) * 80, 446, i < 3 ? 68 : 58 };
+    for (i = 1; i < count; i++)
+        rows[i] = (SDL_Rect){ card.x + 286, card.y + 86 + (i - 1) * 80, 446, i < install ? 68 : 58 };
     ui->modal_depth++;
     ui_start_screen( ui );
     while (ui_begin_frame( ui ))
@@ -167,11 +187,11 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
             if (input.button == UI_LEFT && selected) { right = selected; selected = 0; }
             if (input.button == UI_RIGHT && !selected) selected = right;
             if (input.button == UI_UP && selected > 1) selected--;
-            if (input.button == UI_DOWN && selected && selected < 3) selected++;
+            if (input.button == UI_DOWN && selected && selected < install) selected++;
             if (selected != previous) ui_sound( ui, LAUNCHER_SOUND_MOVE );
             if (input.button == UI_A) action = 1;
             if (input.touch == UI_TOUCH_TAP)
-                for (i = 0; i < 4; i++)
+                for (i = 0; i < count; i++)
                     if (input.x >= rows[i].x && input.x < rows[i].x + rows[i].w &&
                         input.y >= rows[i].y && input.y < rows[i].y + rows[i].h)
                     { selected = i; action = 1; break; }
@@ -198,13 +218,25 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
                     updated = run_job( ui, &job, "Reading icon..." );
                 }
             }
-            else if (selected == 3)
+            else if (selected == space_row)
+            {
+                space = space == WINE_NX_FORWARDER_39_BIT ? WINE_NX_FORWARDER_32_BIT_NO_ALIAS
+                                                          : WINE_NX_FORWARDER_39_BIT;
+                forwarder_mark_name( name, sizeof(name), game->name, space != WINE_NX_FORWARDER_39_BIT );
+            }
+            else if (selected == install)
             {
                 unsigned char *jpeg = NULL;
                 size_t bytes = 0;
-                const char *warning = options->emummc > 0 ?
-                    "Install this HOME Menu shortcut? Autorun's main forwarder will also be installed if missing." :
-                    "Installing unofficial titles can lead to a console ban. Use emuMMC. Autorun's main forwarder will also be installed if missing.";
+                char warning[256];
+
+                /* A 32-bit forwarder carries its own loader; a 39-bit one starts
+                 * Autorun's application, which has to be there. */
+                snprintf( warning, sizeof(warning), "%s%s", options->emummc > 0 ?
+                          "Install this HOME Menu shortcut?" :
+                          "Installing unofficial titles can lead to a console ban. Use emuMMC.",
+                          space == WINE_NX_FORWARDER_39_BIT ?
+                          " Autorun's main forwarder will also be installed if missing." : "" );
                 if (!name[strspn( name, " \t\r\n" )]) ui_message( ui, "Forwarder", "Enter a name first." );
                 else if (ui_confirm( ui, "Install game forwarder?", warning, "Install" ))
                 {
@@ -214,7 +246,8 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
                     {
                         job.kind = JOB_INSTALL;
                         job.request = (struct wine_nx_forwarder){ .nro_path = AUTORUN_NRO, .name = name,
-                            .author = author, .icon = jpeg, .icon_size = bytes, .game_id = game->id };
+                            .author = author, .icon = jpeg, .icon_size = bytes, .game_id = game->id,
+                            .address_space = space };
                         i = run_job( ui, &job, "Installing on the HOME Menu..." );
                         free( jpeg );
                         if (i) { ui_toast( ui, "Forwarder installed", 2400 ); goto closed; }
@@ -244,19 +277,25 @@ void launcher_forwarder_run( struct ui *ui, const struct wine_nx_launcher_option
         ui_text_centered( ui, ui->small, rows[0].x + 112, rows[0].y + 182, "Change icon", ui->value );
         if (!selected) ui_animated_border( ui, rows[0].x - 3, rows[0].y - 3, 230, 230, 20, 2,
                                            (SDL_Color){ 120, 165, 163, 170 }, (SDL_Color){ 216, 255, 235, 255 } );
-        for (i = 1; i < 4; i++)
+        for (i = 1; i < count; i++)
         {
-            const char *label = i == 1 ? "Name" : i == 2 ? "Author" : "Install forwarder";
+            const char *label = i == 1 ? "Name" : i == 2 ? "Author" : i == space_row ? "Address space"
+                                                                                        : "Install forwarder";
+            const char *value = i == 1 ? name : i == 2 ? author :
+                                space == WINE_NX_FORWARDER_39_BIT ? "39-bit, through Autorun" : "32-bit, no alias";
             SDL_Rect r = rows[i];
-            ui_rounded( ui, r.x, r.y, r.w, r.h, 12, i == 3 ? (SDL_Color){ 34, 67, 55, 255 } : ui->panel );
+            ui_rounded( ui, r.x, r.y, r.w, r.h, 12, i == install ? (SDL_Color){ 34, 67, 55, 255 } : ui->panel );
             if (i == selected) ui_animated_border( ui, r.x, r.y, r.w, r.h, 12, 2,
                 (SDL_Color){ 120, 165, 163, 170 }, (SDL_Color){ 216, 255, 235, 255 } );
-            ui_text_fit( ui, i < 3 ? ui->small : ui->normal, r.x + 16, r.y + (i < 3 ? 7 : 15),
-                         r.w - 32, label, i < 3 ? ui->dim : ui->value, 0 );
-            if (i < 3) ui_text_fit( ui, ui->normal, r.x + 16, r.y + 31, r.w - 32,
-                                    i == 2 ? author : name, ui->value, i == selected );
+            ui_text_fit( ui, i < install ? ui->small : ui->normal, r.x + 16, r.y + (i < install ? 7 : 15),
+                         r.w - 32, label, i < install ? ui->dim : ui->value, 0 );
+            if (i < install) ui_text_fit( ui, ui->normal, r.x + 16, r.y + 31, r.w - 32,
+                                          value, ui->value, i == selected );
         }
-        ui_text( ui, ui->small, card.x + 28, card.y + 337, "Launch directly with this game's settings.", ui->dim );
+        ui_text_fit( ui, ui->small, card.x + 28, rows[install].y + rows[install].h + 33, card.w - 56,
+                     space == WINE_NX_FORWARDER_39_BIT ? "Launch directly with this game's settings." :
+                     "A 32-bit process of its own: low addresses for fixed-base games, 2 GiB of memory.",
+                     ui->dim, 0 );
         ui_hints_right( ui, hints, 2, card.x + card.w - 28, card.y + card.h - 28 );
         ui_present( ui );
         ui_wait( ui );

@@ -1,0 +1,26 @@
+Carafe: the language for programs without Unicode follows the console's language, as it does on a Windows set
+to that language, so a program's own texts in its code page show as written. Formats stay American English.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -827,6 +827,19 @@
+         if (preferred_langs) CFRelease( preferred_langs );
+     }
+ #endif
++#ifdef __SWITCH__
++    {
++        extern const char *carafeWindowsLocale( void ) __attribute__((weak));
++        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
++        char line[96];
++
++        if (&carafeWindowsLocale)
++            snprintf( system_locale, sizeof(system_locale), "%s", carafeWindowsLocale() );
++        strcpy( user_locale, "en-US" );
++        snprintf( line, sizeof(line), "[NLS] system locale %s, user locale %s", system_locale, user_locale );
++        if (&wine_nx_runtime_trace) wine_nx_runtime_trace( line );
++    }
++#endif
+ 
+     if ((header = read_nls_file( "locale.nls" )))
+     {

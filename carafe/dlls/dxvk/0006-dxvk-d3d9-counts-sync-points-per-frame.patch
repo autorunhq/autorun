@@ -1,0 +1,297 @@
+Carafe: with the profiler's CARAFE_D3D9_STATS=1, the device also counts the calls a front end on another thread
+would have to answer at once: buffer locks by flag and the kilobytes locked, texture locks and those in the default
+pool, kilobytes drawn from memory and of vertex shader constants, query reads and how many were not ready, render
+target reads, state queries and resources created, with DXVK's own waits for the CS thread and the GPU, and logs
+them every 600 presents as one [D3D9 sync] line of totals.
+Zlib, as the files it changes.
+
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -608,6 +608,7 @@
+           D3DPOOL             Pool,
+           IDirect3DTexture9** ppTexture,
+           HANDLE*             pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     InitReturnPtr(ppTexture);
+ 
+     if (unlikely(ppTexture == nullptr))
+@@ -685,6 +686,7 @@
+           D3DPOOL                   Pool,
+           IDirect3DVolumeTexture9** ppVolumeTexture,
+           HANDLE*                   pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     InitReturnPtr(ppVolumeTexture);
+ 
+     if (unlikely(ppVolumeTexture == nullptr))
+@@ -752,6 +754,7 @@
+           D3DPOOL                 Pool,
+           IDirect3DCubeTexture9** ppCubeTexture,
+           HANDLE*                 pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     InitReturnPtr(ppCubeTexture);
+ 
+     if (unlikely(ppCubeTexture == nullptr))
+@@ -818,6 +821,7 @@
+           D3DPOOL                  Pool,
+           IDirect3DVertexBuffer9** ppVertexBuffer,
+           HANDLE*                  pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     InitReturnPtr(ppVertexBuffer);
+ 
+     if (unlikely(ppVertexBuffer == nullptr))
+@@ -871,6 +875,7 @@
+           D3DPOOL                 Pool,
+           IDirect3DIndexBuffer9** ppIndexBuffer,
+           HANDLE*                 pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     InitReturnPtr(ppIndexBuffer);
+ 
+     if (unlikely(ppIndexBuffer == nullptr))
+@@ -925,6 +930,7 @@
+           BOOL                Lockable,
+           IDirect3DSurface9** ppSurface,
+           HANDLE*             pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     return CreateRenderTargetEx(
+       Width,
+       Height,
+@@ -947,6 +953,7 @@
+           BOOL                Discard,
+           IDirect3DSurface9** ppSurface,
+           HANDLE*             pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     return CreateDepthStencilSurfaceEx(
+       Width,
+       Height,
+@@ -1137,6 +1144,7 @@
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetRenderTargetData(
+           IDirect3DSurface9* pRenderTarget,
+           IDirect3DSurface9* pDestSurface) {
++    CountSync(D3D9Sync::RenderTargetData);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(IsDeviceLost())) {
+@@ -1630,6 +1638,7 @@
+     D3DPOOL Pool,
+     IDirect3DSurface9** ppSurface,
+     HANDLE* pSharedHandle) {
++    CountSync(D3D9Sync::Create);
+     return CreateOffscreenPlainSurfaceEx(
+       Width,     Height,
+       Format,    Pool,
+@@ -2086,6 +2095,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetTransform(D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(pMatrix == nullptr))
+@@ -2686,6 +2696,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetRenderState(D3DRENDERSTATETYPE State, DWORD* pValue) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(pValue == nullptr))
+@@ -2796,6 +2807,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetTexture(DWORD Stage, IDirect3DBaseTexture9** ppTexture) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (ppTexture == nullptr)
+@@ -2834,6 +2846,7 @@
+           DWORD                    Stage,
+           D3DTEXTURESTAGESTATETYPE Type,
+           DWORD*                   pValue) {
++    CountSync(D3D9Sync::StateQuery);
+     auto dxvkType = RemapTextureStageStateType(Type);
+ 
+     if (unlikely(pValue == nullptr))
+@@ -2870,6 +2883,7 @@
+           DWORD               Sampler,
+           D3DSAMPLERSTATETYPE Type,
+           DWORD*              pValue) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(pValue == nullptr))
+@@ -3179,6 +3193,7 @@
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
+     CountCall(D3D9Call::DrawFromMemory);
++    CountSync(D3D9Sync::MemoryDrawBytes, uint64_t(GetVertexCount(PrimitiveType, PrimitiveCount)) * VertexStreamZeroStride);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(!VertexStreamZeroStride))
+@@ -3234,6 +3249,7 @@
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
+     CountCall(D3D9Call::DrawFromMemory);
++    CountSync(D3D9Sync::MemoryDrawBytes, uint64_t(MinVertexIndex + NumVertices) * VertexStreamZeroStride);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(!VertexStreamZeroStride))
+@@ -3650,6 +3666,7 @@
+     const float* pConstantData,
+           UINT   Vector4fCount) {
+     CountCall(D3D9Call::VertexShaderConstants);
++    CountSync(D3D9Sync::VertexConstantBytes, uint64_t(Vector4fCount) * 16);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     return SetShaderConstants<
+@@ -3665,6 +3682,7 @@
+           UINT   StartRegister,
+           float* pConstantData,
+           UINT   Vector4fCount) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     return GetShaderConstants<
+@@ -3805,6 +3823,7 @@
+           IDirect3DVertexBuffer9** ppStreamData,
+           UINT*                    pOffsetInBytes,
+           UINT*                    pStride) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     InitReturnPtr(ppStreamData);
+@@ -3913,6 +3932,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetIndices(IDirect3DIndexBuffer9** ppIndexData) {
++    CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+     InitReturnPtr(ppIndexData);
+ 
+@@ -4281,6 +4301,33 @@
+   }
+ 
+ 
++  void D3D9DeviceEx::CountSyncFrame(uint64_t frames) {
++    static const char* const names[] = {
++      "buffer locks with discard", "with no overwrite", "read only", "with no flag", "KB locked",
++      "texture locks", "of them in the default pool", "KB drawn from memory", "KB of vertex shader constants",
++      "query reads", "not ready", "render target reads", "state queries", "resources created",
++    };
++    static const bool kilobytes[] = {
++      false, false, false, false, true, false, false, true, true, false, false, false, false, false,
++    };
++
++    DxvkStatCounters counters = m_dxvkDevice->getStatCounters();
++    std::array<uint64_t, 4> sync = {
++      counters.getCtr(DxvkStatCounter::CsSyncCount), counters.getCtr(DxvkStatCounter::CsSyncTicks),
++      counters.getCtr(DxvkStatCounter::GpuSyncCount), counters.getCtr(DxvkStatCounter::GpuSyncTicks),
++    };
++
++    std::string text = str::format("[D3D9 sync] in ", frames, " frames:");
++    for (uint32_t i = 0; i < uint32_t(D3D9Sync::Count); i++)
++      text += str::format(i ? ", " : " ", names[i], " ", kilobytes[i] ? m_syncCounts[i] / 1024 : m_syncCounts[i]);
++    text += str::format(", waits for the CS thread ", sync[0] - m_syncSeen[0], " (", sync[1] - m_syncSeen[1],
++      " us), waits for the GPU ", sync[2] - m_syncSeen[2], " (", sync[3] - m_syncSeen[3], " us)");
++    Logger::info(text);
++    m_syncCounts = { };
++    m_syncSeen = sync;
++  }
++
++
+   void D3D9DeviceEx::CountFrame() {
+     static const char* const names[] = {
+       "draws", "draws from memory", "render states", "unchanged", "sampler states", "unchanged",
+@@ -4295,6 +4342,7 @@
+     for (uint32_t i = 0; i < uint32_t(D3D9Call::Count); i++)
+       text += str::format(i ? ", " : " ", names[i], " ", m_callCounts[i] / m_callFrames);
+     Logger::info(text);
++    CountSyncFrame(m_callFrames);
+     m_callCounts = { };
+     m_callFrames = 0;
+   }
+@@ -5030,6 +5078,9 @@
+       return D3DERR_INVALIDCALL;
+ 
+     auto& desc = *(pResource->Desc());
++    CountSync(D3D9Sync::ImageLock);
++    if (desc.Pool == D3DPOOL_DEFAULT)
++      CountSync(D3D9Sync::ImageLockDefaultPool);
+ 
+     if (unlikely((Flags & (D3DLOCK_DISCARD | D3DLOCK_READONLY)) == (D3DLOCK_DISCARD | D3DLOCK_READONLY)
+                && desc.Pool == D3DPOOL_DEFAULT))
+@@ -5522,6 +5573,12 @@
+           void**                  ppbData,
+           DWORD                   Flags) {
+     CountCall(D3D9Call::Lock);
++    if (unlikely(m_callStats)) {
++      CountSync(Flags & D3DLOCK_DISCARD ? D3D9Sync::LockDiscard
++              : Flags & D3DLOCK_NOOVERWRITE ? D3D9Sync::LockNoOverwrite
++              : Flags & D3DLOCK_READONLY ? D3D9Sync::LockReadOnly : D3D9Sync::LockPlain);
++      CountSync(D3D9Sync::LockedBytes, SizeToLock ? SizeToLock : pResource->Desc()->Size);
++    }
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(ppbData == nullptr))
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1171,6 +1171,31 @@
+ 
+     void CountFrame();
+ 
++    enum class D3D9Sync : uint32_t {
++      LockDiscard,
++      LockNoOverwrite,
++      LockReadOnly,
++      LockPlain,
++      LockedBytes,
++      ImageLock,
++      ImageLockDefaultPool,
++      MemoryDrawBytes,
++      VertexConstantBytes,
++      QueryData,
++      QueryNotReady,
++      RenderTargetData,
++      StateQuery,
++      Create,
++      Count
++    };
++
++    void CountSync(D3D9Sync sync, uint64_t amount = 1) {
++      if (unlikely(m_callStats))
++        m_syncCounts[uint32_t(sync)] += amount;
++    }
++
++    void CountSyncFrame(uint64_t frames);
++
+     bool IsD3DCompatibile(D3DCompatibility d3dCompatibility) const {
+       return m_d3dCompatibility.test(d3dCompatibility);
+     }
+@@ -1658,6 +1683,8 @@
+     bool                            m_callStats = false;
+     std::array<uint64_t, uint32_t(D3D9Call::Count)> m_callCounts = { };
+     uint64_t                        m_callFrames = 0;
++    std::array<uint64_t, uint32_t(D3D9Sync::Count)> m_syncCounts = { };
++    std::array<uint64_t, 4>         m_syncSeen = { };
+ 
+     D3D9DeviceDirtyFlags            m_dirty;
+ 
+--- a/src/d3d9/d3d9_query.cpp
++++ b/src/d3d9/d3d9_query.cpp
+@@ -128,6 +128,7 @@
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Query::GetData(void* pData, DWORD dwSize, DWORD dwGetDataFlags) {
+     D3D9DeviceLock lock = m_parent->LockDevice();
++    m_parent->CountSync(D3D9DeviceEx::D3D9Sync::QueryData);
+ 
+     bool flush = dwGetDataFlags & D3DGETDATA_FLUSH;
+ 
+@@ -158,6 +159,9 @@
+       m_parent->ConsiderFlush(GpuFlushType::ImplicitSynchronization);
+     }
+ 
++    if (hr == S_FALSE)
++      m_parent->CountSync(D3D9DeviceEx::D3D9Sync::QueryNotReady);
++
+     return hr;
+   }
+ 

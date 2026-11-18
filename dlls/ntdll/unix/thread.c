@@ -1128,6 +1128,22 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 }
 
 #if defined(__SWITCH__) && defined(__aarch64__)
+unsigned int horizon_contexts_to_server( struct context_data server_contexts[2], CONTEXT *context )
+{
+    contexts_to_server( server_contexts, context );
+    return server_contexts[1].machine && server_contexts[1].flags ? 2 : 1;
+}
+
+void horizon_contexts_from_server( CONTEXT *context, const void *server_contexts )
+{
+    struct context_data contexts[2];
+
+    memcpy( contexts, server_contexts, sizeof(contexts) );
+    memset( context, 0, sizeof(*context) );
+    context->ContextFlags = CONTEXT_ARM64_FULL | CONTEXT_ARM64_X18;
+    contexts_from_server( context, contexts );
+}
+
 void horizon_wait_suspend_arm64ec(void)
 {
     CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;
@@ -1147,9 +1163,16 @@ void horizon_wait_suspend_arm64ec(void)
 /***********************************************************************
  *           pthread_exit_wrapper
  */
+#ifdef __SWITCH__
+extern void carafe_futex_exit_take_out( void );
+#endif
+
 static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
 {
     struct thread_data *data = get_thread_data();
+#ifdef __SWITCH__
+    carafe_futex_exit_take_out();
+#endif
     close( data->alert_fd );
     close( data->wait_fd[0] );
     close( data->wait_fd[1] );
@@ -1597,6 +1620,20 @@ void abort_process( int status )
 
 /* The thread that ended last, waiting to be joined by the next one to end. */
 static void *prev_data;
+#ifdef __SWITCH__
+static pthread_mutex_t prev_data_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct thread_data *horizon_swap_prev_data( struct thread_data *next )
+{
+    struct thread_data *data;
+
+    pthread_mutex_lock( &prev_data_mutex );
+    data = prev_data;
+    prev_data = next;
+    pthread_mutex_unlock( &prev_data_mutex );
+    return data;
+}
+#endif
 
 /***********************************************************************
  *           exit_thread
@@ -1609,7 +1646,11 @@ static DECLSPEC_NORETURN void exit_thread( int status )
 
     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
 
+#ifdef __SWITCH__
+    if ((data = horizon_swap_prev_data( get_thread_data() )))
+#else
     if ((data = InterlockedExchangePointer( &prev_data, get_thread_data() )))
+#endif
     {
         if (data->pthread_id)
         {
@@ -1639,9 +1680,26 @@ static DECLSPEC_NORETURN void exit_thread( int status )
  */
 unsigned int horizon_join_last_exited_thread(void)
 {
-    struct thread_data *data = InterlockedExchangePointer( &prev_data, NULL );
+    struct thread_data *data = horizon_swap_prev_data( NULL );
 
     if (!data || !data->pthread_id) return 0;
+    pthread_join( data->pthread_id, NULL );
+    virtual_free_thread_data( data );
+    __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
+    return 1;
+}
+
+unsigned int horizon_join_ended_thread(void)
+{
+    extern int horizon_pthread_ended( pthread_t thread );
+    struct thread_data *data;
+
+    pthread_mutex_lock( &prev_data_mutex );
+    data = prev_data;
+    if (data && data->pthread_id && horizon_pthread_ended( data->pthread_id )) prev_data = NULL;
+    else data = NULL;
+    pthread_mutex_unlock( &prev_data_mutex );
+    if (!data) return 0;
     pthread_join( data->pthread_id, NULL );
     virtual_free_thread_data( data );
     __atomic_sub_fetch( &horizon_lifecycle.worker_pthreads, 1, __ATOMIC_RELAXED );
@@ -1778,13 +1836,57 @@ NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
 }
 
 
+#ifdef __SWITCH__
+static const char *nx_cxx_type_name( const EXCEPTION_RECORD *rec )
+{
+    const unsigned int *info, *types, *type;
+    const char *name;
+
+    if (rec->ExceptionCode != 0xe06d7363 || rec->NumberParameters != 3 || !rec->ExceptionInformation[2])
+        return "";
+    info = ULongToPtr( rec->ExceptionInformation[2] );
+    if (!virtual_check_buffer_for_read( info, 4 * sizeof(*info) ) || !info[3]) return "";
+    types = ULongToPtr( info[3] );
+    if (!virtual_check_buffer_for_read( types, 2 * sizeof(*types) ) || !types[0] || !types[1]) return "";
+    type = ULongToPtr( types[1] );
+    if (!virtual_check_buffer_for_read( type, 2 * sizeof(*type) ) || !type[1]) return "";
+    name = (const char *)ULongToPtr( type[1] ) + 8;
+    if (!virtual_check_buffer_for_read( name, 64 )) return "";
+    return name;
+}
+
+static void nx_trace_raised_exception( const EXCEPTION_RECORD *rec )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    static unsigned int traced;
+    char buffer[320];
+
+    if (!&wine_nx_runtime_trace) return;
+    if (rec->ExceptionCode == DBG_PRINTEXCEPTION_C || rec->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C ||
+        rec->ExceptionCode == 0x406d1388)
+        return;
+    if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 32) return;
+    snprintf( buffer, sizeof(buffer), "[SEH] raised tid=%04x code=%08x at %p flags=%x params=%u: %lx %lx %lx %.64s",
+              (unsigned int)GetCurrentThreadId(), (unsigned int)rec->ExceptionCode, rec->ExceptionAddress,
+              (unsigned int)rec->ExceptionFlags, (unsigned int)rec->NumberParameters,
+              (unsigned long)rec->ExceptionInformation[0], (unsigned long)rec->ExceptionInformation[1],
+              (unsigned long)rec->ExceptionInformation[2], nx_cxx_type_name( rec ) );
+    wine_nx_runtime_trace( buffer );
+}
+#endif
+
 /*******************************************************************
  *		NtRaiseException (NTDLL.@)
  */
 NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
 {
     struct thread_data *data = get_thread_data();
-    NTSTATUS status = send_debug_event( data, rec, context, first_chance );
+    NTSTATUS status;
+
+#ifdef __SWITCH__
+    if (first_chance) nx_trace_raised_exception( rec );
+#endif
+    status = send_debug_event( data, rec, context, first_chance );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
         return NtContinue( context, FALSE );
@@ -1799,6 +1901,13 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
 
+#ifdef __SWITCH__
+    {
+        extern void carafeErrorException( unsigned int code, const void *address ) __attribute__((weak));
+
+        if (carafeErrorException) carafeErrorException( rec->ExceptionCode, rec->ExceptionAddress );
+    }
+#endif
     NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
     return STATUS_SUCCESS;
 }

@@ -1,0 +1,14 @@
+Carafe: get_handle_fd goes to the server on the calling thread with Horizon sync.
+The server side is 0021-horizon-handle-fd-on-the-calling-thread.patch.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -385,6 +385,7 @@
+     case REQ_query_mutex:
+     case REQ_release_semaphore:
+     case REQ_query_semaphore:
++    case REQ_get_handle_fd:
+         break;
+     default:
+         return 0;

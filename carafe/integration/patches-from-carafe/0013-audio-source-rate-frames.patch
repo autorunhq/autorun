@@ -1,0 +1,127 @@
+Carafe: the Switch audio backend counts the buffer and the position a game sees in the game's own frames.
+It mixes to 48 kHz and reported its ring in 48 kHz frames as the buffer size and padding, while the game writes
+frames at its own rate. Below 48 kHz the first full write did not fit once converted: ReleaseBuffer failed with
+AUDCLNT_E_BUFFER_TOO_LARGE, kept the buffer locked, and every later GetBuffer failed with AUDCLNT_E_OUT_OF_ORDER.
+Each write was also converted on its own and rounded down, so the position fell a fraction of a frame short per
+write; winmm never saw its last header played and the program waited for it forever.
+Size, padding and the GetBuffer check now use the game's rate, with one 48 kHz frame kept free for rounding;
+padding is rounded up and never reported above the size, which winmm would subtract into a huge request.
+Writes are converted from the running total, so no fraction is lost, and the resampler keeps its phase across
+writes. The position is the game's frames at the game's rate, never past what was written. A failed
+ReleaseBuffer unlocks the buffer, and the conversion is done in 64 bits.
+LGPL-2.1-or-later, as the file it changes.
+--- a/horizon-wine/source/audio_unix.c
++++ b/horizon-wine/source/audio_unix.c
+@@ -27,7 +27,7 @@
+     struct nx_audio_stream *next;
+     BYTE *ring, *scratch;
+     unsigned int capacity, held, submitted, read, locked;
+-    UINT64 played;
++    UINT64 played, written, converted;
+     unsigned int frames[NX_BUFFERS];
+     float volume[NX_MAX_CHANNELS], matrix[NX_MAX_CHANNELS][2];
+     HANDLE event;
+@@ -472,13 +472,37 @@
+         {
+             s->read = s->held = s->submitted = 0;
+             memset(s->frames, 0, sizeof(s->frames));
+-            s->played = 0;
++            s->played = s->written = s->converted = 0;
+             p->result = initialized ? S_OK : AUDCLNT_E_DEVICE_INVALIDATED;
+         }
+     }
+     pthread_mutex_unlock(&audio_lock);
+     return STATUS_SUCCESS;
+ }
++static unsigned int nx_source_capacity(const struct nx_audio_stream *s)
++{
++    return (UINT64)(s->capacity - 1) * s->source_rate / NX_RATE;
++}
++static UINT64 nx_converted_frames(const struct nx_audio_stream *s, UINT64 written)
++{
++    return (written * NX_RATE + s->source_rate - 1) / s->source_rate;
++}
++static UINT64 nx_played_source_frames(const struct nx_audio_stream *s)
++{
++    UINT64 played = (s->played * s->source_rate + NX_RATE - 1) / NX_RATE;
++    return played < s->written ? played : s->written;
++}
++static unsigned int nx_source_padding(const struct nx_audio_stream *s)
++{
++    unsigned int padding = ((UINT64)s->held * s->source_rate + NX_RATE - 1) / NX_RATE;
++    unsigned int capacity = nx_source_capacity(s);
++    return padding < capacity ? padding : capacity;
++}
++static unsigned int nx_source_free(const struct nx_audio_stream *s)
++{
++    unsigned int capacity = nx_source_capacity(s), padding = nx_source_padding(s);
++    return padding < capacity ? capacity - padding : 0;
++}
+ static NTSTATUS nx_get_render_buffer(void *args)
+ {
+     struct get_render_buffer_params *p = args;
+@@ -486,7 +510,7 @@
+     pthread_mutex_lock(&audio_lock);
+     if (s->locked) p->result = AUDCLNT_E_OUT_OF_ORDER;
+     else if (s->failed) p->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-    else if (p->frames > s->capacity - s->held) p->result = AUDCLNT_E_BUFFER_TOO_LARGE;
++    else if (p->frames > nx_source_free(s)) p->result = AUDCLNT_E_BUFFER_TOO_LARGE;
+     else { s->locked = p->frames; *p->data = p->frames ? s->scratch : NULL; p->result = S_OK; }
+     pthread_mutex_unlock(&audio_lock);
+     return STATUS_SUCCESS;
+@@ -502,13 +526,18 @@
+     else if (p->written_frames > s->locked) p->result = AUDCLNT_E_INVALID_SIZE;
+     else
+     {
+-        unsigned int out_frames = p->written_frames * NX_RATE / s->source_rate;
+-        if (p->written_frames && !out_frames) out_frames = 1;
+-        if (out_frames > s->capacity - s->held) { p->result = AUDCLNT_E_BUFFER_TOO_LARGE; goto release_done; }
++        UINT64 converted = nx_converted_frames(s, s->written + p->written_frames);
++        unsigned int out_frames = converted - s->converted;
++        if (out_frames > s->capacity - s->held)
++        {
++            s->locked = 0;
++            p->result = AUDCLNT_E_BUFFER_TOO_LARGE;
++            goto release_done;
++        }
+         for (i = 0; i < out_frames; i++)
+         {
+             short *dst = (short *)s->ring + ((s->read + s->held + i) % s->capacity) * s->ring_channels;
+-            unsigned int src_frame = (unsigned long long)i * s->source_rate / NX_RATE;
++            unsigned int src_frame = (s->converted + i) * s->source_rate / NX_RATE - s->written;
+             const BYTE *src = s->scratch + src_frame * s->source_frame_bytes;
+             unsigned int c;
+             if (!(p->flags & AUDCLNT_BUFFERFLAGS_SILENT))
+@@ -535,6 +564,8 @@
+             else memset(dst, 0, s->ring_channels * sizeof(*dst));
+         }
+         s->held += out_frames;
++        s->written += p->written_frames;
++        s->converted = converted;
+         s->locked = 0;
+         p->result = S_OK;
+     }
+@@ -546,11 +577,11 @@
+ static NTSTATUS nx_##name(void *args) { struct name##_params *p = args; \
+ struct nx_audio_stream *s = nx_stream(p->stream); (void)s; pthread_mutex_lock(&audio_lock); \
+ *p->member = (value); p->result = S_OK; pthread_mutex_unlock(&audio_lock); return STATUS_SUCCESS; }
+-NX_QUERY(get_buffer_size, frames, s->capacity)
++NX_QUERY(get_buffer_size, frames, nx_source_capacity(s))
+ NX_QUERY(get_latency, latency, (REFERENCE_TIME)NX_BUFFERS * NX_CHUNK * 10000000 / NX_RATE)
+-NX_QUERY(get_current_padding, padding, s->held)
++NX_QUERY(get_current_padding, padding, nx_source_padding(s))
+ NX_QUERY(get_next_packet_size, frames, 0)
+-NX_QUERY(get_frequency, freq, NX_RATE * 4)
++NX_QUERY(get_frequency, freq, s->source_rate)
+ static NTSTATUS nx_get_position(void *args)
+ {
+     struct get_position_params *p = args;
+@@ -558,7 +589,7 @@
+     LARGE_INTEGER now;
+     if (p->device) { p->result = E_NOTIMPL; return STATUS_SUCCESS; }
+     pthread_mutex_lock(&audio_lock);
+-    *p->pos = s->played * 4;
++    *p->pos = nx_played_source_frames(s);
+     NtQueryPerformanceCounter(&now, NULL);
+     if (p->qpctime) *p->qpctime = now.QuadPart;
+     p->result = S_OK;

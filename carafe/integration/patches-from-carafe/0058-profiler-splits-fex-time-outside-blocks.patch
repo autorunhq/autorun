@@ -1,0 +1,191 @@
+Carafe: the profiler splits FEX's time outside translated blocks into block entries and dispatcher parts.
+Under FEX a sample whose PC lies in FEX's code but not in the block the state names went to "jit". Two
+cases make that time: the first two instructions of every block, adr x0 to the block's header and the
+store of x0 to the state, run before the state names the new block; and FEX's dispatcher, a 16 KB
+buffer with the L1-miss lookup, the linker and compile path, the 64-bit divide helpers, the x87
+sin/cos/tan/atan/log/exp handlers and the softfloat call thunks (Dispatcher.cpp:61-600). A sample on a
+block's first two instructions is now resolved through the adr to its block and counted as x86; the rest
+is placed by the dispatcher pointers in the thread's CpuStateFrame, and a new line gives the shares.
+Only memory reads, so the paused thread holds nothing up.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/thread_profile.c
++++ b/horizon-wine/source/thread_profile.c
+@@ -48,6 +48,29 @@
+ #define NX_PROF_FEX_TAIL_RIP          8
+ #define NX_PROF_FEX_TAIL_ENTRIES      24
+ #define NX_PROF_FEX_TAIL_ENTRY_OFFSET 28
++#define NX_PROF_FEX_FRAME_SIZE        3776
++#define NX_PROF_FEX_FALLBACKS         1640
++#define NX_PROF_FEX_FALLBACK_COUNT    47
++#define NX_PROF_FEX_LOOP_TOP          2912
++#define NX_PROF_FEX_LOOP_TOP_FILL     2920
++#define NX_PROF_FEX_LINKER            2944
++#define NX_PROF_FEX_SIGILL            2968
++#define NX_PROF_FEX_LUDIV             3016
++#define NX_PROF_FEX_SIN               3032
++#define NX_PROF_FEX_DISPATCHER_SIZE   0x4000
++#define NX_PROF_FEX_STORE_HEADER      0xf9000380u
++
++enum nx_prof_fex_part
++{
++    NX_PROF_FEX_ENTRY,
++    NX_PROF_FEX_LOOKUP,
++    NX_PROF_FEX_LINK,
++    NX_PROF_FEX_DIVIDE,
++    NX_PROF_FEX_X87,
++    NX_PROF_FEX_FALLBACK,
++    NX_PROF_FEX_DISPATCHER,
++    NX_PROF_FEX_PARTS
++};
+ 
+ #define NX_PROF_JIT_PCS       16384
+ #define NX_PROF_JIT_BLOCKS    256
+@@ -152,6 +175,7 @@
+     uint64_t teb;
+     uint32_t samples, missed;
+     uint32_t kinds[NX_PROF_KINDS];
++    uint32_t fex_parts[NX_PROF_FEX_PARTS];
+     struct nx_prof_table tables[NX_PROF_TABLES];
+ };
+ 
+@@ -620,14 +644,12 @@
+     return nx_prof_x86_frames( esp, ebp, info.addr, info.addr + info.size, read_word32, callers, NX_PROF_DEPTH );
+ }
+ 
+-static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86, uint64_t *start )
++static int fex_block_pc_to_x86( uint64_t block, uint64_t pc, uintptr_t *x86 )
+ {
+-    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x, block, tail, host, guest, entry, end;
++    uint64_t tail, host, guest, entry, end;
+     uint32_t entries, i;
+     MemoryInfo info;
+ 
+-    if (in_runtime( pc ) || !readable_size( state, sizeof(uint64_t), &info )) return 0;
+-    block = read_word( state );
+     if (pc < block || pc - block >= NX_PROF_FEX_BLOCK_MAX || !readable_size( block, sizeof(uint32_t), &info ))
+         return 0;
+     tail = block + read_word32( block );
+@@ -656,7 +678,6 @@
+         entry += size;
+     }
+     *x86 = guest;
+-    *start = block;
+     return 1;
+ }
+ 
+@@ -675,6 +696,63 @@
+     }
+ }
+ 
++static int fex_pc_to_x86( const ThreadContext *ctx, uintptr_t *x86, uint64_t *start )
++{
++    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x;
++    MemoryInfo info;
++
++    if (in_runtime( pc ) || !readable_size( state, sizeof(uint64_t), &info )) return 0;
++    *start = read_word( state );
++    return fex_block_pc_to_x86( *start, pc, x86 );
++}
++
++static int fex_entry_to_x86( uint64_t pc, uintptr_t *x86, uint64_t *start )
++{
++    uint64_t at = pc;
++    uint32_t word;
++    int64_t offset;
++    MemoryInfo info;
++
++    if (in_runtime( pc ) || !readable_size( pc, sizeof(uint32_t), &info )) return 0;
++    word = read_word32( pc );
++    if (word == NX_PROF_FEX_STORE_HEADER)
++    {
++        if (pc - 4 < info.addr) return 0;
++        at = pc - 4;
++        word = read_word32( at );
++    }
++    if ((word & 0x9f00001fu) != 0x10000000u) return 0;
++    offset = (int64_t)((((word >> 5) & 0x7ffff) << 2) | ((word >> 29) & 3));
++    if (offset & 0x100000) offset -= 0x200000;
++    if (offset >= 0) return 0;
++    *start = at + offset;
++    return fex_block_pc_to_x86( *start, pc, x86 );
++}
++
++static int fex_dispatcher_part( const ThreadContext *ctx )
++{
++    uint64_t pc = ctx->pc.x, state = ctx->cpu_gprs[NX_PROF_FEX_STATE].x, fill, fallback = ~0ull, handler;
++    MemoryInfo info;
++    unsigned int i;
++
++    if (in_runtime( pc ) || !readable_size( state, NX_PROF_FEX_FRAME_SIZE, &info )) return -1;
++    fill = read_word( state + NX_PROF_FEX_LOOP_TOP_FILL );
++    if (!fill || pc + 0x100 < fill || pc + 0x100 - fill >= NX_PROF_FEX_DISPATCHER_SIZE) return -1;
++    for (i = 0; i < NX_PROF_FEX_FALLBACK_COUNT; i++)
++    {
++        handler = read_word( state + NX_PROF_FEX_FALLBACKS + i * 16 );
++        if (handler > fill && handler < fallback) fallback = handler;
++    }
++    if (pc >= fallback) return NX_PROF_FEX_FALLBACK;
++    if (pc >= read_word( state + NX_PROF_FEX_SIN )) return NX_PROF_FEX_X87;
++    if (pc >= read_word( state + NX_PROF_FEX_LUDIV )) return NX_PROF_FEX_DIVIDE;
++    if (pc >= read_word( state + NX_PROF_FEX_LINKER ) && pc < read_word( state + NX_PROF_FEX_SIGILL ))
++        return NX_PROF_FEX_LINK;
++    if (pc >= read_word( state + NX_PROF_FEX_LOOP_TOP ) && pc < read_word( state + NX_PROF_FEX_LINKER ))
++        return NX_PROF_FEX_LOOKUP;
++    return NX_PROF_FEX_DISPATCHER;
++}
++
+ static void record( struct nx_prof_target *target, const ThreadContext *ctx, int translated, uintptr_t x86,
+                     const uint64_t *callers, unsigned int count, const uint32_t *x86_callers, unsigned int x86_count )
+ {
+@@ -730,7 +808,7 @@
+     unsigned int i, tries, count, x86_count;
+     uintptr_t x86 = 0;
+     uint64_t block = 0;
+-    int translated, fex;
++    int translated, fex, part;
+ 
+     (void)arg;
+     for (;;)
+@@ -762,6 +840,10 @@
+                 count = walk_callers( &ctx, callers );
+                 if (&wine_nx_box64_pc_to_x86) translated = wine_nx_box64_pc_to_x86( ctx.pc.x, &x86 );
+                 if (!translated) translated = fex = fex_pc_to_x86( &ctx, &x86, &block );
++                part = -1;
++                if (!translated && (translated = fex = fex_entry_to_x86( ctx.pc.x, &x86, &block ))) part = NX_PROF_FEX_ENTRY;
++                if (!translated) part = fex_dispatcher_part( &ctx );
++                if (part >= 0) target->fex_parts[part]++;
+                 x86_count = fex ? walk_x86_frames( &ctx, NX_PROF_FEX_ESP, NX_PROF_FEX_EBP, x86_callers ) :
+                             translated ? walk_x86_frames( &ctx, NX_PROF_BOX64_ESP, NX_PROF_BOX64_EBP, x86_callers ) :
+                                          walk_x86( target->teb, x86_callers );
+@@ -996,6 +1078,22 @@
+     wine_nx_runtime_trace( line );
+ }
+ 
++static void report_fex_parts( const struct nx_prof_target *target, char *line )
++{
++    static const char *const names[NX_PROF_FEX_PARTS] = { "block-entry", "lookup", "link-compile", "divide",
++                                                          "x87-math", "fallback", "dispatcher" };
++    unsigned int k, total = 0;
++    int len;
++
++    for (k = 0; k < NX_PROF_FEX_PARTS; k++) total += target->fex_parts[k];
++    if (!total) return;
++    len = appendf( line, 0, "[PROF] %u%c fex outside blocks:", target->tid, target->kind );
++    for (k = 0; k < NX_PROF_FEX_PARTS; k++)
++        len = appendf( line, len, " %s %u.%u%%", names[k], share( target->fex_parts[k], target->samples ) / 10,
++                       share( target->fex_parts[k], target->samples ) % 10 );
++    wine_nx_runtime_trace( line );
++}
++
+ static void profile_report( const struct nx_prof_row *rows, unsigned int count )
+ {
+     static const char *const table_names[NX_PROF_TABLES] = { "x86", "pe", "native", "svc", "callers", "x86 callers",
+@@ -1018,6 +1116,7 @@
+         wine_nx_runtime_trace( line );
+         if (target->kinds[NX_PROF_X86]) report_modules( target, NX_PROF_X86, "x86", "unknown", line );
+         if (target->kinds[NX_PROF_IMAGE]) report_modules( target, NX_PROF_IMAGE, "pe", "jit", line );
++        report_fex_parts( target, line );
+         for (k = 0; k < NX_PROF_TABLES; k++)
+         {
+             const struct nx_prof_table *table = &target->tables[k];

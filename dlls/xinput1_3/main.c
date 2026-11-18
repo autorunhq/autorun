@@ -127,6 +127,8 @@ static BOOL get_current_state(UINT index, XINPUT_STATE *state)
  * call table (horizon-wine/source/xinput_unix.c). There is no HID device on
  * the console. Elsewhere __wine_init_unix_call fails and the HID path runs. */
 static BOOL nx_backend;
+static BOOL nx_enabled = TRUE;
+static XINPUT_VIBRATION nx_last_vibration[XUSER_MAX_COUNT];
 
 static DWORD nx_get_state(DWORD index, XINPUT_STATE *state)
 {
@@ -134,6 +136,15 @@ static DWORD nx_get_state(DWORD index, XINPUT_STATE *state)
 
     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
     if (WINE_UNIX_CALL(nx_xinput_get_state, &params) || !params.connected) return ERROR_DEVICE_NOT_CONNECTED;
+    if (!__atomic_load_n(&nx_enabled, __ATOMIC_RELAXED))
+    {
+        if (state)
+        {
+            state->dwPacketNumber = params.state.dwPacketNumber;
+            memset(&state->Gamepad, 0, sizeof(state->Gamepad));
+        }
+        return ERROR_SUCCESS;
+    }
     if (state) *state = params.state;
     return ERROR_SUCCESS;
 }
@@ -143,6 +154,12 @@ static DWORD nx_set_state(DWORD index, XINPUT_VIBRATION *vibration)
     struct nx_xinput_vibration_params params = {index};
 
     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+    if (vibration) nx_last_vibration[index] = *vibration;
+    if (!__atomic_load_n(&nx_enabled, __ATOMIC_RELAXED))
+    {
+        if (!WINE_UNIX_CALL(nx_xinput_set_state, &params) && params.connected) return ERROR_SUCCESS;
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
     if (vibration) params.vibration = *vibration;
     if (WINE_UNIX_CALL(nx_xinput_set_state, &params) || !params.connected) return ERROR_DEVICE_NOT_CONNECTED;
     return ERROR_SUCCESS;
@@ -841,7 +858,20 @@ void WINAPI DECLSPEC_HOTPATCH XInputEnable(BOOL enable)
 
     TRACE("enable %d.\n", enable);
 
-    if (nx_backend) return;
+    if (nx_backend)
+    {
+        BOOL prev = __atomic_exchange_n(&nx_enabled, !!enable, __ATOMIC_SEQ_CST);
+        if (!!enable != prev)
+        {
+            for (index = 0; index < XUSER_MAX_COUNT; index++)
+            {
+                struct nx_xinput_vibration_params params = {index};
+                if (enable) params.vibration = nx_last_vibration[index];
+                WINE_UNIX_CALL(nx_xinput_set_state, &params);
+            }
+        }
+        return;
+    }
 
     /* Setting to false will stop messages from XInputSetState being sent
     to the controllers. Setting to true will send the last vibration

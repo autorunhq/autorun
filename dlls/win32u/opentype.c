@@ -284,12 +284,16 @@ static BOOL opentype_get_table_ptr( const void *data, size_t size, const struct 
 
     table_record = (const struct tt_tablerecord *)(ttc_sfnt_v1 + 1);
     table_count = GET_BE_WORD( ttc_sfnt_v1->numTables );
+    /* A cut or broken file: the directory has to be in it, and a table's
+     * offset and length must not wrap around. */
+    if (((const char *)data + size - (const char *)table_record) / sizeof(*table_record) < table_count)
+        return FALSE;
     for (i = 0; i < table_count; i++, table_record++)
     {
         if (table_record->tag != table_tag) continue;
         offset = GET_BE_DWORD( table_record->offset );
         length = GET_BE_DWORD( table_record->length );
-        if (size < offset + length) return FALSE;
+        if (offset > size || length > size - offset) return FALSE;
         if (table_size && length < *table_size) return FALSE;
 
         if (table_ptr) *table_ptr = (const char *)data + offset;
@@ -633,8 +637,9 @@ BOOL opentype_get_ttc_sfnt_v1( const void *data, size_t size, DWORD index, DWORD
         WARN( "unsupported font format %x\n", fourcc );
         return FALSE;
     case MS_TTCF_TAG:
-        if (size < sizeof(ttc_header_v1)) return FALSE;
+        if (size < FIELD_OFFSET( struct ttc_header_v1, OffsetTable )) return FALSE;
         if (index >= (*count = GET_BE_DWORD( ttc_header_v1->numFonts ))) return FALSE;
+        if ((size - FIELD_OFFSET( struct ttc_header_v1, OffsetTable )) / sizeof(DWORD) <= index) return FALSE;
         offset = GET_BE_DWORD( ttc_header_v1->OffsetTable[index] );
         break;
     case 0x00000100:

@@ -1,0 +1,1534 @@
+Carafe: with d3d9.effectThread on top of d3d9.frontEndThread, the effect library a game links into its executable runs
+on a thread of its own. The device gets a second front end in front of the first: the game thread queues its device
+calls and the effect methods it calls, a worker "d3dx-effects" runs them, so the effect library's state work and its
+device calls happen there, and that worker feeds the "dxvk-frontend" queue, which keeps the shadow and drops unchanged
+states. The effect interface is found as for the counters, must have the 86-method layout, and each queued method must
+pop the argument bytes its signature has, or nothing changes; parameter setters copy their data into the queue,
+Begin answers the pass count it got for the same technique before, and every other public method, Release included,
+first waits for the queue. Each front end has its own buffer staging; a gate waits for both layers except on their
+own workers; the effect worker takes the game thread's x87 control word.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_buffer.h b/src/d3d9/d3d9_buffer.h
+--- a/src/d3d9/d3d9_buffer.h
++++ b/src/d3d9/d3d9_buffer.h
+@@ -17,9 +17,11 @@
+       const bool               Extended)
+     : D3D9Resource<Type...> (pDevice, pDesc->Pool, Extended ),
+       m_buffer              (pDevice, pDesc) {
+-      m_buffer.m_frontEndStaging.owner = this;
+-      m_buffer.m_frontEndStaging.addRef = [](void* p) { static_cast<D3D9Buffer*>(p)->AddRefPrivate(); };
+-      m_buffer.m_frontEndStaging.release = [](void* p) { static_cast<D3D9Buffer*>(p)->ReleasePrivate(); };
++      for (auto& staging : m_buffer.m_frontEndStaging) {
++        staging.owner = this;
++        staging.addRef = [](void* p) { static_cast<D3D9Buffer*>(p)->AddRefPrivate(); };
++        staging.release = [](void* p) { static_cast<D3D9Buffer*>(p)->ReleasePrivate(); };
++      }
+     }
+ 
+     HRESULT STDMETHODCALLTYPE Lock(
+diff -ruN a/src/d3d9/d3d9_common_buffer.cpp b/src/d3d9/d3d9_common_buffer.cpp
+--- a/src/d3d9/d3d9_common_buffer.cpp
++++ b/src/d3d9/d3d9_common_buffer.cpp
+@@ -33,9 +33,10 @@
+           UINT   SizeToLock,
+           void** ppbData,
+           DWORD  Flags) {
+-    if (unlikely(m_parent->FrontEnd().Queues())
+-     && m_parent->FrontEnd().StagesLock(this, OffsetToLock, SizeToLock, Flags))
+-      return m_parent->FrontEnd().LockStaged(this, OffsetToLock, SizeToLock, ppbData, Flags);
++    if (D3D9FrontEnd* frontEnd = m_parent->Queuing()) {
++      if (frontEnd->StagesLock(this, OffsetToLock, SizeToLock, Flags))
++        return frontEnd->LockStaged(this, OffsetToLock, SizeToLock, ppbData, Flags);
++    }
+ 
+     return m_parent->LockBuffer(
+       this,
+@@ -47,8 +48,10 @@
+ 
+ 
+   HRESULT D3D9CommonBuffer::Unlock() {
+-    if (unlikely(m_frontEndStaging.locks != 0) && m_parent->FrontEnd().Queues())
+-      return m_parent->FrontEnd().UnlockStaged(this);
++    if (D3D9FrontEnd* frontEnd = m_parent->Queuing()) {
++      if (frontEnd->StagedLocks(this) != 0)
++        return frontEnd->UnlockStaged(this);
++    }
+ 
+     return m_parent->UnlockBuffer(this);
+   }
+diff -ruN a/src/d3d9/d3d9_common_buffer.h b/src/d3d9/d3d9_common_buffer.h
+--- a/src/d3d9/d3d9_common_buffer.h
++++ b/src/d3d9/d3d9_common_buffer.h
+@@ -85,7 +85,7 @@
+     static constexpr VkDeviceSize BufferSliceAlignment = 64;
+   public:
+ 
+-    D3D9FrontEndStaging m_frontEndStaging;
++    std::array<D3D9FrontEndStaging, 2> m_frontEndStaging;
+ 
+     D3D9CommonBuffer(
+             D3D9DeviceEx*      pDevice,
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -166,6 +166,8 @@
+     if (this_thread::isInModuleDetachment())
+       return;
+ 
++    D3D9EffectHooks::SetFrontEnd(nullptr);
++    m_effectFrontEnd.Stop();
+     m_frontEnd.Stop();
+ 
+     ExecuteFlush(true);
+@@ -229,8 +231,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::TestCooperativeLevel() {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.TestCooperativeLevel();
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->TestCooperativeLevel();
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -457,7 +459,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters) {
+-    auto direct = m_frontEnd.Direct();
++    auto direct = Direct();
+     D3D9DeviceLock lock = LockDevice();
+ 
+     Logger::info("Device reset");
+@@ -553,9 +555,9 @@
+     const RECT*    pDestRect,
+           HWND     hDestWindowOverride,
+     const RGNDATA* pDirtyRegion) {
+-    if (unlikely(m_frontEnd.Queues())
+-     && m_frontEnd.QueuesPresent(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion))
+-      return m_frontEnd.Present(0);
++    D3D9FrontEnd* frontEnd = Queuing();
++    if (frontEnd != nullptr && frontEnd->QueuesPresent(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion))
++      return frontEnd->Present(0);
+ 
+     return PresentEx(
+       pSourceRect,
+@@ -1240,8 +1242,8 @@
+           IDirect3DSurface9*   pDestSurface,
+     const RECT*                pDestRect,
+           D3DTEXTUREFILTERTYPE Filter) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1666,8 +1668,8 @@
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetRenderTarget(
+           DWORD              RenderTargetIndex,
+           IDirect3DSurface9* pRenderTarget) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetRenderTarget(RenderTargetIndex, pRenderTarget);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetRenderTarget(RenderTargetIndex, pRenderTarget);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1811,8 +1813,8 @@
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetRenderTarget(
+           DWORD               RenderTargetIndex,
+           IDirect3DSurface9** ppRenderTarget) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.GetRenderTarget(RenderTargetIndex, ppRenderTarget);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->GetRenderTarget(RenderTargetIndex, ppRenderTarget);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1831,8 +1833,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetDepthStencilSurface(IDirect3DSurface9* pNewZStencil) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetDepthStencilSurface(pNewZStencil);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetDepthStencilSurface(pNewZStencil);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1868,8 +1870,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetDepthStencilSurface(IDirect3DSurface9** ppZStencilSurface) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.GetDepthStencilSurface(ppZStencilSurface);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->GetDepthStencilSurface(ppZStencilSurface);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1890,8 +1892,8 @@
+   // Some games don't even call them.
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::BeginScene() {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.Scene(D3D9FrontEndOp::BeginScene);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->Scene(D3D9FrontEndOp::BeginScene);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1905,8 +1907,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::EndScene() {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.Scene(D3D9FrontEndOp::EndScene);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->Scene(D3D9FrontEndOp::EndScene);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -1948,8 +1950,8 @@
+     if (unlikely(!Count && pRects))
+       return D3D_OK;
+ 
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.Clear(Count, pRects, Flags, Color, Z, Stencil);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->Clear(Count, pRects, Flags, Color, Z, Stencil);
+ 
+     D3D9DeviceLock lock = LockDevice();
+     BindFramebuffer();
+@@ -2126,8 +2128,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetTransform(D3DTRANSFORMSTATETYPE State, const D3DMATRIX* pMatrix) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetTransform(D3D9FrontEndOp::Transform, State, pMatrix);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetTransform(D3D9FrontEndOp::Transform, State, pMatrix);
+ 
+     CountCall(D3D9Call::Transform);
+     return SetStateTransform(GetTransformIndex(State), pMatrix);
+@@ -2148,8 +2150,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::MultiplyTransform(D3DTRANSFORMSTATETYPE TransformState, const D3DMATRIX* pMatrix) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetTransform(D3D9FrontEndOp::MultiplyTransform, TransformState, pMatrix);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetTransform(D3D9FrontEndOp::MultiplyTransform, TransformState, pMatrix);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2167,8 +2169,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetViewport(const D3DVIEWPORT9* pViewport) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetViewport(pViewport);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetViewport(pViewport);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2210,8 +2212,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetMaterial(const D3DMATERIAL9* pMaterial) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetMaterial(pMaterial);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetMaterial(pMaterial);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2241,8 +2243,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetLight(DWORD Index, const D3DLIGHT9* pLight) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetLight(Index, pLight);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetLight(Index, pLight);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2288,8 +2290,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::LightEnable(DWORD Index, BOOL Enable) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.LightEnable(Index, Enable);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->LightEnable(Index, Enable);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2334,8 +2336,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetClipPlane(DWORD Index, const float* pPlane) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetClipPlane(Index, pPlane);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetClipPlane(Index, pPlane);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -2384,8 +2386,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetRenderState(State, Value);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetRenderState(State, Value);
+ 
+     if (unlikely(m_callStats))
+       CountState(D3D9Call::RenderState, uint32_t(State) < RenderStateCount && m_state.renderStates[State] == Value);
+@@ -2758,7 +2760,8 @@
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetRenderState(D3DRENDERSTATETYPE State, DWORD* pValue) {
+     CountSync(D3D9Sync::StateQuery);
+-    bool shadowed = m_frontEnd.Queues();
++    D3D9FrontEnd* shadow = Shadowing();
++    bool shadowed = shadow != nullptr;
+     D3D9DeviceLock lock = shadowed ? D3D9DeviceLock() : LockDevice();
+ 
+     if (unlikely(pValue == nullptr))
+@@ -2771,7 +2774,7 @@
+     if (State < D3DRS_ZENABLE || State > D3DRS_BLENDOPALPHA)
+       *pValue = 0;
+     else
+-      *pValue = shadowed ? m_frontEnd.Shadow().renderStates[State] : m_state.renderStates[State];
++      *pValue = shadowed ? shadow->Shadow().renderStates[State] : m_state.renderStates[State];
+ 
+     return D3D_OK;
+   }
+@@ -2780,7 +2783,7 @@
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::CreateStateBlock(
+           D3DSTATEBLOCKTYPE      Type,
+           IDirect3DStateBlock9** ppSB) {
+-    auto direct = m_frontEnd.Direct();
++    auto direct = Direct();
+     D3D9DeviceLock lock = LockDevice();
+ 
+     // A state block can not be created while another is being recorded.
+@@ -2828,7 +2831,7 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::EndStateBlock(IDirect3DStateBlock9** ppSB) {
+-    auto direct = m_frontEnd.Direct();
++    auto direct = Direct();
+     D3D9DeviceLock lock = LockDevice();
+ 
+     // Recording a state block can't end if recording hasn't been started.
+@@ -2872,7 +2875,8 @@
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetTexture(DWORD Stage, IDirect3DBaseTexture9** ppTexture) {
+     CountSync(D3D9Sync::StateQuery);
+-    bool shadowed = m_frontEnd.Queues();
++    D3D9FrontEnd* shadow = Shadowing();
++    bool shadowed = shadow != nullptr;
+     D3D9DeviceLock lock = shadowed ? D3D9DeviceLock() : LockDevice();
+ 
+     if (ppTexture == nullptr)
+@@ -2885,7 +2889,7 @@
+ 
+     DWORD stateSampler = RemapSamplerState(Stage);
+ 
+-    *ppTexture = ref(shadowed ? m_frontEnd.Shadow().textures[stateSampler] : m_state.textures[stateSampler]);
++    *ppTexture = ref(shadowed ? shadow->Shadow().textures[stateSampler] : m_state.textures[stateSampler]);
+ 
+     return D3D_OK;
+   }
+@@ -2897,8 +2901,8 @@
+ 
+     DWORD stateSampler = RemapSamplerState(Stage);
+ 
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetTexture(stateSampler, pTexture);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetTexture(stateSampler, pTexture);
+ 
+     if (unlikely(m_callStats))
+       CountState(D3D9Call::Texture, m_state.textures[stateSampler] == pTexture);
+@@ -2915,9 +2919,10 @@
+           D3DTEXTURESTAGESTATETYPE Type,
+           DWORD*                   pValue) {
+     CountSync(D3D9Sync::StateQuery);
+-    bool shadowed = m_frontEnd.Queues();
++    D3D9FrontEnd* shadow = Shadowing();
++    bool shadowed = shadow != nullptr;
+     if (!shadowed)
+-      m_frontEnd.Gate();
++      GateFrontEnds();
+     auto dxvkType = RemapTextureStageStateType(Type);
+ 
+     if (unlikely(pValue == nullptr))
+@@ -2926,7 +2931,7 @@
+     Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+     dxvkType = std::min(dxvkType, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
+ 
+-    *pValue = shadowed ? m_frontEnd.Shadow().textureStages[Stage][dxvkType] : m_state.textureStages[Stage][dxvkType];
++    *pValue = shadowed ? shadow->Shadow().textureStages[Stage][dxvkType] : m_state.textureStages[Stage][dxvkType];
+ 
+     return D3D_OK;
+   }
+@@ -2938,8 +2943,8 @@
+           DWORD                    Value) {
+     D3D9TextureStageStateTypes dxvkType = RemapTextureStageStateType(Type);
+ 
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetTextureStageState(Stage, dxvkType, Value);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetTextureStageState(Stage, dxvkType, Value);
+ 
+     if (unlikely(m_callStats))
+       CountState(D3D9Call::TextureStageState, Stage < caps::TextureStageCount
+@@ -2958,7 +2963,8 @@
+           D3DSAMPLERSTATETYPE Type,
+           DWORD*              pValue) {
+     CountSync(D3D9Sync::StateQuery);
+-    bool shadowed = m_frontEnd.Queues();
++    D3D9FrontEnd* shadow = Shadowing();
++    bool shadowed = shadow != nullptr;
+     D3D9DeviceLock lock = shadowed ? D3D9DeviceLock() : LockDevice();
+ 
+     if (unlikely(pValue == nullptr))
+@@ -2971,7 +2977,7 @@
+ 
+     Sampler = RemapSamplerState(Sampler);
+ 
+-    *pValue = shadowed ? m_frontEnd.Shadow().samplerStates[Sampler][Type] : m_state.samplerStates[Sampler][Type];
++    *pValue = shadowed ? shadow->Shadow().samplerStates[Sampler][Type] : m_state.samplerStates[Sampler][Type];
+ 
+     return D3D_OK;
+   }
+@@ -2986,8 +2992,8 @@
+ 
+     uint32_t stateSampler = RemapSamplerState(Sampler);
+ 
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetSamplerState(stateSampler, Type, Value);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetSamplerState(stateSampler, Type, Value);
+ 
+     if (unlikely(m_callStats))
+       CountState(D3D9Call::SamplerState, uint32_t(Type) < SamplerStateCount
+@@ -3082,8 +3088,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetScissorRect(const RECT* pRect) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetScissorRect(pRect);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetScissorRect(pRect);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -3158,8 +3164,8 @@
+           D3DPRIMITIVETYPE PrimitiveType,
+           UINT             StartVertex,
+           UINT             PrimitiveCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.Draw(PrimitiveType, StartVertex, PrimitiveCount);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->Draw(PrimitiveType, StartVertex, PrimitiveCount);
+ 
+     CountCall(D3D9Call::Draw);
+     D3D9DeviceLock lock = LockDevice();
+@@ -3214,8 +3220,8 @@
+           UINT             NumVertices,
+           UINT             StartIndex,
+           UINT             PrimitiveCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.DrawIndexed(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, StartIndex,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->DrawIndexed(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, StartIndex,
+         PrimitiveCount);
+ 
+     CountCall(D3D9Call::Draw);
+@@ -3280,8 +3286,8 @@
+           UINT             PrimitiveCount,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.DrawUp(PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->DrawUp(PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride);
+ 
+     CountCall(D3D9Call::DrawFromMemory);
+     CountSync(D3D9Sync::MemoryDrawBytes, uint64_t(GetVertexCount(PrimitiveType, PrimitiveCount)) * VertexStreamZeroStride);
+@@ -3339,8 +3345,8 @@
+           D3DFORMAT        IndexDataFormat,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.DrawIndexedUp(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->DrawIndexedUp(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData,
+         IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride);
+ 
+     CountCall(D3D9Call::DrawFromMemory);
+@@ -3584,8 +3590,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetVertexDeclaration(IDirect3DVertexDeclaration9* pDecl) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetVertexDeclaration(pDecl);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetVertexDeclaration(pDecl);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -3626,8 +3632,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetVertexDeclaration(IDirect3DVertexDeclaration9** ppDecl) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.GetVertexDeclaration(ppDecl);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->GetVertexDeclaration(ppDecl);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -3646,8 +3652,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetFVF(DWORD FVF) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetFVF(FVF);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetFVF(FVF);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -3670,10 +3676,10 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetFVF(DWORD* pFVF) {
+-    if (unlikely(m_frontEnd.Queues())) {
++    if (D3D9FrontEnd* frontEnd = Queuing()) {
+       if (unlikely(pFVF == nullptr))
+         return D3DERR_INVALIDCALL;
+-      D3D9VertexDecl* decl = m_frontEnd.VertexDecl();
++      D3D9VertexDecl* decl = frontEnd->VertexDecl();
+       *pFVF = decl != nullptr ? decl->GetFVF() : 0;
+       return D3D_OK;
+     }
+@@ -3720,8 +3726,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetVertexShader(IDirect3DVertexShader9* pShader) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetVertexShader(pShader);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetVertexShader(pShader);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -3780,8 +3786,8 @@
+           UINT   StartRegister,
+     const float* pConstantData,
+           UINT   Vector4fCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::VertexConstantsF, StartRegister, pConstantData, Vector4fCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::VertexConstantsF, StartRegister, pConstantData, Vector4fCount,
+         4 * sizeof(float));
+ 
+     CountCall(D3D9Call::VertexShaderConstants);
+@@ -3817,8 +3823,8 @@
+           UINT StartRegister,
+     const int* pConstantData,
+           UINT Vector4iCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::VertexConstantsI, StartRegister, pConstantData, Vector4iCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::VertexConstantsI, StartRegister, pConstantData, Vector4iCount,
+         4 * sizeof(int));
+ 
+     D3D9DeviceLock lock = LockDevice();
+@@ -3851,8 +3857,8 @@
+           UINT  StartRegister,
+     const BOOL* pConstantData,
+           UINT  BoolCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::VertexConstantsB, StartRegister, pConstantData, BoolCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::VertexConstantsB, StartRegister, pConstantData, BoolCount,
+         sizeof(BOOL));
+ 
+     D3D9DeviceLock lock = LockDevice();
+@@ -3886,8 +3892,8 @@
+           IDirect3DVertexBuffer9* pStreamData,
+           UINT                    OffsetInBytes,
+           UINT                    Stride) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetStreamSource(StreamNumber, pStreamData, OffsetInBytes, Stride);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetStreamSource(StreamNumber, pStreamData, OffsetInBytes, Stride);
+ 
+     CountCall(D3D9Call::StreamSource);
+     D3D9DeviceLock lock = LockDevice();
+@@ -3953,8 +3959,8 @@
+           IDirect3DVertexBuffer9** ppStreamData,
+           UINT*                    pOffsetInBytes,
+           UINT*                    pStride) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.GetStreamSource(StreamNumber, ppStreamData, pOffsetInBytes, pStride);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->GetStreamSource(StreamNumber, ppStreamData, pOffsetInBytes, pStride);
+ 
+     CountSync(D3D9Sync::StateQuery);
+     D3D9DeviceLock lock = LockDevice();
+@@ -3984,8 +3990,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetStreamSourceFreq(UINT StreamNumber, UINT Setting) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetStreamSourceFreq(StreamNumber, Setting);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetStreamSourceFreq(StreamNumber, Setting);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -4044,8 +4050,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetIndices(IDirect3DIndexBuffer9* pIndexData) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetIndices(pIndexData);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetIndices(pIndexData);
+ 
+     CountCall(D3D9Call::Indices);
+     D3D9DeviceLock lock = LockDevice();
+@@ -4112,8 +4118,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetPixelShader(IDirect3DPixelShader9* pShader) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetPixelShader(pShader);
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetPixelShader(pShader);
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -4187,8 +4193,8 @@
+     UINT   StartRegister,
+     const float* pConstantData,
+     UINT   Vector4fCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::PixelConstantsF, StartRegister, pConstantData, Vector4fCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::PixelConstantsF, StartRegister, pConstantData, Vector4fCount,
+         4 * sizeof(float));
+ 
+     CountCall(D3D9Call::PixelShaderConstants);
+@@ -4222,8 +4228,8 @@
+     UINT StartRegister,
+     const int* pConstantData,
+     UINT Vector4iCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::PixelConstantsI, StartRegister, pConstantData, Vector4iCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::PixelConstantsI, StartRegister, pConstantData, Vector4iCount,
+         4 * sizeof(int));
+ 
+     D3D9DeviceLock lock = LockDevice();
+@@ -4256,8 +4262,8 @@
+     UINT  StartRegister,
+     const BOOL* pConstantData,
+     UINT  BoolCount) {
+-    if (unlikely(m_frontEnd.Queues()))
+-      return m_frontEnd.SetConstants(D3D9FrontEndOp::PixelConstantsB, StartRegister, pConstantData, BoolCount,
++    if (D3D9FrontEnd* frontEnd = Queuing())
++      return frontEnd->SetConstants(D3D9FrontEndOp::PixelConstantsB, StartRegister, pConstantData, BoolCount,
+         sizeof(BOOL));
+ 
+     D3D9DeviceLock lock = LockDevice();
+@@ -4486,7 +4492,17 @@
+     if (!m_d3d9Options.frontEndThread || m_multithread.enabled()
+      || m_d3dCompatibility.test(D3DCompatibility::D3D8) || m_d3dCompatibility.test(D3DCompatibility::D3D9Ex))
+       return;
+-    m_frontEnd.Start();
++    uint32_t self = D3D9FrontEnd::CurrentThread();
++    if (m_d3d9Options.effectThread && D3D9EffectHooks::InstallQueue()) {
++      m_effectFrontEnd.SetDownstream(&m_frontEnd);
++      m_effectFrontEnd.Start(self, "d3dx-effects", false, true);
++      if (m_effectFrontEnd.Active()) {
++        m_frontEnd.Start(m_effectFrontEnd.Worker(), "dxvk-frontend", true, false);
++        D3D9EffectHooks::SetFrontEnd(&m_effectFrontEnd);
++        return;
++      }
++    }
++    m_frontEnd.Start(self, "dxvk-frontend", true, false);
+   }
+ 
+ 
+diff -ruN a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1059,13 +1059,36 @@
+ 
+     void BindIndices();
+ 
+-    D3D9DeviceLock LockDevice() {
+-      m_frontEnd.Gate();
++    __attribute__((always_inline)) D3D9DeviceLock LockDevice() {
++      GateFrontEnds();
+       return m_multithread.acquire();
+     }
+ 
+-    D3D9FrontEnd& FrontEnd() {
+-      return m_frontEnd;
++    __attribute__((always_inline)) void GateFrontEnds() {
++      m_effectFrontEnd.Gate();
++      m_frontEnd.Gate();
++    }
++
++    D3D9FrontEnd* Queuing() {
++      if (unlikely(m_effectFrontEnd.Queues()))
++        return &m_effectFrontEnd;
++      if (unlikely(m_frontEnd.Queues()))
++        return &m_frontEnd;
++      return nullptr;
++    }
++
++    D3D9FrontEnd* Shadowing() {
++      D3D9FrontEnd* frontEnd = Queuing();
++      return frontEnd != nullptr && frontEnd->Filters() ? frontEnd : nullptr;
++    }
++
++    D3D9FrontEnd* EffectFrontEnd() {
++      return m_effectFrontEnd.Active() ? &m_effectFrontEnd : nullptr;
++    }
++
++    D3D9FrontEnd::DirectScope Direct() {
++      D3D9FrontEnd* frontEnd = Queuing();
++      return frontEnd != nullptr ? frontEnd->Direct() : m_frontEnd.Direct();
+     }
+ 
+     const D3D9Options* GetOptions() const {
+@@ -1687,7 +1710,8 @@
+       false>>                       m_fvfTable;
+ 
+     D3D9Multithread                 m_multithread;
+-    D3D9FrontEnd                    m_frontEnd { this };
++    D3D9FrontEnd                    m_effectFrontEnd { this, 1 };
++    D3D9FrontEnd                    m_frontEnd { this, 0 };
+     D3D9InputAssemblyState          m_iaState;
+ 
+     bool                            m_callStats = false;
+diff -ruN a/src/d3d9/d3d9_effect_hooks.cpp b/src/d3d9/d3d9_effect_hooks.cpp
+--- a/src/d3d9/d3d9_effect_hooks.cpp
++++ b/src/d3d9/d3d9_effect_hooks.cpp
+@@ -1,13 +1,16 @@
+ #include "d3d9_effect_hooks.h"
+ 
+ #include "d3d9_include.h"
++#include "d3d9_front_end.h"
+ 
+ #include "../util/log/log.h"
+ #include "../util/util_string.h"
+ 
+ #include <atomic>
++#include <iterator>
+ #include <cstring>
+ #include <mutex>
++#include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
+ 
+@@ -174,6 +177,227 @@
+         slots, " methods counted"));
+     }
+ 
++    constexpr uint32_t EffectSlots    = 86;
++    constexpr uint32_t PublicSlots    = 79;
++    constexpr uint32_t SlotTechnique  = 60;
++    constexpr uint32_t SlotBegin      = 65;
++
++    enum class Payload : uint8_t { None, Fixed, Count, Bytes, Texture };
++
++    struct Queued {
++      uint32_t slot;
++      uint32_t args;
++      Payload  payload;
++      uint32_t size;
++      void*    hook;
++    };
++
++    std::atomic<D3D9FrontEnd*> g_frontEnd { nullptr };
++    uint32_t                   g_queueOriginal[MaxSlots] = { };
++    uintptr_t                  g_queueTable = 0;
++    uint8_t*                   g_drainThunks = nullptr;
++    void*                      g_drainFunction = nullptr;
++    std::unordered_map<void*, uint32_t>          g_technique;
++    std::unordered_map<uint64_t, uint32_t>       g_passes;
++
++    bool g_direct = false;
++
++    D3D9FrontEnd* Effects() {
++      D3D9FrontEnd* frontEnd = g_frontEnd.load(std::memory_order_relaxed);
++      return frontEnd != nullptr && !g_direct && frontEnd->Queues() ? frontEnd : nullptr;
++    }
++
++    void DrainForEffects() {
++      if (D3D9FrontEnd* frontEnd = Effects())
++        frontEnd->DrainProducer();
++    }
++
++    template <uint32_t Slot>
++    HRESULT CallOriginal(void* effect, uint32_t count, const uint32_t* a) {
++      void* function = reinterpret_cast<void*>(uintptr_t(g_queueOriginal[Slot]));
++      switch (count) {
++        case 0: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*)>(function)(effect);
++        case 1: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t)>(function)(effect, a[0]);
++        case 2: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t)>(function)(effect,
++          a[0], a[1]);
++        default: return reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t, uint32_t)>(
++          function)(effect, a[0], a[1], a[2]);
++      }
++    }
++
++    template <uint32_t Slot, uint32_t Count, Payload Kind, uint32_t Size>
++    HRESULT Forward(void* effect, const uint32_t* a) {
++      D3D9FrontEnd* frontEnd = Effects();
++      if (frontEnd == nullptr)
++        return CallOriginal<Slot>(effect, Count, a);
++      if constexpr (Slot == SlotTechnique)
++        g_technique[effect] = a[0];
++      const void* data = nullptr;
++      uint32_t bytes = 0;
++      IDirect3DBaseTexture9* texture = nullptr;
++      if constexpr (Kind == Payload::Fixed) {
++        data = reinterpret_cast<const void*>(uintptr_t(a[1]));
++        bytes = data != nullptr ? Size : 0;
++      } else if constexpr (Kind == Payload::Count) {
++        data = reinterpret_cast<const void*>(uintptr_t(a[1]));
++        bytes = data != nullptr ? Size * a[2] : 0;
++      } else if constexpr (Kind == Payload::Bytes) {
++        data = reinterpret_cast<const void*>(uintptr_t(a[1]));
++        bytes = data != nullptr ? a[2] : 0;
++      } else if constexpr (Kind == Payload::Texture) {
++        texture = reinterpret_cast<IDirect3DBaseTexture9*>(uintptr_t(a[1]));
++      }
++      if (!frontEnd->EffectCall(effect, Slot, Count, a, data, bytes, 1, texture))
++        return CallOriginal<Slot>(effect, Count, a);
++      return D3D_OK;
++    }
++
++    template <uint32_t Slot, Payload Kind = Payload::None, uint32_t Size = 0>
++    HRESULT STDMETHODCALLTYPE Hook0(void* effect) {
++      return Forward<Slot, 0, Kind, Size>(effect, nullptr);
++    }
++
++    template <uint32_t Slot, Payload Kind = Payload::None, uint32_t Size = 0>
++    HRESULT STDMETHODCALLTYPE Hook1(void* effect, uint32_t a0) {
++      uint32_t a[1] = { a0 };
++      return Forward<Slot, 1, Kind, Size>(effect, a);
++    }
++
++    template <uint32_t Slot, Payload Kind = Payload::None, uint32_t Size = 0>
++    HRESULT STDMETHODCALLTYPE Hook2(void* effect, uint32_t a0, uint32_t a1) {
++      uint32_t a[2] = { a0, a1 };
++      return Forward<Slot, 2, Kind, Size>(effect, a);
++    }
++
++    template <uint32_t Slot, Payload Kind = Payload::None, uint32_t Size = 0>
++    HRESULT STDMETHODCALLTYPE Hook3(void* effect, uint32_t a0, uint32_t a1, uint32_t a2) {
++      uint32_t a[3] = { a0, a1, a2 };
++      return Forward<Slot, 3, Kind, Size>(effect, a);
++    }
++
++    HRESULT STDMETHODCALLTYPE HookBegin(void* effect, uint32_t passes, uint32_t flags) {
++      uint32_t a[2] = { passes, flags };
++      D3D9FrontEnd* frontEnd = Effects();
++      if (frontEnd == nullptr)
++        return CallOriginal<SlotBegin>(effect, 2, a);
++      auto technique = g_technique.find(effect);
++      uint64_t key = (uint64_t(uint32_t(uintptr_t(effect))) << 32)
++        | (technique != g_technique.end() ? technique->second : 0u);
++      auto cached = g_passes.find(key);
++      if (cached == g_passes.end()) {
++        frontEnd->DrainProducer();
++        g_direct = true;
++        HRESULT hr = CallOriginal<SlotBegin>(effect, 2, a);
++        g_direct = false;
++        UINT* out = reinterpret_cast<UINT*>(uintptr_t(passes));
++        if (SUCCEEDED(hr) && out != nullptr)
++          g_passes[key] = *out;
++        return hr;
++      }
++      UINT* out = reinterpret_cast<UINT*>(uintptr_t(passes));
++      if (out != nullptr)
++        *out = cached->second;
++      uint32_t scratch = 0;
++      frontEnd->EffectCall(effect, SlotBegin, 2, a, &scratch, sizeof(scratch), 0, nullptr);
++      return D3D_OK;
++    }
++
++    const Queued g_queued[] = {
++      { 20, 3, Payload::Bytes,   0,  reinterpret_cast<void*>(&Hook3<20, Payload::Bytes>) },
++      { 22, 2, Payload::None,    0,  reinterpret_cast<void*>(&Hook2<22>) },
++      { 24, 3, Payload::Count,   4,  reinterpret_cast<void*>(&Hook3<24, Payload::Count, 4>) },
++      { 26, 2, Payload::None,    0,  reinterpret_cast<void*>(&Hook2<26>) },
++      { 28, 3, Payload::Count,   4,  reinterpret_cast<void*>(&Hook3<28, Payload::Count, 4>) },
++      { 30, 2, Payload::None,    0,  reinterpret_cast<void*>(&Hook2<30>) },
++      { 32, 3, Payload::Count,   4,  reinterpret_cast<void*>(&Hook3<32, Payload::Count, 4>) },
++      { 34, 2, Payload::Fixed,   16, reinterpret_cast<void*>(&Hook2<34, Payload::Fixed, 16>) },
++      { 36, 3, Payload::Count,   16, reinterpret_cast<void*>(&Hook3<36, Payload::Count, 16>) },
++      { 38, 2, Payload::Fixed,   64, reinterpret_cast<void*>(&Hook2<38, Payload::Fixed, 64>) },
++      { 40, 3, Payload::Count,   64, reinterpret_cast<void*>(&Hook3<40, Payload::Count, 64>) },
++      { 44, 2, Payload::Fixed,   64, reinterpret_cast<void*>(&Hook2<44, Payload::Fixed, 64>) },
++      { 46, 3, Payload::Count,   64, reinterpret_cast<void*>(&Hook3<46, Payload::Count, 64>) },
++      { 52, 2, Payload::Texture, 0,  reinterpret_cast<void*>(&Hook2<52, Payload::Texture>) },
++      { 60, 1, Payload::None,    0,  reinterpret_cast<void*>(&Hook1<60>) },
++      { 65, 2, Payload::None,    0,  reinterpret_cast<void*>(&HookBegin) },
++      { 66, 1, Payload::None,    0,  reinterpret_cast<void*>(&Hook1<66>) },
++      { 67, 0, Payload::None,    0,  reinterpret_cast<void*>(&Hook0<67>) },
++      { 68, 0, Payload::None,    0,  reinterpret_cast<void*>(&Hook0<68>) },
++      { 69, 0, Payload::None,    0,  reinterpret_cast<void*>(&Hook0<69>) },
++    };
++
++    int ReturnBytes(uint32_t function) {
++      auto code = reinterpret_cast<const uint8_t*>(uintptr_t(function));
++      for (uint32_t i = 0; i < 0x800; i++) {
++        if (code[i] == 0xc2 && code[i + 2] == 0 && code[i + 1] != 0 && (code[i + 1] & 3) == 0 && code[i + 1] <= 0x40)
++          return code[i + 1];
++      }
++      return -1;
++    }
++
++    bool HookQueue() {
++      uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++      uintptr_t table = g_hooks.table != 0 ? g_hooks.table : FindTable(base);
++      if (table == 0 || g_hooks.slots != EffectSlots) {
++        Logger::info("[D3D9 effects] no effect interface of the known layout; effects stay on the game thread");
++        return false;
++      }
++      auto entries = reinterpret_cast<uint32_t*>(table);
++      for (uint32_t i = 0; i < EffectSlots; i++)
++        g_queueOriginal[i] = entries[i];
++
++      for (const auto& q : g_queued) {
++        uint32_t real = g_hooks.table != 0 ? g_hooks.original[q.slot] : g_queueOriginal[q.slot];
++        int expected = int(4 * (q.args + 1));
++        int found = ReturnBytes(real);
++        if (found != expected) {
++          Logger::info(str::format("[D3D9 effects] method +0x", std::hex, q.slot * 4, std::dec, " returns ", found,
++            " bytes of arguments, ", expected, " expected; effects stay on the game thread"));
++          return false;
++        }
++      }
++
++      constexpr uint32_t DrainBytes = 20;
++      auto thunks = static_cast<uint8_t*>(VirtualAlloc(nullptr, PublicSlots * DrainBytes, MEM_COMMIT | MEM_RESERVE,
++        PAGE_EXECUTE_READWRITE));
++      if (thunks == nullptr)
++        return false;
++      g_drainFunction = reinterpret_cast<void*>(&DrainForEffects);
++      uint32_t drain = uint32_t(reinterpret_cast<uintptr_t>(&g_drainFunction));
++      for (uint32_t i = 0; i < PublicSlots; i++) {
++        uint8_t* t = thunks + i * DrainBytes;
++        uint32_t target = uint32_t(reinterpret_cast<uintptr_t>(&g_queueOriginal[i]));
++        t[0] = 0x50; t[1] = 0x51; t[2] = 0x52;
++        t[3] = 0xff; t[4] = 0x15;
++        std::memcpy(t + 5, &drain, 4);
++        t[9] = 0x5a; t[10] = 0x59; t[11] = 0x58;
++        t[12] = 0xff; t[13] = 0x25;
++        std::memcpy(t + 14, &target, 4);
++        t[18] = 0xcc; t[19] = 0xcc;
++      }
++      FlushInstructionCache(GetCurrentProcess(), thunks, PublicSlots * DrainBytes);
++
++      uint32_t replaced[EffectSlots];
++      std::memcpy(replaced, entries, sizeof(replaced));
++      for (uint32_t i = 2; i < PublicSlots; i++)
++        replaced[i] = uint32_t(reinterpret_cast<uintptr_t>(thunks + i * DrainBytes));
++      for (const auto& q : g_queued)
++        replaced[q.slot] = uint32_t(reinterpret_cast<uintptr_t>(q.hook));
++
++      DWORD old = 0;
++      if (!VirtualProtect(entries, EffectSlots * 4, PAGE_READWRITE, &old))
++        return false;
++      std::memcpy(entries, replaced, sizeof(replaced));
++      VirtualProtect(entries, EffectSlots * 4, old, &old);
++      g_queueTable = table;
++      g_drainThunks = thunks;
++      Logger::info(str::format("[D3D9 effects] effect interface at exe+0x", std::hex, table - base, std::dec,
++        ": ", std::size(g_queued), " methods queued, the other public ones wait for the queue"));
++      return true;
++    }
++
++    std::once_flag g_queueOnce;
++    bool           g_queueInstalled = false;
++
+   }
+ 
+ 
+@@ -182,6 +406,22 @@
+   }
+ 
+ 
++  bool D3D9EffectHooks::InstallQueue() {
++    std::call_once(g_queueOnce, [] { g_queueInstalled = HookQueue(); });
++    return g_queueInstalled;
++  }
++
++
++  void D3D9EffectHooks::SetFrontEnd(D3D9FrontEnd* pFrontEnd) {
++    g_frontEnd.store(pFrontEnd);
++  }
++
++
++  void* D3D9EffectHooks::Original(uint32_t Slot) {
++    return Slot < MaxSlots ? reinterpret_cast<void*>(uintptr_t(g_queueOriginal[Slot])) : nullptr;
++  }
++
++
+   void D3D9EffectHooks::Report(uint32_t Frames) {
+     if (g_hooks.table == 0 || Frames == 0)
+       return;
+@@ -197,6 +437,12 @@
+   void D3D9EffectHooks::Install() { }
+ 
+   void D3D9EffectHooks::Report(uint32_t) { }
++
++  bool D3D9EffectHooks::InstallQueue() { return false; }
++
++  void D3D9EffectHooks::SetFrontEnd(D3D9FrontEnd*) { }
++
++  void* D3D9EffectHooks::Original(uint32_t) { return nullptr; }
+ #endif
+ 
+ }
+diff -ruN a/src/d3d9/d3d9_effect_hooks.h b/src/d3d9/d3d9_effect_hooks.h
+--- a/src/d3d9/d3d9_effect_hooks.h
++++ b/src/d3d9/d3d9_effect_hooks.h
+@@ -4,6 +4,8 @@
+ 
+ namespace dxvk {
+ 
++  class D3D9FrontEnd;
++
+   class D3D9EffectHooks {
+ 
+   public:
+@@ -12,6 +14,12 @@
+ 
+     static void Report(uint32_t Frames);
+ 
++    static bool InstallQueue();
++
++    static void SetFrontEnd(D3D9FrontEnd* pFrontEnd);
++
++    static void* Original(uint32_t Slot);
++
+   };
+ 
+ }
+diff -ruN a/src/d3d9/d3d9_front_end.cpp b/src/d3d9/d3d9_front_end.cpp
+--- a/src/d3d9/d3d9_front_end.cpp
++++ b/src/d3d9/d3d9_front_end.cpp
+@@ -7,12 +7,14 @@
+ #include "d3d9_surface.h"
+ #include "d3d9_texture.h"
+ #include "d3d9_vertex_declaration.h"
++#include "d3d9_effect_hooks.h"
+ 
+ #include "../util/util_env.h"
+ #include "../util/util_time.h"
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <float.h>
+ 
+ extern "C" IMAGE_DOS_HEADER __ImageBase;
+ 
+@@ -107,6 +109,20 @@
+       D3D9StateBlock* block;
+     };
+ 
++    struct EffectArgs {
++      void*                  effect;
++      uint32_t               slot;
++      uint32_t               argCount;
++      uint32_t               args[4];
++      uint32_t               dataBytes;
++      uint32_t               dataArg;
++      IDirect3DBaseTexture9* texture;
++    };
++
++    DWORD PublicSampler(DWORD StateSampler) {
++      return StateSampler < caps::MaxTexturesPS ? StateSampler : D3DDMAPSAMPLER + (StateSampler - caps::MaxTexturesPS);
++    }
++
+     struct UploadArgs {
+       D3D9CommonBuffer* buffer;
+       void*             owner;
+@@ -139,8 +155,8 @@
+   }
+ 
+ 
+-  D3D9FrontEnd::D3D9FrontEnd(D3D9DeviceEx* pDevice)
+-  : m_device(pDevice) { }
++  D3D9FrontEnd::D3D9FrontEnd(D3D9DeviceEx* pDevice, uint32_t Index)
++  : m_device(pDevice), m_index(Index) { }
+ 
+ 
+   D3D9FrontEnd::~D3D9FrontEnd() {
+@@ -148,11 +164,15 @@
+   }
+ 
+ 
+-  void D3D9FrontEnd::Start() {
++  void D3D9FrontEnd::Start(uint32_t Producer, const char* pThreadName, bool Filter, bool ReplayPublic) {
+     m_ring = static_cast<uint8_t*>(std::malloc(RingSize));
+     if (m_ring == nullptr)
+       return;
+     m_space = RingSize;
++    m_filter = Filter;
++    m_replayPublic = ReplayPublic;
++    m_threadName = pThreadName;
++    m_fpuControl = _control87(0, 0);
+     m_thread = dxvk::thread([this] { Run(); });
+     if (!m_thread.joinable()) {
+       std::free(m_ring);
+@@ -160,9 +180,9 @@
+       return;
+     }
+     m_worker = m_thread.get_id();
+-    m_producer = CurrentThread();
++    m_producer = Producer;
+     m_stale = true;
+-    Logger::info("D3D9: the front end runs on its own thread");
++    Logger::info(str::format("D3D9: ", pThreadName, " runs the device calls of thread ", Producer));
+   }
+ 
+ 
+@@ -288,7 +308,10 @@
+ 
+ 
+   void D3D9FrontEnd::Resync() {
+-    DrainProducer();
++    if (m_filter)
++      DrainProducer();
++    else
++      DrainAll();
+     auto& state = m_device->m_state;
+     m_shadow.renderStates = state.renderStates.get();
+     m_shadow.samplerStates = state.samplerStates.get();
+@@ -307,6 +330,28 @@
+   }
+ 
+ 
++  bool D3D9FrontEnd::EffectCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pArgs,
++      const void* pData, uint32_t DataBytes, uint32_t DataArg, IDirect3DBaseTexture9* pTexture) {
++    if (unlikely(DataBytes > MaxRecord)) {
++      DrainProducer();
++      return false;
++    }
++    TextureRefPrivate(pTexture, true);
++    auto args = reinterpret_cast<EffectArgs*>(Allocate(D3D9FrontEndOp::Effect, sizeof(EffectArgs) + DataBytes));
++    args->effect = pEffect;
++    args->slot = Slot;
++    args->argCount = ArgCount;
++    std::memset(args->args, 0, sizeof(args->args));
++    std::memcpy(args->args, pArgs, sizeof(uint32_t) * std::min<uint32_t>(ArgCount, 4u));
++    args->dataBytes = DataBytes;
++    args->dataArg = DataArg;
++    args->texture = pTexture;
++    if (DataBytes != 0)
++      std::memcpy(args + 1, pData, DataBytes);
++    return true;
++  }
++
++
+   HRESULT D3D9FrontEnd::Queue3(D3D9FrontEndOp Op, uint32_t A, uint32_t B, uint32_t C) {
+     auto args = reinterpret_cast<Args3*>(Allocate(Op, sizeof(Args3)));
+     args->a = A;
+@@ -515,10 +560,18 @@
+   }
+ 
+ 
++  void D3D9FrontEnd::DrainAll() {
++    auto lock = m_device->LockDevice();
++  }
++
++
+   D3D9VertexDecl* D3D9FrontEnd::VertexDecl() {
+     Refresh();
+     if (unlikely(!m_shadow.vertexDeclKnown)) {
+-      DrainProducer();
++      if (m_filter)
++        DrainProducer();
++      else
++        DrainAll();
+       m_shadow.vertexDecl = m_device->m_state.vertexDecl.ptr();
+       m_shadow.vertexDeclKnown = true;
+     }
+@@ -881,7 +934,7 @@
+ 
+   bool D3D9FrontEnd::StagesLock(D3D9CommonBuffer* pBuffer, UINT OffsetToLock, UINT SizeToLock, DWORD Flags) const {
+     const D3D9_BUFFER_DESC* desc = pBuffer->Desc();
+-    if (pBuffer->m_frontEndStaging.locks != 0)
++    if (pBuffer->m_frontEndStaging[m_index].locks != 0)
+       return true;
+     if (!(Flags & D3DLOCK_DISCARD) || (Flags & D3DLOCK_READONLY))
+       return false;
+@@ -900,7 +953,7 @@
+       return D3DERR_INVALIDCALL;
+ 
+     const D3D9_BUFFER_DESC* desc = pBuffer->Desc();
+-    D3D9FrontEndStaging& staging = pBuffer->m_frontEndStaging;
++    D3D9FrontEndStaging& staging = pBuffer->m_frontEndStaging[m_index];
+ 
+     OffsetToLock = std::min<UINT>(OffsetToLock, desc->Size);
+     uint32_t size = SizeToLock == 0 ? desc->Size - OffsetToLock : std::min<UINT>(SizeToLock, desc->Size - OffsetToLock);
+@@ -924,8 +977,13 @@
+   }
+ 
+ 
++  uint32_t D3D9FrontEnd::StagedLocks(D3D9CommonBuffer* pBuffer) const {
++    return pBuffer->m_frontEndStaging[m_index].locks;
++  }
++
++
+   HRESULT D3D9FrontEnd::UnlockStaged(D3D9CommonBuffer* pBuffer) {
+-    D3D9FrontEndStaging& staging = pBuffer->m_frontEndStaging;
++    D3D9FrontEndStaging& staging = pBuffer->m_frontEndStaging[m_index];
+     if (staging.locks == 0)
+       return D3D_OK;
+     if (--staging.locks != 0)
+@@ -948,7 +1006,7 @@
+ 
+   void D3D9FrontEnd::Report() {
+     double frames = double(m_statFrames);
+-    Logger::info(str::format("[D3D9 front end] per frame over ", m_statFrames, " frames: calls queued ",
++    Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " per frame over ", m_statFrames, " frames: calls queued ",
+       uint64_t(double(m_statQueued) / frames), ", unchanged states dropped ", uint64_t(double(m_statDropped) / frames),
+       ", buffer locks staged ", uint64_t(double(m_statStaged) / frames), "; in all: drains ", m_statDrains, " (",
+       m_statDrainUs, " us), waits for ring room ", m_statRoomWaits, ", frames waited for the worker ",
+@@ -961,7 +1019,7 @@
+         sites += str::format(" d3d9.dll+0x", std::hex, site.first, std::dec, " ", site.second);
+     }
+     if (!sites.empty())
+-      Logger::info(str::format("[D3D9 front end] drains by caller:", sites));
++      Logger::info(str::format(m_index == 1 ? "[D3D9 effects]" : "[D3D9 front end]", " drains by caller:", sites));
+     m_drainSites = { };
+     m_statQueued = 0;
+     m_statDropped = 0;
+@@ -975,7 +1033,9 @@
+ 
+ 
+   void D3D9FrontEnd::Run() {
+-    env::setThreadName("dxvk-frontend");
++    env::setThreadName(m_threadName);
++    if (m_fpuControl != 0)
++      _control87(m_fpuControl, _MCW_PC | _MCW_RC);
+ 
+     uint32_t read = 0;
+     uint32_t sinceComplete = 0;
+@@ -995,6 +1055,8 @@
+       if (end == read) {
+         if (sinceComplete != 0)
+           complete();
++        if (m_downstream != nullptr && m_downstream->m_unpublished != 0)
++          m_downstream->Publish();
+ 
+         for (uint32_t i = 0; i < SpinCount && end == read; i++) {
+           _mm_pause();
+@@ -1044,26 +1106,57 @@
+ 
+       case D3D9FrontEndOp::RenderState: {
+         auto args = static_cast<const Args3*>(body);
+-        device->SetStateRenderState(D3DRENDERSTATETYPE(args->a), args->b);
++        if (m_replayPublic)
++          device->SetRenderState(D3DRENDERSTATETYPE(args->a), args->b);
++        else
++          device->SetStateRenderState(D3DRENDERSTATETYPE(args->a), args->b);
+       } break;
+ 
+       case D3D9FrontEndOp::SamplerState: {
+         auto args = static_cast<const Args3*>(body);
+-        device->SetStateSamplerState(args->a, D3DSAMPLERSTATETYPE(args->b), args->c);
++        if (m_replayPublic)
++          device->SetSamplerState(PublicSampler(args->a), D3DSAMPLERSTATETYPE(args->b), args->c);
++        else
++          device->SetStateSamplerState(args->a, D3DSAMPLERSTATETYPE(args->b), args->c);
+       } break;
+ 
+       case D3D9FrontEndOp::TextureStageState: {
+         auto args = static_cast<const Args3*>(body);
+-        device->SetStateTextureStageState(args->a, D3D9TextureStageStateTypes(args->b), args->c);
++        if (m_replayPublic)
++          device->SetTextureStageState(args->a, D3DTEXTURESTAGESTATETYPE(args->b + 1), args->c);
++        else
++          device->SetStateTextureStageState(args->a, D3D9TextureStageStateTypes(args->b), args->c);
+       } break;
+ 
+       case D3D9FrontEndOp::Texture: {
+         auto args = static_cast<const ObjectArgs*>(body);
+         auto texture = static_cast<IDirect3DBaseTexture9*>(args->object);
+-        device->SetStateTexture(args->a, texture);
++        if (m_replayPublic)
++          device->SetTexture(PublicSampler(args->a), texture);
++        else
++          device->SetStateTexture(args->a, texture);
+         TextureRefPrivate(texture, false);
+       } break;
+ 
++      case D3D9FrontEndOp::Effect: {
++        auto args = static_cast<const EffectArgs*>(body);
++        uint32_t values[4];
++        std::memcpy(values, args->args, sizeof(values));
++        if (args->dataBytes != 0)
++          values[args->dataArg] = uint32_t(reinterpret_cast<uintptr_t>(args + 1));
++        void* function = D3D9EffectHooks::Original(args->slot);
++        switch (args->argCount) {
++          case 0: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*)>(function)(args->effect); break;
++          case 1: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t)>(function)(args->effect,
++            values[0]); break;
++          case 2: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t)>(function)(args->effect,
++            values[0], values[1]); break;
++          default: reinterpret_cast<HRESULT (STDMETHODCALLTYPE*)(void*, uint32_t, uint32_t, uint32_t)>(function)(
++            args->effect, values[0], values[1], values[2]); break;
++        }
++        TextureRefPrivate(args->texture, false);
++      } break;
++
+       case D3D9FrontEndOp::StreamSource: {
+         auto args = static_cast<const ObjectArgs*>(body);
+         auto buffer = static_cast<D3D9VertexBuffer*>(args->object);
+@@ -1229,7 +1322,10 @@
+ 
+       case D3D9FrontEndOp::Present: {
+         auto args = static_cast<const Args3*>(body);
+-        m_lastPresent.store(int32_t(device->PresentEx(nullptr, nullptr, nullptr, nullptr, args->a)));
++        HRESULT result = m_replayPublic && args->a == 0
++          ? device->Present(nullptr, nullptr, nullptr, nullptr)
++          : device->PresentEx(nullptr, nullptr, nullptr, nullptr, args->a);
++        m_lastPresent.store(int32_t(result));
+         m_presentsDone.fetch_add(1u);
+         if (Load(m_producerWaiting)) {
+           std::lock_guard<dxvk::mutex> lock(m_mutex);
+diff -ruN a/src/d3d9/d3d9_front_end.h b/src/d3d9/d3d9_front_end.h
+--- a/src/d3d9/d3d9_front_end.h
++++ b/src/d3d9/d3d9_front_end.h
+@@ -32,6 +32,7 @@
+     RenderTarget,
+     DepthStencil,
+     StretchRect,
++    Effect,
+     VertexShader,
+     PixelShader,
+     VertexDeclaration,
+@@ -96,11 +97,11 @@
+     static constexpr uint32_t ReportFrames  = 600;
+     static constexpr uint32_t StagedLockMax = 64u << 10;
+ 
+-    explicit D3D9FrontEnd(D3D9DeviceEx* pDevice);
++    D3D9FrontEnd(D3D9DeviceEx* pDevice, uint32_t Index);
+ 
+     ~D3D9FrontEnd();
+ 
+-    void Start();
++    void Start(uint32_t Producer, const char* pThreadName, bool Filter, bool ReplayPublic);
+ 
+     void Stop();
+ 
+@@ -112,6 +113,33 @@
+       return m_producer != 0;
+     }
+ 
++    bool Filters() const {
++      return m_filter;
++    }
++
++    uint32_t Worker() const {
++      return m_worker;
++    }
++
++    static uint32_t CurrentThread() {
++#if defined(__i386__)
++      return __readfsdword(0x24);
++#elif defined(__x86_64__)
++      return __readgsdword(0x48);
++#else
++      return GetCurrentThreadId();
++#endif
++    }
++
++    void SetDownstream(D3D9FrontEnd* pDownstream) {
++      m_downstream = pDownstream;
++    }
++
++    void DrainProducer();
++
++    bool EffectCall(void* pEffect, uint32_t Slot, uint32_t ArgCount, const uint32_t* pArgs, const void* pData,
++      uint32_t DataBytes, uint32_t DataArg, IDirect3DBaseTexture9* pTexture);
++
+     const D3D9FrontEndShadow& Shadow() {
+       Refresh();
+       return m_shadow;
+@@ -147,13 +175,16 @@
+       return DirectScope(this, std::exchange(m_producer, 0u));
+     }
+ 
+-    void Gate() {
+-      if (unlikely(m_producer != 0) && CurrentThread() != m_worker)
++    __attribute__((always_inline)) void Gate() {
++      if (likely(m_producer == 0))
++        return;
++      uint32_t self = CurrentThread();
++      if (self != m_worker && (m_downstream == nullptr || self != m_downstream->m_worker))
+         GateSlow();
+     }
+ 
+     HRESULT SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) {
+-      if (likely(uint32_t(State) < RenderStateCount) && likely(!Recording())) {
++      if (likely(m_filter) && likely(uint32_t(State) < RenderStateCount) && likely(!Recording())) {
+         Refresh();
+         if (m_shadow.renderStates[State] == Value)
+           return Dropped();
+@@ -163,7 +194,7 @@
+     }
+ 
+     HRESULT SetSamplerState(DWORD StateSampler, D3DSAMPLERSTATETYPE Type, DWORD Value) {
+-      if (likely(uint32_t(Type) < SamplerStateCount) && likely(!Recording())) {
++      if (likely(m_filter) && likely(uint32_t(Type) < SamplerStateCount) && likely(!Recording())) {
+         Refresh();
+         if (m_shadow.samplerStates[StateSampler][Type] == Value)
+           return Dropped();
+@@ -173,7 +204,8 @@
+     }
+ 
+     HRESULT SetTextureStageState(DWORD Stage, D3D9TextureStageStateTypes Type, DWORD Value) {
+-      if (likely(Stage < caps::TextureStageCount && uint32_t(Type) < TextureStageStateCount) && likely(!Recording())) {
++      if (likely(m_filter) && likely(Stage < caps::TextureStageCount && uint32_t(Type) < TextureStageStateCount)
++       && likely(!Recording())) {
+         Refresh();
+         if (m_shadow.textureStages[Stage][Type] == Value)
+           return Dropped();
+@@ -283,6 +315,8 @@
+ 
+     HRESULT UnlockStaged(D3D9CommonBuffer* pBuffer);
+ 
++    uint32_t StagedLocks(D3D9CommonBuffer* pBuffer) const;
++
+   private:
+ 
+     struct Header {
+@@ -291,8 +325,14 @@
+     };
+ 
+     D3D9DeviceEx*         m_device;
++    D3D9FrontEnd*         m_downstream = nullptr;
++    uint32_t              m_index;
+     uint32_t              m_producer = 0;
+     uint32_t              m_worker   = 0;
++    bool                  m_filter   = true;
++    bool                  m_replayPublic = false;
++    const char*           m_threadName = "";
++    unsigned int          m_fpuControl = 0;
+     dxvk::thread          m_thread;
+ 
+     uint8_t*              m_ring     = nullptr;
+@@ -329,16 +369,6 @@
+ 
+     std::array<std::pair<uintptr_t, uint32_t>, 8> m_drainSites = { };
+ 
+-    static uint32_t CurrentThread() {
+-#if defined(__i386__)
+-      return __readfsdword(0x24);
+-#elif defined(__x86_64__)
+-      return __readgsdword(0x48);
+-#else
+-      return GetCurrentThreadId();
+-#endif
+-    }
+-
+     static uint32_t Load(std::atomic<uint32_t>& value) {
+       return value.fetch_add(0u);
+     }
+@@ -374,10 +404,10 @@
+ 
+     void WaitCompleted(uint32_t Target);
+ 
+-    void DrainProducer();
+-
+     void GateSlow();
+ 
++    void DrainAll();
++
+     void Resync();
+ 
+     D3D9FrontEndShadow& Mirror(D3D9StateBlock* pStateBlock);
+diff -ruN a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -79,6 +79,7 @@
+     this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
+     this->unchangedStateFastPath        = config.getOption<bool>        ("d3d9.unchangedStateFastPath",        true);
+     this->frontEndThread                = config.getOption<bool>        ("d3d9.frontEndThread",                false);
++    this->effectThread                  = config.getOption<bool>        ("d3d9.effectThread",                  false);
+ 
+     // D3D8 options
+     this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
+diff -ruN a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -176,6 +176,8 @@
+     bool unchangedStateFastPath;
+ 
+     bool frontEndThread;
++
++    bool effectThread;
+   };
+ 
+ }
+diff -ruN a/src/d3d9/d3d9_stateblock.cpp b/src/d3d9/d3d9_stateblock.cpp
+--- a/src/d3d9/d3d9_stateblock.cpp
++++ b/src/d3d9/d3d9_stateblock.cpp
+@@ -46,8 +46,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Capture() {
+-    if (unlikely(m_parent->FrontEnd().Queues()))
+-      return m_parent->FrontEnd().StateBlockCapture(this);
++    if (D3D9FrontEnd* frontEnd = m_parent->Queuing())
++      return frontEnd->StateBlockCapture(this);
+ 
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+@@ -65,8 +65,8 @@
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
+-    if (unlikely(m_parent->FrontEnd().Queues()))
+-      return m_parent->FrontEnd().StateBlockApply(this);
++    if (D3D9FrontEnd* frontEnd = m_parent->Queuing())
++      return frontEnd->StateBlockApply(this);
+ 
+     m_parent->CountCall(D3D9DeviceEx::D3D9Call::StateBlockApply);
+     D3D9DeviceLock lock = m_parent->LockDevice();
+diff -ruN a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -475,7 +475,7 @@
+           D3DBACKBUFFER_TYPE  Type,
+           IDirect3DSurface9** ppBackBuffer) {
+     // Could be doing a device reset...
+-    D3D9DeviceLock lock = m_parent->FrontEnd().Queues() ? D3D9DeviceLock() : m_parent->LockDevice();
++    D3D9DeviceLock lock = m_parent->Queuing() != nullptr ? D3D9DeviceLock() : m_parent->LockDevice();
+ 
+     if (unlikely(ppBackBuffer == nullptr))
+       return D3DERR_INVALIDCALL;

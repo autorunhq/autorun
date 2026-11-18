@@ -1,0 +1,14 @@
+Carafe: the game's window is painted again after the screen follows it, as its surface is made anew for
+the new place and keeps nothing of what was drawn before.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_drv.c
++++ b/dlls/win32u/winnx_drv.c
+@@ -877,6 +877,7 @@
+     if ((flags & SWP_NOMOVE) && !(flags & SWP_FRAMECHANGED)) return;
+     if (!get_window_rect( game, &window, dpi )) return;
+     NtUserSetWindowPos( game, 0, window.left - client.left, window.top - client.top, 0, 0, flags );
++    NtUserRedrawWindow( game, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
+     if (!(flags & SWP_NOMOVE) && &wine_nx_runtime_trace)
+     {
+         snprintf( line, sizeof(line), "[NXSCREEN] the game's window moved by %d,%d to the screen's corner",

@@ -34,6 +34,7 @@ fixture += r'''
 static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct nx_prof_thread registry[NX_PROF_MAX_THREADS];
 static int four_cores_enabled = 1;
+static u32 reserved_cores;
 static Handle current_handle = 123;
 static s32 current_core, current_priority;
 static u64 current_mask, process_mask;

@@ -54,15 +54,21 @@ fixture = r'''
 #define C_ASSERT(x) _Static_assert((x), #x)
 #define offsetof(t, f) __builtin_offsetof(t, f)
 #define CONTEXT_ARM64_FULL 0x400007
+/* A C name in assembly: with an underscore on macOS, as it is on Linux. */
+#ifdef __APPLE__
+#define ASM_NAME(name) "_" #name
+#else
+#define ASM_NAME(name) #name
+#endif
 #define __ASM_GLOBAL_FUNC(name, code) \
-    __asm__( ".text\n.globl _" #name "\n.p2align 2\n_" #name ":\n" code );
+    __asm__( ".text\n.globl " ASM_NAME(name) "\n.p2align 2\n" ASM_NAME(name) ":\n" code );
 
 typedef struct { uint64_t low, high; } NEON128;
 typedef struct
 {
     unsigned int ContextFlags;   /* 0x000 */
     unsigned int Cpsr;           /* 0x004 */
-    uint64_t X[29];              /* 0x008 */
+    union { uint64_t X[29]; struct { uint64_t X0_17[18], X18; }; };  /* 0x008; X18 is X[18], as in winnt.h */
     uint64_t Fp;                 /* 0x0f0 */
     uint64_t Lr;                 /* 0x0f8 */
     uint64_t Sp;                 /* 0x100 */
@@ -92,6 +98,8 @@ typedef struct
     uint32_t fpcr, fpsr;                  /* 800? */
     uint32_t pstate;
 } ThreadExceptionDump;
+C_ASSERT( offsetof(CONTEXT, X18) == 0x98 && offsetof(CONTEXT, Fp) == 0xf0 && offsetof(CONTEXT, V) == 0x110 );
+C_ASSERT( offsetof(CONTEXT, Fpcr) == 0x310 );
 C_ASSERT( offsetof(ThreadExceptionDump, cpu_gprs) == 16 );
 C_ASSERT( offsetof(ThreadExceptionDump, fp) == 248 );
 C_ASSERT( offsetof(ThreadExceptionDump, pc) == 272 );
@@ -110,6 +118,10 @@ static void *current_teb( void )
 #define CONTEXT_ARM64 0x400000
 #define CONTEXT_ARM64_X18 (CONTEXT_ARM64 | 0x00000008)
 #define horizon_trace(...) ((void)0)
+typedef uintptr_t ULONG_PTR;
+/* No FEX here: the context is continued by the restore, as for a native thread. */
+static int horizon_uses_fex( void ) { return 0; }
+static void wine_nx_fex_continue_context( const CONTEXT *context ) { (void)context; assert( 0 ); }
 
 extern int horizon_capture_context( CONTEXT *context );
 

@@ -1,0 +1,135 @@
+Experimental: the C runtime float to integer helpers, _ftol and _ftol2, are one conversion.
+MIT, as the files it changes.
+
+A block that starts at the bytes of Visual C++ 6 _ftol or Visual C++ 2002/2003
+_ftol2 is emitted as a truncating conversion of ST(0) to EDX:EAX, a pop and the
+return, with reduced x87 precision. Doom 3 spent about a fifth of its translated
+time in _ftol2 while loading a map (jit-blocks.txt, block 0x134a4b4).
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index eb5106e..b3435eb 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -760,6 +760,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           Thread->OpDispatcher->StartNewBlock();
+         }
+ 
++        bool InlinedHelper {false};
+         if (TableInfo && TableInfo->OpcodeDispatcher.OpDispatch) {
+           auto Fn = TableInfo->OpcodeDispatcher.OpDispatch;
+           Thread->OpDispatcher->ResetHandledLock();
+@@ -776,7 +777,12 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           }
+ 
+           Thread->OpDispatcher->SetForceTSO(ForceTSO);
+-          std::invoke(Fn, Thread->OpDispatcher, DecodedInfo);
++          // Experimental: a block that starts at the C runtime's float to
++          // integer helper is that conversion and a return, and ends there.
++          InlinedHelper = i == 0 && Thread->OpDispatcher->InlineFloatToIntHelper(Block.Entry);
++          if (!InlinedHelper) {
++            std::invoke(Fn, Thread->OpDispatcher, DecodedInfo);
++          }
+           if (Thread->OpDispatcher->HadDecodeFailure()) {
+             HadDispatchError = true;
+           } else {
+@@ -833,6 +839,10 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+         }
+ 
+ 
++        if (InlinedHelper) {
++          break;
++        }
++
+         if (Thread->OpDispatcher->FinishOp(DecodedInfo->PC + DecodedInfo->InstSize, i + 1 == InstsInBlock)) {
+           break;
+         }
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 15684d5..9dbc82a 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -766,6 +766,8 @@ public:
+   void FDIVF64(OpcodeArgs, IR::OpSize Width, bool Integer, bool Reverse, OpResult ResInST0);
+   void FILDF64(OpcodeArgs);
+   void FISTF64(OpcodeArgs, bool Truncate);
++  // Experimental: the C runtime's float to integer helper, emitted in place.
++  bool InlineFloatToIntHelper(uint64_t Entry);
+   void FLDF64_Const(OpcodeArgs, uint64_t Num);
+   void FLDF64(OpcodeArgs, IR::OpSize Width);
+   void FMULF64(OpcodeArgs, IR::OpSize Width, bool Integer, OpResult ResInST0);
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
+index b6db75e..9b9e80e 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
+@@ -18,6 +18,7 @@ $end_info$
+ #include <bit>
+ #include <stddef.h>
+ #include <stdint.h>
++#include <string.h>
+ 
+ namespace FEXCore::IR {
+ class OrderedNode;
+@@ -113,6 +114,64 @@ void OpDispatchBuilder::FILDF64(OpcodeArgs) {
+   _PushStack(ConvertedData, Invalid(), OpSize::iInvalid);
+ }
+ 
++// A cast of a float to an integer in a program built by Visual C++ 6 to 2003 is
++// a call of the C runtime's _ftol or _ftol2: ST(0) truncated to a 64-bit integer
++// in EDX:EAX, and popped. _ftol changes the control word twice to do it; _ftol2
++// stores and reloads the value three times and corrects the rounding by hand,
++// some thirty instructions with three stores read straight back, each a wait of
++// seven cycles on a Cortex-A57. Doom 3 spent a fifth of its translated time in
++// _ftol2 while loading a map.
++//
++// With reduced precision the whole of it is one conversion. The function is
++// recognized by its bytes, which are the same in every program linked with
++// that runtime, when a block starts at it; what it leaves in ECX, the flags
++// and the stack below ESP is scratch that no caller can use.
++bool OpDispatchBuilder::InlineFloatToIntHelper(uint64_t Entry) {
++  static constexpr uint8_t Ftol2[] = {
++    0x55, 0x8b, 0xec, 0x83, 0xec, 0x20, 0x83, 0xe4, 0xf0, 0xd9, 0xc0, 0xd9, 0x54, 0x24, 0x18, 0xdf,
++    0x7c, 0x24, 0x10, 0xdf, 0x6c, 0x24, 0x10, 0x8b, 0x54, 0x24, 0x18, 0x8b, 0x44, 0x24, 0x10, 0x85,
++    0xc0, 0x74, 0x3c, 0xde, 0xe9, 0x85, 0xd2, 0x79, 0x1e, 0xd9, 0x1c, 0x24, 0x8b, 0x0c, 0x24, 0x81,
++    0xf1, 0x00, 0x00, 0x00, 0x80, 0x81, 0xc1, 0xff, 0xff, 0xff, 0x7f, 0x83, 0xd0, 0x00, 0x8b, 0x54,
++    0x24, 0x14, 0x83, 0xd2, 0x00, 0xeb, 0x2c, 0xd9, 0x1c, 0x24, 0x8b, 0x0c, 0x24, 0x81, 0xc1, 0xff,
++    0xff, 0xff, 0x7f, 0x83, 0xd8, 0x00, 0x8b, 0x54, 0x24, 0x14, 0x83, 0xda, 0x00, 0xeb, 0x14, 0x8b,
++    0x54, 0x24, 0x14, 0xf7, 0xc2, 0xff, 0xff, 0xff, 0x7f, 0x75, 0xb8, 0xd9, 0x5c, 0x24, 0x18, 0xd9,
++    0x5c, 0x24, 0x18, 0xc9, 0xc3,
++  };
++  static constexpr uint8_t Ftol[] = {
++    0x55, 0x8b, 0xec, 0x83, 0xc4, 0xf4, 0x9b, 0xd9, 0x7d, 0xfe, 0x9b, 0x66, 0x8b, 0x45, 0xfe, 0x80,
++    0xcc, 0x0c, 0x66, 0x89, 0x45, 0xfc, 0xd9, 0x6d, 0xfc, 0xdf, 0x7d, 0xf4, 0xd9, 0x6d, 0xfe, 0x8b,
++    0x45, 0xf4, 0x8b, 0x55, 0xf8, 0xc9, 0xc3,
++  };
++
++  if (Is64BitMode || !ReducedPrecisionMode) {
++    return false;
++  }
++
++  // The block's first byte is readable; so is the rest of its page.
++  const auto Matches = [Entry](const uint8_t* Code, size_t Size) {
++    return (Entry & 0xfff) + Size <= 0x1000 && memcmp(reinterpret_cast<const void*>(Entry), Code, Size) == 0;
++  };
++  if (!Matches(Ftol2, sizeof(Ftol2)) && !Matches(Ftol, sizeof(Ftol))) {
++    return false;
++  }
++
++  Ref Value = _ReadStackValue(0);
++  Ref Data = SinglePrecisionMode ? _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Value) : Value;
++  Ref Result = _Float_ToGPR_ZS(OpSize::i64Bit, OpSize::i64Bit, Data);
++  _PopStackDestroy();
++  StoreGPRRegister(X86State::REG_RAX, Result, OpSize::i32Bit);
++  StoreGPRRegister(X86State::REG_RDX, _Lshr(OpSize::i64Bit, Result, Constant(32)), OpSize::i32Bit);
++
++  // And its return.
++  const auto GPRSize = GetGPROpSize();
++  Ref SP = _RMWHandle(LoadGPRRegister(X86State::REG_RSP));
++  Ref NewRIP = Pop(GPRSize, SP);
++  StoreGPRRegister(X86State::REG_RSP, SP);
++  ExitFunction(NewRIP, BranchHint::Return);
++  BlockSetRIP = true;
++  return true;
++}
++
+ void OpDispatchBuilder::FISTF64(OpcodeArgs, bool Truncate) {
+   const auto Size = OpSizeFromSrc(Op);
+ 

@@ -288,6 +288,10 @@ static void test_dibs(void)
     assert( launcher_icon_decode_dib( b.data, b.size, &icon ) && pixel( &icon, 0, 0 )[3] == 255 );
     launcher_icon_free( &icon );
     assert( !launcher_icon_decode_dib( b.data, b.size - 1, &icon ) && icon.kind == LAUNCHER_ICON_NONE );
+    /* A height of -2^31 has no positive to turn into: refused, not negated. */
+    b.size = 0; make_dib24( &b, 48 );
+    b.data[8] = b.data[9] = b.data[10] = 0; b.data[11] = 0x80;
+    assert( !launcher_icon_decode_dib( b.data, b.size, &icon ) && icon.kind == LAUNCHER_ICON_NONE );
 
     /* Fitting 48 pixels into 16 averages 3x3 blocks, ignoring transparent colour. */
     b.size = 0; make_dib24( &b, 48 );

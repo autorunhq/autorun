@@ -1,0 +1,16 @@
+Carafe: the runtime checks the TEB offsets and the CPU area fields the profiler uses against Wine's headers.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -67,6 +67,10 @@
+ C_ASSERT( sizeof(WOW64_CPURESERVED) == NX_PROF_CPU_CONTEXT && TYPE_ALIGNMENT( I386_CONTEXT ) <= NX_PROF_CPU_CONTEXT );
+ C_ASSERT( FIELD_OFFSET( I386_CONTEXT, Ebp ) == NX_PROF_I386_EBP );
+ C_ASSERT( FIELD_OFFSET( I386_CONTEXT, Esp ) == NX_PROF_I386_ESP );
++C_ASSERT( FIELD_OFFSET( WOW64_CPURESERVED, Machine ) == NX_PROF_CPU_MACHINE );
++C_ASSERT( IMAGE_FILE_MACHINE_I386 == NX_PROF_MACHINE_I386 );
++C_ASSERT( FIELD_OFFSET( TEB, TlsSlots[WOW64_TLS_MAX_NUMBER - 3] ) == NX_PROF_TEB_FEX_THREAD );
++C_ASSERT( FIELD_OFFSET( TEB, TlsSlots[WOW64_TLS_MAX_NUMBER - 2] ) == NX_PROF_TEB_FEX_CONTROL );
+ 
+ u32 __nx_applet_type = AppletType_Application;
+ size_t __nx_heap_size = 256 * 1024 * 1024;

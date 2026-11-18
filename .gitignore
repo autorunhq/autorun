@@ -2,6 +2,7 @@
 /horizon-wine/toolchains/
 /horizon-wine/vendor/
 /horizon-wine/**/__pycache__/
+/carafe/**/__pycache__/
 .DS_Store
 
 debug

@@ -1,0 +1,15 @@
+Carafe: with the profiler on, the runtime passes FEX_GDBSYMBOLS=1 whatever the program's settings say. FEX then
+records every x86 instruction in a block's RIP map, which the profiler needs to name the guest code it samples; without
+the profiler the option keeps its setting, off by default.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -1734,6 +1734,7 @@
+ 
+         if (launcher_kv_get( &kv, option->name, configured, sizeof(configured) ) &&
+             nx_fex_option_choice( option, configured ) >= 0) value = configured;
++        if (option->id == NX_FEX_GDB_SYMBOLS && runtime_profile) value = "1";
+         length = snprintf( buffer + used, size - used, "%s=%s", option->name, value );
+         if (length < 0 || (size_t)length + 1 > size - used) return 0;
+         used += length + 1;

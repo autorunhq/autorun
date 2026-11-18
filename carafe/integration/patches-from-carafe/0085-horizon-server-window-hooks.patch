@@ -1,0 +1,479 @@
+Carafe: the Horizon server keeps window hooks: set_hook, remove_hook, start_hook_chain, finish_hook_chain and
+get_hook_info work for the hooks a program sets on its own threads, and every thread's shared queue data counts
+the hooks that run in it, so win32u calls them. Programs built on MFC hook window creation with WH_CBT before
+their first window and stop with CMemoryException when the hook is refused. Low-level, journal and win event
+hooks are still refused.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -643,6 +643,11 @@
+ #define HORIZON_REQ_FREE_USER_HANDLE 279
+ #define HORIZON_REQ_SET_CURSOR 280
+ #define HORIZON_REQ_GET_NEXT_THREAD 295
++#define HORIZON_REQ_SET_HOOK 199
++#define HORIZON_REQ_REMOVE_HOOK 200
++#define HORIZON_REQ_START_HOOK_CHAIN 201
++#define HORIZON_REQ_FINISH_HOOK_CHAIN 202
++#define HORIZON_REQ_GET_HOOK_INFO 203
+ #define HORIZON_STATUS_SUCCESS 0
+ #define HORIZON_STATUS_OBJECT_NAME_EXISTS 0x40000000u
+ #define HORIZON_STATUS_IMAGE_MACHINE_TYPE_MISMATCH 0x4000000eu
+@@ -6428,6 +6433,9 @@
+ static struct horizon_obj_locator horizon_free_queue_shm[32];
+ static unsigned int horizon_free_queue_shm_count;
+ 
++static void horizon_server_publish_hooks_locked( struct horizon_msgq *queue );
++static void horizon_server_remove_thread_hooks_locked( unsigned int tid );
++
+ /* The thread's message queue, created with its shared data and waitable
+  * object on first use. */
+ static struct horizon_msgq *horizon_server_queue_locked( unsigned int tid )
+@@ -6468,6 +6476,7 @@
+     queue->sync = sync;
+     queue->shm_id = locator.id;
+     queue->shm_offset = locator.offset;
++    horizon_server_publish_hooks_locked( queue );
+     return queue;
+ }
+ 
+@@ -6545,6 +6554,7 @@
+     struct horizon_msgq *queue = horizon_msgq_find( &horizon_msg_queues, tid );
+     struct horizon_server_object *sync;
+ 
++    horizon_server_remove_thread_hooks_locked( tid );
+     horizon_server_release_input_locked( tid );
+     if (!queue) return;
+     sync = queue->sync;
+@@ -6720,6 +6730,416 @@
+     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+ }
+ 
++#define HORIZON_NTUSER_OBJ_HOOK 0x0f
++#define HORIZON_WH_MINHOOK (-1)
++#define HORIZON_WH_JOURNALPLAYBACK 1
++#define HORIZON_WH_CALLWNDPROCRET 12
++#define HORIZON_WH_WINEVENT 15
++#define HORIZON_HOOK_KINDS 17
++
++struct horizon_set_hook_request
++{
++    struct horizon_server_request_header header;
++    int id;
++    unsigned int pid;
++    unsigned int tid;
++    int event_min;
++    int event_max;
++    unsigned long long proc;
++    int flags;
++    int unicode;
++};
++
++struct horizon_set_hook_reply
++{
++    struct horizon_server_reply_header header;
++    unsigned int handle;
++    char __pad_12[4];
++};
++
++struct horizon_remove_hook_request
++{
++    struct horizon_server_request_header header;
++    unsigned int handle;
++    unsigned long long proc;
++    int id;
++    char __pad_28[4];
++};
++
++struct horizon_start_hook_chain_request
++{
++    struct horizon_server_request_header header;
++    int id;
++    int event;
++    unsigned int window;
++    int object_id;
++    int child_id;
++};
++
++struct horizon_start_hook_chain_reply
++{
++    struct horizon_server_reply_header header;
++    unsigned int handle;
++    unsigned int pid;
++    unsigned int tid;
++    int unicode;
++    unsigned long long proc;
++};
++
++struct horizon_finish_hook_chain_request
++{
++    struct horizon_server_request_header header;
++    int id;
++};
++
++struct horizon_get_hook_info_request
++{
++    struct horizon_server_request_header header;
++    unsigned int handle;
++    int get_next;
++    int event;
++    unsigned int window;
++    int object_id;
++    int child_id;
++    char __pad_36[4];
++};
++
++struct horizon_get_hook_info_reply
++{
++    struct horizon_server_reply_header header;
++    unsigned int handle;
++    int id;
++    unsigned int pid;
++    unsigned int tid;
++    unsigned long long proc;
++    int unicode;
++    char __pad_36[4];
++};
++
++struct horizon_window_hook
++{
++    struct horizon_window_hook *next;
++    unsigned int handle;
++    int index;
++    unsigned int tid;
++    unsigned int owner;
++    unsigned long long proc;
++    int unicode;
++    unsigned char *module;
++    unsigned int module_size;
++};
++
++static struct horizon_window_hook *horizon_window_hooks;
++static int horizon_window_hook_chains[HORIZON_HOOK_KINDS];
++
++static struct horizon_window_hook *horizon_window_hook_from_locked( struct horizon_window_hook *hook, int index,
++                                                                    unsigned int tid, int global )
++{
++    for (; hook; hook = hook->next)
++        if (hook->index == index && hook->proc && (global ? !hook->tid : hook->tid == tid)) return hook;
++    return NULL;
++}
++
++static struct horizon_window_hook *horizon_window_hook_first_locked( int index, unsigned int tid )
++{
++    struct horizon_window_hook *hook = horizon_window_hook_from_locked( horizon_window_hooks, index, tid, 0 );
++
++    return hook ? hook : horizon_window_hook_from_locked( horizon_window_hooks, index, tid, 1 );
++}
++
++static struct horizon_window_hook *horizon_window_hook_next_locked( struct horizon_window_hook *hook, unsigned int tid )
++{
++    struct horizon_window_hook *next;
++
++    if (!hook->tid) return horizon_window_hook_from_locked( hook->next, hook->index, tid, 1 );
++    if ((next = horizon_window_hook_from_locked( hook->next, hook->index, tid, 0 ))) return next;
++    return horizon_window_hook_from_locked( horizon_window_hooks, hook->index, tid, 1 );
++}
++
++static struct horizon_window_hook *horizon_window_hook_find_locked( unsigned int handle )
++{
++    struct horizon_window_hook *hook;
++
++    for (hook = horizon_window_hooks; hook; hook = hook->next)
++        if (hook->handle == handle) return hook;
++    return NULL;
++}
++
++static void horizon_server_publish_hooks_locked( struct horizon_msgq *queue )
++{
++    struct horizon_obj_locator locator = { queue->shm_id, queue->shm_offset };
++    struct horizon_shared_object *shared;
++    struct horizon_window_hook *hook;
++    int counts[HORIZON_HOOK_KINDS] = {0};
++
++    for (hook = horizon_window_hooks; hook; hook = hook->next)
++        if (hook->proc && (!hook->tid || hook->tid == queue->tid)) counts[hook->index]++;
++    if (!(shared = horizon_server_shared_object_locked( locator )) || shared->id != queue->shm_id) return;
++    if (!memcmp( shared->shm.queue.hooks_count, counts, sizeof(counts) )) return;
++    memcpy( shared->shm.queue.hooks_count, counts, sizeof(counts) );
++    horizon_server_flush_session_range_locked(
++        queue->shm_offset, offsetof( struct horizon_shared_object, shm ) + sizeof(struct horizon_queue_shm) );
++}
++
++static void horizon_server_publish_all_hooks_locked( void )
++{
++    struct horizon_msgq *queue;
++
++    for (queue = horizon_msg_queues.head; queue; queue = queue->next)
++        horizon_server_publish_hooks_locked( queue );
++}
++
++static void horizon_server_free_hook_handle_locked( unsigned int handle )
++{
++    unsigned int low = handle & 0xffff, index;
++    struct horizon_user_entry *entry;
++
++    if (!horizon_session_data || low < HORIZON_FIRST_USER_HANDLE || ((low - HORIZON_FIRST_USER_HANDLE) & 1)) return;
++    index = (low - HORIZON_FIRST_USER_HANDLE) >> 1;
++    if (index >= horizon_user_handle_count) return;
++    entry = &((struct horizon_session_shm *)horizon_session_data)->user_entries[index];
++    if (entry->type != HORIZON_NTUSER_OBJ_HOOK || entry->generation != (handle >> 16)) return;
++    entry->offset = 0;
++    entry->tid = 0;
++    entry->pid = 0;
++    entry->id = 0;
++    entry->uniq = (unsigned int)entry->generation << 16;
++    horizon_server_flush_session_range_locked(
++        offsetof( struct horizon_session_shm, user_entries ) + index * sizeof(*entry), sizeof(*entry) );
++}
++
++static void horizon_window_hook_free_locked( struct horizon_window_hook *hook )
++{
++    struct horizon_window_hook **link;
++
++    for (link = &horizon_window_hooks; *link; link = &(*link)->next)
++    {
++        if (*link != hook) continue;
++        *link = hook->next;
++        break;
++    }
++    horizon_server_free_hook_handle_locked( hook->handle );
++    free( hook->module );
++    free( hook );
++}
++
++static void horizon_window_hook_remove_locked( struct horizon_window_hook *hook )
++{
++    hook->proc = 0;
++    if (!horizon_window_hook_chains[hook->index]) horizon_window_hook_free_locked( hook );
++}
++
++static void horizon_server_remove_thread_hooks_locked( unsigned int tid )
++{
++    struct horizon_window_hook *hook, *next;
++    int removed = 0;
++
++    for (hook = horizon_window_hooks; hook; hook = next)
++    {
++        next = hook->next;
++        if (!hook->proc || (hook->tid != tid && hook->owner != tid)) continue;
++        horizon_window_hook_remove_locked( hook );
++        removed = 1;
++    }
++    if (removed) horizon_server_publish_all_hooks_locked();
++}
++
++static unsigned int horizon_window_hook_module_locked( const struct horizon_window_hook *hook, unsigned int max,
++                                                       unsigned char *module, unsigned int size )
++{
++    unsigned int length = hook->module_size;
++
++    if (length > max) length = max;
++    if (length > size) length = size;
++    if (length) memcpy( module, hook->module, length );
++    return length;
++}
++
++static int horizon_server_handle_set_hook( struct horizon_server_connection *connection,
++                                           const unsigned char *message, const unsigned char *data,
++                                           unsigned int data_size )
++{
++    const struct horizon_set_hook_request *request = (const void *)message;
++    struct horizon_obj_locator locator = {0};
++    struct horizon_set_hook_reply reply;
++    struct horizon_window_hook *hook = NULL;
++
++    memset( &reply, 0, sizeof(reply) );
++    if (!request->proc || request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT ||
++        (request->pid && request->pid != connection->pid))
++        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
++    else if (request->id > HORIZON_WH_CALLWNDPROCRET ||
++             (request->id >= 0 && request->id <= HORIZON_WH_JOURNALPLAYBACK))
++        reply.header.error = HORIZON_STATUS_NOT_IMPLEMENTED;
++    else if (!(hook = calloc( 1, sizeof(*hook) )) || (data_size && !(hook->module = malloc( data_size ))))
++        reply.header.error = HORIZON_STATUS_NO_MEMORY;
++    if (!reply.header.error)
++    {
++        pthread_mutex_lock( &horizon_server_objects_mutex );
++        reply.header.error = horizon_server_alloc_user_handle_locked( HORIZON_NTUSER_OBJ_HOOK, locator,
++                                                                      connection->pid, connection->tid,
++                                                                      &hook->handle );
++        if (!reply.header.error)
++        {
++            hook->index = request->id - HORIZON_WH_MINHOOK;
++            hook->tid = request->tid;
++            hook->owner = connection->tid;
++            hook->proc = request->proc;
++            hook->unicode = request->unicode;
++            hook->module_size = data_size;
++            if (data_size) memcpy( hook->module, data, data_size );
++            hook->next = horizon_window_hooks;
++            horizon_window_hooks = hook;
++            reply.handle = hook->handle;
++            horizon_server_publish_all_hooks_locked();
++            hook = NULL;
++        }
++        pthread_mutex_unlock( &horizon_server_objects_mutex );
++    }
++    if (hook)
++    {
++        free( hook->module );
++        free( hook );
++    }
++    horizon_trace( "[HZHOOK] set id=%d tid=%04x owner=%04x module=%u -> %08x err=%08x\n",
++                   request->id, request->tid, connection->tid, data_size, reply.handle, reply.header.error );
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++}
++
++static int horizon_server_handle_remove_hook( struct horizon_server_connection *connection,
++                                              const unsigned char *message )
++{
++    const struct horizon_remove_hook_request *request = (const void *)message;
++    struct horizon_server_reply_header reply = { 0, 0 };
++    struct horizon_window_hook *hook = NULL;
++
++    pthread_mutex_lock( &horizon_server_objects_mutex );
++    if (request->handle)
++    {
++        if (!(hook = horizon_window_hook_find_locked( request->handle )) || !hook->proc)
++            reply.error = HORIZON_STATUS_INVALID_HANDLE;
++    }
++    else if (!request->proc || request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
++        reply.error = HORIZON_STATUS_INVALID_PARAMETER;
++    else
++    {
++        for (hook = horizon_window_hooks; hook; hook = hook->next)
++            if (hook->proc == request->proc && hook->tid == connection->tid &&
++                hook->index == request->id - HORIZON_WH_MINHOOK) break;
++        if (!hook) reply.error = HORIZON_STATUS_INVALID_PARAMETER;
++    }
++    if (!reply.error)
++    {
++        horizon_window_hook_remove_locked( hook );
++        horizon_server_publish_all_hooks_locked();
++    }
++    pthread_mutex_unlock( &horizon_server_objects_mutex );
++    horizon_trace( "[HZHOOK] remove %08x err=%08x\n", request->handle, reply.error );
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++}
++
++static int horizon_server_handle_start_hook_chain( struct horizon_server_connection *connection,
++                                                   const unsigned char *message )
++{
++    const struct horizon_start_hook_chain_request *request = (const void *)message;
++    struct horizon_start_hook_chain_reply reply;
++    struct horizon_window_hook *hook;
++    unsigned char module[520];
++
++    memset( &reply, 0, sizeof(reply) );
++    if (request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
++    {
++        reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
++        return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++    }
++    pthread_mutex_lock( &horizon_server_objects_mutex );
++    if ((hook = horizon_window_hook_first_locked( request->id - HORIZON_WH_MINHOOK, connection->tid )))
++    {
++        reply.handle = hook->handle;
++        reply.unicode = hook->unicode;
++        reply.proc = hook->proc;
++        reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
++                                                                     module, sizeof(module) );
++        horizon_window_hook_chains[hook->index]++;
++    }
++    pthread_mutex_unlock( &horizon_server_objects_mutex );
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
++                                       reply.header.reply_size );
++}
++
++static int horizon_server_handle_finish_hook_chain( struct horizon_server_connection *connection,
++                                                    const unsigned char *message )
++{
++    const struct horizon_finish_hook_chain_request *request = (const void *)message;
++    struct horizon_server_reply_header reply = { 0, 0 };
++    struct horizon_window_hook *hook, *next;
++    int index = request->id - HORIZON_WH_MINHOOK;
++
++    if (request->id < HORIZON_WH_MINHOOK || request->id > HORIZON_WH_WINEVENT)
++        reply.error = HORIZON_STATUS_INVALID_PARAMETER;
++    else
++    {
++        pthread_mutex_lock( &horizon_server_objects_mutex );
++        if (!horizon_window_hook_chains[index]) reply.error = HORIZON_STATUS_INVALID_PARAMETER;
++        else if (!--horizon_window_hook_chains[index])
++        {
++            for (hook = horizon_window_hooks; hook; hook = next)
++            {
++                next = hook->next;
++                if (hook->index == index && !hook->proc) horizon_window_hook_free_locked( hook );
++            }
++        }
++        pthread_mutex_unlock( &horizon_server_objects_mutex );
++    }
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
++}
++
++static int horizon_server_handle_get_hook_info( struct horizon_server_connection *connection,
++                                                const unsigned char *message )
++{
++    const struct horizon_get_hook_info_request *request = (const void *)message;
++    struct horizon_get_hook_info_reply reply;
++    struct horizon_window_hook *hook;
++    unsigned char module[520];
++
++    memset( &reply, 0, sizeof(reply) );
++    pthread_mutex_lock( &horizon_server_objects_mutex );
++    if (!(hook = horizon_window_hook_find_locked( request->handle )) ||
++        (hook->tid && hook->tid != connection->tid))
++        reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
++    else if (!request->get_next || (hook = horizon_window_hook_next_locked( hook, connection->tid )))
++    {
++        reply.handle = hook->handle;
++        reply.id = hook->index + HORIZON_WH_MINHOOK;
++        reply.unicode = hook->unicode;
++        reply.proc = hook->proc;
++        reply.header.reply_size = horizon_window_hook_module_locked( hook, request->header.reply_size,
++                                                                     module, sizeof(module) );
++    }
++    pthread_mutex_unlock( &horizon_server_objects_mutex );
++    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), module,
++                                       reply.header.reply_size );
++}
++
++static int horizon_server_handle_window_hook( struct horizon_server_connection *connection,
++                                              const unsigned char *message, int req,
++                                              const unsigned char *data, unsigned int data_size )
++{
++    switch (req)
++    {
++    case HORIZON_REQ_SET_HOOK:
++        return horizon_server_handle_set_hook( connection, message, data, data_size );
++    case HORIZON_REQ_REMOVE_HOOK:
++        return horizon_server_handle_remove_hook( connection, message );
++    case HORIZON_REQ_START_HOOK_CHAIN:
++        return horizon_server_handle_start_hook_chain( connection, message );
++    case HORIZON_REQ_FINISH_HOOK_CHAIN:
++        return horizon_server_handle_finish_hook_chain( connection, message );
++    default:
++        return horizon_server_handle_get_hook_info( connection, message );
++    }
++}
++
+ static struct horizon_user_window *horizon_server_find_window_locked( unsigned int handle )
+ {
+     struct horizon_user_window *window;
+@@ -17201,6 +17621,14 @@
+         case HORIZON_REQ_GET_KEY_STATE:
+             status = horizon_server_handle_get_key_state( connection, message );
+             break;
++        case HORIZON_REQ_SET_HOOK:
++        case HORIZON_REQ_REMOVE_HOOK:
++        case HORIZON_REQ_START_HOOK_CHAIN:
++        case HORIZON_REQ_FINISH_HOOK_CHAIN:
++        case HORIZON_REQ_GET_HOOK_INFO:
++            status = horizon_server_handle_window_hook( connection, message, header->req, request_data,
++                                                        header->request_size );
++            break;
+         default:
+         {
+             WARN( "unimplemented Horizon server request %d size %u reply_size %u.\n",

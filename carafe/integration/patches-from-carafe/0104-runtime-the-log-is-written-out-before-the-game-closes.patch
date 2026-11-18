@@ -1,0 +1,23 @@
+Carafe: wine_nx_runtime_log_flush writes out what the runtime's log and the game's log still hold, and the card
+writes held back with them. The overlay calls it before it lets the system close the game from the HOME Menu,
+which ends the process before the next periodic flush: the last lines of the log were lost.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/runtime.c
++++ b/horizon-wine/source/runtime.c
+@@ -499,6 +499,15 @@
+     log_line( "%s", msg );
+ }
+ 
++void wine_nx_runtime_log_flush( void )
++{
++    pthread_mutex_lock( &log_mutex );
++    if (log_file) fflush( log_file );
++    if (game_log_file) fflush( game_log_file );
++    pthread_mutex_unlock( &log_mutex );
++    wine_nx_sd_cache_flush();
++}
++
+ /* Per-operation traces (system calls, server requests, fonts, window painting)
+  * are formatted and written to the SD card as they happen, which slows the
+  * whole program down. Their call sites check this first; it is set from

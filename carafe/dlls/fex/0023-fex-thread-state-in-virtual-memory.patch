@@ -1,0 +1,28 @@
+Carafe: a thread's state is allocated in pages of the process's virtual memory, as the heap is on Windows. Its
+interrupt page must be write-protected for SuspendThread of a WoW64 thread running translated code; on Horizon
+FEX's heap is the runtime's own, which NtProtectVirtualMemory does not know, so the suspension failed.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -487,7 +487,9 @@
+ }
+ 
+ FEXCore::Core::InternalThreadState* ContextImpl::CreateThread(const FEXCore::Core::CPUState* NewThreadState) {
+-  FEXCore::Core::InternalThreadState* Thread = new FEXCore::Core::InternalThreadState {
++  void* Memory = FEXCore::Allocator::VirtualAlloc(sizeof(FEXCore::Core::InternalThreadState));
++  LOGMAN_THROW_A_FMT(Memory != nullptr, "Couldn't allocate the thread state");
++  FEXCore::Core::InternalThreadState* Thread = ::new (Memory) FEXCore::Core::InternalThreadState {
+     .CTX = this,
+   };
+   FEXCore::Allocator::VirtualName("FEXMem_ThreadState", Thread, sizeof(*Thread));
+@@ -515,7 +517,8 @@
+ void ContextImpl::DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
+   FEXCore::Allocator::VirtualProtect(&Thread->InterruptFaultPage, sizeof(Thread->InterruptFaultPage),
+                                      Allocator::ProtectOptions::Read | Allocator::ProtectOptions::Write);
+-  delete Thread;
++  Thread->~InternalThreadState();
++  FEXCore::Allocator::VirtualFree(Thread, sizeof(FEXCore::Core::InternalThreadState));
+ }
+ 
+ #ifndef _WIN32

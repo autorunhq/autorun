@@ -1,0 +1,16 @@
+Carafe: d3d9.frontEndThread, the switch for the Direct3D 9 front end on its own thread in Carafe's DXVK build, is
+one more key the runtime copies from the program settings into dxvk.conf.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/dxvk_options.c
++++ b/horizon-wine/source/dxvk_options.c
+@@ -431,6 +431,9 @@
+     OPTION( "d3d9.unchangedStateFastPath",
+             "Carafe's DXVK build: a state set to the value it already has returns before the device lock.",
+             boolean, 30101, 0, 0, 0, 1, 0, "True" ),
++    OPTION( "d3d9.frontEndThread",
++            "Carafe's DXVK build: the Direct3D 9 front end runs on a thread of its own.",
++            boolean, 30101, 0, 0, 0, 1, 0, "False" ),
+ };
+ #undef OPTION
+ 

@@ -1,0 +1,443 @@
+Carafe: with X87SinglePrecision and X87ReducedPrecision, x87 values are kept and computed as 32-bit floats instead
+of doubles. Direct3D 9 sets the x87 precision control to 24 bits unless a game asks it not to, so a Direct3D 9
+game's float math already rounds every result to a float. In games' x87 code most operands are floats in memory,
+and with doubles every load, every arithmetic operand and every store took an fcvt on the dependency chain: about
+a fifth of all emitted instructions. Registers keep their doubles in the thread state, so FSAVE, FXSAVE, MMX and the
+slow path see the same layout, and values are converted where a block loads or stores them there. FSIN, FCOS,
+FPTAN, FPATAN, FPREM, FSCALE, FYL2X, F2XM1 and FXTRACT run in double and round the result to a float. FIST and FISTP
+convert from double as before. Off by default; wrong for games that rely on double precision.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -624,6 +624,16 @@
+           "the stack back. Assumes the program neither overflows the x87 stack nor reads registers it has popped."
+         ]
+       },
++      "X87SinglePrecision": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "With X87ReducedPrecision, x87 values are kept and computed as 32-bit floats instead of doubles. Matches",
++          "programs that set the x87 precision control to 24 bits, as Direct3D 9 does; registers keep their doubles in",
++          "the thread state, so FSAVE, FXSAVE and MMX see the same layout."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1309,6 +1309,18 @@ private:
+   FEX_CONFIG_OPT(ReducedPrecisionMode, X87REDUCEDPRECISION);
+   FEX_CONFIG_OPT(ConversionRoundingMode, X87CONVERSIONROUNDING);
+   FEX_CONFIG_OPT(FastStackMode, X87FASTSTACK);
++  FEX_CONFIG_OPT(SinglePrecisionMode, X87SINGLEPRECISION);
++
++  IR::OpSize X87StackSize() const {
++    return SinglePrecisionMode() ? OpSize::i32Bit : OpSize::i64Bit;
++  }
++
++  Ref X87FromFloat(Ref Value, IR::OpSize Width) {
++    if (Width == X87StackSize()) {
++      return Value;
++    }
++    return _Float_FToF(X87StackSize(), Width, Value);
++  }
+   Ref X87ConditionBlock {};
+   std::array<Ref, 8> X87ConditionValues {};
+ 
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
+@@ -863,7 +863,7 @@ void OpDispatchBuilder::X87FXAM(OpcodeArgs) {
+     ReducedPrecisionMode ? _VExtractToGPR(OpSize::i64Bit, OpSize::i64Bit, a, 0) : _VExtractToGPR(OpSize::i128Bit, OpSize::i64Bit, a, 1);
+ 
+   // Extract the sign bit
+-  Result = ReducedPrecisionMode ? _Bfe(OpSize::i64Bit, 1, 63, Result) : _Bfe(OpSize::i64Bit, 1, 15, Result);
++  Result = ReducedPrecisionMode ? _Bfe(OpSize::i64Bit, 1, SinglePrecisionMode() ? 31 : 63, Result) : _Bfe(OpSize::i64Bit, 1, 15, Result);
+   SetRFLAG<FEXCore::X86State::X87FLAG_C1_LOC>(Result);
+ 
+   // Claim this is a normal number
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
+@@ -15,6 +15,7 @@ $end_info$
+ #include <FEXCore/Utils/EnumUtils.h>
+ #include <FEXCore/Utils/LogManager.h>
+ 
++#include <bit>
+ #include <stddef.h>
+ #include <stdint.h>
+ 
+@@ -66,10 +67,10 @@ void OpDispatchBuilder::FLDF64(OpcodeArgs, IR::OpSize Width) {
+   Ref Data = LoadSourceFPR_WithOpSize(Op, Op->Src[0], Width, Op->Flags);
+   // Convert to 64bit float
+   Ref ConvertedData = Data;
+-  if (Width == OpSize::i32Bit) {
+-    ConvertedData = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Data);
+-  } else if (Width == OpSize::f80Bit) {
+-    ConvertedData = _F80CVT(OpSize::i64Bit, Data);
++  if (Width == OpSize::f80Bit) {
++    ConvertedData = _F80CVT(X87StackSize(), Data);
++  } else {
++    ConvertedData = X87FromFloat(Data, Width);
+   }
+   _PushStack(ConvertedData, Data, Width);
+ }
+@@ -78,18 +79,24 @@ void OpDispatchBuilder::FBLDF64(OpcodeArgs) {
+   // Read from memory
+   Ref Data = LoadSourceFPR_WithOpSize(Op, Op->Src[0], OpSize::f80Bit, Op->Flags);
+   Ref ConvertedData = _F80BCDLoad(Data);
+-  ConvertedData = _F80CVT(OpSize::i64Bit, ConvertedData);
++  ConvertedData = _F80CVT(X87StackSize(), ConvertedData);
+   _PushStack(ConvertedData, Invalid(), OpSize::iInvalid);
+ }
+ 
+ void OpDispatchBuilder::FBSTPF64(OpcodeArgs) {
+-  Ref converted = _F80CVTTo(_ReadStackValue(0), OpSize::i64Bit);
++  Ref converted = _F80CVTTo(_ReadStackValue(0), X87StackSize());
+   converted = _F80BCDStore(converted);
+   StoreResultFPR_WithOpSize(Op, Op->Dest, converted, OpSize::f80Bit, OpSize::i8Bit);
+   _PopStackDestroy();
+ }
+ 
+ void OpDispatchBuilder::FLDF64_Const(OpcodeArgs, uint64_t Num) {
++  if (SinglePrecisionMode) {
++    const uint32_t Bits = std::bit_cast<uint32_t>(static_cast<float>(std::bit_cast<double>(Num)));
++    auto Data = _VCastFromGPR(OpSize::i32Bit, OpSize::i32Bit, Constant(Bits));
++    _PushStack(Data, Data, OpSize::i32Bit);
++    return;
++  }
+   auto Data = _VCastFromGPR(OpSize::i64Bit, OpSize::i64Bit, Constant(Num));
+   _PushStack(Data, Data, OpSize::i64Bit);
+ }
+@@ -102,7 +109,7 @@ void OpDispatchBuilder::FILDF64(OpcodeArgs) {
+   if (ReadWidth == OpSize::i16Bit) {
+     Data = _Sbfe(OpSize::i64Bit, IR::OpSizeAsBits(ReadWidth), 0, Data);
+   }
+-  auto ConvertedData = _Float_FromGPR_S(OpSize::i64Bit, ReadWidth == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, Data);
++  auto ConvertedData = _Float_FromGPR_S(X87StackSize(), ReadWidth == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit, Data);
+   _PushStack(ConvertedData, Invalid(), OpSize::iInvalid);
+ }
+ 
+@@ -110,6 +117,9 @@ void OpDispatchBuilder::FISTF64(OpcodeArgs, bool Truncate) {
+   const auto Size = OpSizeFromSrc(Op);
+ 
+   Ref data = _ReadStackValue(0);
++  if (SinglePrecisionMode) {
++    data = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, data);
++  }
+   if (!Truncate && ConversionRoundingMode) {
+     const auto IntSize = Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit;
+     Ref RoundBits = _Bfe(OpSize::i32Bit, 2, 10, _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW)));
+@@ -174,12 +184,9 @@ void OpDispatchBuilder::FADDF64(OpcodeArgs, IR::OpSize Width, bool Integer, OpDi
+     if (Width == OpSize::i16Bit) {
+       arg = _Sbfe(OpSize::i64Bit, 16, 0, arg);
+     }
+-    arg = _Float_FromGPR_S(OpSize::i64Bit, Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
+-  } else if (Width == OpSize::i32Bit) {
+-    arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
+-    arg = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, arg);
+-  } else if (Width == OpSize::i64Bit) {
+-    arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
++    arg = _Float_FromGPR_S(X87StackSize(), Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
++  } else if (Width == OpSize::i32Bit || Width == OpSize::i64Bit) {
++    arg = X87FromFloat(LoadSourceFPR(Op, Op->Src[0], Op->Flags), Width);
+   } else {
+     FEX_UNREACHABLE;
+   }
+@@ -212,12 +219,9 @@ void OpDispatchBuilder::FMULF64(OpcodeArgs, IR::OpSize Width, bool Integer, OpDi
+     if (Width == OpSize::i16Bit) {
+       arg = _Sbfe(OpSize::i64Bit, 16, 0, arg);
+     }
+-    arg = _Float_FromGPR_S(OpSize::i64Bit, Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
+-  } else if (Width == OpSize::i32Bit) {
+-    arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
+-    arg = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, arg);
+-  } else if (Width == OpSize::i64Bit) {
+-    arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
++    arg = _Float_FromGPR_S(X87StackSize(), Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
++  } else if (Width == OpSize::i32Bit || Width == OpSize::i64Bit) {
++    arg = X87FromFloat(LoadSourceFPR(Op, Op->Src[0], Op->Flags), Width);
+   } else {
+     FEX_UNREACHABLE;
+   }
+@@ -264,12 +268,9 @@ void OpDispatchBuilder::FDIVF64(OpcodeArgs, IR::OpSize Width, bool Integer, bool
+       if (Width == OpSize::i16Bit) {
+         Arg = _Sbfe(OpSize::i64Bit, 16, 0, Arg);
+       }
+-      Arg = _Float_FromGPR_S(OpSize::i64Bit, Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, Arg);
+-    } else if (Width == OpSize::i32Bit) {
+-      Arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
+-      Arg = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Arg);
+-    } else if (Width == OpSize::i64Bit) {
+-      Arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
++      Arg = _Float_FromGPR_S(X87StackSize(), Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, Arg);
++    } else if (Width == OpSize::i32Bit || Width == OpSize::i64Bit) {
++      Arg = X87FromFloat(LoadSourceFPR(Op, Op->Src[0], Op->Flags), Width);
+     }
+   } else {
+     FEX_UNREACHABLE;
+@@ -321,12 +322,9 @@ void OpDispatchBuilder::FSUBF64(OpcodeArgs, IR::OpSize Width, bool Integer, bool
+       if (Width == OpSize::i16Bit) {
+         arg = _Sbfe(OpSize::i64Bit, 16, 0, arg);
+       }
+-      arg = _Float_FromGPR_S(OpSize::i64Bit, Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
+-    } else if (Width == OpSize::i32Bit) {
+-      arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
+-      arg = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, arg);
+-    } else if (Width == OpSize::i64Bit) {
+-      arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
++      arg = _Float_FromGPR_S(X87StackSize(), Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
++    } else if (Width == OpSize::i32Bit || Width == OpSize::i64Bit) {
++      arg = X87FromFloat(LoadSourceFPR(Op, Op->Src[0], Op->Flags), Width);
+     }
+   } else {
+     FEX_UNREACHABLE;
+@@ -368,12 +366,9 @@ void OpDispatchBuilder::FCOMIF64(OpcodeArgs, IR::OpSize Width, bool Integer, OpD
+       if (Width == OpSize::i16Bit) {
+         arg = _Sbfe(OpSize::i64Bit, 16, 0, arg);
+       }
+-      b = _Float_FromGPR_S(OpSize::i64Bit, Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
+-    } else if (Width == OpSize::i32Bit) {
+-      arg = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
+-      b = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, arg);
+-    } else if (Width == OpSize::i64Bit) {
+-      b = LoadSourceFPR(Op, Op->Src[0], Op->Flags);
++      b = _Float_FromGPR_S(X87StackSize(), Width == OpSize::i64Bit ? OpSize::i64Bit : OpSize::i32Bit, arg);
++    } else if (Width == OpSize::i32Bit || Width == OpSize::i64Bit) {
++      b = X87FromFloat(LoadSourceFPR(Op, Op->Src[0], Op->Flags), Width);
+     }
+   } else {
+     FEX_UNREACHABLE;
+@@ -407,6 +402,9 @@ void OpDispatchBuilder::X87FXTRACTF64(OpcodeArgs) {
+   // if val is NaN, then sig = val, exp = val
+   // otherwise we just extract the 64-bit sig and exp as normal.
+   Ref Node = _ReadStackValue(0);
++  if (SinglePrecisionMode) {
++    Node = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Node);
++  }
+ 
+   Ref Gpr = _VExtractToGPR(OpSize::i64Bit, OpSize::i64Bit, Node, 0);
+ 
+@@ -447,6 +445,11 @@ void OpDispatchBuilder::X87FXTRACTF64(OpcodeArgs) {
+   Ref Sig = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, SigZV, SigNZOrInf);
+   Ref Exp = _NZCVSelectV(OpSize::i64Bit, CondClass::EQ, ExpZV, ExpNZOrInf);
+ 
++  if (SinglePrecisionMode) {
++    Exp = _Float_FToF(OpSize::i32Bit, OpSize::i64Bit, Exp);
++    Sig = _Float_FToF(OpSize::i32Bit, OpSize::i64Bit, Sig);
++  }
++
+   _PopStackDestroy();
+   _PushStack(Exp, Invalid(), OpSize::iInvalid);
+   _PushStack(Sig, Invalid(), OpSize::iInvalid);
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -230,6 +230,8 @@ public:
+     ConversionRoundingMode = ConversionRounding;
+     FEX_CONFIG_OPT(FastStack, X87FASTSTACK);
+     FastStackMode = FastStack;
++    FEX_CONFIG_OPT(SinglePrecision, X87SINGLEPRECISION);
++    SinglePrecisionMode = ReducedPrecisionMode && SinglePrecision;
+   }
+   void Run(IREmitter* Emit) override;
+ 
+@@ -239,6 +241,19 @@ private:
+   bool ReducedPrecisionMode;
+   bool ConversionRoundingMode;
+   bool FastStackMode;
++  bool SinglePrecisionMode;
++
++  OpSize StackSize() const {
++    return SinglePrecisionMode ? OpSize::i32Bit : OpSize::i64Bit;
++  }
++
++  Ref ToDouble(Ref Value) {
++    return SinglePrecisionMode ? IREmit->_Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Value) : Value;
++  }
++
++  Ref FromDouble(Ref Value) {
++    return SinglePrecisionMode ? IREmit->_Float_FToF(OpSize::i32Bit, OpSize::i64Bit, Value) : Value;
++  }
+   FEX_CONFIG_OPT(DisableVixlIndirectCalls, DISABLE_VIXL_INDIRECT_RUNTIME_CALLS);
+ 
+   // Helpers
+@@ -314,16 +329,20 @@ private:
+ 
+     switch (Op->StoreSize) {
+     case OpSize::i32Bit: {
+-      StackNode = IREmit->_Float_FToF(OpSize::i32Bit, OpSize::i64Bit, StackNode);
+-      [[fallthrough]];
++      if (!SinglePrecisionMode) {
++        StackNode = IREmit->_Float_FToF(OpSize::i32Bit, OpSize::i64Bit, StackNode);
++      }
++      IREmit->_StoreMemFPR(Op->StoreSize, StackNode, AddrNode, Offset, Align, OffsetType, OffsetScale);
++      break;
+     }
+     case OpSize::i64Bit: {
++      StackNode = ToDouble(StackNode);
+       IREmit->_StoreMemFPR(Op->StoreSize, StackNode, AddrNode, Offset, Align, OffsetType, OffsetScale);
+       break;
+     }
+ 
+     case OpSize::f80Bit: {
+-      StackNode = IREmit->_F80CVTTo(StackNode, OpSize::i64Bit);
++      StackNode = IREmit->_F80CVTTo(StackNode, StackSize());
+       Store80BitToMem(Op, StackNode, AddrNode, Offset, Align, OffsetType, OffsetScale);
+       break;
+     }
+@@ -551,7 +570,8 @@ inline Ref X87StackOptimization::LoadStackValueAtOffset_Slow(uint8_t Offset) {
+   OrderedNode* TopOffsetAddress = GetOffsetTopAddressWithCache_Slow(Offset);
+   auto Size = ReducedPrecisionMode ? OpSize::i64Bit : OpSize::i128Bit;
+   if (!TopValueCache[Offset]) {
+-    TopValueCache[Offset] = IREmit->_LoadMemFPR(Size, TopOffsetAddress, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1);
++    TopValueCache[Offset] =
++      FromDouble(IREmit->_LoadMemFPR(Size, TopOffsetAddress, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1));
+   }
+   return TopValueCache[Offset];
+ }
+@@ -574,7 +594,7 @@ inline std::optional<X87StackOptimization::StackMemberInfo> X87StackOptimization
+   if (FastStackMode && !SlowPath && StackData.top(Offset).Type == StackSlot::UNUSED) {
+     const auto Size = ReducedPrecisionMode ? OpSize::i64Bit : OpSize::i128Bit;
+     Ref Address = GetOffsetTopAddressWithCache_Slow(EntryOffset(Offset));
+-    Ref Value = IREmit->_LoadMemFPR(Size, Address, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1);
++    Ref Value = FromDouble(IREmit->_LoadMemFPR(Size, Address, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1));
+     StackData.load(StackMemberInfo {Value}, Offset);
+     return StackData.top(Offset).Value;
+   }
+@@ -614,9 +634,11 @@ void X87StackOptimization::HandleUnop(IROps Op64, bool VFOp64, IROps Op80) {
+ 
+   if (ReducedPrecisionMode) {
+     if (VFOp64) {
+-      DeriveOp(Value, Op64, IREmit->_VFSqrt(OpSize::i64Bit, OpSize::i64Bit, St0));
++      DeriveOp(Value, Op64, IREmit->_VFSqrt(StackSize(), StackSize(), St0));
+     } else {
+-      DeriveOp(Value, Op64, IREmit->_F64SIN(St0));
++      Ref Arg = ToDouble(St0);
++      DeriveOp(Value, Op64, IREmit->_F64SIN(Arg));
++      Value = FromDouble(Value);
+     }
+   } else {
+     DeriveOp(Value, Op80, IREmit->_F80SQRT(St0));
+@@ -634,12 +656,15 @@ void X87StackOptimization::HandleBinopValue(IROps Op64, bool VFOp64, IROps Op80,
+   Ref Node = {};
+   if (ReducedPrecisionMode) {
+     if (Reverse) {
+-      DeriveOp(Node, Op64, IREmit->_VFAdd(OpSize::i64Bit, OpSize::i64Bit, ValueNode, StackNode));
++      DeriveOp(Node, Op64, IREmit->_VFAdd(StackSize(), StackSize(), ValueNode, StackNode));
+     } else {
+       if (VFOp64) {
+-        DeriveOp(Node, Op64, IREmit->_VFAdd(OpSize::i64Bit, OpSize::i64Bit, StackNode, ValueNode));
++        DeriveOp(Node, Op64, IREmit->_VFAdd(StackSize(), StackSize(), StackNode, ValueNode));
+       } else {
+-        DeriveOp(Node, Op64, IREmit->_F64FPREM(StackNode, ValueNode));
++        Ref Arg1 = ToDouble(StackNode);
++        Ref Arg2 = ToDouble(ValueNode);
++        DeriveOp(Node, Op64, IREmit->_F64FPREM(Arg1, Arg2));
++        Node = FromDouble(Node);
+       }
+     }
+   } else {
+@@ -705,7 +730,8 @@ void X87StackOptimization::FlushCachedRegs() {
+   for (size_t i = 0; i < FlushValuesPending.size(); i++) {
+     if (FlushValuesPending[i]) {
+       OrderedNode* TopOffsetAddress = GetOffsetTopAddressWithCache_Slow(i);
+-      IREmit->_StoreMemFPR(Size, TopValueCache[i], TopOffsetAddress, IREmit->_InlineConstant(MMBaseOffset()), Size, MemOffsetType::SXTX, 1);
++      IREmit->_StoreMemFPR(Size, ToDouble(TopValueCache[i]), TopOffsetAddress, IREmit->_InlineConstant(MMBaseOffset()), Size,
++                           MemOffsetType::SXTX, 1);
+       // store
+       FlushValuesPending[i] = false;
+     }
+@@ -961,7 +987,9 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+       case OP_F80PTANSTACK: {
+         HandleUnop(OP_F64TAN, false, OP_F80TAN);
+         Ref OneConst {};
+-        if (ReducedPrecisionMode) {
++        if (SinglePrecisionMode) {
++          OneConst = IREmit->_VCastFromGPR(OpSize::i32Bit, OpSize::i32Bit, GetConstant(0x3F800000));
++        } else if (ReducedPrecisionMode) {
+           OneConst = IREmit->_VCastFromGPR(OpSize::i64Bit, OpSize::i64Bit, GetConstant(0x3FF0000000000000));
+         } else {
+           OneConst = IREmit->_LoadNamedVectorConstant(OpSize::i128Bit, NamedVectorConstant::NAMED_VECTOR_X87_ONE);
+@@ -983,8 +1011,9 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         Ref CosValue {};
+ 
+         if (ReducedPrecisionMode) {
+-          SinValue = IREmit->_F64SIN(St0);
+-          CosValue = IREmit->_F64COS(St0);
++          Ref Arg = ToDouble(St0);
++          SinValue = FromDouble(IREmit->_F64SIN(Arg));
++          CosValue = FromDouble(IREmit->_F64COS(Arg));
+         }
+ #ifdef VIXL_SIMULATOR
+         else if (DisableVixlIndirectCalls() == 0) {
+@@ -1212,7 +1241,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         // of a value
+         Ref ResultNode {};
+         if (ReducedPrecisionMode) {
+-          ResultNode = IREmit->_VFNeg(OpSize::i64Bit, OpSize::i64Bit, Value);
++          ResultNode = IREmit->_VFNeg(StackSize(), StackSize(), Value);
+         } else {
+           Ref HelperNode = IREmit->_LoadNamedVectorConstant(OpSize::i128Bit, IR::NamedVectorConstant::NAMED_VECTOR_F80_SIGN_MASK);
+           ResultNode = IREmit->_VXor(OpSize::i128Bit, Value, HelperNode);
+@@ -1226,7 +1255,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+ 
+         Ref ResultNode {};
+         if (ReducedPrecisionMode) {
+-          ResultNode = IREmit->_VFAbs(OpSize::i64Bit, OpSize::i64Bit, Value);
++          ResultNode = IREmit->_VFAbs(StackSize(), StackSize(), Value);
+         } else {
+           // Intermediate insts
+           Ref HelperNode = IREmit->_LoadNamedVectorConstant(OpSize::i128Bit, IR::NamedVectorConstant::NAMED_VECTOR_F80_SIGN_MASK);
+@@ -1244,7 +1273,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+ 
+         Ref CmpNode {};
+         if (ReducedPrecisionMode) {
+-          CmpNode = IREmit->_FCmp(OpSize::i64Bit, StackValue1, StackValue2);
++          CmpNode = IREmit->_FCmp(StackSize(), StackValue1, StackValue2);
+         } else {
+           CmpNode = IREmit->_F80Cmp(StackValue1, StackValue2);
+         }
+@@ -1260,7 +1289,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+ 
+         Ref CmpNode {};
+         if (ReducedPrecisionMode) {
+-          CmpNode = IREmit->_FCmp(OpSize::i64Bit, StackNode, ZeroConst);
++          CmpNode = IREmit->_FCmp(StackSize(), StackNode, ZeroConst);
+         } else {
+           CmpNode = IREmit->_F80Cmp(StackNode, ZeroConst);
+         }
+@@ -1276,7 +1305,7 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+ 
+         Ref CmpNode {};
+         if (ReducedPrecisionMode) {
+-          CmpNode = IREmit->_FCmp(OpSize::i64Bit, StackNode, Value);
++          CmpNode = IREmit->_FCmp(StackSize(), StackNode, Value);
+         } else {
+           CmpNode = IREmit->_F80Cmp(StackNode, Value);
+         }
+@@ -1334,20 +1363,20 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         if (ReducedPrecisionMode && ConversionRoundingMode) {
+           Ref FCW = IREmit->_LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW));
+           Ref RoundBits = IREmit->_Bfe(OpSize::i32Bit, 2, 10, FCW);
+-          Value = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, RoundMode::Host);
++          Value = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, RoundMode::Host);
+           const std::pair<uint64_t, RoundMode> Modes[] = {
+             {1, RoundMode::NegInfinity},
+             {2, RoundMode::PosInfinity},
+             {3, RoundMode::TowardsZero},
+           };
+           for (const auto& [Bits, Mode] : Modes) {
+-            Ref Rounded = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, Mode);
++            Ref Rounded = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, Mode);
+             Ref Mask = IREmit->_Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, IREmit->_Constant(Bits),
+                                        IREmit->_Constant(~0ULL), IREmit->_Constant(0));
+             Value = IREmit->_VBSL(OpSize::i128Bit, IREmit->_VDupFromGPR(OpSize::i128Bit, OpSize::i64Bit, Mask), Rounded, Value);
+           }
+         } else if (ReducedPrecisionMode) {
+-          Value = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, RoundMode::Host);
++          Value = IREmit->_Vector_FToI(StackSize(), StackSize(), St0, RoundMode::Host);
+         } else {
+           Value = IREmit->_F80Round(St0);
+         }

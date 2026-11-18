@@ -41,6 +41,39 @@ One source tree builds each runtime. The CMake options pick which:
 |---|---|---|
 | x86 (`nx-wow64-dynarec-*`) | 32-bit games through WoW64 and Box64, with OpenGL and Vulkan from mesa-switch | `WINE_NX_BOX64_DYNAREC`, `WINE_NX_MESA_SWITCH_DIR` |
 | AMD64 (`nx-amd64-fex-*`) | 32- and 64-bit games through FEX (WoW64 and ARM64EC) | `WINE_NX_AMD64`, `WINE_NX_FEX` |
+| AMD64 with nxvk (`wine-nx-runtime-nxvk.nro`) | The same, with nxvk's Mesa instead of mesa-switch: NVK for Vulkan, Zink for OpenGL, no nvc0 and no frame generation | `WINE_NX_NXVK_DIR` (`build.sh --nxvk`, `build-nxvk.sh`) |
+
+A game's Graphics driver setting picks mesa-switch with OpenGL through nvc0 or
+Zink, or nxvk. The switch-dev image's mesa-switch is built without Zink, so a
+game set to Zink runs on nxvk, which is Zink on NVK, and on nvc0 when nxvk is
+not on the card either; the launcher says which. Two Mesas cannot be linked into one program, so nxvk is a second
+runtime on the card: a game set to it is queued in `run-next.txt` and that NRO
+is started for it, and the other way round (`source/runtime.c`,
+`runtime_switch_graphics_runtime`). When the game ends, the nxvk runtime starts
+the card's runtime for the launcher. Both run in the one process the loader
+keeps, so whatever one leaves running goes on into the next: each closes USB
+and its threads first, and a runtime that finds pages left lent inside its heap
+keeps them out of it. The nxvk runtime writes `logs/autorun_runtime_nxvk.log`,
+which the card's runtime does not write over.
+
+NVK's image compression is off in the nxvk runtime and for Zink on mesa-switch
+(`NVK_DEBUG=no_compression`): each compressed image is an allocation of its own
+with compression tags of the GPU's, Zink makes one for every texture, and in
+Doom 3 they ran out at about 2000. `nvk-compression` in `settings.json` turns it
+back on.
+
+Vampire: The Masquerade - Redemption froze on mesa-switch about a minute in,
+on "corrupt or oversized bufctx list", with display mode emulation on, this
+fork's default. Its 640x480 is then drawn into a framebuffer object, which an
+internal context of win32u's, sharing the game's objects, blits to the window at
+every swap, and nvc0 gives every context of the screen the screen's one
+pushbuffer. With **Display mode emulation** off for the game (`mode-emulation`),
+as upstream Autorun has it, the game draws to the window itself and plays. Two
+earlier guesses did not hold: turning `NOUVEAU_SWITCH_INCREMENTAL_REFS` off,
+and drawing the loading screen's first frame on a new OpenGL surface with the
+program's own context instead of one made and destroyed for it
+(`dlls/win32u/winnx_opengl.c`, `nx_screen_first_frame`). The frame is still
+drawn that way, so no context that drew is destroyed while a program runs.
 
 The AMD64 runtime runs 32-bit programs too, so a card needs only it; the x86
 one is optional. `tools/package-autorun.py` puts the runtime, Autorun's setup

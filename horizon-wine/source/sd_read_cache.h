@@ -37,7 +37,8 @@
 
 #define SD_CACHE_CHUNK  (128 * 1024)  /* the most a miss reads, and a line's buffer */
 #define SD_CACHE_FILL_MIN (16 * 1024) /* what a miss reads until a file is read in order */
-#define SD_CACHE_LINES  8             /* chunks kept per file */
+#define SD_CACHE_LINES  32            /* chunks kept per file, 4 MB */
+#define SD_CACHE_KEPT   32            /* closed files whose chunks are kept */
 #define SD_CACHE_DIRECT (64 * 1024)   /* reads this large go straight to the file */
 #define SD_CACHE_BYPASS (-2)          /* sd_cache_read found no memory: read directly */
 #define SD_CACHE_POOL_MIN 256         /* 32 MB, the chunks every game gets */
@@ -72,6 +73,12 @@ struct sd_cache_pool
     unsigned int fill_min;         /* the smallest fill, or 0 for whole chunks */
     unsigned long long clock;      /* counts every chunk read, across files */
     struct sd_cache_line **held;   /* the lines holding a chunk, used of them */
+    /* Files closed with chunks, newest first, SD_CACHE_KEPT at most: the next
+     * open of the path takes them (sd_cache_opened). Doom 3 opens a .pk4 again
+     * for files inside it, and each open started with no chunk, so the card
+     * gave 10 to 35 times what it asked for while a level loaded. */
+    struct sd_cache_file *kept;
+    unsigned int kept_count;
 };
 
 static inline void sd_cache_held_add( struct sd_cache_pool *pool, struct sd_cache_line *line )
@@ -166,6 +173,9 @@ struct sd_cache_file
     long long fill_end;      /* where the last fill ended: a miss there reads on in order */
     int size_known;          /* a fill came back short: the file ends at size */
     long long size;
+    /* For the [SDFILES] line (sd_cache.c): what the program asked of this
+     * open and what the card gave for it, and how much was reported. */
+    unsigned long long asked, card, asked_told, card_told;
     struct sd_cache_line lines[SD_CACHE_LINES];
     struct sd_cache_file *next;
 };
@@ -188,6 +198,51 @@ static inline void sd_cache_drop( struct sd_cache_file *file, struct sd_cache_po
     file->window = 0;
     file->fill_end = 0;
     file->size_known = 0;
+}
+
+static inline int sd_cache_same_path( const char *a, const char *b );
+
+static inline int sd_cache_holds( const struct sd_cache_file *file )
+{
+    unsigned int i;
+
+    for (i = 0; i < SD_CACHE_LINES; i++) if (file->lines[i].data) return 1;
+    return 0;
+}
+
+/* Lets go of a kept file: its chunks and the record. */
+static inline void sd_cache_kept_remove( struct sd_cache_pool *pool, struct sd_cache_file *file )
+{
+    struct sd_cache_file **prev;
+
+    for (prev = &pool->kept; *prev; prev = &(*prev)->next)
+    {
+        if (*prev != file) continue;
+        *prev = file->next;
+        pool->kept_count--;
+        sd_cache_drop( file, pool );
+        free( file->path );
+        free( file );
+        return;
+    }
+}
+
+/* Every kept file, as when the cache stops. */
+static inline void sd_cache_kept_clear( struct sd_cache_pool *pool )
+{
+    while (pool->kept) sd_cache_kept_remove( pool, pool->kept );
+}
+
+/* The kept files with this path go: what they hold may be out of date. */
+static inline void sd_cache_kept_forget( struct sd_cache_pool *pool, const char *path )
+{
+    struct sd_cache_file *file = pool->kept, *next;
+
+    for (; file; file = next)
+    {
+        next = file->next;
+        if (sd_cache_same_path( file->path, path )) sd_cache_kept_remove( pool, file );
+    }
 }
 
 static inline struct sd_cache_line *sd_cache_line_for( struct sd_cache_file *file, long long offset )
@@ -364,6 +419,7 @@ static inline struct sd_cache_file *sd_cache_find( struct sd_cache_file *list, v
 /* Stop caching every open file with this path. */
 static inline void sd_cache_forget_path( struct sd_cache_file *list, struct sd_cache_pool *pool, const char *path )
 {
+    sd_cache_kept_forget( pool, path );
     for (; list; list = list->next)
     {
         if (!sd_cache_same_path( list->path, path )) continue;
@@ -376,6 +432,7 @@ static inline void sd_cache_forget_path( struct sd_cache_file *list, struct sd_c
  * date, and is dropped. They stay cached, and read the card again. */
 static inline void sd_cache_written( struct sd_cache_file *list, struct sd_cache_pool *pool, const char *path )
 {
+    sd_cache_kept_forget( pool, path );
     for (; list; list = list->next)
         if (sd_cache_same_path( list->path, path )) sd_cache_drop( list, pool );
 }
@@ -395,6 +452,27 @@ static inline struct sd_cache_file *sd_cache_opened( struct sd_cache_file **list
     file->key = key;
     file->writable = writable;
     file->cacheable = 1;
+    /* What an earlier open of the path read, if it is kept. */
+    for (other = pool->kept; other; other = other->next)
+    {
+        unsigned int i;
+
+        if (!sd_cache_same_path( other->path, path )) continue;
+        for (i = 0; i < SD_CACHE_LINES; i++)
+        {
+            if (!other->lines[i].data) continue;
+            file->lines[i] = other->lines[i];
+            sd_cache_held_replace( pool, &other->lines[i], &file->lines[i] );
+            memset( &other->lines[i], 0, sizeof(other->lines[i]) );
+        }
+        file->window = other->window;
+        file->fill_end = other->fill_end;
+        file->size_known = other->size_known;
+        file->size = other->size;
+        sd_cache_kept_remove( pool, other );
+        break;
+    }
+    sd_cache_kept_forget( pool, path );
     /* What a writer of this path left behind is not what this open will read. */
     for (other = *list; other; other = other->next)
         if (other->writable && sd_cache_same_path( other->path, path )) sd_cache_drop( other, pool );
@@ -411,6 +489,25 @@ static inline void sd_cache_closed( struct sd_cache_file **list, struct sd_cache
     {
         if (file->key != key) continue;
         *prev = file->next;
+        if (file->cacheable && sd_cache_holds( file ))
+        {
+            /* Kept for the next open of the path, newest first, and the only
+             * one kept for it: an open that does not take a kept file's
+             * chunks would not drop them when it writes. */
+            sd_cache_kept_forget( pool, file->path );
+            file->key = NULL;
+            file->asked = file->card = file->asked_told = file->card_told = 0;
+            file->next = pool->kept;
+            pool->kept = file;
+            if (++pool->kept_count > SD_CACHE_KEPT)
+            {
+                struct sd_cache_file *oldest = pool->kept;
+
+                while (oldest->next) oldest = oldest->next;
+                sd_cache_kept_remove( pool, oldest );
+            }
+            return;
+        }
         sd_cache_drop( file, pool );
         free( file->path );
         free( file );

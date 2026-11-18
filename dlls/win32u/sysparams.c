@@ -165,13 +165,21 @@ static INT64 last_query_display_time;
 static UINT64 monitor_update_serial;
 static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef __SWITCH__
+BOOL emulate_modeset = TRUE;
+#else
 BOOL emulate_modeset = FALSE;
+#endif
 BOOL decorated_mode = TRUE;
 UINT64 thunk_lock_callback = 0;
 
 #ifdef __SWITCH__
 /* horizon-wine/source/runtime.c, cleared by switch/wine/no-display-devices.txt */
 extern int wine_nx_display_devices __attribute__((weak));
+/* horizon-wine/source/runtime.c: 0=whole, 1=edges, 2=stretched, 3=own-size */
+extern int wine_nx_picture_mode __attribute__((weak));
+/* horizon-wine/source/runtime.c: 0 when mode-emulation is off for the program */
+extern int wine_nx_emulate_modeset __attribute__((weak));
 #endif
 
 #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
@@ -329,11 +337,19 @@ static UINT gcd( UINT a, UINT b )
 
 static struct ratio make_ratio( UINT num, UINT den )
 {
-    UINT d = gcd( num, den );
-    struct ratio r = { num / d, den / d };
-    assert( num / d < 65536 );
-    assert( den / d < 65536 );
-    return r;
+    UINT d;
+
+    if (!den) return (struct ratio){ 1, 1 };
+    for (;;)
+    {
+        d = gcd( num, den );
+        if (num / d < 65536 && den / d < 65536) break;
+        if (num < 2 || den < 2) break;
+        num >>= 1;
+        den >>= 1;
+    }
+    if (!den) return (struct ratio){ 1, 1 };
+    return (struct ratio){ num / d, den / d };
 }
 
 static struct ratio min_ratio( struct ratio x, struct ratio y )
@@ -2348,20 +2364,55 @@ static BOOL is_monitor_primary( struct monitor *monitor )
 }
 
 /* display_lock must be held */
-static void source_virt_to_raw_ratio( struct source *source, UINT *num, UINT *den )
+static void source_virt_to_raw_ratios( struct source *source, UINT *num_x, UINT *den_x, UINT *num_y, UINT *den_y )
 {
-    *num = *den = 1;
+    UINT phys_w = source->physical.dmPelsWidth, phys_h = source->physical.dmPelsHeight;
+    UINT cur_w = source->current.dmPelsWidth, cur_h = source->current.dmPelsHeight;
+#ifdef __SWITCH__
+    int mode = (&wine_nx_picture_mode) ? wine_nx_picture_mode : 0;
 
-    if (source->physical.dmPelsWidth * source->current.dmPelsHeight <=
-        source->physical.dmPelsHeight * source->current.dmPelsWidth)
+    /* With display mode emulation off the screen's surface takes the mode's
+     * size and the console stretches it over the screen
+     * (winnx_opengl.c, nx_screen_fit): a finger's points follow. */
+    if (!emulate_modeset && mode != 3) mode = 2;
+    if (mode == 3)
     {
-        *num = source->physical.dmPelsWidth;
-        *den = source->current.dmPelsWidth;
+        *num_x = *den_x = *num_y = *den_y = 1;
+        return;
+    }
+    if (mode == 2)
+    {
+        *num_x = phys_w;
+        *den_x = cur_w;
+        *num_y = phys_h;
+        *den_y = cur_h;
+        return;
+    }
+    if (mode == 1)
+    {
+        if ((UINT64)phys_w * cur_h >= (UINT64)phys_h * cur_w)
+        {
+            *num_x = *num_y = phys_w;
+            *den_x = *den_y = cur_w;
+        }
+        else
+        {
+            *num_x = *num_y = phys_h;
+            *den_x = *den_y = cur_h;
+        }
+        return;
+    }
+#endif
+    *num_x = *den_x = *num_y = *den_y = 1;
+    if ((UINT64)phys_w * cur_h <= (UINT64)phys_h * cur_w)
+    {
+        *num_x = *num_y = phys_w;
+        *den_x = *den_y = cur_w;
     }
     else
     {
-        *num = source->physical.dmPelsHeight;
-        *den = source->current.dmPelsHeight;
+        *num_x = *num_y = phys_h;
+        *den_x = *den_y = cur_h;
     }
 }
 
@@ -2400,7 +2451,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         double points[4] = {rect.left, rect.top, rect.right, rect.bottom}, from[2], to[2];
         DEVMODEW current_mode = {.dmSize = sizeof(DEVMODEW)}, physical_mode;
         struct ratio dpi;
-        UINT num, den;
+        UINT num[2], den[2];
 
         source_get_current_settings( source, &current_mode );
         physical_mode = source->physical;
@@ -2411,7 +2462,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
 
         if (type_from == MDT_RAW_DPI)
         {
-            source_virt_to_raw_ratio( source, &den, &num );
+            source_virt_to_raw_ratios( source, &den[0], &num[0], &den[1], &num[1] );
             from[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
             from[1] = physical_mode.dmPosition.y + physical_mode.dmPelsHeight / 2.0;
             to[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
@@ -2419,7 +2470,7 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
         }
         else
         {
-            source_virt_to_raw_ratio( source, &num, &den );
+            source_virt_to_raw_ratios( source, &num[0], &den[0], &num[1], &den[1] );
             from[0] = current_mode.dmPosition.x + current_mode.dmPelsWidth / 2.0;
             from[1] = current_mode.dmPosition.y + current_mode.dmPelsHeight / 2.0;
             to[0] = physical_mode.dmPosition.x + physical_mode.dmPelsWidth / 2.0;
@@ -2428,10 +2479,11 @@ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, struct ratio d
 
         for (int i = 0; i < ARRAY_SIZE(points); i++)
         {
+            UINT axis = i & 1;
             points[i] *= (double)dpi.num * dpi_from.den / (dpi_from.num * dpi.den);
-            points[i] -= from[i & 1];
-            points[i] *= (double)num / den;
-            points[i] += to[i & 1];
+            points[i] -= from[axis];
+            if (den[axis]) points[i] *= (double)num[axis] / den[axis];
+            points[i] += to[axis];
             points[i] *= (double)dpi_to.num * dpi.den / (dpi.num * dpi_to.den);
             points[i] = roundf( points[i] );
             points[i] = min( INT_MAX, max( INT_MIN, (INT64)points[i] ));
@@ -2511,8 +2563,17 @@ static void set_winstation_monitors( BOOL increment )
         if (monitor->is_clone) info->flags |= MONITOR_FLAG_CLONE;
         info->dpi = monitor_get_dpi( monitor, MDT_EFFECTIVE_DPI, &x, &y );
         info->raw_dpi = monitor_get_dpi( monitor, MDT_RAW_DPI, &x, &y );
+#ifdef __SWITCH__
+        {
+            RECT virt = monitor_get_rect( monitor, no_dpi, MDT_EFFECTIVE_DPI );
+            info->virt = wine_server_rectangle( virt );
+            info->raw = wine_server_rectangle( map_monitor_rect( monitor, virt, no_dpi, MDT_DEFAULT,
+                                                                 no_dpi, MDT_RAW_DPI ) );
+        }
+#else
         info->virt = wine_server_rectangle( monitor_get_rect( monitor, no_dpi, MDT_EFFECTIVE_DPI ) );
         info->raw = wine_server_rectangle( monitor_get_rect( monitor, no_dpi, MDT_RAW_DPI ) );
+#endif
         TRACE( "  flags %#x virt %s dpi %s raw %s raw_dpi %s\n", info->flags, wine_dbgstr_rect( (RECT *)&info->virt ),
                debugstr_ratio( info->dpi ), wine_dbgstr_rect( (RECT *)&info->raw ), debugstr_ratio( info->raw_dpi ) );
         info++;
@@ -4605,6 +4666,26 @@ static LONG apply_display_settings( struct source *target, const DEVMODEW *devmo
     return ret;
 }
 
+#ifdef __SWITCH__
+LONG wine_nx_fit_screen( UINT width, UINT height )
+{
+    DEVMODEW mode = {.dmSize = sizeof(DEVMODEW)};
+    struct source *source;
+    LONG ret;
+
+    if (!(source = find_source( NULL ))) return DISP_CHANGE_BADPARAM;
+    source_get_current_settings( source, &mode );
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION;
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
+    mode.dmPosition.x = 0;
+    mode.dmPosition.y = 0;
+    ret = apply_display_settings( source, &mode, NULL, CDS_FULLSCREEN, NULL );
+    source_release( source );
+    return ret;
+}
+#endif
+
 /***********************************************************************
  *	     NtUserChangeDisplaySettings    (win32u.@)
  */
@@ -6190,6 +6271,9 @@ void sysparams_init(void)
         grab_fullscreen = IS_OPTION_TRUE( buffer[0] );
     if (!get_config_key( hkey, appkey, "Decorated", buffer, sizeof(buffer) ))
         decorated_mode = IS_OPTION_TRUE( buffer[0] );
+#ifdef __SWITCH__
+    if (&wine_nx_emulate_modeset) emulate_modeset = !!wine_nx_emulate_modeset;
+#endif
     if (!get_config_key( hkey, appkey, "EmulateModeset", buffer, sizeof(buffer) ))
         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
 

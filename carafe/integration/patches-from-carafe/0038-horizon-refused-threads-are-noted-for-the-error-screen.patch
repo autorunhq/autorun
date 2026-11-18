@@ -1,0 +1,17 @@
+Carafe: a thread creation that is refused for good is noted for the error screen.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/horizon.c
++++ b/dlls/ntdll/unix/horizon.c
+@@ -3630,9 +3630,11 @@
+ 
+ static void carafe_threads_refusal( void )
+ {
++    extern void carafeErrorThreadRefused( void ) __attribute__((weak));
+     unsigned int refused;
+ 
+     if (!__atomic_load_n( &horizon_lifecycle.tebs, __ATOMIC_RELAXED )) return;
++    if (carafeErrorThreadRefused) carafeErrorThreadRefused();
+     refused = __atomic_add_fetch( &carafe_threads_refused, 1, __ATOMIC_RELAXED );
+     if (refused & (refused - 1)) return;
+     carafe_server_report();

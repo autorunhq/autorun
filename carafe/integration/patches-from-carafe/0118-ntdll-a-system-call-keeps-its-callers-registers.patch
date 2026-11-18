@@ -1,0 +1,391 @@
+Carafe: a system call or a call into a Unix library keeps the registers its caller had, as Windows keeps a
+thread's user context while it is in the kernel. A suspended thread inside such a call gives those registers and
+stops only when the call returns to the program, as a Windows thread takes its suspension on the way back to user
+mode; GetThreadContext and SetThreadContext of the thread itself use them too. Callbacks into the program, APCs
+and continued contexts are returns to the program. A call made by the x86 emulator for itself is not one: its
+thread stops at the emulator's next consistent point, through the doorbell.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -49,13 +49,122 @@
+     (void)callback;
+ }
+ 
++#define KERNEL_FRAME_SIZE  416
++#define KERNEL_FRAME_WORDS (KERNEL_FRAME_SIZE / sizeof(ULONG_PTR))
++
++extern const void *wine_nx_kernel_enter( const void *frame );
++extern const void *wine_nx_kernel_leave( void );
++extern int wine_nx_suspend_requested( void );
++extern void horizon_contexts_from_server( CONTEXT *context, const void *server_contexts );
++extern __thread volatile int *wine_nx_stop_word;
++extern __thread const void *wine_nx_kernel_frame;
++
++void wine_nx_kernel_context( const void *frame, CONTEXT *context )
++{
++    const ULONG_PTR *saved = frame;
++    unsigned int i;
++
++    memset( context, 0, sizeof(*context) );
++    context->ContextFlags = CONTEXT_ARM64_FULL | CONTEXT_ARM64_X18;
++    context->Fp = saved[0];
++    context->Lr = saved[1];
++    for (i = 0; i < 4; i++) context->X[19 + i] = saved[2 + i];
++    context->X18 = saved[6];
++    for (i = 0; i < 8; i++) memcpy( &context->V[8 + i], saved + 12 + 2 * i, sizeof(context->V[0]) );
++    for (i = 0; i < 2; i++) memcpy( &context->V[6 + i], saved + 28 + 2 * i, sizeof(context->V[0]) );
++    for (i = 0; i < 6; i++) context->X[23 + i] = saved[32 + i];
++    context->Pc = saved[38];
++    for (i = 0; i < 9; i++) context->X[i] = saved[40 + i];
++    context->Fpcr = saved[49];
++    context->Fpsr = saved[50];
++    context->Sp = (ULONG_PTR)(saved + KERNEL_FRAME_WORDS);
++}
++
++static BOOL program_frame( const ULONG_PTR *frame )
++{
++    CHPE_V2_CPU_AREA_INFO *area = NtCurrentTeb()->ChpeV2CpuAreaInfo;
++    ULONG_PTR sp = frame ? (ULONG_PTR)(frame + KERNEL_FRAME_WORDS) : (ULONG_PTR)__builtin_frame_address( 0 );
++
++    if (horizon_suspend_pending) return FALSE;
++    if (!area) return TRUE;
++    if (area->InSimulation || area->InSyscallCallback) return FALSE;
++    return sp < area->EmulatorStackLimit || sp > area->EmulatorStackBase;
++}
++
++static void end_point( void )
++{
++    volatile int *word = wine_nx_stop_word;
++
++    if (word && (__atomic_load_n( word, __ATOMIC_ACQUIRE ) & 2)) NtTerminateThread( GetCurrentThread(), word[1] );
++}
++
++static void continue_changed( const void *changed )
++{
++    CONTEXT context;
++
++    if (!changed) return;
++    horizon_contexts_from_server( &context, changed );
++    wine_nx_kernel_frame = NULL;
++    signal_set_full_context( &context );
++}
++
++static void return_to_kernel( const void *frame )
++{
++    wine_nx_kernel_frame = frame;
++    continue_changed( wine_nx_kernel_enter( frame ) );
++}
++
++static const void *enter_kernel( const ULONG_PTR *frame )
++{
++    const void *outer = wine_nx_kernel_frame;
++
++    return_to_kernel( program_frame( frame ) ? frame : NULL );
++    return outer;
++}
++
++static void leave_kernel( const void *outer )
++{
++    const void *changed = wine_nx_kernel_frame ? wine_nx_kernel_leave() : NULL;
++
++    wine_nx_kernel_frame = NULL;
++    continue_changed( changed );
++    return_to_kernel( outer );
++}
++
++static const void *enter_program( void )
++{
++    const void *outer = wine_nx_kernel_frame;
++    const void *changed = outer ? wine_nx_kernel_leave() : NULL;
++
++    wine_nx_kernel_frame = NULL;
++    continue_changed( changed );
++    return outer;
++}
++
+ NTSTATUS signal_set_full_context( CONTEXT *context )
+ {
+     extern void horizon_continue_context( const CONTEXT *context );
++    const void *changed;
+     CONTEXT resume;
+ 
+     if (!context || (context->ContextFlags & CONTEXT_ARM64_FULL) != CONTEXT_ARM64_FULL)
+         return STATUS_INVALID_PARAMETER;
++    if (wine_nx_kernel_frame)
++    {
++        changed = wine_nx_kernel_leave();
++        wine_nx_kernel_frame = NULL;
++        if (changed)
++        {
++            horizon_contexts_from_server( &resume, changed );
++            context = &resume;
++        }
++    }
++    else if (wine_nx_suspend_requested() && !horizon_suspend_pending)
++    {
++        resume = *context;
++        wait_suspend( &resume );
++        context = &resume;
++    }
+     if (is_arm64ec())
+     {
+         void *start, *end;
+@@ -106,9 +215,30 @@
+ {
+     BOOL self;
+     NTSTATUS status = set_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
++    DWORD flags = context->ContextFlags;
++    CONTEXT full;
+ 
+     if (status || !self) return status;
+-    return STATUS_NOT_SUPPORTED;
++    if (!wine_nx_kernel_frame) return STATUS_NOT_SUPPORTED;
++    wine_nx_kernel_context( wine_nx_kernel_frame, &full );
++    if ((flags & CONTEXT_ARM64_CONTROL) == CONTEXT_ARM64_CONTROL)
++    {
++        full.Fp = context->Fp;
++        full.Lr = context->Lr;
++        full.Sp = context->Sp;
++        full.Pc = context->Pc;
++        full.Cpsr = context->Cpsr;
++    }
++    if ((flags & CONTEXT_ARM64_INTEGER) == CONTEXT_ARM64_INTEGER)
++        memcpy( full.X, context->X, 29 * sizeof(full.X[0]) );
++    if ((flags & CONTEXT_ARM64_FLOATING_POINT) == CONTEXT_ARM64_FLOATING_POINT)
++    {
++        memcpy( full.V, context->V, sizeof(full.V) );
++        full.Fpcr = context->Fpcr;
++        full.Fpsr = context->Fpsr;
++    }
++    if ((flags & CONTEXT_ARM64_X18) == CONTEXT_ARM64_X18) full.X18 = context->X18;
++    return signal_set_full_context( &full );
+ }
+ 
+ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
+@@ -118,6 +248,14 @@
+ 
+     status = get_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
+     if (status || !self) return status;
++    if (wine_nx_kernel_frame)
++    {
++        DWORD flags = context->ContextFlags;
++
++        wine_nx_kernel_context( wine_nx_kernel_frame, context );
++        context->ContextFlags = flags;
++        return STATUS_SUCCESS;
++    }
+     return horizon_capture_context( context ) ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+ }
+ 
+@@ -216,12 +354,15 @@
+ NTSTATUS call_user_apc_dispatcher( CONTEXT *context, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
+                                    ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status )
+ {
++    const void *outer;
+     CONTEXT here;
+ 
+     if (flags) FIXME( "flags %#x are not supported.\n", flags );
++    outer = enter_program();
+     if (!horizon_capture_context( &here ))
+         wine_nx_call_pe_apc( func, arg1, arg2, arg3, &here, NtCurrentTeb() );
+     if (context) return signal_set_full_context( context );
++    return_to_kernel( outer );
+     return status;
+ }
+ 
+@@ -366,6 +507,7 @@
+     PEB *peb = teb ? teb->Peb : NULL;
+     KERNEL_CALLBACK_PROC *table;
+     struct switch_callback_frame *frame;
++    const void *outer;
+ 
+     if (ret_ptr) *ret_ptr = NULL;
+     if (ret_len) *ret_len = 0;
+@@ -395,6 +537,7 @@
+     frame->ret_len = 0;
+     frame->status = STATUS_SUCCESS;
+     switch_cb_top = frame;
++    outer = enter_program();
+ 
+     if (!setjmp( frame->jmp ))
+     {
+@@ -403,6 +546,7 @@
+     }
+     /* else: NtCallbackReturn longjmp'd here with frame.{ret_ptr,ret_len,status} set */
+ 
++    return_to_kernel( outer );
+     switch_cb_top = frame->prev;
+     free( frame->args );
+     frame->args = NULL;
+@@ -589,7 +733,7 @@
+     int stop;
+ 
+     if (!word || !(stop = __atomic_load_n( word, __ATOMIC_ACQUIRE ))) return;
+-    if (stop & 1)
++    if ((stop & 1) && !wine_nx_kernel_frame && program_frame( NULL ))
+     {
+         memset( &context, 0, sizeof(context) );
+         if (!horizon_capture_context( &context )) wait_suspend( &context );
+@@ -612,6 +756,8 @@
+ {
+     unsigned int table_idx = (syscall_id >> 12) & 3;
+     unsigned int func_idx  = syscall_id & 0xfff;
++    const ULONG_PTR *frame = (const ULONG_PTR *)stack_args - KERNEL_FRAME_WORDS;
++    const void *outer = enter_kernel( frame );
+ #ifdef __SWITCH__
+     /* + and - ask for the launcher back. A thread cannot be ended from outside
+      * on Horizon, so each ends itself here, where every one of them passes. */
+@@ -621,7 +767,7 @@
+ 
+         if (&wine_nx_quit_requested && wine_nx_quit_requested && &wine_nx_quit_point) wine_nx_quit_point();
+     }
+-    if (wine_nx_stop_word && *wine_nx_stop_word) wine_nx_stop_point();
++    end_point();
+ #endif
+     SYSTEM_SERVICE_TABLE *table = &KeServiceDescriptorTable[table_idx];
+     ULONG_PTR *handler;
+@@ -630,12 +776,11 @@
+     BOOL trace_syscall = &wine_nx_runtime_verbose && wine_nx_runtime_verbose &&
+                          !(table_idx == 1 && func_idx == 1051); /* NtUserGetMessage idle polling */
+ 
+-    if (func_idx >= table->ServiceLimit)
+-        return STATUS_INVALID_SYSTEM_SERVICE;
+-
+-    handler = (ULONG_PTR *)table->ServiceTable[func_idx];
+-    if (!handler)
++    if (func_idx >= table->ServiceLimit || !(handler = (ULONG_PTR *)table->ServiceTable[func_idx]))
++    {
++        leave_kernel( outer );
+         return STATUS_INVALID_SYSTEM_SERVICE;
++    }
+     /* winebox64 reads each x86 syscall's stack arguments through this. */
+     if ((void *)handler == (void *)NtReadVirtualMemory) trace_syscall = FALSE;
+     else if (!(++wine_nx_syscall_sample & 63))
+@@ -702,7 +847,8 @@
+         wine_nx_runtime_trace( buf );
+     }
+ 
+-    if (wine_nx_stop_word && *wine_nx_stop_word) wine_nx_stop_point();
++    leave_kernel( outer );
++    end_point();
+     return result;
+ }
+ 
+@@ -728,7 +874,19 @@
+     ".type __wine_syscall_dispatcher, %function\n"
+     "__wine_syscall_dispatcher:\n"
+     "    /* save callee-saved regs + LR + x18 (PE TEB register) */\n"
+-    "    stp x29, x30, [sp, #-256]!\n"
++    "    stp x29, x30, [sp, #-416]!\n"
++    "    str x30, [sp, #304]\n"
++    "    stp x0, x1, [sp, #320]\n"
++    "    stp x2, x3, [sp, #336]\n"
++    "    stp x4, x5, [sp, #352]\n"
++    "    stp x6, x7, [sp, #368]\n"
++    "    str x8, [sp, #384]\n"
++    "    mrs x16, fpcr\n"
++    "    mrs x17, fpsr\n"
++    "    stp x16, x17, [sp, #392]\n"
++    "    stp x23, x24, [sp, #256]\n"
++    "    stp x25, x26, [sp, #272]\n"
++    "    stp x27, x28, [sp, #288]\n"
+     /* x30 at entry = address of `ret` in PE syscall stub (set by `blr x16`).
+      * Stub saved the real PE caller's LR into x9 before the blr.
+      * Overwrite the saved x30 slot with x9 so our final `ret` jumps directly
+@@ -749,7 +907,7 @@
+     "    mov w19, w8\n"          /* syscall_id */
+     "    mov x20, x0\n"         /* save original x0 */
+     "    mov x21, x7\n"         /* save original x7 */
+-    "    add x22, x29, #256\n"  /* caller's SP (where stack args live) */
++    "    add x22, x29, #416\n"  /* caller's SP (where stack args live) */
+ 
+     "    /* set up call to wine_nx_do_syscall(stack_args, x0..x7, syscall_id) */\n"
+     "    /* arg 0 (x0): stack_args = caller SP */\n"
+@@ -787,7 +945,7 @@
+     "    ldp q12, q13, [x29, #160]\n"
+     "    ldp q14, q15, [x29, #192]\n"
+     "    ldp q6, q7, [x29, #224]\n"
+-    "    ldp x29, x30, [sp], #256\n"
++    "    ldp x29, x30, [sp], #416\n"
+     "    lsr x16, x30, #39\n"
+     "    cbnz x16, 1f\n"
+     "    ldr x16, [x18, #0x60]\n"
+@@ -825,11 +983,18 @@
+  */
+ typedef NTSTATUS (*unixlib_entry_t)( void *args );
+ 
+-NTSTATUS __wine_unix_call_dispatcher_impl( unixlib_handle_t handle, unsigned int index, void *args )
++NTSTATUS __wine_unix_call_dispatcher_impl( unixlib_handle_t handle, unsigned int index, void *args,
++                                           const ULONG_PTR *frame )
+ {
+     const unixlib_entry_t *table = (const unixlib_entry_t *)(ULONG_PTR)handle;
++    const void *outer;
++    NTSTATUS status;
++
+     if (!table) return STATUS_INVALID_PARAMETER;
+-    return table[index]( args );
++    outer = enter_kernel( frame );
++    status = table[index]( args );
++    leave_kernel( outer );
++    return status;
+ }
+ 
+ __asm__(
+@@ -840,27 +1005,41 @@
+     "__wine_unix_call_dispatcher:\n"
+     "wine_nx_pe_unix_call_dispatcher:\n"
+     "    /* x0=handle, x1=index, x2=args — save x18 (PE TEB) then forward */\n"
+-    "    stp x29, x30, [sp, #-208]!\n"
++    "    stp x29, x30, [sp, #-416]!\n"
+     "    mov x29, sp\n"
+-    "    str x18, [sp, #16]\n"
+-    "    str x19, [sp, #24]\n"
+-    "    stp q8, q9, [sp, #48]\n"
+-    "    stp q10, q11, [sp, #80]\n"
+-    "    stp q12, q13, [sp, #112]\n"
+-    "    stp q14, q15, [sp, #144]\n"
+-    "    stp q6, q7, [sp, #176]\n"
++    "    stp x19, x20, [sp, #16]\n"
++    "    stp x21, x22, [sp, #32]\n"
++    "    str x18, [sp, #48]\n"
++    "    stp q8, q9, [sp, #96]\n"
++    "    stp q10, q11, [sp, #128]\n"
++    "    stp q12, q13, [sp, #160]\n"
++    "    stp q14, q15, [sp, #192]\n"
++    "    stp q6, q7, [sp, #224]\n"
++    "    stp x23, x24, [sp, #256]\n"
++    "    stp x25, x26, [sp, #272]\n"
++    "    stp x27, x28, [sp, #288]\n"
++    "    str x30, [sp, #304]\n"
++    "    stp x0, x1, [sp, #320]\n"
++    "    stp x2, x3, [sp, #336]\n"
++    "    stp x4, x5, [sp, #352]\n"
++    "    stp x6, x7, [sp, #368]\n"
++    "    str x8, [sp, #384]\n"
++    "    mrs x16, fpcr\n"
++    "    mrs x17, fpsr\n"
++    "    stp x16, x17, [sp, #392]\n"
++    "    mov x3, sp\n"
+     "    bl __wine_unix_call_dispatcher_impl\n"
+     "    mov x19, x0\n"
+     "    bl wine_nx_current_teb\n"
+     "    mov x18, x0\n"
+     "    mov x0, x19\n"
+-    "    ldr x19, [sp, #24]\n"
+-    "    ldp q8, q9, [sp, #48]\n"
+-    "    ldp q10, q11, [sp, #80]\n"
+-    "    ldp q12, q13, [sp, #112]\n"
+-    "    ldp q14, q15, [sp, #144]\n"
+-    "    ldp q6, q7, [sp, #176]\n"
+-    "    ldp x29, x30, [sp], #208\n"
++    "    ldr x19, [sp, #16]\n"
++    "    ldp q8, q9, [sp, #96]\n"
++    "    ldp q10, q11, [sp, #128]\n"
++    "    ldp q12, q13, [sp, #160]\n"
++    "    ldp q14, q15, [sp, #192]\n"
++    "    ldp q6, q7, [sp, #224]\n"
++    "    ldp x29, x30, [sp], #416\n"
+     "    ret\n"
+     ".size __wine_unix_call_dispatcher, . - __wine_unix_call_dispatcher\n"
+     ".size wine_nx_pe_unix_call_dispatcher, . - wine_nx_pe_unix_call_dispatcher\n"

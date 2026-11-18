@@ -14,12 +14,20 @@ esac
 if [ -n "${WINE_NX_LLVM_MINGW:-}" ]; then
     export PATH="$WINE_NX_LLVM_MINGW/bin:$PATH"
 fi
-# Wine's configure wants a newer bison than macOS has.
-[ -d /opt/homebrew/opt/bison/bin ] && export PATH="/opt/homebrew/opt/bison/bin:$PATH"
+# build.sh has fetched llvm-mingw and put it in WINE_NX_LLVM_MINGW; bison and
+# the rest of Wine's PE-build requirements (bison 3.0 or newer) come with the
+# machine: on the GitHub runner, from the image.
 for tool in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang i686-w64-mingw32-clang x86_64-w64-mingw32-clang x86_64-w64-mingw32-windres llvm-readobj; do
     command -v "$tool" >/dev/null || { echo "Missing $tool; set WINE_NX_LLVM_MINGW." >&2; exit 1; }
 done
 mkdir -p "$pe" "$build"
+# WINE_NX_NXVK_DIR: link nxvk's package (build-nxvk.sh) instead of mesa-switch.
+nxvk=""
+if [ -n "${WINE_NX_NXVK_DIR:-}" ]; then
+    nxvk="$(CDPATH= cd -- "$WINE_NX_NXVK_DIR" && pwd)"
+    case "$nxvk" in "$root"/*) ;; *) echo "The nxvk package must be inside the Wine checkout." >&2; exit 1;; esac
+    nxvk="/work/${nxvk#"$root"/}"
+fi
 pe="$(CDPATH= cd -- "$pe" && pwd)"
 build="$(CDPATH= cd -- "$build" && pwd)"
 case "$pe" in "$root"/*) ;; *) echo "PE build must be inside the Wine checkout." >&2; exit 1;; esac
@@ -51,20 +59,34 @@ sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # The switch-dev image (switch-dev.txt) has libnx, mesa-switch, LSFG-VK and
 # libusbhsfs in portlibs. WINE_NX_MESA_SWITCH_DIR links another mesa-switch.
+# A checkout the build container does not own -- a bind mount keeping the host's
+# user ids, as on Linux and in CI -- is still that checkout; without this, git
+# calls it "dubious ownership" and the Box64 core check fails.
 docker run --rm --network none -v "$root:/work" -w /work \
+    -e GIT_CONFIG_COUNT=1 \
+    -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
     -e NX_PE="/work/${pe#"$root/"}" -e NX_BUILD="/work/${build#"$root/"}" \
     -e NX_JOBS="$jobs" -e NX_DYNAREC="${WINE_NX_BOX64_DYNAREC:-ON}" \
     -e WINE_NX_JOBS="$jobs" \
     -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" -e NX_FEX="$fex" -e NX_BOOT_BUNDLE="$boot_bundle" \
+    -e NX_NXVK="$nxvk" \
+    -e NX_BUILD_ID="${WINE_NX_BUILD_ID:-}" \
     "${WINE_NX_DEVKIT_IMAGE:-$(cat "$root/horizon-wine/switch-dev.txt")}" sh -ec '
     cmake -S horizon-wine -B "$NX_BUILD" -G Ninja \
+        -DWINE_NX_BUILD_ID="$NX_BUILD_ID" \
         -DCMAKE_TOOLCHAIN_FILE=/work/horizon-wine/cmake/switch-devkitA64.cmake \
         -DWINE_NX_PE_BUILD_DIR="$NX_PE" -DWINE_NX_AMD64=ON -DWINE_NX_FEX="$NX_FEX" \
         -DWINE_NX_BOX64_INTERPRETER=ON -DWINE_NX_BOX64_DYNAREC="$NX_DYNAREC" \
-        ${NX_MESA:+-DWINE_NX_MESA_SWITCH_DIR="$NX_MESA"} -DWINE_NX_USB_STORAGE=ON \
+        ${NX_MESA:+-DWINE_NX_MESA_SWITCH_DIR="$NX_MESA"} -DWINE_NX_NXVK_DIR="$NX_NXVK" -DWINE_NX_USB_STORAGE=ON \
         -DWINE_NX_BOOT_BUNDLE="$NX_BOOT_BUNDLE" -DCMAKE_BUILD_TYPE=Release
     cmake --build "$NX_BUILD" --target wine-nx-runtime-nro -j "$NX_JOBS"
     '
+# A runtime linked with nxvk is the second NRO of the card and no more: the
+# packager takes it from the build folder (tools/package-autorun.py --nxvk).
+if [ -n "$nxvk" ]; then
+    echo "nxvk runtime: $build/wine-nx-runtime.nro"
+    exit 0
+fi
 # The Windows modules this runtime runs -- system32, syswow64, FEX's CPU modules,
 # DXVK and VKD3D-Proton -- are the DLL repository's: horizon-dlls/tools/build-dlls.py
 # builds them in $pe. These say what the NRO was built to run.

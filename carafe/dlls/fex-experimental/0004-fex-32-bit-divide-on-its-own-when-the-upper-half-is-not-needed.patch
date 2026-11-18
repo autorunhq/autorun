@@ -1,0 +1,81 @@
+Experimental: a 32-bit DIV/IDIV divides 32 bits when EDX holds nothing more.
+MIT, as the file it changes.
+
+DIV and IDIV r/m32 divide EDX:EAX, and the backend always joined the two into
+a 64-bit dividend, sign-extended the divisor and divided 64 bits. EDX is
+almost always just the extension of EAX (zero before DIV, CDQ before IDIV):
+then one test sends it to a W-form divide of EAX alone, three instructions
+shorter, and on Cortex-A57 a 32-bit divide takes at most about half as long
+as a 64-bit one. The frontend keeps 32 bits of each result, so the low halves
+being the same is enough. From berlint-hub/FEX, arena/799d045b-fex
+(div-fast-path.patch), fitted to FEX-2609.
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp b/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
+index 1c10a6a..b47c840 100644
+--- a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
+@@ -909,12 +909,33 @@ DEF_OP(Div) {
+     break;
+   }
+   case IR::OpSize::i32Bit: {
+-    // TODO: 32-bit operation should be guaranteed not to leave garbage in the upper bits.
++    // When Upper is the sign extension of Lower's top bit (what CDQ leaves,
++    // the common case), the 64-bit dividend is the sign-extended 32-bit one,
++    // so a W-form SDIV gives the same low halves, which are all x86 keeps
++    // (the frontend takes 32 bits of each result). It is a shorter sequence,
++    // and on Cortex-A57 a 32-bit divide takes at most about half as long as
++    // a 64-bit one. Only the W halves are compared, and the W-form reads
++    // ignore the upper halves. INT_MIN / -1 gives 0x80000000 and a remainder
++    // of 0 either way.
++    ARMEmitter::ForwardLabel Fast32 {};
++    ARMEmitter::ForwardLabel Done {};
++
++    eor(ARMEmitter::Size::i32Bit, TMP1, Upper, Lower, ARMEmitter::ShiftType::ASR, 31);
++    (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &Fast32);
++
++    // Upper is something else: the full 64-bit dividend.
+     mov(EmitSize, TMP1, Lower);
+     bfi(EmitSize, TMP1, Upper, 32, 32);
+     sxtw(TMP2, Divisor.W());
+     sdiv(EmitSize, Quotient, TMP1, TMP2);
+     msub(EmitSize, Remainder, Quotient, TMP2, TMP1);
++    (void)b(&Done);
++
++    (void)Bind(&Fast32);
++    sdiv(ARMEmitter::Size::i32Bit, Quotient, Lower, Divisor);
++    msub(ARMEmitter::Size::i32Bit, Remainder, Quotient, Divisor, Lower);
++
++    (void)Bind(&Done);
+     break;
+   }
+   case IR::OpSize::i64Bit: {
+@@ -993,6 +1014,15 @@ DEF_OP(UDiv) {
+     break;
+   }
+   case IR::OpSize::i32Bit: {
++    // A 32-bit DIV almost always runs with EDX == 0, and x86 keeps only the
++    // low halves of the results, so a W-form UDIV does for that case: a
++    // shorter sequence and, on Cortex-A57, a shorter divide. Only the W half
++    // of Upper is tested, and the W-form reads ignore the upper halves.
++    ARMEmitter::ForwardLabel Fast32 {};
++    ARMEmitter::ForwardLabel Done {};
++
++    (void)cbz(ARMEmitter::Size::i32Bit, Upper, &Fast32);
++
+     // We need to mask divisor if we have Upper bits, since the frontend does
+     // not on the hope that we can optimize to use the path above.
+     mov(ARMEmitter::Size::i32Bit, TMP2, Divisor);
+@@ -1002,6 +1032,13 @@ DEF_OP(UDiv) {
+     bfi(EmitSize, TMP1, Upper, 32, 32);
+     udiv(EmitSize, Quotient, TMP1, TMP2);
+     msub(EmitSize, Remainder, Quotient, TMP2, TMP1);
++    (void)b(&Done);
++
++    (void)Bind(&Fast32);
++    udiv(ARMEmitter::Size::i32Bit, Quotient, Lower, Divisor);
++    msub(ARMEmitter::Size::i32Bit, Remainder, Quotient, Divisor, Lower);
++
++    (void)Bind(&Done);
+     break;
+   }
+   case IR::OpSize::i64Bit: {

@@ -1,0 +1,147 @@
+Carafe: DXVK counts the pipelines it builds while drawing, which hold the frame up: every ten seconds one
+[DXVK pipelines] line gives how many were built (linked from shader libraries or compiled in full), the time they
+took and the longest one, the shader libraries built while drawing and the draws skipped for want of a pipeline.
+Zlib, as the files it changes.
+
+diff -ruN a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -620,6 +620,7 @@
+     latencyInfo.frameId = frameId;
+ 
+     m_submissionQueue.present(presentInfo, latencyInfo, status);
++    m_objects.pipelineManager().reportStalls();
+     
+     std::lock_guard<sync::Spinlock> statLock(m_statLock);
+     m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
+diff -ruN a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1099,13 +1099,24 @@
+       if (!instance) {
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
++        auto t0 = dxvk::high_resolution_clock::now();
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
+         instance = this->createInstance(state, canCreateBasePipeline);
++        auto t1 = dxvk::high_resolution_clock::now();
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
+         lock.unlock();
+ 
++        uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
++        m_stats->drawBuilds += 1;
++        m_stats->drawBuildUs += us;
++        (instance->baseHandle.load() ? m_stats->drawBuildsLinked : m_stats->drawBuildsFull) += 1;
++
++        uint64_t longest = m_stats->drawBuildMaxUs.load();
++        while (us > longest && !m_stats->drawBuildMaxUs.compare_exchange_weak(longest, us))
++          continue;
++
+         // If necessary, compile an optimized pipeline variant
+         if (!instance->fastHandle.load())
+           m_workers->compileGraphicsPipeline(this, state, DxvkPipelinePriority::Low);
+diff -ruN a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -1,5 +1,7 @@
+ #include <optional>
+ 
++#include "../util/util_time.h"
++
+ #include "dxvk_device.h"
+ #include "dxvk_pipemanager.h"
+ 
+@@ -356,6 +358,38 @@
+   }
+ 
+ 
++  void DxvkPipelineManager::reportStalls() {
++    m_stats.frames += 1;
++
++    int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(
++      dxvk::high_resolution_clock::now().time_since_epoch()).count();
++    int64_t last = m_stats.reportedAt.load();
++
++    if (!last) {
++      m_stats.reportedAt.compare_exchange_strong(last, now);
++      return;
++    }
++
++    if (now - last < 10000000 || !m_stats.reportedAt.compare_exchange_strong(last, now))
++      return;
++
++    uint64_t frames = m_stats.frames.exchange(0u);
++    uint64_t builds = m_stats.drawBuilds.exchange(0u);
++    uint64_t linked = m_stats.drawBuildsLinked.exchange(0u);
++    uint64_t full = m_stats.drawBuildsFull.exchange(0u);
++    uint64_t buildUs = m_stats.drawBuildUs.exchange(0u);
++    uint64_t maxUs = m_stats.drawBuildMaxUs.exchange(0u);
++    uint64_t rebuilds = m_stats.libraryRebuilds.exchange(0u);
++    uint64_t rebuildUs = m_stats.libraryRebuildUs.exchange(0u);
++    uint64_t skipped = m_stats.drawsSkipped.exchange(0u);
++
++    Logger::info(str::format("[DXVK pipelines] ", (now - last) / 1000, " ms, ", frames, " frames: ",
++      builds, " built while drawing (", linked, " linked, ", full, " full) in ", buildUs / 1000,
++      " ms, longest ", maxUs / 1000, " ms; ", rebuilds, " shader libraries rebuilt in ", rebuildUs / 1000,
++      " ms; ", skipped, " draws skipped"));
++  }
++
++
+   const DxvkDescriptorSetLayout* DxvkPipelineManager::createDescriptorSetLayout(
+     const DxvkDescriptorSetLayoutKey& key) {
+     std::lock_guard<dxvk::mutex> lock(m_layoutMutex);
+diff -ruN a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -31,6 +31,16 @@
+     std::atomic<uint32_t> numGraphicsPipelines  = { 0u };
+     std::atomic<uint32_t> numGraphicsLibraries  = { 0u };
+     std::atomic<uint32_t> numComputePipelines   = { 0u };
++    std::atomic<uint64_t> drawBuilds            = { 0u };
++    std::atomic<uint64_t> drawBuildsLinked      = { 0u };
++    std::atomic<uint64_t> drawBuildsFull        = { 0u };
++    std::atomic<uint64_t> drawBuildUs           = { 0u };
++    std::atomic<uint64_t> drawBuildMaxUs        = { 0u };
++    std::atomic<uint64_t> libraryRebuilds       = { 0u };
++    std::atomic<uint64_t> libraryRebuildUs      = { 0u };
++    std::atomic<uint64_t> drawsSkipped          = { 0u };
++    std::atomic<uint64_t> frames                = { 0u };
++    std::atomic<int64_t>  reportedAt            = { 0 };
+   };
+ 
+   struct DxvkPipelineWorkerStats {
+@@ -288,7 +298,9 @@
+      * \brief Stops async compiler threads
+      */
+     void stopWorkerThreads();
+-    
++
++    void reportStalls();
++
+   private:
+     
+     DxvkDevice*               m_device;
+diff -ruN a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -1,3 +1,5 @@
++#include "../util/util_time.h"
++
+ #include "dxvk_device.h"
+ #include "dxvk_pipemanager.h"
+ #include "dxvk_shader.h"
+@@ -220,7 +222,12 @@
+     if (m_pipeline)
+       return *m_pipeline;
+ 
++    auto t0 = dxvk::high_resolution_clock::now();
+     m_pipeline = compileShaderPipelineLocked();
++    auto t1 = dxvk::high_resolution_clock::now();
++
++    m_manager->m_stats.libraryRebuilds += 1;
++    m_manager->m_stats.libraryRebuildUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+     return *m_pipeline;
+   }
+ 

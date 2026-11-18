@@ -1,0 +1,549 @@
+Carafe: with JumpTables, a 32-bit switch compiled the way MSVC emits it (cmp reg, imm; ja/jae; optionally
+movzx reg, byte [reg + table]; jmp [table + reg*4]) takes its cases into the multiblock. The decoder reads the table
+from read-only executable memory, bounded by the compare, and decodes the forward targets as internal blocks. The
+jump keeps the guest's load and then branches to the case whose guest RIP equals the loaded target, without a block
+entry: up to four distinct cases are compared one by one, more are found in a host table next to the block, indexed
+by the guest's index, that holds each case's guest RIP and the offset of its code. Any other target takes the lookup
+as before, so a changed table or index only costs the lookup. The x87 stack is synchronised before the branch. Off
+by default; not used with the code cache.
+MIT, as the files it changes.
+
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -662,6 +662,16 @@
+           "same target skips the lookup table, others take it as before. The entry is cleared when the target's code goes."
+         ]
+       },
++      "JumpTables": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "A 32-bit switch, an indirect jump through a table in read-only code bounded by the compare before it, takes its",
++          "cases into the multiblock: the jump finds the case's code in a table next to the block when the guest's target",
++          "matches it, others take the lookup as before."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -559,6 +559,7 @@
+ 
+     Thread->OpDispatcher->BeginFunction(GuestRIP, &CodeBlocks, BlockInfo->TotalInstructionCount, BlockInfo->Is64BitMode,
+                                         AreMonoHacksActive() && MonoBackpatcherBlock.load(std::memory_order_relaxed) == GuestRIP);
++    Thread->OpDispatcher->SetJumpTables(&BlockInfo->JumpTables);
+ 
+     const auto GPRSize = Thread->OpDispatcher->GetGPROpSize();
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -1219,6 +1219,156 @@
+   }
+ }
+ 
++bool Decoder::JumpTablesAllowed() const {
++#ifdef ARCHITECTURE_arm64ec
++  return false;
++#else
++  return JumpTablesMode() && CTX->Config.Multiblock && !BlockInfo.Is64BitMode && !Relocations && !EnableCodeCacheValidation() &&
++         !CTX->GetCodeCache().IsGeneratingCache && !CTX->DiskCache.IsReadingDiskCache() && !CTX->DiskCache.IsWritingDiskCache();
++#endif
++}
++
++std::optional<uint32_t> Decoder::ReadReadOnlyGuest(uint64_t Address, uint8_t Size) const {
++  if (ExecutableRangeWritable || Address < ExecutableRangeBase || Address + Size < Address || Address + Size > ExecutableRangeEnd) {
++    return std::nullopt;
++  }
++
++  uint32_t Value {};
++  memcpy(&Value, reinterpret_cast<const void*>(Address), Size);
++  return Value;
++}
++
++void Decoder::RecordSwitchBound(uint64_t NumInstructions) {
++  constexpr uint64_t MAX_JUMP_TABLE_ENTRIES = 256;
++
++  if (NumInstructions < 2 || !JumpTablesAllowed()) {
++    return;
++  }
++
++  const bool Above = DecodeInst->OP == 0x77 || DecodeInst->OP == 0x87;
++  const bool AboveOrEqual = DecodeInst->OP == 0x73 || DecodeInst->OP == 0x83;
++  if (!Above && !AboveOrEqual) {
++    return;
++  }
++
++  const auto Compare = std::prev(DecodeInst);
++  const auto* Bytes = reinterpret_cast<const uint8_t*>(Compare->PC);
++  uint8_t Reg {};
++  int64_t Limit {};
++  if (Compare->InstSize == 3 && Bytes[0] == 0x83 && (Bytes[1] & 0xF8) == 0xF8) {
++    Reg = Bytes[1] & 7;
++    Limit = static_cast<int8_t>(Bytes[2]);
++  } else if (Compare->InstSize == 6 && Bytes[0] == 0x81 && (Bytes[1] & 0xF8) == 0xF8) {
++    uint32_t Imm {};
++    memcpy(&Imm, Bytes + 2, sizeof(Imm));
++    Reg = Bytes[1] & 7;
++    Limit = Imm;
++  } else if (Compare->InstSize == 5 && Bytes[0] == 0x3D) {
++    uint32_t Imm {};
++    memcpy(&Imm, Bytes + 1, sizeof(Imm));
++    Reg = FEXCore::X86State::REG_RAX;
++    Limit = Imm;
++  } else {
++    return;
++  }
++
++  const int64_t Count = Above ? Limit + 1 : Limit;
++  if (Count <= 0 || Count > static_cast<int64_t>(MAX_JUMP_TABLE_ENTRIES)) {
++    return;
++  }
++
++  const uint64_t FallThrough = (DecodeInst->PC + DecodeInst->InstSize) & 0xFFFFFFFFU;
++  SwitchBounds[FallThrough] = {.Reg = Reg, .Count = static_cast<uint32_t>(Count)};
++}
++
++void Decoder::RecordJumpTable(uint64_t BlockEntry, uint64_t NumInstructions) {
++  constexpr uint64_t MAX_FORWARD_BRANCH_DIST = FEXCore::Utils::FEX_PAGE_SIZE * 4;
++
++  if (!JumpTablesAllowed() || DecodeInst->InstSize != 7) {
++    return;
++  }
++
++  const auto* Bytes = reinterpret_cast<const uint8_t*>(DecodeInst->PC);
++  if (Bytes[0] != 0xFF || Bytes[1] != 0x24 || (Bytes[2] & 0xC7) != 0x85) {
++    return;
++  }
++
++  const uint8_t IndexReg = (Bytes[2] >> 3) & 7;
++  if (IndexReg == FEXCore::X86State::REG_RSP) {
++    return;
++  }
++
++  uint32_t TableAddress {};
++  memcpy(&TableAddress, Bytes + 3, sizeof(TableAddress));
++
++  auto Bound = SwitchBounds.find(BlockEntry);
++  if (Bound == SwitchBounds.end()) {
++    return;
++  }
++
++  uint32_t Count {};
++  if (NumInstructions == 1) {
++    if (Bound->second.Reg != IndexReg) {
++      return;
++    }
++    Count = Bound->second.Count;
++  } else if (NumInstructions == 2) {
++    const auto Narrow = std::prev(DecodeInst);
++    const auto* NarrowBytes = reinterpret_cast<const uint8_t*>(Narrow->PC);
++    if (Narrow->InstSize != 7 || NarrowBytes[0] != 0x0F || NarrowBytes[1] != 0xB6 || (NarrowBytes[2] >> 6) != 2) {
++      return;
++    }
++
++    const uint8_t NarrowDest = (NarrowBytes[2] >> 3) & 7;
++    const uint8_t NarrowIndex = NarrowBytes[2] & 7;
++    if (NarrowIndex == FEXCore::X86State::REG_RSP || NarrowDest != IndexReg || Bound->second.Reg != NarrowIndex) {
++      return;
++    }
++
++    uint32_t ByteTable {};
++    memcpy(&ByteTable, NarrowBytes + 3, sizeof(ByteTable));
++    for (uint32_t i = 0; i < Bound->second.Count; ++i) {
++      auto Case = ReadReadOnlyGuest(uint64_t {ByteTable} + i, 1);
++      if (!Case) {
++        return;
++      }
++      Count = std::max(Count, *Case + 1);
++    }
++  } else {
++    return;
++  }
++
++  const uint64_t InstEnd = DecodeInst->PC + DecodeInst->InstSize;
++  const uint64_t TargetLimit = std::min(InstEnd + MAX_FORWARD_BRANCH_DIST, SectionMaxAddress);
++
++  JumpTable Table {.IndexReg = IndexReg};
++  Table.Targets.resize(Count);
++  bool HasTarget = false;
++  for (uint32_t i = 0; i < Count; ++i) {
++    auto Target = ReadReadOnlyGuest(uint64_t {TableAddress} + uint64_t {i} * 4, 4);
++    if (!Target) {
++      return;
++    }
++    if (*Target > DecodeInst->PC && *Target < TargetLimit) {
++      Table.Targets[i] = *Target;
++      HasTarget = true;
++    }
++  }
++
++  if (!HasTarget) {
++    return;
++  }
++
++  const uint64_t JumpPC = DecodeInst->PC;
++  for (auto Target : Table.Targets) {
++    if (Target) {
++      AddBranchTarget(Target);
++    }
++  }
++
++  BlockInfo.JumpTables[JumpPC] = std::move(Table);
++}
++
+ bool Decoder::IsBranchMonoTailcall(uint64_t NumInstructions) const {
+   // While the mono call backpatching block can easily be detected due it being the only one to contain SMC-faulting
+   // atomics, that can't be said for the tailcall jump backpatcher which has changed several times across versions and
+@@ -1554,6 +1704,7 @@
+         BlockInfo.TotalInstructionCount = 0;
+         BlockInfo.Blocks = {*BlockIt};
+         BlockInfo.EntryPoints.clear();
++        BlockInfo.JumpTables.clear();
+         BlockInfo.CodePages.clear();
+         return;
+       }
+@@ -1641,7 +1792,11 @@
+             // we should fix the crc at relocation if this is important
+             BlockIt->DataMasks.clear();
+           }
++          const uint64_t BlockEntry = BlockIt->Entry;
++          const uint64_t BlockInstructions = BlockIt->NumInstructions;
++          RecordSwitchBound(BlockInstructions);
+           BranchTargetInMultiblockRange();
++          RecordJumpTable(BlockEntry, BlockInstructions);
+         }
+ 
+         break;
+@@ -1700,6 +1855,8 @@
+   BlockInfo.TotalInstructionCount = 0;
+   BlockInfo.Blocks.clear();
+   VisitedBlocks.clear();
++  SwitchBounds.clear();
++  BlockInfo.JumpTables.clear();
+   // Reset internal state management
+   Paused = false;
+   BlockResume = -1;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/Frontend.h b/FEXCore/Source/Interface/Core/Frontend.h
+--- a/FEXCore/Source/Interface/Core/Frontend.h
++++ b/FEXCore/Source/Interface/Core/Frontend.h
+@@ -7,6 +7,7 @@
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Core/CodeCache.h>
+ #include <FEXCore/Utils/ThreadPoolAllocator.h>
++#include <FEXCore/fextl/map.h>
+ #include <FEXCore/fextl/set.h>
+ #include <FEXCore/fextl/vector.h>
+ #include <FEXCore/fextl/robin_map.h>
+@@ -52,12 +53,18 @@
+     fextl::vector<DataMask> DataMasks;
+   };
+ 
++  struct JumpTable final {
++    uint8_t IndexReg {};
++    fextl::vector<uint32_t> Targets;
++  };
++
+   struct DecodedBlockInformation final {
+     uint64_t TotalInstructionCount;
+     bool Is64BitMode {};
+     fextl::vector<DecodedBlocks> Blocks;
+     fextl::set<uint64_t> EntryPoints;
+     fextl::set<uint64_t> CodePages; // Start addresses of all pages touching the block
++    fextl::map<uint64_t, JumpTable> JumpTables;
+   };
+ 
+   Decoder(FEXCore::Core::InternalThreadState* Thread);
+@@ -102,11 +109,16 @@
+   FEXCore::Context::ContextImpl* CTX;
+ 
+   FEX_CONFIG_OPT(EnableCodeCacheValidation, ENABLECODECACHEVALIDATION);
++  FEX_CONFIG_OPT(JumpTablesMode, JUMPTABLES);
+ 
+   DecodedBlockStatus DecodeInstructionImpl(uint64_t PC);
+   DecodedBlockStatus DecodeInstruction(uint64_t PC);
+ 
+   void BranchTargetInMultiblockRange();
++  void RecordSwitchBound(uint64_t NumInstructions);
++  void RecordJumpTable(uint64_t BlockEntry, uint64_t NumInstructions);
++  bool JumpTablesAllowed() const;
++  std::optional<uint32_t> ReadReadOnlyGuest(uint64_t Address, uint8_t Size) const;
+   bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
+   bool InstCanContinue() const;
+ 
+@@ -208,6 +220,12 @@
+   fextl::set<uint64_t> VisitedBlocks;
+   fextl::set<uint64_t>* ExternalBranches {nullptr};
+ 
++  struct SwitchBound final {
++    uint8_t Reg;
++    uint32_t Count;
++  };
++  fextl::map<uint64_t, SwitchBound> SwitchBounds;
++
+   const fextl::robin_map<uint32_t, GuestRelocationType>* Relocations {nullptr};
+ 
+   // ModRM rm decoding
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -18,6 +18,8 @@
+ #include <FEXCore/Utils/MathUtils.h>
+ #include <FEXCore/Utils/SHMStats.h>
+ 
++#include <algorithm>
++
+ namespace FEXCore::CPU {
+ 
+ DEF_OP(CallbackReturn) {
+@@ -285,6 +287,66 @@
+   }
+ }
+ 
++DEF_OP(JumpTableEntry) {
++  auto Op = IROp->C<IR::IROp_JumpTableEntry>();
++
++  PendingJumpTableCases.push_back({JumpTarget(Op->TargetBlock), Op->Index, Op->GuestRIP});
++}
++
++DEF_OP(JumpTableBranch) {
++  auto Op = IROp->C<IR::IROp_JumpTableBranch>();
++
++  fextl::vector<PendingJumpTableCase> Cases;
++  for (const auto& Case : PendingJumpTableCases) {
++    if (!Case.Target->Backward.Location && Case.Index < Op->Count) {
++      Cases.push_back(Case);
++    }
++  }
++  PendingJumpTableCases.clear();
++
++  if (Cases.empty()) {
++    return;
++  }
++
++  auto IndexReg = GetReg(Op->Index);
++  auto RipReg = GetReg(Op->NewRIP);
++
++  constexpr size_t MAX_COMPARE_CHAIN = 4;
++  fextl::vector<const PendingJumpTableCase*> Distinct;
++  for (const auto& Case : Cases) {
++    const bool Seen = std::any_of(Distinct.begin(), Distinct.end(), [&](const auto* Other) { return Other->GuestRIP == Case.GuestRIP; });
++    if (!Seen) {
++      Distinct.push_back(&Case);
++    }
++  }
++
++  if (Distinct.size() <= MAX_COMPARE_CHAIN) {
++    for (const auto* Case : Distinct) {
++      LoadConstant(ARMEmitter::Size::i32Bit, TMP1, Case->GuestRIP);
++      sub(ARMEmitter::Size::i32Bit, TMP1, RipReg, TMP1);
++      cbz_OrRestart(ARMEmitter::Size::i32Bit, TMP1, Case->Target);
++    }
++    return;
++  }
++
++  ARMEmitter::ForwardLabel Miss;
++
++  auto& Table = PendingJumpTables.emplace_back();
++  Table.Count = Op->Count;
++  Table.Cases = std::move(Cases);
++
++  and_(ARMEmitter::Size::i32Bit, TMP1, IndexReg, Op->Count - 1);
++  (void)adr(TMP2, &Table.Label);
++  add(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1, ARMEmitter::ShiftType::LSL, 3);
++  ldpsw<ARMEmitter::IndexType::OFFSET>(TMP1, TMP3, TMP2, 0);
++  sub(ARMEmitter::Size::i32Bit, TMP1, TMP1, RipReg);
++  (void)cbnz(ARMEmitter::Size::i32Bit, TMP1, &Miss);
++  add(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP3);
++  br(TMP2);
++  (void)Bind(&Miss);
++  PendingJumpTables.back().Miss = GetCursorAddress<uint8_t*>();
++}
++
+ DEF_OP(Jump) {
+   const auto Op = IROp->C<IR::IROp_Jump>();
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -117,6 +117,20 @@
+   fextl::vector<ARMEmitter::ForwardLabel> PendingCallCaches;
+   FEX_CONFIG_OPT(IndirectCallCache, INDIRECTCALLCACHE);
+ 
++  struct PendingJumpTableCase {
++    ARMEmitter::BiDirectionalLabel* Target;
++    uint32_t Index;
++    uint32_t GuestRIP;
++  };
++  struct PendingJumpTable {
++    ARMEmitter::ForwardLabel Label;
++    uint8_t* Miss {};
++    uint32_t Count {};
++    fextl::vector<PendingJumpTableCase> Cases;
++  };
++  fextl::vector<PendingJumpTableCase> PendingJumpTableCases;
++  fextl::vector<PendingJumpTable> PendingJumpTables;
++
+   static uint64_t IndirectCallLink(FEXCore::Core::CpuStateFrame* Frame, IndirectCallCacheRecord* Record);
+ 
+   Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempCodeBufferAllocator;
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -929,6 +929,8 @@
+   CallReturnTargets.clear();
+   PendingJumpThunks.clear();
+   PendingCallCaches.clear();
++  PendingJumpTableCases.clear();
++  PendingJumpTables.clear();
+   JumpTargets.resize(IR->GetHeader()->BlockCount, {});
+   Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
+ 
+@@ -1095,6 +1097,23 @@
+     dc64(0);
+   }
+ 
++  for (auto& JumpTable : PendingJumpTables) {
++    fextl::vector<const PendingJumpTableCase*> Cases(JumpTable.Count, nullptr);
++    for (const auto& Case : JumpTable.Cases) {
++      Cases[Case.Index] = &Case;
++    }
++
++    Align(8);
++    BindOrRestart(&JumpTable.Label);
++    for (const auto* Case : Cases) {
++      const auto EntryAddress = GetCursorAddress<uint8_t*>();
++      const auto Target = Case ? Case->Target->Backward.Location : JumpTable.Miss;
++      LOGMAN_THROW_A_FMT(Target != nullptr, "Jump table case without a bound block");
++      dc32(Case ? Case->GuestRIP : 0);
++      dc32(static_cast<uint32_t>(static_cast<int32_t>(Target - EntryAddress)));
++    }
++  }
++
+   BindOrRestart(&l_ExitLink);
+   PlaceNamedSymbolLiteral(InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER));
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -909,10 +909,44 @@
+   // No way to use this effectively in multiblock
+   auto RIPOffset = LoadSourceGPR(Op, Op->Src[0], Op->Flags);
+ 
++  if (Multiblock && JumpTables) {
++    if (auto Table = JumpTables->find(Op->PC); Table != JumpTables->end()) {
++      JumpTableExit(RIPOffset, Table->second);
++      return;
++    }
++  }
++
+   // Store the new RIP
+   ExitFunction(RIPOffset);
+ }
+ 
++void OpDispatchBuilder::JumpTableExit(Ref NewRIP, const FEXCore::Frontend::Decoder::JumpTable& Table) {
++  fextl::vector<std::pair<uint32_t, Ref>> Cases;
++  for (uint32_t i = 0; i < Table.Targets.size(); ++i) {
++    const auto Target = Table.Targets[i];
++    if (!Target) {
++      continue;
++    }
++    if (auto Block = JumpTargets.find(Target); Block != JumpTargets.end()) {
++      Cases.emplace_back(i, Block->second.BlockEntry);
++    }
++  }
++
++  if (Cases.empty()) {
++    ExitFunction(NewRIP);
++    return;
++  }
++
++  auto Index = LoadGPRRegister(Table.IndexReg);
++  FlushRegisterCache();
++  for (const auto& [i, Block] : Cases) {
++    _JumpTableEntry(Block, i, Table.Targets[i]);
++  }
++  const auto Count = std::bit_ceil(std::max<uint32_t>(Table.Targets.size(), 2));
++  _JumpTableBranch(Index, NewRIP, Count);
++  ExitFunction(NewRIP);
++}
++
+ void OpDispatchBuilder::JUMPFARIndirectOp(OpcodeArgs) {
+   // Calculate flags early.
+   CalculateDeferredFlags();
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -392,6 +392,7 @@
+   void LoopOp(OpcodeArgs);
+   void JUMPOp(OpcodeArgs);
+   void JUMPAbsoluteOp(OpcodeArgs);
++  void JumpTableExit(Ref NewRIP, const FEXCore::Frontend::Decoder::JumpTable& Table);
+   void JUMPFARIndirectOp(OpcodeArgs);
+   void CALLFARIndirectOp(OpcodeArgs);
+   void RETFARIndirectOp(OpcodeArgs);
+@@ -1129,6 +1130,10 @@
+     Multiblock = _Multiblock;
+   }
+ 
++  void SetJumpTables(const fextl::map<uint64_t, FEXCore::Frontend::Decoder::JumpTable>* _JumpTables) {
++    JumpTables = _JumpTables;
++  }
++
+   static inline constexpr unsigned IndexNZCV(unsigned BitOffset) {
+     switch (BitOffset) {
+     case FEXCore::X86State::RFLAG_OF_RAW_LOC: return 28;
+@@ -2473,6 +2478,7 @@
+   bool BlockSetRIP {false};
+ 
+   bool Multiblock {};
++  const fextl::map<uint64_t, FEXCore::Frontend::Decoder::JumpTable>* JumpTables {};
+   bool Is64BitMode {};
+   uint64_t Entry {};
+ 
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/IR/IR.json b/FEXCore/Source/Interface/IR/IR.json
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -320,6 +320,13 @@
+         "DestSize": "Size",
+         "RAOverride": "2"
+       },
++      "JumpTableEntry SSA:$TargetBlock, u32:$Index, u32:$GuestRIP": {
++        "HasSideEffects": true,
++        "RAOverride": "0"
++      },
++      "JumpTableBranch GPR:$Index, GPR:$NewRIP, u32:$Count": {
++        "HasSideEffects": true
++      },
+       "Break BreakDefinition:$Reason": {
+         "HasSideEffects": true
+       },
+diff -ruN -x cpp-optparse -x .git a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -874,8 +874,12 @@
+     Reset();
+ 
+     IREmit->SetCurrentCodeBlock(BlockNode);
++    Ref JumpTableNode {};
+     for (auto [CodeNode, IROp] : CurrentIR.GetCode(BlockNode)) {
+       if (!LoweredX87(IROp->Op)) {
++        if (!JumpTableNode && (IROp->Op == OP_JUMPTABLEENTRY || IROp->Op == OP_JUMPTABLEBRANCH)) {
++          JumpTableNode = CodeNode;
++        }
+         continue;
+       }
+       IREmit->SetWriteCursor(CodeNode);
+@@ -1406,7 +1410,7 @@
+     --Last;
+     auto [LastCodeNode, LastIROp] = Last();
+     LOGMAN_THROW_A_FMT(IsBlockExit(LastIROp->Op), "must be exit");
+-    IREmit->SetWriteCursorBefore(LastCodeNode);
++    IREmit->SetWriteCursorBefore(JumpTableNode ? JumpTableNode : LastCodeNode);
+     SynchronizeStackValues();
+     FlushCachedRegs();
+   }

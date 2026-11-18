@@ -1,0 +1,272 @@
+Carafe: with the profiler's CARAFE_D3D9_STATS=1, the device finds the effect interface of a Direct3D 9 effect library
+linked into the game's executable, counts the calls the game makes to each of its methods, and logs them every 600
+presents as one [D3D9 effect] line per frame. The table is found as the one run of 76 to 96 code pointers in the
+executable's data that its code installs into objects; each slot is wrapped by a counter that jumps on to the method.
+Zlib, as the files it changes.
+
+diff -ruN a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -15,6 +15,7 @@
+ #include "d3d9_monitor.h"
+ #include "d3d9_names.h"
+ #include "d3d9_format_helpers.h"
++#include "d3d9_effect_hooks.h"
+ 
+ #include "../dxvk/dxvk_adapter.h"
+ #include "../dxvk/dxvk_instance.h"
+@@ -66,6 +67,8 @@
+     , m_d3dCompatibility   ( pParent->GetD3DCompatibilityFlags() ) {
+ 
+     m_callStats = env::getEnvVar("CARAFE_D3D9_STATS") == "1";
++    if (m_callStats)
++      D3D9EffectHooks::Install();
+ 
+     InitShaderOptions();
+ 
+@@ -4502,6 +4505,7 @@
+       text += str::format(i ? ", " : " ", names[i], " ", m_callCounts[i] / m_callFrames);
+     Logger::info(text);
+     CountSyncFrame(m_callFrames);
++    D3D9EffectHooks::Report(uint32_t(m_callFrames));
+     m_callCounts = { };
+     m_callFrames = 0;
+   }
+diff -ruN a/src/d3d9/d3d9_effect_hooks.cpp b/src/d3d9/d3d9_effect_hooks.cpp
+--- a/src/d3d9/d3d9_effect_hooks.cpp
++++ b/src/d3d9/d3d9_effect_hooks.cpp
+@@ -0,0 +1,202 @@
++#include "d3d9_effect_hooks.h"
++
++#include "d3d9_include.h"
++
++#include "../util/log/log.h"
++#include "../util/util_string.h"
++
++#include <atomic>
++#include <cstring>
++#include <mutex>
++#include <unordered_set>
++#include <vector>
++
++namespace dxvk {
++
++#if defined(__i386__)
++  namespace {
++
++    constexpr uint32_t MinSlots   = 76;
++    constexpr uint32_t MaxSlots   = 96;
++    constexpr uint32_t ThunkBytes = 16;
++    constexpr uintptr_t Margin    = 0x40000;
++
++    struct Section {
++      uintptr_t begin;
++      uintptr_t end;
++      bool      code;
++    };
++
++    struct Hooks {
++      uintptr_t                 table = 0;
++      uint32_t                  slots = 0;
++      uint32_t                  original[MaxSlots] = { };
++      std::atomic<uint32_t>     counts[MaxSlots] = { };
++      uint8_t*                  thunks = nullptr;
++    };
++
++    Hooks      g_hooks;
++    std::once_flag g_once;
++
++    std::vector<Section> Sections(uintptr_t base) {
++      std::vector<Section> result;
++      auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
++      if (dos->e_magic != IMAGE_DOS_SIGNATURE)
++        return result;
++      auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
++      if (nt->Signature != IMAGE_NT_SIGNATURE)
++        return result;
++      auto section = IMAGE_FIRST_SECTION(nt);
++      for (uint32_t i = 0; i < nt->FileHeader.NumberOfSections; i++, section++) {
++        uintptr_t begin = base + section->VirtualAddress;
++        uintptr_t size = std::max<uintptr_t>(section->Misc.VirtualSize, section->SizeOfRawData);
++        result.push_back({ begin, begin + size, (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 });
++      }
++      return result;
++    }
++
++    bool InCode(const std::vector<Section>& sections, uint32_t value) {
++      for (const auto& s : sections) {
++        if (s.code && value >= s.begin && value < s.end)
++          return true;
++      }
++      return false;
++    }
++
++    uintptr_t FindTable(uintptr_t base) {
++      std::vector<Section> sections = Sections(base);
++      if (sections.empty())
++        return 0;
++
++      static const char marker[] = "ID3DXEffectCompiler";
++      std::unordered_set<uint32_t> markers;
++      for (const auto& s : sections) {
++        if (s.code)
++          continue;
++        for (uintptr_t p = s.begin; p + sizeof(marker) <= s.end; p++) {
++          if (std::memcmp(reinterpret_cast<const void*>(p), marker, sizeof(marker) - 1) == 0)
++            markers.insert(uint32_t(p));
++        }
++      }
++      if (markers.empty())
++        return 0;
++
++      uintptr_t lo = UINTPTR_MAX, hi = 0;
++      std::unordered_set<uint32_t> installed;
++      for (const auto& s : sections) {
++        if (!s.code)
++          continue;
++        auto bytes = reinterpret_cast<const uint8_t*>(s.begin);
++        for (uintptr_t i = 0; s.begin + i + 6 <= s.end; i++) {
++          uint32_t value;
++          std::memcpy(&value, bytes + i, sizeof(value));
++          if (markers.count(value)) {
++            lo = std::min(lo, s.begin + i);
++            hi = std::max(hi, s.begin + i);
++          }
++          if (bytes[i] == 0xc7 && (bytes[i + 1] & 0xc7) <= 0x07) {
++            std::memcpy(&value, bytes + i + 2, sizeof(value));
++            installed.insert(value);
++          }
++        }
++      }
++      if (hi == 0)
++        return 0;
++      lo = lo > Margin ? lo - Margin : 0;
++      hi += Margin;
++
++      uintptr_t picked = 0;
++      uint32_t pickedSlots = 0;
++      uint32_t candidates = 0;
++      for (const auto& s : sections) {
++        if (s.code)
++          continue;
++        uintptr_t p = s.begin & ~uintptr_t(3);
++        while (p + 4 <= s.end) {
++          uint32_t run = 0;
++          uint32_t inside = 0;
++          while (p + 4 * (run + 1) <= s.end) {
++            uint32_t value = *reinterpret_cast<const uint32_t*>(p + 4 * run);
++            if (!InCode(sections, value))
++              break;
++            if (value >= lo && value <= hi)
++              inside++;
++            run++;
++          }
++          if (run >= MinSlots && run <= MaxSlots && installed.count(uint32_t(p)) && inside * 100 >= run * 95) {
++            candidates++;
++            picked = p;
++            pickedSlots = run;
++          }
++          p += run ? 4 * run : 4;
++        }
++      }
++      if (candidates != 1)
++        return 0;
++      g_hooks.slots = pickedSlots;
++      return picked;
++    }
++
++    void Hook() {
++      uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++      uintptr_t table = FindTable(base);
++      if (table == 0) {
++        Logger::info("[D3D9 effect] no effect library linked into the executable was found");
++        return;
++      }
++      uint32_t slots = g_hooks.slots;
++      auto thunks = static_cast<uint8_t*>(VirtualAlloc(nullptr, slots * ThunkBytes, MEM_COMMIT | MEM_RESERVE,
++        PAGE_EXECUTE_READWRITE));
++      if (thunks == nullptr)
++        return;
++      auto entries = reinterpret_cast<uint32_t*>(table);
++      for (uint32_t i = 0; i < slots; i++) {
++        g_hooks.original[i] = entries[i];
++        uint8_t* t = thunks + i * ThunkBytes;
++        uint32_t counter = uint32_t(reinterpret_cast<uintptr_t>(&g_hooks.counts[i]));
++        uint32_t target = uint32_t(reinterpret_cast<uintptr_t>(&g_hooks.original[i]));
++        t[0] = 0xf0; t[1] = 0xff; t[2] = 0x05;
++        std::memcpy(t + 3, &counter, 4);
++        t[7] = 0xff; t[8] = 0x25;
++        std::memcpy(t + 9, &target, 4);
++        t[13] = 0xcc; t[14] = 0xcc; t[15] = 0xcc;
++      }
++      FlushInstructionCache(GetCurrentProcess(), thunks, slots * ThunkBytes);
++      DWORD old = 0;
++      if (!VirtualProtect(entries, slots * 4, PAGE_READWRITE, &old))
++        return;
++      for (uint32_t i = 0; i < slots; i++)
++        entries[i] = uint32_t(reinterpret_cast<uintptr_t>(thunks + i * ThunkBytes));
++      VirtualProtect(entries, slots * 4, old, &old);
++      g_hooks.table = table;
++      g_hooks.thunks = thunks;
++      Logger::info(str::format("[D3D9 effect] effect interface at exe+0x", std::hex, table - base, std::dec, ", ",
++        slots, " methods counted"));
++    }
++
++  }
++
++
++  void D3D9EffectHooks::Install() {
++    std::call_once(g_once, Hook);
++  }
++
++
++  void D3D9EffectHooks::Report(uint32_t Frames) {
++    if (g_hooks.table == 0 || Frames == 0)
++      return;
++    std::string text = str::format("[D3D9 effect] calls per frame over ", Frames, " frames by method offset:");
++    for (uint32_t i = 0; i < g_hooks.slots; i++) {
++      uint32_t count = g_hooks.counts[i].exchange(0u);
++      if (count != 0)
++        text += str::format(" +0x", std::hex, i * 4, std::dec, " ", double(count) / double(Frames));
++    }
++    Logger::info(text);
++  }
++#else
++  void D3D9EffectHooks::Install() { }
++
++  void D3D9EffectHooks::Report(uint32_t) { }
++#endif
++
++}
+diff -ruN a/src/d3d9/d3d9_effect_hooks.h b/src/d3d9/d3d9_effect_hooks.h
+--- a/src/d3d9/d3d9_effect_hooks.h
++++ b/src/d3d9/d3d9_effect_hooks.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++#include <cstdint>
++
++namespace dxvk {
++
++  class D3D9EffectHooks {
++
++  public:
++
++    static void Install();
++
++    static void Report(uint32_t Frames);
++
++  };
++
++}
+diff -ruN a/src/d3d9/meson.build b/src/d3d9/meson.build
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -20,6 +20,7 @@
+   'd3d9_monitor.cpp',
+   'd3d9_device.cpp',
+   'd3d9_front_end.cpp',
++  'd3d9_effect_hooks.cpp',
+   'd3d9_state.cpp',
+   'd3d9_cursor.cpp',
+   'd3d9_swapchain.cpp',

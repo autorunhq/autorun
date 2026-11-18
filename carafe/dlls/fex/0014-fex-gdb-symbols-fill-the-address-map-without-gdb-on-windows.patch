@@ -1,0 +1,21 @@
+Carafe: under Windows, GDBSymbols only fills each block's address map and no longer registers blocks with GDB.
+FEX_GDBSYMBOLS makes FEX record every x86 instruction in a block's RIP map, which the profiler needs. FEX also
+registers each block with GDB's JIT interface, and on Windows that interface is a stub that ends the process with
+"GDBSymbols support not compiled in": the first block compiled raised it inside CompileBlock, and the game hung in
+ntdll's unwinder. The registration is now left out on Windows.
+MIT, as the file it changes.
+
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -992,9 +992,11 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+         Symbols.RegisterNamedRegion(Thread->SymbolBuffer.get(), CodePtr, DebugData->HostCodeSize, MappedSection->FileInfo.Filename);
+       }
+ 
++#ifndef _WIN32
+       if (Config.GDBSymbols()) {
+         GDBJITRegister(MappedSection->FileInfo, MappedSection->FileStartVA, GuestRIP, (uintptr_t)CodePtr, *DebugData);
+       }
++#endif
+     }
+   }
+ 

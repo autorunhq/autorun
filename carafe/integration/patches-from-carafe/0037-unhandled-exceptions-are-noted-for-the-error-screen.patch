@@ -1,0 +1,21 @@
+Carafe: an unhandled exception is noted for the error screen.
+The code and the address of an exception that no handler took go to carafeErrorException, which names the
+module on the error screen.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1834,6 +1834,13 @@
+         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
+                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
+ 
++#ifdef __SWITCH__
++    {
++        extern void carafeErrorException( unsigned int code, const void *address ) __attribute__((weak));
++
++        if (carafeErrorException) carafeErrorException( rec->ExceptionCode, rec->ExceptionAddress );
++    }
++#endif
+     NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
+     return STATUS_SUCCESS;
+ }

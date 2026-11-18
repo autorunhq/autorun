@@ -1,0 +1,33 @@
+Carafe: the compositor draws a quad with blend set with its alpha over the windows under it.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/compositor_gl.c
++++ b/horizon-wine/source/compositor_gl.c
+@@ -31,7 +31,7 @@
+     "void main()\n"
+     "{\n"
+     "    vec4 texel = texture(image, coord);\n"
+-    "    color = window != 0 ? vec4(texel.bgr, 1.0) : texel;\n"
++    "    color = window == 2 ? texel.bgra : window != 0 ? vec4(texel.bgr, 1.0) : texel;\n"
+     "}\n";
+ 
+ static GLuint compile_shader( struct compositor_gl *comp, GLenum type, const char *source )
+@@ -213,7 +213,18 @@
+         const struct compositor_gl_quad *quad = &quads[i];
+ 
+         if (!quad->texture->name || quad->width <= 0 || quad->height <= 0) continue;
++        if (quad->blend)
++        {
++            gl->Enable( GL_BLEND );
++            gl->BlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
++            gl->Uniform1i( comp->window_uniform, 2 );
++        }
+         draw_quad( comp, quad->texture, quad->x, quad->y, quad->width, quad->height, quad->src_x, quad->src_y );
++        if (quad->blend)
++        {
++            gl->Disable( GL_BLEND );
++            gl->Uniform1i( comp->window_uniform, 1 );
++        }
+     }
+ 
+     if (cursor_visible && comp->cursor.name)

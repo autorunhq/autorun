@@ -15,5 +15,15 @@ int launcher_graphics_select( struct launcher_graphics *graphics, const struct u
 int launcher_graphics_ensure( struct launcher_graphics *graphics, unsigned short machine,
                               int combined, enum dxvk_source source,
                               char dxvk_version[32], char vkd3d_version[32] );
+/* The FEX a 32-bit program runs on: Autorun's own, from the DLL repository, or
+ * a release of the one with Carafe's patches, or of the experimental one on top
+ * of those, listed and installed like a DXVK release. 1 when a choice was made,
+ * with *carafe (0, 1 Carafe's, 2 experimental) and version holding it. */
+int launcher_graphics_select_fex( struct launcher_graphics *graphics, const struct ui_list *anchor,
+                                  int *carafe, char version[32] );
+/* Has a Carafe (build 1) or experimental (build 2) FEX on the card before a
+ * program set to one starts: the version asked for, or the newest installed,
+ * or the newest release when none is. */
+int launcher_graphics_ensure_fex( struct launcher_graphics *graphics, int build, char version[32] );
 
 #endif

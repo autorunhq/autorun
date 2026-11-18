@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "windef.h"
@@ -128,9 +129,46 @@ static NTSTATUS heap_free( void *args )
     return STATUS_SUCCESS;
 }
 
+struct wine_nx_fex_stats_area
+{
+    void *base;
+    UINT32 map_size;
+    UINT32 max_size;
+};
+
+void *wine_nx_fex_stats_base;
+UINT32 wine_nx_fex_stats_size;
+
+static NTSTATUS stats_area( void *args )
+{
+    struct wine_nx_fex_stats_area *p = args;
+    void *base;
+
+    if (!p || !p->max_size || (p->max_size & 4095) || p->map_size > p->max_size) return STATUS_INVALID_PARAMETER;
+    if (!p->base)
+    {
+        if (__atomic_load_n( &wine_nx_fex_stats_base, __ATOMIC_ACQUIRE )) return STATUS_INTERNAL_ERROR;
+        if (!(base = aligned_alloc( 4096, p->max_size ))) return STATUS_NO_MEMORY;
+        memset( base, 0, p->max_size );
+        p->base = base;
+        __atomic_store_n( &wine_nx_fex_stats_size, p->map_size, __ATOMIC_RELEASE );
+        __atomic_store_n( &wine_nx_fex_stats_base, base, __ATOMIC_RELEASE );
+        return STATUS_SUCCESS;
+    }
+    if (p->base != __atomic_load_n( &wine_nx_fex_stats_base, __ATOMIC_ACQUIRE )) return STATUS_INVALID_PARAMETER;
+    __atomic_store_n( &wine_nx_fex_stats_size, p->map_size, __ATOMIC_RELEASE );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS stats_delete( void *args )
+{
+    (void)args;
+    return STATUS_SUCCESS;
+}
+
 const unixlib_entry_t wine_nx_fex_unix_funcs[] =
 {
-    unsupported, unsupported, unsupported, unsupported, unsupported, unsupported, unsupported,
+    unsupported, unsupported, unsupported, unsupported, stats_area, stats_delete, unsupported,
     query, allocate, release, flush, attach_thread, heap_allocate, heap_reallocate, heap_free, protect_code
 };
 
@@ -138,3 +176,4 @@ C_ASSERT( sizeof(struct wine_nx_fex_query) == 8 );
 C_ASSERT( sizeof(struct wine_nx_fex_memory) == 24 );
 C_ASSERT( sizeof(struct wine_nx_fex_heap) == 24 );
 C_ASSERT( sizeof(struct wine_nx_fex_protection) == 16 );
+C_ASSERT( sizeof(struct wine_nx_fex_stats_area) == 16 );

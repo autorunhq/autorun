@@ -1,0 +1,28 @@
+Carafe: FEX_GDBSYMBOLS can be passed to FEX, so a profiling run maps every x86 instruction to its ARM64 code.
+FEX puts an x86 instruction into a block's RIP map only when it can fault, unless GDBSymbols is on
+(Core.cpp:647-649). Register-only instructions such as fcom st(1), fnstsw ax and test ah are then charged to
+the instruction before them. With FEX_GDBSYMBOLS=1 every instruction gets an entry; under mingw the GDB
+interface itself is a stub (GDBJIT.cpp:116), and the emitted code is the same: checked on 26 blocks.
+Off unless a program's settings turn it on.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/horizon-wine/source/fex_options.h
++++ b/horizon-wine/source/fex_options.h
+@@ -32,6 +32,7 @@
+     NX_FEX_X87_CONVERSION_ROUNDING,
+     NX_FEX_X87_FAST_STACK,
+     NX_FEX_X87_SINGLE_PRECISION,
++    NX_FEX_GDB_SYMBOLS,
+     NX_FEX_OPTION_COUNT
+ };
+ 
+@@ -122,6 +123,9 @@
+     { NX_FEX_X87_SINGLE_PRECISION, "FEX_X87SINGLEPRECISION",
+       "With reduced x87 precision, computes x87 math in 32-bit floats, as Direct3D 9 games set the precision to.",
+       1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
++    { NX_FEX_GDB_SYMBOLS, "FEX_GDBSYMBOLS",
++      "Records every x86 instruction in each translated block's address map, so the profiler names each one. The code is the same.",
++      1, 0, 2, { "0", "1" }, { "0 - Off", "1 - On" } },
+ };
+ 
+ static inline int nx_fex_option_choice( const struct nx_fex_option *option, const char *value )

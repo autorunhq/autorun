@@ -1,0 +1,65 @@
+Carafe: the first 32 exceptions a program raises, C++ throws among them, go to the runtime log as [SEH]
+lines with their code, address, parameters and, for a 32-bit C++ throw, the thrown type, so a crash shows
+the exception that started it and not only the last one. Debug prints and thread names are left out.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1813,13 +1813,56 @@
+ }
+ 
+ 
++#ifdef __SWITCH__
++static const char *nx_cxx_type_name( const EXCEPTION_RECORD *rec )
++{
++    const unsigned int *info, *types, *type;
++    const char *name;
++
++    if (rec->ExceptionCode != 0xe06d7363 || rec->NumberParameters != 3 || !rec->ExceptionInformation[2])
++        return "";
++    info = ULongToPtr( rec->ExceptionInformation[2] );
++    if (!virtual_check_buffer_for_read( info, 4 * sizeof(*info) ) || !info[3]) return "";
++    types = ULongToPtr( info[3] );
++    if (!virtual_check_buffer_for_read( types, 2 * sizeof(*types) ) || !types[0] || !types[1]) return "";
++    type = ULongToPtr( types[1] );
++    if (!virtual_check_buffer_for_read( type, 2 * sizeof(*type) ) || !type[1]) return "";
++    name = (const char *)ULongToPtr( type[1] ) + 8;
++    if (!virtual_check_buffer_for_read( name, 64 )) return "";
++    return name;
++}
++
++static void nx_trace_raised_exception( const EXCEPTION_RECORD *rec )
++{
++    extern void wine_nx_runtime_trace( const char *msg );
++    static unsigned int traced;
++    char buffer[320];
++
++    if (rec->ExceptionCode == DBG_PRINTEXCEPTION_C || rec->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C ||
++        rec->ExceptionCode == 0x406d1388)
++        return;
++    if (__atomic_add_fetch( &traced, 1, __ATOMIC_RELAXED ) > 32) return;
++    snprintf( buffer, sizeof(buffer), "[SEH] raised tid=%04x code=%08x at %p flags=%x params=%u: %lx %lx %lx %.64s",
++              (unsigned int)GetCurrentThreadId(), (unsigned int)rec->ExceptionCode, rec->ExceptionAddress,
++              (unsigned int)rec->ExceptionFlags, (unsigned int)rec->NumberParameters,
++              (unsigned long)rec->ExceptionInformation[0], (unsigned long)rec->ExceptionInformation[1],
++              (unsigned long)rec->ExceptionInformation[2], nx_cxx_type_name( rec ) );
++    wine_nx_runtime_trace( buffer );
++}
++#endif
++
+ /*******************************************************************
+  *		NtRaiseException (NTDLL.@)
+  */
+ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
+ {
+     struct thread_data *data = get_thread_data();
+-    NTSTATUS status = send_debug_event( data, rec, context, first_chance );
++    NTSTATUS status;
++
++#ifdef __SWITCH__
++    if (first_chance) nx_trace_raised_exception( rec );
++#endif
++    status = send_debug_event( data, rec, context, first_chance );
+ 
+     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
+         return NtContinue( context, FALSE );

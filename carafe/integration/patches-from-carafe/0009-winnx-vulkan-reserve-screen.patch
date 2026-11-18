@@ -1,0 +1,24 @@
+Carafe: a Vulkan surface reserves the screen (wine_nx_vk_reserve_window) instead of taking it.
+docs/research/loading-screen/REPORT.md.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_vulkan.c	2026-10-08 03:59:14.851844000 +0000
++++ b/dlls/win32u/winnx_vulkan.c	2026-10-08 03:59:51.761815500 +0000
+@@ -32,7 +32,7 @@
+ 
+ /* The runtime hands the screen's NWindow to one surface at a time
+  * (horizon-wine/source/runtime.c); OpenGL and Vulkan take turns with it. */
+-extern void *wine_nx_gl_acquire_window( void );
++extern void *wine_nx_vk_reserve_window( void );
+ extern void wine_nx_gl_release_window( void );
+ extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+ 
+@@ -102,7 +102,7 @@
+ 
+     TRACE( "hwnd %p, raw %u, instance %p\n", hwnd, client->raw, instance );
+ 
+-    if (!(info.window = wine_nx_gl_acquire_window()))
++    if (!(info.window = wine_nx_vk_reserve_window()))
+     {
+         ERR( "hwnd %p: the screen already has an OpenGL or Vulkan surface\n", hwnd );
+         return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;

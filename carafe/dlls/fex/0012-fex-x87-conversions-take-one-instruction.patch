@@ -1,0 +1,108 @@
+Carafe: FIST and FISTP rounding by the guest's FCW (X87ConversionRounding) convert in one instruction per rounding
+mode: fcvtns, fcvtms, fcvtps and fcvtzs, instead of frint followed by fcvtzs, and with X87SinglePrecision they convert
+the float32 stack value itself instead of widening it to a double first. On the A57 that takes frint (5 cycles) and
+the fcvt (5 cycles) off the dependency chain of every float-to-integer conversion. Rounding control 0 now means
+round to nearest, as on x87, whatever rounding mode SSE left in FPCR.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/ALUOps.cpp
+@@ -1477,6 +1477,55 @@ DEF_OP(Float_ToGPR_ZS) {
+   }
+ }
+ 
++DEF_OP(Float_ToGPR_R) {
++  auto Op = IROp->C<IR::IROp_Float_ToGPR_R>();
++
++  const auto Size = ConvertSize(IROp);
++  ARMEmitter::Register Dst = GetReg(Node);
++  ARMEmitter::VRegister Src = GetVReg(Op->Scalar);
++  const bool Double = Op->SrcElementSize == IR::OpSize::i64Bit;
++
++  switch (Op->Round) {
++  case IR::RoundMode::Nearest:
++    if (Double) {
++      fcvtns(Size, Dst, Src.D());
++    } else {
++      fcvtns(Size, Dst, Src.S());
++    }
++    break;
++  case IR::RoundMode::NegInfinity:
++    if (Double) {
++      fcvtms(Size, Dst, Src.D());
++    } else {
++      fcvtms(Size, Dst, Src.S());
++    }
++    break;
++  case IR::RoundMode::PosInfinity:
++    if (Double) {
++      fcvtps(Size, Dst, Src.D());
++    } else {
++      fcvtps(Size, Dst, Src.S());
++    }
++    break;
++  case IR::RoundMode::TowardsZero:
++    if (Double) {
++      fcvtzs(Size, Dst, Src.D());
++    } else {
++      fcvtzs(Size, Dst, Src.S());
++    }
++    break;
++  case IR::RoundMode::Host:
++    if (Double) {
++      frinti(VTMP1.D(), Src.D());
++      fcvtzs(Size, Dst, VTMP1.D());
++    } else {
++      frinti(VTMP1.S(), Src.S());
++      fcvtzs(Size, Dst, VTMP1.S());
++    }
++    break;
++  }
++}
++
+ DEF_OP(Float_ToGPR_S) {
+   auto Op = IROp->C<IR::IROp_Float_ToGPR_S>();
+ 
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
+@@ -116,17 +116,16 @@ void OpDispatchBuilder::FILDF64(OpcodeArgs) {
+ void OpDispatchBuilder::FISTF64(OpcodeArgs, bool Truncate) {
+   const auto Size = OpSizeFromSrc(Op);
+ 
+-  Ref data = _ReadStackValue(0);
+-  if (SinglePrecisionMode) {
+-    data = _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, data);
+-  }
++  Ref Value = _ReadStackValue(0);
++  Ref data = SinglePrecisionMode ? _Float_FToF(OpSize::i64Bit, OpSize::i32Bit, Value) : Value;
+   if (!Truncate && ConversionRoundingMode) {
+     const auto IntSize = Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit;
++    const auto ValueSize = SinglePrecisionMode ? OpSize::i32Bit : OpSize::i64Bit;
+     Ref RoundBits = _Bfe(OpSize::i32Bit, 2, 10, _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW)));
+-    Ref Result = _Float_ToGPR_S(IntSize, OpSize::i64Bit, data);
+-    Ref Down = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, _Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, data, RoundMode::NegInfinity));
+-    Ref Up = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, _Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, data, RoundMode::PosInfinity));
+-    Ref Zero = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, data);
++    Ref Result = _Float_ToGPR_R(IntSize, ValueSize, Value, RoundMode::Nearest);
++    Ref Down = _Float_ToGPR_R(IntSize, ValueSize, Value, RoundMode::NegInfinity);
++    Ref Up = _Float_ToGPR_R(IntSize, ValueSize, Value, RoundMode::PosInfinity);
++    Ref Zero = _Float_ToGPR_R(IntSize, ValueSize, Value, RoundMode::TowardsZero);
+     Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(1), Down, Result);
+     Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(2), Up, Result);
+     Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(3), Zero, Result);
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -1630,6 +1630,13 @@
+         "DestSize": "DestElementSize"
+       },
+ 
++      "GPR = Float_ToGPR_R OpSize:#DestElementSize, OpSize:$SrcElementSize, FPR:$Scalar, RoundType:$Round": {
++        "Desc": ["Moves the scalar element to a GPR with conversion",
++                 "Converts the 32bit or 64bit float to an signed integer in one instruction, rounding by the argument"
++                ],
++        "DestSize": "DestElementSize"
++      },
++
+       "FCmp OpSize:$ElementSize, FPR:$Scalar1, FPR:$Scalar2": {
+         "Desc": ["Does a scalar unordered compare and sets NZCV accordingly.",
+                  "NZCV follows Arm conventions, a separate AXFLAG instruction is required for x86",

@@ -1,0 +1,64 @@
+Carafe: with X87FastStack, FNSTSW reads TOP without writing the x87 stack back to memory. The status word holds
+only TOP and the condition and exception bits, but FNSTSW wrote every register and the tag word in the middle of the
+block, and the block's end wrote them again. MSVC code compares floats with FCOM, FNSTSW AX and TEST AH, so this
+was paid at almost every float comparison. A new IR op returns TOP as the stack pass tracks it.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1308,6 +1308,7 @@ protected:
+ private:
+   FEX_CONFIG_OPT(ReducedPrecisionMode, X87REDUCEDPRECISION);
+   FEX_CONFIG_OPT(ConversionRoundingMode, X87CONVERSIONROUNDING);
++  FEX_CONFIG_OPT(FastStackMode, X87FASTSTACK);
+ 
+   struct JumpTargetInfo {
+     Ref BlockEntry;
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87.cpp
+@@ -769,7 +769,7 @@ Ref OpDispatchBuilder::ReconstructFSW_Helper(Ref T) {
+ // There's no load Status Word instruction but you can load it through frstor
+ // or fldenv.
+ void OpDispatchBuilder::X87FNSTSW(OpcodeArgs) {
+-  Ref TopValue = _SyncStackToSlow();
++  Ref TopValue = FastStackMode ? _StackTop() : _SyncStackToSlow();
+   Ref StatusWord = ReconstructFSW_Helper(TopValue);
+   StoreResultGPR(Op, StatusWord);
+ }
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -2860,6 +2860,14 @@
+         "HasSideEffects": true,
+         "DestSize": "OpSize::i64Bit"
+       },
++      "GPR = StackTop": {
++        "Desc": [
++          "Returns the current stack top without synchronizing the stack."
++        ],
++        "X87": true,
++        "HasSideEffects": true,
++        "DestSize": "OpSize::i64Bit"
++      },
+       "StackForceSlow": {
+         "Desc": [
+           "Forces the slow path."
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -1292,6 +1292,17 @@ void X87StackOptimization::Run(IREmitter* Emit) {
+         break;
+       }
+ 
++      case OP_STACKTOP: {
++        Ref Top {};
++        if (SlowPath || StackData.TopOffset == 0) {
++          Top = GetTopWithCache_Slow();
++        } else {
++          Top = GetOffsetTopWithCache_Slow(StackData.TopOffset, true);
++        }
++        IREmit->ReplaceUsesWithAfter(CodeNode, Top, CodeNode);
++        break;
++      }
++
+       case OP_STACKFORCESLOW: {
+         MigrateToSlowPathIf(true);
+         InvalidateCachedRegs();

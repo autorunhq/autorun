@@ -24,6 +24,18 @@
 
 #define HORIZON_DLLS_RAW "https://raw.githubusercontent.com/autorunhq/autorun-horizon-dlls/"
 #define HORIZON_DLLS_MANIFEST_URL HORIZON_DLLS_RAW "main/switch/wine/horizon-dlls/manifest.json"
+/* A second repository the card may take its DLLs from instead, a fork of the
+ * first with this source's own builds; Windows DLLs > Source chooses. Files a
+ * manifest names may be in either: what is written is checked against the
+ * manifest's size and SHA-256 all the same. */
+#ifndef HORIZON_DLLS_FORK_OWNER
+#define HORIZON_DLLS_FORK_OWNER "berlint-hub"
+#endif
+#define HORIZON_DLLS_FORK_RAW "https://raw.githubusercontent.com/" HORIZON_DLLS_FORK_OWNER "/autorun-horizon-dlls/"
+#define HORIZON_DLLS_FORK_MANIFEST_URL HORIZON_DLLS_FORK_RAW "main/switch/wine/horizon-dlls/manifest.json"
+/* Which of the two the card follows, a line of text beside its manifest:
+ * "fork", or anything else (or no file) for the first. */
+#define HORIZON_DLLS_SOURCE "horizon-dlls/source.txt"
 /* Relative to the runtime directory, as in the repository under switch/wine. */
 #define HORIZON_DLLS_MANIFEST "horizon-dlls/manifest.json"
 #define HORIZON_DLLS_CLASSES  "horizon-dlls/classes.reg"
@@ -181,6 +193,8 @@ enum horizon_dlls_result horizon_dlls_apply( const char *root, const struct hori
  * network. */
 #define HORIZON_DLLS_RELEASE "https://github.com/autorunhq/autorun-horizon-dlls/releases/latest/download/"
 #define HORIZON_DLLS_BUNDLE_URL HORIZON_DLLS_RELEASE "horizon-dlls.tar.zst"
+#define HORIZON_DLLS_FORK_RELEASE "https://github.com/" HORIZON_DLLS_FORK_OWNER "/autorun-horizon-dlls/releases/latest/download/"
+#define HORIZON_DLLS_FORK_BUNDLE_URL HORIZON_DLLS_FORK_RELEASE "horizon-dlls.tar.zst"
 
 /* How downloading and unpacking the bundle went, for the log. */
 struct horizon_dlls_bundle_stats

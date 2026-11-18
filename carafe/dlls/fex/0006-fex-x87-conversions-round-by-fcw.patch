@@ -1,0 +1,132 @@
+Carafe: with X87ConversionRounding, FLDCW leaves FPCR alone and conversions round by the guest's FCW.
+Games built with MSVC convert floats to integers through _ftol, which sets the x87 rounding mode to truncation with
+FLDCW, stores with FISTP and restores the mode with FLDCW. In reduced precision FEX wrote FPCR at both FLDCWs, and
+writing FPCR stalls the A57; in a racing game _ftol and _controlfp were among the hottest functions. With the option,
+FLDCW and FLDENV only store FCW, FIST and FISTP pick nearest, down, up or toward zero from FCW's rounding bits, and
+FRNDINT does the same; x87 arithmetic always rounds to nearest. Off by default, reduced precision only.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -604,6 +604,16 @@
+           "Emulates X87 floating point using 64-bit precision. This reduces emulation accuracy and may result in rendering bugs."
+         ]
+       },
++      "X87ConversionRounding": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "With X87ReducedPrecision, FLDCW leaves the host rounding mode alone and FIST, FISTP and FRNDINT round by the",
++          "guest's FCW. Arithmetic then always rounds to nearest. Faster for games that switch the rounding mode around",
++          "every float to integer conversion."
++        ]
++      },
+       "StallProcess": {
+         "Type": "bool",
+         "Default": "false",
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1307,6 +1307,7 @@
+ 
+ private:
+   FEX_CONFIG_OPT(ReducedPrecisionMode, X87REDUCEDPRECISION);
++  FEX_CONFIG_OPT(ConversionRoundingMode, X87CONVERSIONROUNDING);
+ 
+   struct JumpTargetInfo {
+     Ref BlockEntry;
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/X87F64.cpp
+@@ -32,8 +32,10 @@
+   auto NewFCW = _LoadMemGPR(OpSize::i16Bit, Mem, OpSize::i16Bit);
+   // ignore the rounding precision, we're always 64-bit in F64.
+   // extract rounding mode
+-  Ref roundingMode = _Bfe(OpSize::i32Bit, 3, 10, NewFCW);
+-  _SetRoundingMode(roundingMode, false, roundingMode);
++  if (!ConversionRoundingMode) {
++    Ref roundingMode = _Bfe(OpSize::i32Bit, 3, 10, NewFCW);
++    _SetRoundingMode(roundingMode, false, roundingMode);
++  }
+   _StoreContextGPR(OpSize::i16Bit, NewFCW, offsetof(FEXCore::Core::CPUState, FCW));
+ 
+   auto NewFSW = _LoadMemGPR(Size, Mem, Constant(IR::OpSizeToSize(Size)), Size, MemOffsetType::SXTX, 1);
+@@ -51,8 +53,10 @@
+   Ref NewFCW = LoadSourceGPR(Op, Op->Src[0], Op->Flags);
+   // ignore the rounding precision, we're always 64-bit in F64.
+   // extract rounding mode
+-  Ref roundingMode = _Bfe(OpSize::i32Bit, 3, 10, NewFCW);
+-  _SetRoundingMode(roundingMode, false, roundingMode);
++  if (!ConversionRoundingMode) {
++    Ref roundingMode = _Bfe(OpSize::i32Bit, 3, 10, NewFCW);
++    _SetRoundingMode(roundingMode, false, roundingMode);
++  }
+   _StoreContextGPR(OpSize::i16Bit, NewFCW, offsetof(FEXCore::Core::CPUState, FCW));
+ }
+ 
+@@ -106,6 +110,23 @@
+   const auto Size = OpSizeFromSrc(Op);
+ 
+   Ref data = _ReadStackValue(0);
++  if (!Truncate && ConversionRoundingMode) {
++    const auto IntSize = Size == OpSize::i32Bit ? OpSize::i32Bit : OpSize::i64Bit;
++    Ref RoundBits = _Bfe(OpSize::i32Bit, 2, 10, _LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW)));
++    Ref Result = _Float_ToGPR_S(IntSize, OpSize::i64Bit, data);
++    Ref Down = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, _Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, data, RoundMode::NegInfinity));
++    Ref Up = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, _Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, data, RoundMode::PosInfinity));
++    Ref Zero = _Float_ToGPR_ZS(IntSize, OpSize::i64Bit, data);
++    Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(1), Down, Result);
++    Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(2), Up, Result);
++    Result = _Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, Constant(3), Zero, Result);
++    StoreResultGPR_WithOpSize(Op, Op->Dest, Result, Size, OpSize::i8Bit,
++                              CTX->IsVectorAtomicTSOEnabled() ? MemoryAccessType::DEFAULT : MemoryAccessType::NONTSO);
++    if ((Op->TableInfo->Flags & X86Tables::InstFlags::FLAGS_POP) != 0) {
++      _PopStackDestroy();
++    }
++    return;
++  }
+   bool CanUseFloatReg = Size == OpSize::i64Bit;
+   if (CanUseFloatReg) {
+     // If possible, it's faster to keep the data in an FPR than doing a GPR transfer.
+--- a/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
++++ b/FEXCore/Source/Interface/IR/Passes/x87StackOptimizationPass.cpp
+@@ -156,6 +156,8 @@
+     , GPROpSize(GPROpSize) {
+     FEX_CONFIG_OPT(ReducedPrecision, X87REDUCEDPRECISION);
+     ReducedPrecisionMode = ReducedPrecision;
++    FEX_CONFIG_OPT(ConversionRounding, X87CONVERSIONROUNDING);
++    ConversionRoundingMode = ConversionRounding;
+   }
+   void Run(IREmitter* Emit) override;
+ 
+@@ -163,6 +165,7 @@
+   const FEXCore::HostFeatures& Features;
+   const OpSize GPROpSize;
+   bool ReducedPrecisionMode;
++  bool ConversionRoundingMode;
+   FEX_CONFIG_OPT(DisableVixlIndirectCalls, DISABLE_VIXL_INDIRECT_RUNTIME_CALLS);
+ 
+   // Helpers
+@@ -1197,7 +1200,22 @@
+         Ref St0 = LoadStackValue();
+ 
+         Ref Value {};
+-        if (ReducedPrecisionMode) {
++        if (ReducedPrecisionMode && ConversionRoundingMode) {
++          Ref FCW = IREmit->_LoadContextGPR(OpSize::i16Bit, offsetof(FEXCore::Core::CPUState, FCW));
++          Ref RoundBits = IREmit->_Bfe(OpSize::i32Bit, 2, 10, FCW);
++          Value = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, RoundMode::Host);
++          const std::pair<uint64_t, RoundMode> Modes[] = {
++            {1, RoundMode::NegInfinity},
++            {2, RoundMode::PosInfinity},
++            {3, RoundMode::TowardsZero},
++          };
++          for (const auto& [Bits, Mode] : Modes) {
++            Ref Rounded = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, Mode);
++            Ref Mask = IREmit->_Select(OpSize::i64Bit, OpSize::i32Bit, CondClass::EQ, RoundBits, IREmit->_Constant(Bits),
++                                       IREmit->_Constant(~0ULL), IREmit->_Constant(0));
++            Value = IREmit->_VBSL(OpSize::i128Bit, IREmit->_VDupFromGPR(OpSize::i128Bit, OpSize::i64Bit, Mask), Rounded, Value);
++          }
++        } else if (ReducedPrecisionMode) {
+           Value = IREmit->_Vector_FToI(OpSize::i64Bit, OpSize::i64Bit, St0, RoundMode::Host);
+         } else {
+           Value = IREmit->_F80Round(St0);

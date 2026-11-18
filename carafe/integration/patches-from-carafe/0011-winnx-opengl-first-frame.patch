@@ -1,0 +1,50 @@
+Carafe: an OpenGL surface that took the screen from the compositor gets one frame of the loading screen.
+docs/research/loading-screen/REPORT.md.
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/dlls/win32u/winnx_opengl.c	2026-10-08 03:59:14.923547300 +0000
++++ b/dlls/win32u/winnx_opengl.c	2026-10-08 04:00:54.419652400 +0000
+@@ -259,6 +259,35 @@
+     return ret;
+ }
+ 
++static void nx_screen_first_frame( struct nx_gl_drawable *gl, int format )
++{
++    EGLContext previous = funcs->p_eglGetCurrentContext(), context;
++    EGLSurface draw = funcs->p_eglGetCurrentSurface( EGL_DRAW ), read = funcs->p_eglGetCurrentSurface( EGL_READ );
++    unsigned int i;
++
++    if (!wine_nx_osk_visible()) return;
++    funcs->p_eglBindAPI( EGL_OPENGL_API );
++    if (!(context = funcs->p_eglCreateContext( egl->display, nx_config_for_format( format ), NULL, NULL ))) return;
++    if (funcs->p_eglMakeCurrent( egl->display, gl->base.surface, gl->base.surface, context ))
++    {
++        funcs->p_glClearColor( 0, 0, 0, 1 );
++        funcs->p_glClear( GL_COLOR_BUFFER_BIT );
++        nx_osk_draw( &gl->base );
++        nx_log( "[NXGL] first frame: the floating keyboard's picture, swap %s",
++                funcs->p_eglSwapBuffers( egl->display, gl->base.surface ) ? "done" : "failed" );
++    }
++    if (!funcs->p_eglMakeCurrent( egl->display, draw, read, previous ))
++        nx_log( "[NXGL] first frame: the thread's context could not be made current again, error %#x",
++                funcs->p_eglGetError() );
++    funcs->p_eglDestroyContext( egl->display, context );
++    for (i = 0; i < ARRAY_SIZE(nx_osk_gl); i++)
++    {
++        if (nx_osk_gl[i].context != context) continue;
++        free( nx_osk_gl[i].pixels );
++        memset( &nx_osk_gl[i], 0, sizeof(nx_osk_gl[i]) );
++    }
++}
++
+ static const struct opengl_drawable_funcs nx_drawable_funcs =
+ {
+     .size = sizeof(struct nx_gl_drawable),
+@@ -336,6 +365,7 @@
+     nx_screen_format = format;
+     nx_screen_refs = 1;
+     pthread_mutex_unlock( &nx_screen_mutex );
++    if (!previous) nx_screen_first_frame( gl, format );
+ 
+     TRACE( "created drawable %s with EGL surface %p\n", debugstr_opengl_drawable( &gl->base ), gl->base.surface );
+     {

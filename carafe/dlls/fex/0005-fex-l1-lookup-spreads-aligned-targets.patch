@@ -1,0 +1,93 @@
+Carafe: the dispatcher's L1 lookup spreads 16-byte aligned targets and reads the clock once per 64 misses.
+The L1 slot was RIP masked by the table size, so call and jump targets, which compilers align to 16 bytes, fell into
+one slot in 16. The slot is now (RIP ^ (RIP >> 4)) masked, the same in the C++ lookups, in indirect branches and in
+the dispatcher, at one more instruction. The dynamic L1 sizing read the system clock on every L2 or L3 hit, a system
+call on Windows; it now reads it on every 64th hit.
+MIT, as the files it changes.
+
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -181,7 +181,7 @@
+ 
+   uintptr_t FindBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) {
+     // Try L1, no lock needed
+-    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[Address & L1PointerMask];
++    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[L1Slot(Address)];
+     if (L1Entry.GuestCode == Address) {
+       return L1Entry.HostCode;
+     }
+@@ -238,6 +238,9 @@
+     // If host pointer was found in L2 or L3, then add it to the counter.
+     // Keeping track not L1 misses, but specifically L2/L3 hits.
+     ++L2L3CacheHits;
++    if ((L2L3CacheHits & 63) != 0) {
++      return;
++    }
+ 
+     const auto CurrentTime = std::chrono::system_clock::now();
+     const auto Period = CurrentTime - LastPeriod;
+@@ -313,7 +316,7 @@
+   // Invalidates L1/L2 for a given guest block
+   void InvalidateCache(uint64_t Address, const LookupCacheWriteLockToken& lk) {
+     // Do L1
+-    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[Address & L1PointerMask];
++    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[L1Slot(Address)];
+     if (L1Entry.GuestCode == Address) {
+       L1Entry.GuestCode = 0;
+       // Leave L1Entry.HostCode as is, so that concurrent lookups won't read a null pointer
+@@ -372,6 +375,9 @@
+   uintptr_t GetScaledL1PointerMask() const {
+     return L1PointerMask << FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry));
+   }
++  uint64_t L1Slot(uint64_t Address) const {
++    return (Address ^ (Address >> 4)) & L1PointerMask;
++  }
+   uintptr_t GetPagePointer() const {
+     return PagePointer;
+   }
+@@ -402,7 +408,7 @@
+   }
+ 
+   void AddL1Entry(uint64_t GuestAddress, uint64_t HostCode) {
+-    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[GuestAddress & L1PointerMask];
++    auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[L1Slot(GuestAddress)];
+     L1Entry.GuestCode = GuestAddress;
+     L1Entry.HostCode = HostCode;
+   }
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -202,11 +202,13 @@
+     }
+ 
+     // L1 Cache
+-    ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
+ 
+     // Calculate (tmp1 + ((ripreg & L1_ENTRIES_MASK) << 4)) for the address
+     // L1Mask is pre-shifted.
+-    and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, RipReg, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++    eor(ARMEmitter::Size::i64Bit, TMP1, RipReg, RipReg, ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++    ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Mask));
++    and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1);
++    ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
+     add(TMP1, TMP1, TMP2);
+ 
+     ldp<ARMEmitter::IndexType::OFFSET>(TMP2, TMP1, TMP1, 0);
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -229,11 +229,14 @@
+       // If we've made it here then we have a real compiled block
+       {
+         // update L1 cache
+-        ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
+ 
+         // Calculate (tmp1 + ((ripreg & L1_ENTRIES_MASK) << 4)) for the address
+         // L1Mask is pre-shifted.
+-        and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, RipReg.R(), ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++        eor(ARMEmitter::Size::i64Bit, TMP1, RipReg.R(), RipReg.R(), ARMEmitter::ShiftType::LSL,
++            FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++        ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Mask));
++        and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, TMP1);
++        ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
+         add(TMP1, TMP1, TMP2);
+ 
+         stp<ARMEmitter::IndexType::OFFSET>(TMP4, RipReg, TMP1);

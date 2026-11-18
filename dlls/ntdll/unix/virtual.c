@@ -1257,6 +1257,22 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
     }
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     if (!status && entry) status = entry();
+#ifdef __SWITCH__
+    if (status)
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        static unsigned int reported;
+        const char *name = wine_nx_module_export_name( module );
+        char message[192];
+
+        if (&wine_nx_runtime_trace && __atomic_add_fetch( &reported, 1, __ATOMIC_RELAXED ) <= 16)
+        {
+            snprintf( message, sizeof(message), "[UNIXLIB] %s at %p has no unix calls%s, status %#x",
+                      name ? name : "?", module, wow ? " for WoW64" : "", (unsigned int)status );
+            wine_nx_runtime_trace( message );
+        }
+    }
+#endif
     return status;
 }
 
@@ -2771,6 +2787,20 @@ failed:
     return status;
 }
 
+#define CARAFE_LARGE_GUEST_VIEW ((size_t)0x200000)
+
+static BOOL carafe_large_guest_views(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *value = getenv( "CARAFE_LARGE_GUEST_PAGES" );
+        enabled = value && !strcmp( value, "1" );
+    }
+    return enabled;
+}
+
 /***********************************************************************
  *           map_view
  *
@@ -2785,6 +2815,10 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
     void *ptr;
     int unix_prot = get_unix_prot( vprot );
     NTSTATUS status;
+
+    if (!align_mask && !base && size >= CARAFE_LARGE_GUEST_VIEW && carafe_large_guest_views() &&
+        !map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, CARAFE_LARGE_GUEST_VIEW - 1 ))
+        return STATUS_SUCCESS;
 
     if (!align_mask) align_mask = granularity_mask;
     assert( align_mask >= host_page_mask );
@@ -4962,9 +4996,30 @@ static struct thread_data *init_thread_data( void *ptr )
     return data;
 }
 
+#ifdef __SWITCH__
+/* horizon-wine/source/runtime.c: large-address-aware=1 in a program's
+ * settings. A 32-bit program is then given addresses up to 4 GB as if its
+ * image carried IMAGE_FILE_LARGE_ADDRESS_AWARE, with no need to patch the
+ * file. It adds addresses, not memory. */
+int wine_nx_large_address_aware;
+#endif
+
 /* enable use of a large address space when allowed by the application */
 static void set_large_address_space(void)
 {
+#ifdef __SWITCH__
+    if (main_image_info.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        int own = !!(main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
+
+        if (wine_nx_large_address_aware) main_image_info.ImageCharacteristics |= IMAGE_FILE_LARGE_ADDRESS_AWARE;
+        if (&wine_nx_runtime_trace)
+            wine_nx_runtime_trace( own ? "[VA] 32-bit program: addresses up to 4 GB, its image is large address aware"
+                                   : wine_nx_large_address_aware
+                                   ? "[VA] 32-bit program: addresses up to 4 GB (large-address-aware); its image does not ask for them"
+                                   : "[VA] 32-bit program: addresses up to 2 GB; its image is not large address aware" );
+    }
+#endif
     if (main_image_info.Machine == IMAGE_FILE_MACHINE_I386)
     {
         /* reserve the DOS area, and make it accessible (except the low 64K)
@@ -5001,6 +5056,48 @@ static void set_large_address_space(void)
 }
 
 
+#ifdef __SWITCH__
+/* In a 32-bit address space (a game's 32-bit forwarder) the kernel puts its
+ * heap region, or its alias region, over 0x7ffe0000 in every layout it picks,
+ * and nothing can be mapped there: Wine stopped with "failed to map the shared
+ * user data: c0000018". The page goes where Wine can map one, below 2 GB if it
+ * can, and user_shared_data says where: ntdll exports it to the PE ntdlls and
+ * kernelbase (wine_nx_user_shared_data), win32u reads it, and a program's own
+ * reads of 0x7ffe0000 fault and are served from it (horizon.c,
+ * horizon_redirect_user_shared_data) once the heap page at 0x7ffe0000 is taken
+ * out of the runtime's heap and made inaccessible. */
+static NTSTATUS relocate_user_shared_data( struct file_view **view )
+{
+    const unsigned int vprot = VPROT_WRITE | VPROT_READ | VPROT_COMMITTED;
+    void *windows = user_shared_data;
+    const char *hidden;
+    NTSTATUS status;
+    char msg[256];
+
+    if ((status = map_view( view, NULL, page_size, MEM_TOP_DOWN, vprot, 0, limit_2g - 1, 0 )) &&
+        (status = map_view( view, NULL, page_size, MEM_TOP_DOWN, vprot, 0, limit_4g - 1, 0 )))
+        return status;
+    user_shared_data = (*view)->base;
+    hidden = horizon_hide_user_shared_data_address( (ULONG_PTR)windows );
+    snprintf( msg, sizeof(msg), "[USD] %p cannot be mapped in this address space: the shared user data is at %p; "
+              "a program's own reads of %p %s", windows, user_shared_data, windows,
+              hidden ? hidden : "fault and are served from there" );
+    if (&wine_nx_runtime_trace) wine_nx_runtime_trace( msg );
+    return STATUS_SUCCESS;
+}
+
+/* Thread data goes above 4 GB, out of a WoW64 guest's way, as native stacks do
+ * (virtual_alloc_thread_stack). A 32-bit address space has nothing there, and
+ * asking for it failed the first thread: the top of what there is instead, as
+ * far from the guest as it goes. */
+static ULONG_PTR thread_data_limit_low( unsigned int *alloc_type )
+{
+    if ((void *)limit_4g < host_addr_space_limit) return limit_4g;
+    *alloc_type |= MEM_TOP_DOWN;
+    return 0;
+}
+#endif
+
 /***********************************************************************
  *           virtual_alloc_first_thread_data
  */
@@ -5020,14 +5117,27 @@ struct thread_data *virtual_alloc_first_thread_data(void)
                        VPROT_WRITE |
 #endif
                        VPROT_READ | VPROT_COMMITTED, 0, 0, 0 );
+#ifdef __SWITCH__
+    if (status == (unsigned int)STATUS_CONFLICTING_ADDRESSES) status = relocate_user_shared_data( &view );
+#endif
     if (status)
     {
         ERR( "wine: failed to map the shared user data: %08x\n", status );
         exit(1);
     }
 
+#ifdef __SWITCH__
+    {
+        unsigned int alloc_type = MEM_TOP_DOWN;
+        ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+
+        status = map_view( &view, NULL, size, alloc_type,
+                           VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_low, 0, 0 );
+    }
+#else
     status = map_view( &view, NULL, size, MEM_TOP_DOWN,
                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+#endif
     if (status)
     {
         ERR( "wine: failed to allocate initial thread data: %08x\n", status );
@@ -5177,7 +5287,17 @@ struct thread_data *virtual_alloc_thread_data(void)
 #endif
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+#ifdef __SWITCH__
+    {
+        unsigned int alloc_type = 0;
+        ULONG_PTR limit_low = thread_data_limit_low( &alloc_type );
+
+        status = map_view( &view, NULL, size, alloc_type, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED,
+                           limit_low, 0, 0 );
+    }
+#else
     status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+#endif
     if (!status)
     {
 #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)

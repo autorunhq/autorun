@@ -1736,7 +1736,11 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
                 if (!row->disabled) return action_result( ui, UI_ACTION_CHOOSE );
                 break;
             case UI_B: return action_result( ui, UI_ACTION_BACK );
-            case UI_Y: if (can_reset && !row->disabled && row->adjustable) return action_result( ui, UI_ACTION_RESET ); break;
+            case UI_Y:
+                if (list->in_header || row->disabled) break;
+                if (list->extra_label) return action_result( ui, UI_ACTION_EXTRA );
+                if (can_reset && row->adjustable) return action_result( ui, UI_ACTION_RESET );
+                break;
             case UI_X:
                 if (row->help)
                 {
@@ -1851,9 +1855,13 @@ enum ui_action ui_list_run( struct ui *ui, struct ui_list *list, const char *tit
         {
             if (any_adjustable) hints[hint_count++] = (struct ui_hint){ UI_LEFT, NULL };
             if (any_adjustable) hints[hint_count++] = (struct ui_hint){ UI_RIGHT, "Change" };
-            if (!row->disabled) hints[hint_count++] = (struct ui_hint){ UI_A, row->adjustable ? "Next" : "Choose" };
+            if (!row->disabled)
+                hints[hint_count++] = (struct ui_hint){ UI_A, list->choose_label ? list->choose_label :
+                                                              row->adjustable ? "Next" : "Choose" };
             if (row->help) hints[hint_count++] = (struct ui_hint){ UI_X, "Info" };
-            if (can_reset && row->adjustable && !row->disabled)
+            if (list->extra_label && !row->disabled)
+                hints[hint_count++] = (struct ui_hint){ UI_Y, list->extra_label };
+            else if (can_reset && row->adjustable && !row->disabled)
                 hints[hint_count++] = (struct ui_hint){ UI_Y, "Default" };
             hints[hint_count++] = (struct ui_hint){ UI_B, "Back" };
         }
