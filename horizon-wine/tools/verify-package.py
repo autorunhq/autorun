@@ -10,8 +10,23 @@ first and then there, which is how the two meet on a card."""
 from pathlib import Path
 import argparse
 import json
+import os
+import platform
 import re
 import subprocess
+
+
+def llvm_mingw(horizon_wine):
+    """The llvm-mingw build.sh fetched for this host: WINE_NX_LLVM_MINGW, which it
+    exports, or the one it picks for this system when run on its own."""
+    if os.environ.get("WINE_NX_LLVM_MINGW"):
+        return Path(os.environ["WINE_NX_LLVM_MINGW"])
+    if platform.system() == "Darwin":
+        name = "macos-universal"
+    else:
+        name = "ubuntu-22.04-" + ("aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64")
+    return horizon_wine / f"toolchains/llvm-mingw-20260505-ucrt-{name}"
+
 
 root = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
@@ -19,7 +34,7 @@ parser.add_argument("stage", type=Path)
 parser.add_argument("--dlls", type=Path, default=root / "horizon-dlls/switch/wine")
 args = parser.parse_args()
 stage, dlls = args.stage.resolve(), args.dlls.resolve()
-readobj = root / "horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin/llvm-readobj"
+readobj = llvm_mingw(root / "horizon-wine") / "bin/llvm-readobj"
 
 def inspect(path, option):
     return subprocess.check_output([str(readobj), option, str(path)], text=True)

@@ -15,10 +15,24 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import argparse
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+
+
+def llvm_mingw(horizon_wine):
+    """The llvm-mingw build.sh fetched for this host: WINE_NX_LLVM_MINGW, which it
+    exports, or the one it picks for this system when run on its own."""
+    if os.environ.get('WINE_NX_LLVM_MINGW'):
+        return Path(os.environ['WINE_NX_LLVM_MINGW'])
+    if platform.system() == 'Darwin':
+        name = 'macos-universal'
+    else:
+        name = 'ubuntu-22.04-' + ('aarch64' if platform.machine() in ('aarch64', 'arm64') else 'x86_64')
+    return horizon_wine / f'toolchains/llvm-mingw-20260505-ucrt-{name}'
+
 
 horizon_wine = Path(__file__).resolve().parents[1]
 root = horizon_wine.parent
@@ -27,7 +41,7 @@ build = horizon_wine / 'build-autorun'
 stage_root = build / 'sd-card'
 stage = stage_root / 'switch/wine'
 marker = re.search(r'nx-wow64-dynarec-(\d+)', (horizon_wine / 'source/runtime.c').read_text()).group(1)
-toolchain = horizon_wine / 'toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin'
+toolchain = llvm_mingw(horizon_wine) / 'bin'
 # The FEX build when there is one, as build-amd64-components.sh names it.
 default_amd64 = next((path for path in (horizon_wine / f'build-switch-amd64/wine-nx-amd64-box64{kind}-mesa-dxvk-vkd3d.zip'
                                         for kind in ('-fex', '')) if path.is_file()),
