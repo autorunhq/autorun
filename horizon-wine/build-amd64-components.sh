@@ -51,7 +51,11 @@ sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # The switch-dev image (switch-dev.txt) has libnx, mesa-switch, LSFG-VK and
 # libusbhsfs in portlibs. WINE_NX_MESA_SWITCH_DIR links another mesa-switch.
+# The checkout belongs to the host user, not to the container's root, and
+# git refuses to read such a repository; Box64Core.cmake reads vendor/box64.
 docker run --rm --network none -v "$root:/work" -w /work \
+    -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0=/work/horizon-wine/vendor/box64 \
     -e NX_PE="/work/${pe#"$root/"}" -e NX_BUILD="/work/${build#"$root/"}" \
     -e NX_JOBS="$jobs" -e NX_DYNAREC="${WINE_NX_BOX64_DYNAREC:-ON}" \
     -e WINE_NX_JOBS="$jobs" \
