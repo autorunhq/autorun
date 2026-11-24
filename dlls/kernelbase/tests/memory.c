@@ -23,6 +23,7 @@
 #define WIN32_NO_STATUS
 #include <windef.h>
 #include <winbase.h>
+#include <winuser.h>
 #include <winerror.h>
 
 #include "wine/test.h"
@@ -50,6 +51,35 @@ static void test_enum_system_firmware_tables(void)
     ok(err == ERROR_INVALID_FUNCTION, "Unexpected error for invalid provider: %ld\n", err);
 }
 
+static void test_GetOsSafeBootMode(void)
+{
+    BOOL (WINAPI *get_os_safe_boot_mode)(DWORD *);
+    HMODULE module;
+    DWORD flags = 0xdeadbeef, error;
+    BOOL ret;
+
+    module = LoadLibraryA("api-ms-win-core-sysinfo-l1-2-0.dll");
+    if (!module)
+    {
+        win_skip("System information API set is unavailable.\n");
+        return;
+    }
+    get_os_safe_boot_mode = (void *)GetProcAddress(module, "GetOsSafeBootMode");
+    ok(!!get_os_safe_boot_mode, "GetOsSafeBootMode missing from the API set.\n");
+    if (get_os_safe_boot_mode)
+    {
+        SetLastError(0xdeadbeef);
+        ret = get_os_safe_boot_mode(&flags);
+        error = GetLastError();
+        ok(ret, "GetOsSafeBootMode failed, error %lu.\n", error);
+        ok(error == 0xdeadbeef, "Unexpected last error %lu.\n", error);
+        ok(flags != 0xdeadbeef, "Boot flags were not set.\n");
+        if (!GetSystemMetrics(SM_CLEANBOOT))
+            ok(!flags, "Expected normal boot, got flags %#lx.\n", flags);
+    }
+    FreeLibrary(module);
+}
+
 START_TEST(memory)
 {
     HMODULE hmod;
@@ -58,4 +88,5 @@ START_TEST(memory)
     pEnumSystemFirmwareTables = (void *)GetProcAddress(hmod, "EnumSystemFirmwareTables");
 
     test_enum_system_firmware_tables();
+    test_GetOsSafeBootMode();
 }
