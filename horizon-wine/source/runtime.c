@@ -1645,14 +1645,15 @@ static void dos_dirname( const char *path, char *dir, size_t size )
 
 static void put_process_string( WCHAR **cursor, UNICODE_STRING *string, const char *value )
 {
-    size_t i, len = value ? strlen( value ) : 0;
+    DWORD bytes, len = value ? strlen( value ) : 0;
 
     string->Buffer = *cursor;
-    string->Length = len * sizeof(WCHAR);
-    string->MaximumLength = (len + 1) * sizeof(WCHAR);
-    for (i = 0; i < len; i++) (*cursor)[i] = (unsigned char)value[i];
-    (*cursor)[len] = 0;
-    *cursor += len + 1;
+    /* The allocation reserves one WCHAR per UTF-8 byte, plus the terminator. */
+    RtlUTF8ToUnicodeN( *cursor, len * sizeof(WCHAR), &bytes, value ? value : "", len );
+    string->Length = bytes;
+    string->MaximumLength = bytes + sizeof(WCHAR);
+    *cursor += bytes / sizeof(WCHAR);
+    *(*cursor)++ = 0;
 }
 
 /* Minimal environment (sorted, NUL-separated; the literal's own terminator

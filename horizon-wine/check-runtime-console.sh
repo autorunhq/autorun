@@ -23,6 +23,7 @@ flags="-std=gnu11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-f
 "$build/clipboard"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/launcher_list.c" -o "$build/launcher_list"
 "$build/launcher_list"
+python3 "$root/horizon-wine/tests/check_process_strings.py"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/launcher_settings.c" -o "$build/launcher_settings"
 "$build/launcher_settings"
 "${CC:-clang}" $flags "$root/horizon-wine/tests/launcher_pe.c" -o "$build/launcher_pe"
