@@ -155,6 +155,16 @@ SIZE_T WINAPI GetLargePageMinimum(void)
 }
 
 
+/***********************************************************************
+ *          GetOsSafeBootMode   (kernelbase.@)
+ */
+BOOL WINAPI GetOsSafeBootMode( DWORD *flags )
+{
+    *flags = 0; /* Wine starts in normal boot mode. */
+    return TRUE;
+}
+
+
 static void fill_system_info( SYSTEM_INFO *si, const SYSTEM_BASIC_INFORMATION *basic_info,
                               const SYSTEM_CPU_INFORMATION *cpu_info )
 {
